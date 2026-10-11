@@ -101,6 +101,9 @@ struct Shot {
     /// The overlay, in the screen's top left corner, laid out so (a strip
     /// in one row).
     overlay: Option<crate::ui::overlay::Layout>,
+    /// How clear the overlay's glass is (see `OverlaySettings::clear`).
+    #[serde(default)]
+    overlay_clear: f32,
     /// Whether the panel is in the shot (it is unless said).
     #[serde(default = "yes")]
     panel: bool,
@@ -653,10 +656,11 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                     let whole = |dips: f32| (dips * px).round() as i32;
                     let hole = RECT { left: whole(INSET), top: whole(INSET), right: whole(INSET + w), bottom: whole(INSET + h) };
                     let ring = RECT { left: 0, top: 0, right: whole(INSET + w + MARGIN + 16.0), bottom: whole(INSET + h + MARGIN + 16.0) };
-                    let glass = overlay::glass(&mut desktop.luminances(ring, hole, 1), None);
+                    let presence = 1.0 - shot.overlay_clear.clamp(0.0, 1.0);
+                    let glass = overlay::Glass { presence, ..overlay::glass(&mut desktop.luminances(ring, hole, 1), None) };
                     let at = Matrix3x2::translation(INSET, INSET);
                     if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
-                        frame.frosted(&bitmap, Matrix3x2::identity(), (0.0, 0.0, w, h, radius), at, 1.0);
+                        frame.frosted(&bitmap, Matrix3x2::identity(), (0.0, 0.0, w, h, radius), at, presence);
                     }
                     frame.place(at);
                     frame.crisp_text();
