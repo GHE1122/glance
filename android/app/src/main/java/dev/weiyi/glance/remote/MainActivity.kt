@@ -422,6 +422,12 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                                 act("monitor$at", "/v1/monitor", JSONObject().put("index", at).put("on", wanted)) { was -> was.copy(monitors = was.monitors.mapIndexed { i, one -> if (i == at) one.copy(on = wanted) else one }) }
                             }
                         }
+                        // How bright it is, where it says: under its row.
+                        monitor.brightness?.let { bright ->
+                            Brightness(bright, enabled = reached && monitor.on != false && now.screen != false) { wanted ->
+                                act("bright$at", "/v1/monitor", JSONObject().put("index", at).put("brightness", wanted)) { was -> was.copy(monitors = was.monitors.mapIndexed { i, one -> if (i == at) one.copy(brightness = wanted) else one }) }
+                            }
+                        }
                     }
                 }
             }
@@ -494,6 +500,20 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 }
             }
         }
+    }
+}
+
+/** How bright a monitor is ([value] percent), slid to another: [set] when let go. */
+@Composable
+private fun Brightness(value: Int, enabled: Boolean, set: (Int) -> Unit) {
+    var level by remember { mutableFloatStateOf(value.toFloat()) }
+    var sliding by remember { mutableStateOf(false) }
+    // As the monitor says, but for while it is being slid.
+    LaunchedEffect(value) { if (!sliding) level = value.toFloat() }
+    Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) { Sign(Sign.BRIGHT, if (enabled) Dim else Faint, size = 18.dp) }
+        Bar(level, 0f..100f, stringResource(R.string.brightness), Modifier.weight(1f), enabled = enabled, track = filled(Ink), change = { sliding = true; level = it }, done = { sliding = false; set(level.toInt()) })
+        Text("${level.toInt()}%", color = if (enabled) Ink else Faint, fontSize = 13.sp, textAlign = TextAlign.End, modifier = Modifier.width(40.dp))
     }
 }
 

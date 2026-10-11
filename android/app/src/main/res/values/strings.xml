@@ -57,7 +57,7 @@
     <string name="effect_rainbow">Rainbow</string>
     <string name="effect_heat">By heat</string>
     <string name="colour">Colour %1$s</string>
-    <string name="colours_hint">Your own colours stay in this row; swipe it sideways. Hold one to delete</string>
+    <string name="colours_hint">The colours are in this row; swipe it sideways. Hold any to delete</string>
     <string name="colours_removing">Tap a colour with a minus to delete it</string>
     <string name="done">Done</string>
     <string name="delete_colour">Delete colour %1$s</string>

@@ -62,8 +62,8 @@ object Pcs {
     }
 }
 
-/** One of the PC's monitors: its name, where it is on the desktop, and whether it is on (none: it cannot be asked, nor turned off by itself). */
-data class Monitor(val name: String, val x: Int, val y: Int, val width: Int, val height: Int, val on: Boolean?)
+/** One of the PC's monitors: its name, where it is on the desktop, and whether it is on and how bright (percent), each none where it cannot be asked nor changed by itself. */
+data class Monitor(val name: String, val x: Int, val y: Int, val width: Int, val height: Int, val on: Boolean?, val brightness: Int?)
 
 /** How the lights are when they are on: their colour (RRGGBB) and what they do ("steady", "breathing", "rainbow", "heat"). */
 data class Light(val color: String, val effect: String)
@@ -104,7 +104,7 @@ data class PcState(
             monitors = json.optJSONArray("monitors")?.let { list ->
                 (0 until list.length()).map { at ->
                     val one = list.getJSONObject(at)
-                    Monitor(one.optString("name"), one.optInt("x"), one.optInt("y"), one.optInt("width"), one.optInt("height"), if (one.isNull("on")) null else one.optBoolean("on"))
+                    Monitor(one.optString("name"), one.optInt("x"), one.optInt("y"), one.optInt("width"), one.optInt("height"), if (one.isNull("on")) null else one.optBoolean("on"), one.int("brightness"))
                 }
             } ?: emptyList(),
         )
@@ -172,7 +172,7 @@ fun Pc.ask(path: String, body: JSONObject? = null): PcState {
 
 fun on(value: Boolean) = JSONObject().put("on", value)
 
-/** What the main page shows, and the colours made by hand: this phone's own, kept in the app's storage. */
+/** What the main page shows, and the colours to light the PC in: this phone's own, kept in the app's storage. */
 object Look {
     /** The parts of the main page that may be left out, by the names they are kept under. */
     val PARTS = listOf("rig", "reads", "lights", "monitors", "sound", "sleep")
@@ -184,8 +184,18 @@ object Look {
 
     fun show(context: Context, part: String, on: Boolean) = kept(context).edit().putBoolean("show_$part", on).apply()
 
-    /** The colours made by hand (RRGGBB), the oldest first. */
-    fun colours(context: Context): List<String> = kept(context).getString("colours", "").orEmpty().split(',').filter { it.length == 6 }
+    /** The colours a phone starts with. */
+    private val GIVEN = listOf("FF7B4A", "FFFFFF", "70B3FF", "59C98A", "C68CFF", "FF5E7E")
 
-    fun keep(context: Context, colours: List<String>) = kept(context).edit().putString("colours", colours.joinToString(",")).apply()
+    private fun list(text: String?) = text.orEmpty().split(',').filter { it.length == 6 }
+
+    /**
+     * The colours to choose from (RRGGBB), in their order: those given,
+     * till any is taken away, and those made by hand after them. (Before
+     * the given ones could be taken away, only those made by hand were
+     * kept, as "colours".)
+     */
+    fun colours(context: Context): List<String> = kept(context).getString("palette", null)?.let(::list) ?: (GIVEN + list(kept(context).getString("colours", "")))
+
+    fun keep(context: Context, colours: List<String>) = kept(context).edit().putString("palette", colours.joinToString(",")).apply()
 }

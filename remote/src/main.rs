@@ -166,7 +166,7 @@ impl Helper {
             "media": playing.map(|media| json!({ "title": media.title, "artist": media.artist, "app": media.app, "playing": media.playing })),
             "night": state.night.is_some(),
             "screen": display::on(),
-            "monitors": display::monitors().iter().map(|monitor| json!({ "name": monitor.name, "x": monitor.place.0, "y": monitor.place.1, "width": monitor.place.2, "height": monitor.place.3, "on": monitor.on })).collect::<Vec<_>>(),
+            "monitors": display::monitors().iter().map(|monitor| json!({ "name": monitor.name, "x": monitor.place.0, "y": monitor.place.1, "width": monitor.place.2, "height": monitor.place.3, "on": monitor.on, "brightness": monitor.brightness })).collect::<Vec<_>>(),
             "volume": sound.map(|(level, _)| level),
             "muted": sound.map(|(_, muted)| muted),
             "idle_seconds": actions::tick().wrapping_sub(actions::last_input()) / 1000,
@@ -190,7 +190,12 @@ impl Helper {
             // One monitor by itself, by its place among them.
             ("POST", "/v1/monitor") => {
                 let index = asked.get("index").and_then(Value::as_u64).ok_or((400, "\"index\" is missing".to_string()))? as usize;
-                if !display::turn(index, on()?) {
+                // On or off, or as bright as asked.
+                let took = match asked.get("brightness").and_then(Value::as_u64) {
+                    Some(percent) => display::dim(index, percent.min(100) as u8),
+                    None => display::turn(index, on()?),
+                };
+                if !took {
                     return Err((500, "the monitor did not take it".into()));
                 }
             }
@@ -310,6 +315,7 @@ fn main() -> std::io::Result<()> {
         Some("monitors") => {
             for monitor in display::monitors() {
                 println!("{} ({}x{} at {},{}): on {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on);
+                println!("  brightness {:?}", monitor.brightness);
             }
             return Ok(());
         }

@@ -57,7 +57,7 @@
     <string name="effect_rainbow">彩虹</string>
     <string name="effect_heat">跟随温度</string>
     <string name="colour">颜色 %1$s</string>
-    <string name="colours_hint">自己调的颜色留在这一排，可以左右滑；长按可以删除</string>
+    <string name="colours_hint">颜色都在这一排，可以左右滑；长按任意一个可以删除</string>
     <string name="colours_removing">点一下带减号的颜色，就把它删掉</string>
     <string name="done">完成</string>
     <string name="delete_colour">删除颜色 %1$s</string>

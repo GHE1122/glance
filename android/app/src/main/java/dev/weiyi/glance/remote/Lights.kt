@@ -62,9 +62,6 @@ fun colour(hex: String) = Color(0xFF000000 or (hex.toLongOrNull(16) ?: 0xFFFFFF)
 /** A colour by its hue (degrees), how much colour it has and how bright it is (each 0 to 1), as RRGGBB. */
 private fun hex(hue: Float, depth: Float, bright: Float) = "%06X".format(Color.hsv(hue, depth, bright).toArgb() and 0xFFFFFF)
 
-/** The colours given to choose from. */
-private val GIVEN = listOf("FF7B4A", "FFFFFF", "70B3FF", "59C98A", "C68CFF", "FF5E7E")
-
 /** What the lights may do, as the PC names each, with its word here. */
 private val EFFECTS = listOf("steady" to R.string.effect_steady, "breathing" to R.string.effect_breathing, "rainbow" to R.string.effect_rainbow, "heat" to R.string.effect_heat)
 
@@ -76,15 +73,15 @@ private val HUES = Brush.sweepGradient((0..6).map { Color.hsv(it * 60f % 360f, 1
 
 /**
  * The lights' effect and colour. [light] is how they are; [heat], whether
- * the PC can light them by how warm it is; [own], the colours made here
- * before. A colour being made is [preview]ed as it changes and [choose]n
+ * the PC can light them by how warm it is; [own], the colours to choose
+ * from. A colour being made is [preview]ed as it changes and [choose]n
  * when let go.
  */
 @Composable
 fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean, keep: (List<String>) -> Unit, preview: (String?) -> Unit, choose: (color: String?, effect: String?) -> Unit) {
     // The colour the lights had as the ring was opened, to go back to; none: the ring is shut.
     var was by remember { mutableStateOf<String?>(null) }
-    // One's own colours being taken away: each trembles under a minus, and one pressed is gone.
+    // The colours being taken away: each trembles under a minus, and one pressed is gone.
     var removing by remember { mutableStateOf(false) }
     if (own.isEmpty()) removing = false
     val tremble by rememberInfiniteTransition(label = "tremble").animateFloat(-3.5f, 3.5f, infiniteRepeatable(tween(110), RepeatMode.Reverse), label = "tremble")
@@ -96,19 +93,18 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
                 Chip(stringResource(name), light.effect == effect) { if (enabled) choose(null, effect) }
             }
         }
-        // The colours given, then one's own, then the one that opens the ring.
+        // The colours, then the one that opens the ring to make another.
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            for (one in GIVEN + own) {
+            for (one in own) {
                 val chosen = was == null && light.color.equals(one, ignoreCase = true)
-                val mine = one in own
-                val going = removing && mine
+                val going = removing
                 val named = stringResource(if (going) R.string.delete_colour else R.string.colour, "#$one")
                 Canvas(
-                    Modifier.size(36.dp).graphicsLayer { rotationZ = if (going) tremble else 0f }.semantics { contentDescription = named; role = Role.Button }.pointerInput(one, mine, enabled, removing) {
+                    Modifier.size(36.dp).graphicsLayer { rotationZ = if (going) tremble else 0f }.semantics { contentDescription = named; role = Role.Button }.pointerInput(one, own, enabled, removing) {
                         if (!enabled) return@pointerInput
                         detectTapGestures(
-                            // One's own colour, held: they may be taken away.
-                            onLongPress = { if (mine) removing = true },
+                            // A colour held: they may be taken away.
+                            onLongPress = { removing = true },
                             onTap = {
                                 if (going) {
                                     keep(own - one)
@@ -141,14 +137,14 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
                 if (was != null) drawCircle(Ink, size.minDimension / 2 - 1.25.dp.toPx(), style = Stroke(2.5.dp.toPx()))
             }
         }
-        if (was != null || own.isNotEmpty()) Text(stringResource(if (removing) R.string.colours_removing else R.string.colours_hint), color = Faint, fontSize = 12.sp, lineHeight = 17.sp)
+        Text(stringResource(if (removing) R.string.colours_removing else R.string.colours_hint), color = Faint, fontSize = 12.sp, lineHeight = 17.sp)
         was?.let { before ->
             Picker(
                 from = before,
                 changed = { preview(it) },
                 settled = { choose(it, null) },
                 cancel = { was = null; preview(null); if (!light.color.equals(before, ignoreCase = true)) choose(before, null) },
-                use = { made -> if ((GIVEN + own).none { it.equals(made, ignoreCase = true) }) keep(own + made); was = null },
+                use = { made -> if (own.none { it.equals(made, ignoreCase = true) }) keep(own + made); was = null },
             )
         }
     }

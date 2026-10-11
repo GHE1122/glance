@@ -101,13 +101,15 @@ pub fn wake() {
 }
 
 /// A monitor: what it calls itself, where it is on the desktop (left, top,
-/// width, height: physical px), and whether it is on, as it answers over
-/// DDC/CI (none: it does not answer, and cannot be turned off by itself).
+/// width, height: physical px), and, as it answers over DDC/CI, whether it
+/// is on and how bright it is (percent of its most); none where it does
+/// not answer: that it cannot be asked to change by itself.
 #[derive(Clone)]
 pub struct Monitor {
     pub name: String,
     pub place: (i32, i32, i32, i32),
     pub on: Option<bool>,
+    pub brightness: Option<u8>,
 }
 
 fn text(wide: &[u16]) -> String {
@@ -146,6 +148,8 @@ fn names() -> Vec<(String, String)> {
 const POWER_MODE: u8 = 0xD6;
 const POWER_ON: u32 = 1;
 const POWER_OFF: u32 = 4;
+/// VCP's brightness (luminance): from nothing to the most the monitor says.
+const BRIGHTNESS: u8 = 0x10;
 /// How long what the monitors answered is taken to stand: asking takes
 /// each of them a moment.
 const KNOWN_FOR: Duration = Duration::from_secs(5);
@@ -193,9 +197,19 @@ fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32, i32, i32), HANDLE
     }
 }
 
-fn ask(monitor: HANDLE, code: u8) -> Option<u32> {
+/// A monitor's feature `code`: what it is now, and the most it can be.
+fn asked(monitor: HANDLE, code: u8) -> Option<(u32, u32)> {
     let (mut now, mut most) = (0u32, 0u32);
-    (unsafe { GetVCPFeatureAndVCPFeatureReply(monitor, code, None, &mut now, Some(&mut most)) } != 0).then_some(now)
+    (unsafe { GetVCPFeatureAndVCPFeatureReply(monitor, code, None, &mut now, Some(&mut most)) } != 0).then_some((now, most))
+}
+
+fn ask(monitor: HANDLE, code: u8) -> Option<u32> {
+    asked(monitor, code).map(|(now, _)| now)
+}
+
+/// How bright a monitor is, as a percent of its most.
+fn brightness(monitor: HANDLE) -> Option<u8> {
+    asked(monitor, BRIGHTNESS).filter(|(_, most)| *most > 0).map(|(now, most)| ((now.min(most) * 100 + most / 2) / most) as u8)
 }
 
 /// Every monitor that is connected, as it answered within `KNOWN_FOR`.
@@ -205,7 +219,7 @@ pub fn monitors() -> Vec<Monitor> {
         return monitors.clone();
     }
     let mut found = Vec::new();
-    each_monitor(|_, name, place, monitor| found.push(Monitor { name, place, on: ask(monitor, POWER_MODE).map(|mode| mode == POWER_ON) }));
+    each_monitor(|_, name, place, monitor| found.push(Monitor { name, place, on: ask(monitor, POWER_MODE).map(|mode| mode == POWER_ON), brightness: brightness(monitor) }));
     *known = Some((Instant::now(), found.clone()));
     found
 }
@@ -219,6 +233,21 @@ pub fn tell(index: usize, code: u8, value: u32) -> bool {
             told = unsafe { SetVCPFeature(monitor, code, value) } != 0;
         }
     });
+    told
+}
+
+/// Makes the monitor at `index` as bright as `percent` of its most:
+/// whether it took it.
+pub fn dim(index: usize, percent: u8) -> bool {
+    let mut told = false;
+    each_monitor(|at, _, _, monitor| {
+        if at == index {
+            if let Some((_, most)) = asked(monitor, BRIGHTNESS).filter(|(_, most)| *most > 0) {
+                told = unsafe { SetVCPFeature(monitor, BRIGHTNESS, (percent.min(100) as u32 * most + 50) / 100) } != 0;
+            }
+        }
+    });
+    *KNOWN.lock().unwrap() = None;
     told
 }
 
