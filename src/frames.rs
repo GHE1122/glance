@@ -56,10 +56,12 @@ impl Presents {
         // longer than they are (a few frames in a burst and then none are not that many a second).
         let span = (last - first).as_secs_f64();
         let waited = now.saturating_sub(last).as_secs_f64();
-        let fps = (recent.len() - 1) as f64 / (span + if waited > span / (recent.len() - 1) as f64 { waited } else { 0.0 });
+        let pending = (waited > span / (recent.len() - 1) as f64).then_some(waited);
+        let fps = (recent.len() - 1) as f64 / (span + pending.unwrap_or(0.0));
         let longest_ms = recent.windows(2).map(|pair| (pair[1] - pair[0]).as_secs_f64() * 1000.0).fold(0.0, f64::max);
         // Every frame time kept, the slowest 1% from the 99th percentile on.
-        let mut times: Vec<f64> = self.times.iter().collect::<Vec<_>>().windows(2).map(|pair| (*pair[1] - *pair[0]).as_secs_f64()).collect();
+        // (With them the frame being waited for, where it counts: the frames a second and their 1% low are of the same frames.)
+        let mut times: Vec<f64> = self.times.iter().collect::<Vec<_>>().windows(2).map(|pair| (*pair[1] - *pair[0]).as_secs_f64()).chain(pending).collect();
         let low = (times.len() >= LOW_FRAMES).then(|| {
             times.sort_by(f64::total_cmp);
             let index = ((times.len() as f64 * 0.99).ceil() as usize).clamp(1, times.len()) - 1;
