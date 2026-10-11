@@ -9,7 +9,15 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -49,6 +57,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
@@ -71,6 +80,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -313,6 +323,12 @@ private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>
 /** How long a PC may go without answering before it is said to be away (ms). */
 private const val PATIENCE = 4000L
 
+/** How long the page takes to go from a PC not heard from to one that is, and back (ms). */
+private const val WAKING = 600
+
+/** A PC of which nothing is read. */
+private val UNREAD = Reads(Read(null, null), Read(null, null), Read(null, null), Read(null, null), null, null)
+
 /** What is waiting to be asked of the PC, in turn. */
 private class Asking(val what: String, val path: String, val body: JSONObject)
 
@@ -393,12 +409,18 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
     val reached = state != null && failure == null
     val now = state
     val night = now?.night == true
+    // Not heard from yet, or no longer (what was last heard of it is not how it is now): the PC is drawn as it sleeps,
+    // dark and breathing slowly, in the place it has when it is heard from; it wakes there when it answers.
+    val asleep = now == null || failure == Failure.Unreachable || failure == Failure.Refused
+    val away = animateFloatAsState(if (asleep) 1f else 0f, tween(WAKING), label = "away")
+    val breathing by remember { derivedStateOf { away.value > 0f } }
+    val breath = if (breathing) rememberInfiniteTransition(label = "asleep").animateFloat(0.6f, 1f, infiniteRepeatable(tween(2600, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "breath") else remember { mutableFloatStateOf(1f) }
     val light = now?.light?.let { if (making != null) it.copy(color = making!!) else it }
     val working = stringResource(R.string.working)
 
     val rig: @Composable (Modifier, Boolean) -> Unit = { modifier, fill ->
-        Column(modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(start = 8.dp, top = 8.dp, end = 8.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            val reads = now?.reads
+        Column(modifier.fillMaxWidth().animateContentSize().clip(RoundedCornerShape(20.dp)).background(Card).padding(start = 8.dp, top = 8.dp, end = 8.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            val reads = now?.reads.takeUnless { asleep }
             val names = mapOf(Part.Cpu to stringResource(R.string.cpu), Part.Gpu to stringResource(R.string.gpu), Part.Ram to stringResource(R.string.ram), Part.Disk to stringResource(R.string.disk))
             val notes = reads?.let {
                 Notes(
@@ -409,9 +431,13 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                     reads.caseFan?.let { Note(it.toString(), stringResource(R.string.case_fans), stringResource(R.string.rpm)) },
                 )
             }
-            Rig(reads, notes, light?.takeIf { now?.lights == true }?.let { colour(it.color) }, night, part, if (fill) Modifier.weight(1f).fillMaxWidth() else Modifier.fillMaxWidth().aspectRatio(320f / 254f)) { part = it }
-            if (now != null && reads == null) Text(stringResource(R.string.no_reads), color = Faint, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(horizontal = 8.dp))
-            if (reads != null && shown["reads"] != false) ReadsRow(reads, part, Modifier.padding(horizontal = 4.dp)) { part = it }
+            Rig(
+                reads, notes, light?.takeIf { now?.lights == true && !asleep }?.let { colour(it.color) }, night || asleep, part,
+                (if (fill) Modifier.weight(1f).fillMaxWidth() else Modifier.fillMaxWidth().aspectRatio(320f / 254f)).graphicsLayer { alpha = 1f - away.value * (1f - breath.value) },
+            ) { part = it }
+            if (!asleep && reads == null) Text(stringResource(R.string.no_reads), color = Faint, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(horizontal = 8.dp))
+            // (Asleep, the places of its figures with none in them: where they will be.)
+            if ((reads != null || asleep) && shown["reads"] != false) ReadsRow(reads ?: UNREAD, part.takeUnless { asleep }, Modifier.padding(horizontal = 4.dp).graphicsLayer { alpha = 1f - 0.6f * away.value }) { part = it }
         }
     }
 
@@ -552,7 +578,8 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(now?.name?.ifBlank { pc.name } ?: pc.name, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = Ink, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Box(Modifier.size(8.dp).clip(CircleShape).background(if (reached) Good else if (failure == null) Faint else Bad))
+                val dot by animateColorAsState(if (reached) Good else if (failure == null) Faint else Bad, tween(WAKING), label = "dot")
+                Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
                 Text(
                     stringResource(when (failure) { null -> if (now == null) R.string.connecting else R.string.connected; Failure.Unreachable -> R.string.unreachable_short; Failure.Refused -> R.string.refused_short; else -> R.string.failed_short }),
                     color = Dim, fontSize = 13.sp, maxLines = 1,
@@ -560,23 +587,26 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
             }
         }
         // Folded, the PC's picture leads the one column; unfolded, it has the right side to itself.
-        // Not heard from yet, or no longer (what was last heard of it is not how it is now): the PC drawn as it sleeps, and why that may be.
-        if (now == null || failure == Failure.Unreachable || failure == Failure.Refused) {
-            Away(pc.name, failure)
-            return@Column
-        }
         BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-            val pictured = shown["rig"] != false
+            // (Asleep, it is pictured whatever is chosen: there is nothing else of it to show.)
+            val pictured = shown["rig"] != false || asleep
             val gap = Arrangement.spacedBy(12.dp)
+            val rise = with(LocalDensity.current) { 20.dp.roundToPx() }
+            // Under the picture, what the PC may be asked; asleep, why that may be. The one comes up over the other as it goes.
+            val rest: @Composable () -> Unit = {
+                AnimatedContent(asleep, transitionSpec = { (fadeIn(tween(WAKING)) + slideInVertically(tween(WAKING)) { rise }) togetherWith fadeOut(tween(WAKING / 3)) }, label = "rest") { sleeping ->
+                    if (sleeping) Away(pc.name, failure) else Column(Modifier.fillMaxWidth(), verticalArrangement = gap) { cards() }
+                }
+            }
             if (maxWidth >= WIDE && pictured) {
                 Row(Modifier.fillMaxSize()) {
-                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), verticalArrangement = gap) { cards() }
+                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp)) { rest() }
                     Box(Modifier.weight(1f).fillMaxHeight().padding(top = 4.dp, end = 16.dp, bottom = 24.dp)) { rig(Modifier.fillMaxHeight(), true) }
                 }
             } else {
                 Column(Modifier.widthIn(max = 560.dp).verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), verticalArrangement = gap) {
                     if (pictured) rig(Modifier, false)
-                    cards()
+                    rest()
                 }
             }
         }
@@ -613,15 +643,10 @@ private fun MonitorRow(at: Int, monitor: Monitor, enabled: Boolean, lit: Boolean
     }
 }
 
-/**
- * A PC that has not answered: drawn dark, breathing slowly as one asleep,
- * with what may be the matter under it (none yet: it is still being asked).
- */
+/** Of a PC that has not answered, what may be the matter (nothing yet: it is still being asked). */
 @Composable
 private fun Away(name: String, failure: Failure?) {
-    val breath by rememberInfiniteTransition(label = "asleep").animateFloat(0.6f, 1f, infiniteRepeatable(tween(2600, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "breath")
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Rig(null, null, null, night = true, chosen = Part.Cpu, modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth().aspectRatio(320f / 254f).graphicsLayer { alpha = breath }) {}
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         if (failure != null) {
             Column(Modifier.widthIn(max = 420.dp).padding(top = 8.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(stringResource(if (failure == Failure.Refused) R.string.away_refused_title else R.string.away_title, name), color = Ink, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)

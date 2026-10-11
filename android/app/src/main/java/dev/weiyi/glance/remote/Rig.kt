@@ -2,6 +2,9 @@ package dev.weiyi.glance.remote
 
 import android.graphics.Typeface
 import android.provider.Settings
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.runtime.Composable
@@ -192,6 +195,9 @@ private val FANS = Place(v(W / 2, D, 38), -134f, 64f, true)
 
 private val STEEL = Color(0xFF8EA2C0)
 
+/** How long the picture takes to dim and to brighten, and its lights to come on, go out and change colour (ms). */
+private const val TURNING = 600
+
 /** A part is the case's own steel (tinted by the lights), till it runs warm: then amber, then red. */
 private fun heat(temp: Int?, tint: Color) = when {
     temp == null -> tint
@@ -244,7 +250,8 @@ private inline fun DrawScope.faded(alpha: Float, draw: DrawScope.() -> Unit) {
  * fans; [notes] are what is said beside it (none: only the picture);
  * [light] is the lights' colour while they are on, which the whole inside
  * of the case takes; at [night] it is dim and still. A part pressed is
- * [choose]n.
+ * [choose]n. Whatever of this changes, the picture goes over to it, not at
+ * once.
  */
 @Composable
 fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Part, modifier: Modifier = Modifier, choose: (Part) -> Unit) {
@@ -273,6 +280,17 @@ fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Par
     val words = remember {
         android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
     }
+    // How awake it is (dim at night), how much its lights are on, and their colour (as it last was, while they go out).
+    val wake by animateFloatAsState(if (night) 0f else 1f, tween(TURNING), label = "wake")
+    val lit = light.takeUnless { night }
+    val last = remember { arrayOf(STEEL) }
+    lit?.let { last[0] = it }
+    val glow by animateColorAsState(last[0], tween(TURNING), label = "glow")
+    val shine by animateFloatAsState(if (lit != null) 1f else 0f, tween(TURNING), label = "shine")
+    // What is said beside it, kept while it fades away.
+    val said = remember { arrayOfNulls<Notes>(1) }
+    notes?.let { said[0] = it }
+    val saying by animateFloatAsState(if (notes != null) 1f else 0f, tween(TURNING), label = "saying")
     Canvas(
         modifier.pointerInput(Unit) {
             detectTapGestures { tap ->
@@ -285,18 +303,17 @@ fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Par
         frame
         val k = min(size.width / WIDE, size.height / TALL)
         val thin = 1.dp.toPx() / k
-        val lit = light.takeUnless { night }
-        val tint = if (lit != null) lerp(STEEL, lit, 0.42f) else STEEL
+        val tint = lerp(STEEL, glow, 0.42f * shine)
         fun colour(part: Part) = heat(reads?.of(part)?.temp, tint)
         fun width(part: Part) = if (notes != null && chosen == part) thin * 1.8f else thin
         withTransform({
             translate((size.width - WIDE * k) / 2 - LEFT * k, (size.height - TALL * k) / 2 - TOP * k)
             scale(k, k, Offset.Zero)
         }) {
-            faded(if (night) 0.4f else 1f) {
+            faded(0.4f + 0.6f * wake) {
                 val stroke = Stroke(thin, cap = StrokeCap.Round, join = StrokeJoin.Round)
                 // The lights' colour on the walls and the floor.
-                val wall = if (lit != null) lerp(Color(0xFF12161B), lit, 0.09f) else Color(0xFF12161B)
+                val wall = lerp(Color(0xFF12161B), glow, 0.09f * shine)
                 for (one in Case.walls) {
                     drawPath(one, wall)
                     drawPath(one, Color(0xFF3A424D), style = stroke)
@@ -306,7 +323,7 @@ fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Par
                 drawPath(Case.board, Color(0xFF46505C), style = stroke)
                 for (y in listOf(12f, 20f)) drawLine(Color(0xFF46505C).copy(alpha = 0.55f), Case.boardOn.at(8f, y), Case.boardOn.at(78f, y), thin, StrokeCap.Round)
                 // The fans are lit as the lights are; out, they are the case's grey.
-                val fans = lit ?: Color(0xFF59636F)
+                val fans = lerp(Color(0xFF59636F), glow, shine)
                 fan(Case.rear, 16f, turned[0], fans, thin)
                 block(Case.shroud, Color(0xFF4A5461), thin)
                 for (i in 0 until 9) drawLine(Color(0xFF4A5461).copy(alpha = 0.7f), Case.vents.at(i * 6f, 0f), Case.vents.at(i * 6f, 10f), thin, StrokeCap.Round)
@@ -316,7 +333,7 @@ fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Par
 
                 block(Case.gpu, colour(Part.Gpu), width(Part.Gpu))
                 drawPath(Case.gpuTop, colour(Part.Gpu).copy(alpha = 0.5f), style = stroke)
-                if (lit != null) drawLine(lit, Case.gpuLight.first, Case.gpuLight.second, thin * 2.5f, StrokeCap.Round)
+                if (shine > 0f) drawLine(glow.copy(alpha = shine), Case.gpuLight.first, Case.gpuLight.second, thin * 2.5f, StrokeCap.Round)
 
                 block(Case.cpu, colour(Part.Cpu), width(Part.Cpu))
                 fan(Case.cpuFan, 8.5f, turned[1], colour(Part.Cpu), thin)
@@ -335,11 +352,12 @@ fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Par
 
                 for (stick in Case.ram) block(stick, colour(Part.Ram), width(Part.Ram))
                 for (one in Case.front) fan(one, 15f, turned[0], fans, thin)
-                val shell = if (lit != null) lerp(Color(0xFF8F99A6), lit, 0.22f) else Color(0xFF8F99A6)
+                val shell = lerp(Color(0xFF8F99A6), glow, 0.22f * shine)
                 for (panel in Case.shell) drawPath(panel, shell, style = Stroke(thin * 1.4f, cap = StrokeCap.Round, join = StrokeJoin.Round))
             }
-            if (notes != null) {
-                faded(if (night) 0.55f else 1f) {
+            val told = said[0]
+            if (told != null && saying > 0f) {
+                faded((0.55f + 0.45f * wake) * saying) {
                     fun say(place: Place, note: Note, here: Boolean) {
                         val from = place.from.flat
                         val elbow = place.x + if (place.ends) 12f else -12f
@@ -357,8 +375,8 @@ fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Par
                             if (note.second.isNotEmpty()) canvas.drawText(note.second, x, place.y + 25f, words)
                         }
                     }
-                    for ((part, place) in PLACES) notes.parts[part]?.let { say(place, it, chosen == part) }
-                    notes.fans?.let { say(FANS, it, false) }
+                    for ((part, place) in PLACES) told.parts[part]?.let { say(place, it, chosen == part) }
+                    told.fans?.let { say(FANS, it, false) }
                 }
             }
         }
