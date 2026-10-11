@@ -341,6 +341,13 @@ impl Helper {
             body.extend_from_slice(&chunk[..read]);
         }
         body.truncate(length);
+        // The page a phone's browser controls this PC from (a phone with no
+        // app for it): anyone's to fetch, for it holds nothing; what it
+        // then asks is signed as the app's is, with a key it was paired by.
+        if method == "GET" && path == "/" {
+            let page = include_str!("web.html");
+            return write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
+        }
         let checked = self.admit(method, path, header("x-glance-time"), header("x-glance-nonce"), header("x-glance-sign"), &body, header("x-glance-phone"), &unescaped(header("x-glance-name")));
         let (status, answer) = match checked {
             Err(refused) => (401, json!({ "error": format!("{refused:?}").to_lowercase(), "time": sign::now() })),
@@ -392,6 +399,12 @@ fn unescaped(text: &str) -> String {
 
 /// What a phone needs to pair, as the link its QR code holds: where this
 /// PC is, and a key offered to the phone that takes it.
+/// The same for a phone's browser: the page's address, the key after the
+/// `#` (which a browser keeps to itself: it is never sent).
+fn pairing_web(config: &Config, key: &str) -> String {
+    format!("http://{}:{}/#k={key}", address().unwrap_or_default(), config.port)
+}
+
 fn pairing(config: &Config, key: &str) -> String {
     format!("glance://pair?h={}&p={}&k={key}&n={}", address().unwrap_or_default(), config.port, escaped(&config.name))
 }
@@ -402,7 +415,9 @@ fn main() -> std::io::Result<()> {
     let config = Config::load();
     match std::env::args().nth(1).as_deref() {
         Some("pair") => {
-            let link = pairing(&config, &Config::offer()?);
+            // glance-remote pair web: for a phone's browser rather than the app.
+            let key = Config::offer()?;
+            let link = if std::env::args().nth(2).as_deref() == Some("web") { pairing_web(&config, &key) } else { pairing(&config, &key) };
             let code = qrcode::QrCode::new(link.as_bytes()).map_err(std::io::Error::other)?;
             let picture = code.render::<qrcode::render::svg::Color>().min_dimensions(480, 480).quiet_zone(true).build();
             let path = std::env::temp_dir().join("glance-pair.svg");
