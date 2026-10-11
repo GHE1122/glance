@@ -6,7 +6,7 @@ use windows::core::{Result, GUID};
 use windows::Win32::Foundation::HLOCAL;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CoCreateInstance, CoIncrementMTAUsage, CLSCTX_ALL};
 use windows::Win32::System::Power::{PowerGetActiveScheme, PowerSetActiveScheme, SetSuspendState};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
@@ -34,11 +34,21 @@ pub fn set_power_plan(plan: GUID) -> bool {
     unsafe { PowerSetActiveScheme(None, Some(&plan)) }.is_ok()
 }
 
+/// COM for the whole program, for as long as it runs: every thread may use
+/// it. (Kept by each thread for itself, what COM had loaded would be
+/// unloaded some minutes after those threads were gone, under whatever was
+/// still held of it.)
+pub fn com() {
+    static KEPT: std::sync::Once = std::sync::Once::new();
+    KEPT.call_once(|| {
+        let _ = unsafe { CoIncrementMTAUsage() };
+    });
+}
+
 /// The sound's level on the device the sound plays from now.
 fn sound() -> Result<IAudioEndpointVolume> {
+    com();
     unsafe {
-        // Once a thread; again is no error to mind.
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
         devices.GetDefaultAudioEndpoint(eRender, eConsole)?.Activate(CLSCTX_ALL, None)
     }

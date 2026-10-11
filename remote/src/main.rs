@@ -12,6 +12,8 @@ mod actions;
 mod config;
 mod display;
 mod lights;
+mod media;
+mod reads;
 mod sign;
 
 use std::io::{Read, Write};
@@ -19,7 +21,7 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use config::Config;
+use config::{Config, Effect, Light};
 use serde_json::{json, Value};
 
 /// The most a request may be: none of the phone's is near it.
@@ -31,6 +33,24 @@ const ARRIVING: Duration = Duration::from_secs(5);
 /// often they are looked at after.
 const SETTLING_MS: u32 = 3000;
 const WATCH: Duration = Duration::from_millis(500);
+/// How often lights that follow the heat are looked at again.
+const FOLLOW: Duration = Duration::from_secs(2);
+/// The heat the coolest colour is for, and the warmest (°C).
+const COOL: i64 = 40;
+const HOT: i64 = 85;
+
+/// The colour (RRGGBB) for how warm the PC is: blue while it is cool,
+/// through green and amber, to red when it is hot.
+fn heat(celsius: i64) -> String {
+    let along = (celsius.clamp(COOL, HOT) - COOL) as f32 / (HOT - COOL) as f32;
+    // Round the wheel of hues from blue (210 degrees) back to red (0).
+    let hue = 210.0 * (1.0 - along) / 60.0;
+    let channel = |n: f32| {
+        let k = (n + hue) % 6.0;
+        ((1.0 - k.min(4.0 - k).clamp(0.0, 1.0)) * 255.0).round() as u8
+    };
+    format!("{:02X}{:02X}{:02X}", channel(5.0), channel(3.0), channel(1.0))
+}
 
 /// Night mode: the power plan to go back to, and when it began (see
 /// `actions::tick`).
@@ -44,26 +64,64 @@ struct State {
     seen: sign::Seen,
     /// Whether the lights are on, once this helper has set them.
     lights: Option<bool>,
-    /// How each device was lit before this helper last put the lights out.
-    before: lights::Before,
     night: Option<Night>,
 }
 
 struct Helper {
     config: Config,
+    /// How the lights are when they are on: as the phone last chose.
+    light: Mutex<Light>,
     key: [u8; 32],
     state: Mutex<State>,
+    /// Held while the lights are being set: one at a time.
+    lighting: Mutex<()>,
 }
 
 impl Helper {
     fn lights(&self, on: bool) -> Result<(), String> {
-        // (Not held while OpenRGB is asked: that may take a while.)
-        let mut before = self.state.lock().unwrap().before.clone();
-        lights::set(&self.config, on, &mut before).map_err(|error| error.to_string())?;
-        let mut state = self.state.lock().unwrap();
-        state.before = before;
-        state.lights = Some(on);
+        // (The state is not held while OpenRGB is asked: that may take a while.)
+        let _one = self.lighting.lock().unwrap();
+        let mut light = self.light.lock().unwrap().clone();
+        if light.effect == Effect::Heat {
+            if let Some(celsius) = reads::read().as_ref().and_then(reads::hottest) {
+                light.color = heat(celsius);
+            }
+        }
+        lights::set(&self.config, on, &light).map_err(|error| error.to_string())?;
+        self.state.lock().unwrap().lights = Some(on);
         Ok(())
+    }
+
+    /// Lights that follow the heat, put in the colour of how warm the PC
+    /// is now, where that is another than `last` (the one they were last
+    /// put in by this).
+    fn follow(&self, last: &mut Option<String>) {
+        let _one = self.lighting.lock().unwrap();
+        let lit = {
+            let state = self.state.lock().unwrap();
+            state.lights == Some(true) && state.night.is_none()
+        };
+        if !lit || self.light.lock().unwrap().effect != Effect::Heat {
+            *last = None;
+            return;
+        }
+        let Some(color) = reads::read().as_ref().and_then(reads::hottest).map(heat) else { return };
+        if last.as_ref() != Some(&color) && lights::set(&self.config, true, &Light { color: color.clone(), effect: Effect::Steady }).is_ok() {
+            *last = Some(color);
+        }
+    }
+
+    /// The lights' colour or what they do, changed from the phone: kept,
+    /// for the lights on from then on.
+    fn choose(&self, color: Option<&str>, effect: Option<Effect>) {
+        let mut light = self.light.lock().unwrap();
+        if let Some(color) = color.filter(|color| color.len() == 6 && color.bytes().all(|b| b.is_ascii_hexdigit())) {
+            light.color = color.to_ascii_uppercase();
+        }
+        if let Some(effect) = effect {
+            light.effect = effect;
+        }
+        let _ = Config { light: light.clone(), ..self.config.clone() }.save();
     }
 
     /// Night: the lights out, the power-saving plan, the screens off. Day
@@ -95,15 +153,20 @@ impl Helper {
         // As OpenRGB has them; while it is not running, as this helper last
         // set them.
         let lights = lights::lit().or(self.state.lock().unwrap().lights);
+        let light = self.light.lock().unwrap().clone();
+        let playing = media::playing();
         let state = self.state.lock().unwrap();
         let sound = actions::volume();
         json!({
             "name": self.config.name,
             "version": env!("CARGO_PKG_VERSION"),
             "lights": lights,
+            "light": light,
+            "reads": reads::read(),
+            "media": playing.map(|media| json!({ "title": media.title, "artist": media.artist, "app": media.app, "playing": media.playing })),
             "night": state.night.is_some(),
             "screen": display::on(),
-            "monitors": display::monitors().iter().map(|monitor| json!({ "name": monitor.name, "width": monitor.size.0, "height": monitor.size.1, "on": monitor.on })).collect::<Vec<_>>(),
+            "monitors": display::monitors().iter().map(|monitor| json!({ "name": monitor.name, "x": monitor.place.0, "y": monitor.place.1, "width": monitor.place.2, "height": monitor.place.3, "on": monitor.on })).collect::<Vec<_>>(),
             "volume": sound.map(|(level, _)| level),
             "muted": sound.map(|(_, muted)| muted),
             "idle_seconds": actions::tick().wrapping_sub(actions::last_input()) / 1000,
@@ -131,7 +194,18 @@ impl Helper {
                     return Err((500, "the monitor did not take it".into()));
                 }
             }
-            ("POST", "/v1/lights") => self.lights(on()?).map_err(failed)?,
+            // On or off, in another colour, doing something else: any of
+            // them. A colour or an effect alone lights them so.
+            ("POST", "/v1/lights") => {
+                let effect = asked.get("effect").and_then(|effect| serde_json::from_value::<Effect>(effect.clone()).ok());
+                self.choose(asked.get("color").and_then(Value::as_str), effect);
+                self.lights(asked.get("on").and_then(Value::as_bool).unwrap_or(true)).map_err(failed)?
+            }
+            ("POST", "/v1/media") => {
+                if !media::ask(asked.get("do").and_then(Value::as_str).unwrap_or_default()) {
+                    return Err((500, "nothing playing took it".into()));
+                }
+            }
             ("POST", "/v1/night") => self.night(on()?).map_err(failed)?,
             ("POST", "/v1/volume") => {
                 let level = asked.get("level").and_then(Value::as_u64).map(|level| level.min(100) as u8);
@@ -235,7 +309,7 @@ fn main() -> std::io::Result<()> {
         }
         Some("monitors") => {
             for monitor in display::monitors() {
-                println!("{} ({}x{}): on {:?}", monitor.name, monitor.size.0, monitor.size.1, monitor.on);
+                println!("{} ({}x{} at {},{}): on {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on);
             }
             return Ok(());
         }
@@ -252,7 +326,17 @@ fn main() -> std::io::Result<()> {
     display::watch();
     let key = sign::key(&config.key).expect("a key made at first run");
     let listener = TcpListener::bind(("0.0.0.0", config.port))?;
-    let helper = Arc::new(Helper { config, key, state: Mutex::new(State::default()) });
+    // (Whether the lights are on, as OpenRGB has them if it is running.)
+    let state = State { lights: lights::lit(), ..State::default() };
+    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), config, key, state: Mutex::new(state), lighting: Mutex::new(()) });
+    let following = helper.clone();
+    std::thread::spawn(move || {
+        let mut last = None;
+        loop {
+            std::thread::sleep(FOLLOW);
+            following.follow(&mut last);
+        }
+    });
     // Night ends at the first touch of the mouse or the keyboard.
     let watching = helper.clone();
     std::thread::spawn(move || loop {
@@ -269,4 +353,17 @@ fn main() -> std::io::Result<()> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_heat_goes_from_blue_to_red() {
+        assert_eq!(super::heat(20), "0080FF");
+        assert_eq!(super::heat(40), "0080FF");
+        assert_eq!(super::heat(85), "FF0000");
+        assert_eq!(super::heat(120), "FF0000");
+        // About half way: green.
+        assert_eq!(super::heat(62), "36FF00");
+    }
 }

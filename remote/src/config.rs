@@ -2,7 +2,6 @@
 //! paired phone, and how the lights are when they are on. In the user's own
 //! folder; the helper runs as the user.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -13,14 +12,35 @@ const PORT: u16 = 47631;
 /// OpenRGB has none for it: enough for a few fans in a chain.
 const STRIP_LEDS: u32 = 120;
 
-/// How a lighting device is when the lights are on.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// What the lights do while they are on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Lit {
-    /// One of the device's own modes, by its name.
-    Mode(String),
-    /// All of it in one colour (RRGGBB).
-    Color(String),
+pub enum Effect {
+    /// One colour, steady.
+    #[default]
+    Steady,
+    /// That colour, swelling and fading.
+    Breathing,
+    /// Every colour in turn (the colour chosen is not used).
+    Rainbow,
+    /// A colour for how warm the PC is, from blue through to red (the
+    /// colour chosen, while Glance is not there to say how warm).
+    Heat,
+}
+
+/// How the lights are when they are on: their colour (RRGGBB) and what
+/// they do.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Light {
+    pub color: String,
+    pub effect: Effect,
+}
+
+impl Default for Light {
+    fn default() -> Self {
+        Light { color: "FFFFFF".into(), effect: Effect::Steady }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -34,9 +54,7 @@ pub struct Config {
     /// Where OpenRGB is, if it is not where its installer puts it.
     pub openrgb: Option<PathBuf>,
     pub strip_leds: u32,
-    /// Each lighting device, by its name as OpenRGB has it, as it is lit;
-    /// one not named, in white.
-    pub lights_on: BTreeMap<String, Lit>,
+    pub light: Light,
 }
 
 impl Default for Config {
@@ -47,7 +65,7 @@ impl Default for Config {
             key: String::new(),
             openrgb: None,
             strip_leds: STRIP_LEDS,
-            lights_on: BTreeMap::new(),
+            light: Light::default(),
         }
     }
 }
@@ -78,8 +96,4 @@ impl Config {
         std::fs::write(path, serde_json::to_string_pretty(self).unwrap())
     }
 
-    /// How the device named `name` is lit.
-    pub fn lit(&self, name: &str) -> Lit {
-        self.lights_on.get(name).cloned().unwrap_or(Lit::Color("FFFFFF".into()))
-    }
 }

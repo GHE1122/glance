@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, BOOL, GUID};
 use windows::Win32::Devices::Display::{
-    DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR, GetVCPFeatureAndVCPFeatureReply, SetVCPFeature, PHYSICAL_MONITOR,
+    DestroyPhysicalMonitors, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR,
+    GetVCPFeatureAndVCPFeatureReply, QueryDisplayConfig, SetVCPFeature, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, PHYSICAL_MONITOR, QDC_ONLY_ACTIVE_PATHS,
 };
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW};
 use windows::Win32::System::Power::{RegisterPowerSettingNotification, SetThreadExecutionState, ES_DISPLAY_REQUIRED, POWERBROADCAST_SETTING};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -98,14 +100,45 @@ pub fn wake() {
     *KNOWN.lock().unwrap() = None;
 }
 
-/// A monitor: what it calls itself, how many pixels it shows, and whether
-/// it is on, as it answers over DDC/CI (none: it does not answer, and
-/// cannot be turned off by itself).
+/// A monitor: what it calls itself, where it is on the desktop (left, top,
+/// width, height: physical px), and whether it is on, as it answers over
+/// DDC/CI (none: it does not answer, and cannot be turned off by itself).
 #[derive(Clone)]
 pub struct Monitor {
     pub name: String,
-    pub size: (i32, i32),
+    pub place: (i32, i32, i32, i32),
     pub on: Option<bool>,
+}
+
+fn text(wide: &[u16]) -> String {
+    String::from_utf16_lossy(&wide[..wide.iter().position(|c| *c == 0).unwrap_or(wide.len())])
+}
+
+/// Each display output in use (as `\\.\DISPLAY1`) with the name the
+/// monitor on it gives itself ("DELL S2725QS"): what Windows' own display
+/// settings call it.
+fn names() -> Vec<(String, String)> {
+    let (mut paths, mut modes) = (0u32, 0u32);
+    if unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut paths, &mut modes) }.is_err() {
+        return Vec::new();
+    }
+    let mut path = vec![DISPLAYCONFIG_PATH_INFO::default(); paths as usize];
+    let mut mode = vec![DISPLAYCONFIG_MODE_INFO::default(); modes as usize];
+    if unsafe { QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut paths, path.as_mut_ptr(), &mut modes, mode.as_mut_ptr(), None) }.is_err() {
+        return Vec::new();
+    }
+    path.truncate(paths as usize);
+    path.iter()
+        .filter_map(|path| {
+            let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+            source.header = DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32, adapterId: path.sourceInfo.adapterId, id: path.sourceInfo.id };
+            let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+            target.header = DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32, adapterId: path.targetInfo.adapterId, id: path.targetInfo.id };
+            let got = unsafe { DisplayConfigGetDeviceInfo(&mut source.header) == 0 && DisplayConfigGetDeviceInfo(&mut target.header) == 0 };
+            let name = text(&target.monitorFriendlyDeviceName);
+            (got && !name.is_empty()).then(|| (text(&source.viewGdiDeviceName), name))
+        })
+        .collect()
 }
 
 /// VCP's power mode, and its values for on and for off (standby, from
@@ -123,9 +156,10 @@ static KNOWN: Mutex<Option<(Instant, Vec<Monitor>)>> = Mutex::new(None);
 static TURNED_OFF: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 /// Goes through every monitor that is connected, in the order Windows has
-/// them: `with` is handed each one's place in that order, its name, its
-/// size and its handle for DDC/CI.
-fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32), HANDLE)) {
+/// them: `with` is handed each one's place in that order, its name, where
+/// it is on the desktop and its handle for DDC/CI.
+fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32, i32, i32), HANDLE)) {
+    let names = names();
     unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, found: LPARAM) -> BOOL {
         unsafe { &mut *(found.0 as *mut Vec<HMONITOR>) }.push(monitor);
         true.into()
@@ -134,9 +168,13 @@ fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32), HANDLE)) {
     let _ = unsafe { EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut screens as *mut _ as isize)) };
     let mut index = 0;
     for screen in screens {
-        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let _ = unsafe { GetMonitorInfoW(screen, &mut info) };
-        let size = (info.rcMonitor.right - info.rcMonitor.left, info.rcMonitor.bottom - info.rcMonitor.top);
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+        let _ = unsafe { GetMonitorInfoW(screen, &mut info as *mut _ as *mut MONITORINFO) };
+        let at = info.monitorInfo.rcMonitor;
+        let place = (at.left, at.top, at.right - at.left, at.bottom - at.top);
+        let output = text(&info.szDevice);
+        let named = names.iter().find(|(source, _)| *source == output).map(|(_, name)| name.clone());
         let mut count = 0;
         if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(screen, &mut count) }.is_err() || count == 0 {
             continue;
@@ -146,8 +184,9 @@ fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32), HANDLE)) {
             continue;
         }
         for one in &physical {
-            let name = one.szPhysicalMonitorDescription;
-            with(index, String::from_utf16_lossy(&name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())]), size, one.hPhysicalMonitor);
+            // As the monitor names itself; one that does not, as its driver does.
+            let described = one.szPhysicalMonitorDescription;
+            with(index, named.clone().unwrap_or_else(|| text(&described)), place, one.hPhysicalMonitor);
             index += 1;
         }
         let _ = unsafe { DestroyPhysicalMonitors(&physical) };
@@ -166,7 +205,7 @@ pub fn monitors() -> Vec<Monitor> {
         return monitors.clone();
     }
     let mut found = Vec::new();
-    each_monitor(|_, name, size, monitor| found.push(Monitor { name, size, on: ask(monitor, POWER_MODE).map(|mode| mode == POWER_ON) }));
+    each_monitor(|_, name, place, monitor| found.push(Monitor { name, place, on: ask(monitor, POWER_MODE).map(|mode| mode == POWER_ON) }));
     *known = Some((Instant::now(), found.clone()));
     found
 }
