@@ -13,6 +13,7 @@ mod config;
 mod display;
 mod lights;
 mod media;
+mod power;
 mod reads;
 mod sign;
 
@@ -55,7 +56,7 @@ fn heat(celsius: i64) -> String {
 /// Night mode: the power plan to go back to, and when it began (see
 /// `actions::tick`).
 struct Night {
-    plan: Option<windows::core::GUID>,
+    power: Option<power::Before>,
     since: u32,
 }
 
@@ -138,15 +139,14 @@ impl Helper {
             }
             // The lights first: they may take OpenRGB a while to reach.
             let lit = self.lights(false);
-            let plan = actions::power_plan().filter(|plan| *plan != actions::POWER_SAVER);
-            actions::set_power_plan(actions::POWER_SAVER);
+            let power = power::save();
             let dark = display::sleep().map_err(|error| error.to_string());
-            self.state.lock().unwrap().night = Some(Night { plan, since: actions::tick() });
+            self.state.lock().unwrap().night = Some(Night { power, since: actions::tick() });
             lit.and(dark)
         } else {
             let Some(night) = self.state.lock().unwrap().night.take() else { return Ok(()) };
-            if let Some(plan) = night.plan {
-                actions::set_power_plan(plan);
+            if let Some(power) = night.power {
+                power::restore(power);
             }
             display::wake();
             self.lights(true)
@@ -159,7 +159,6 @@ impl Helper {
         let lights = lights::lit().or(self.state.lock().unwrap().lights);
         let light = self.light.lock().unwrap().clone();
         let playing = media::playing();
-        let plan = actions::power_plan();
         let state = self.state.lock().unwrap();
         let sound = actions::volume();
         json!({
@@ -170,7 +169,7 @@ impl Helper {
             "reads": reads::read(),
             "media": playing.map(|media| json!({ "title": media.title, "artist": media.artist, "app": media.app, "playing": media.playing })),
             "night": state.night.is_some(),
-            "power": actions::power_plans().iter().map(|(id, name)| json!({ "id": format!("{id:?}"), "name": name, "on": Some(*id) == plan })).collect::<Vec<_>>(),
+            "power": power::choices().iter().map(|choice| json!({ "id": choice.id, "name": choice.name, "on": choice.on })).collect::<Vec<_>>(),
             "screen": display::on(),
             "monitors": display::monitors().iter().map(|monitor| json!({ "name": monitor.name, "x": monitor.place.0, "y": monitor.place.1, "width": monitor.place.2, "height": monitor.place.3, "on": monitor.on, "brightness": monitor.brightness })).collect::<Vec<_>>(),
             "volume": sound.map(|(level, _)| level),
@@ -229,13 +228,11 @@ impl Helper {
                     media::Asked::Not => return Err((500, "nothing playing took it".into())),
                 }
             }
-            // One of the PC's power plans, by its id as the state gives it.
-            // (Night over, the plan gone back to is the one there was before
+            // One of the PC's power modes (or plans), by its id as the state
+            // gives it. (Night over, what is gone back to is what there was before
             // night, not one chosen during it.)
             ("POST", "/v1/power") => {
-                let wanted = asked.get("plan").and_then(Value::as_str).unwrap_or_default();
-                let plan = actions::power_plans().into_iter().find(|(id, _)| format!("{id:?}") == wanted).ok_or((400, "no such plan".to_string()))?.0;
-                if !actions::set_power_plan(plan) {
+                if !power::choose(asked.get("plan").and_then(Value::as_str).unwrap_or_default()) {
                     return Err((500, "the plan was not taken".into()));
                 }
             }
@@ -348,8 +345,8 @@ fn main() -> std::io::Result<()> {
             return Ok(());
         }
         Some("power") => {
-            for (id, name) in actions::power_plans() {
-                println!("{id:?} {name}{}", if Some(id) == actions::power_plan() { " *" } else { "" });
+            for choice in power::choices() {
+                println!("{} {}{}", choice.id, choice.name, if choice.on { " *" } else { "" });
             }
             return Ok(());
         }

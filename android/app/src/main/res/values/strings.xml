@@ -24,7 +24,10 @@
     <string name="show_reads">Temperatures and load</string>
     <string name="show_reads_what">CPU, graphics, memory and disk</string>
     <string name="power">Power plan</string>
-    <string name="show_power_what">Power saver, balanced, performance; night mode goes to power saver</string>
+    <string name="show_power_what">As in the PC\'s power settings; night mode goes to best efficiency</string>
+    <string name="mode_efficiency">Best efficiency</string>
+    <string name="mode_balanced">Balanced</string>
+    <string name="mode_performance">Best performance</string>
     <string name="show_lights">Lighting effect and colour</string>
     <string name="show_lights_what">Off, only the lights\' switch is left</string>
     <string name="show_monitors">Monitors</string>

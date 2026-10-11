@@ -398,7 +398,9 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 Heading(stringResource(R.string.power))
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     for (plan in now.power) {
-                        Chip(plan.name, plan.on) { if (reached && !plan.on) act("power", "/v1/power", JSONObject().put("plan", plan.id)) { was -> was.copy(power = was.power.map { it.copy(on = it.id == plan.id) }) } }
+                        // A power mode is named here; a plan, as Windows names it.
+                        val name = when (plan.id) { "efficiency" -> stringResource(R.string.mode_efficiency); "balanced" -> stringResource(R.string.mode_balanced); "performance" -> stringResource(R.string.mode_performance); else -> plan.name }
+                        Chip(name, plan.on) { if (reached && !plan.on) act("power", "/v1/power", JSONObject().put("plan", plan.id)) { was -> was.copy(power = was.power.map { it.copy(on = it.id == plan.id) }) } }
                     }
                 }
             }

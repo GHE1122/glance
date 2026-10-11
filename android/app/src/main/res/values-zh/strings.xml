@@ -24,7 +24,10 @@
     <string name="show_reads">温度和占用</string>
     <string name="show_reads_what">CPU、显卡、内存、硬盘各一格</string>
     <string name="power">电源模式</string>
-    <string name="show_power_what">节能、平衡、高性能，夜间模式会切到节能</string>
+    <string name="show_power_what">和电脑设置里的电源模式一样；夜间模式会切到最佳能效</string>
+    <string name="mode_efficiency">最佳能效</string>
+    <string name="mode_balanced">平衡</string>
+    <string name="mode_performance">最佳性能</string>
     <string name="show_lights">灯光的效果和颜色</string>
     <string name="show_lights_what">关掉后只留灯光的开关</string>
     <string name="show_monitors">显示器</string>
