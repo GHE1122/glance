@@ -103,6 +103,8 @@ fn figures(sample: &Sample, info: &StaticInfo) -> Value {
         "disk": { "temp": whole(hottest(&mut sample.drive_temps.iter().map(|drive| drive.celsius))), "load": whole(sample.disk_active) },
         "cpu_fan": whole(cpu_fan),
         "case_fan": whole(case_fan),
+        // Every fan the board reads, as it names each.
+        "fans": sample.board.as_ref().map_or(Vec::new(), |board| board.fans.iter().map(|(name, rpm)| json!([name, rpm.round() as i64])).collect()),
     })
 }
 
