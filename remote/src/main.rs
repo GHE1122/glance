@@ -159,6 +159,7 @@ impl Helper {
         let lights = lights::lit().or(self.state.lock().unwrap().lights);
         let light = self.light.lock().unwrap().clone();
         let playing = media::playing();
+        let plan = actions::power_plan();
         let state = self.state.lock().unwrap();
         let sound = actions::volume();
         json!({
@@ -169,6 +170,7 @@ impl Helper {
             "reads": reads::read(),
             "media": playing.map(|media| json!({ "title": media.title, "artist": media.artist, "app": media.app, "playing": media.playing })),
             "night": state.night.is_some(),
+            "power": actions::power_plans().iter().map(|(id, name)| json!({ "id": format!("{id:?}"), "name": name, "on": Some(*id) == plan })).collect::<Vec<_>>(),
             "screen": display::on(),
             "monitors": display::monitors().iter().map(|monitor| json!({ "name": monitor.name, "x": monitor.place.0, "y": monitor.place.1, "width": monitor.place.2, "height": monitor.place.3, "on": monitor.on, "brightness": monitor.brightness })).collect::<Vec<_>>(),
             "volume": sound.map(|(level, _)| level),
@@ -211,8 +213,30 @@ impl Helper {
                 self.lights(asked.get("on").and_then(Value::as_bool).unwrap_or(true)).map_err(failed)?
             }
             ("POST", "/v1/media") => {
-                if !media::ask(asked.get("do").and_then(Value::as_str).unwrap_or_default()) {
-                    return Err((500, "nothing playing took it".into()));
+                match media::ask(asked.get("do").and_then(Value::as_str).unwrap_or_default()) {
+                    media::Asked::Taken => {}
+                    // A key pressed is a touch of the keyboard, at which night
+                    // would end and the screens wake: it is none of the user's,
+                    // so night goes on and the screens are put out again.
+                    media::Asked::Pressed => {
+                        let mut state = self.state.lock().unwrap();
+                        if let Some(night) = state.night.as_mut() {
+                            night.since = actions::tick();
+                            drop(state);
+                            let _ = display::sleep();
+                        }
+                    }
+                    media::Asked::Not => return Err((500, "nothing playing took it".into())),
+                }
+            }
+            // One of the PC's power plans, by its id as the state gives it.
+            // (Night over, the plan gone back to is the one there was before
+            // night, not one chosen during it.)
+            ("POST", "/v1/power") => {
+                let wanted = asked.get("plan").and_then(Value::as_str).unwrap_or_default();
+                let plan = actions::power_plans().into_iter().find(|(id, _)| format!("{id:?}") == wanted).ok_or((400, "no such plan".to_string()))?.0;
+                if !actions::set_power_plan(plan) {
+                    return Err((500, "the plan was not taken".into()));
                 }
             }
             ("POST", "/v1/night") => self.night(on()?).map_err(failed)?,
@@ -313,6 +337,19 @@ fn main() -> std::io::Result<()> {
         Some("lights") => {
             for device in lights::devices(&config)? {
                 println!("{}\n  modes: {}\n  zones: {}", device.name, device.modes.iter().map(|mode| mode.name.as_str()).collect::<Vec<_>>().join(", "), device.zones.iter().map(|zone| format!("{} ({} LEDs)", zone.name, zone.leds)).collect::<Vec<_>>().join(", "));
+            }
+            return Ok(());
+        }
+        Some("media") => {
+            println!("{:?}", media::sounding());
+            if let Some(playing) = media::playing() {
+                println!("{:?} by {:?} in {}: playing {}", playing.title, playing.artist, playing.app, playing.playing);
+            }
+            return Ok(());
+        }
+        Some("power") => {
+            for (id, name) in actions::power_plans() {
+                println!("{id:?} {name}{}", if Some(id) == actions::power_plan() { " *" } else { "" });
             }
             return Ok(());
         }

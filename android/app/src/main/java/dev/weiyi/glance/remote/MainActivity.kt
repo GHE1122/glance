@@ -254,7 +254,7 @@ private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>
             Panel {
                 Column {
                     val parts = listOf(
-                        Triple("rig", R.string.show_rig, R.string.show_rig_what), Triple("reads", R.string.show_reads, R.string.show_reads_what), Triple("lights", R.string.show_lights, R.string.show_lights_what),
+                        Triple("rig", R.string.show_rig, R.string.show_rig_what), Triple("reads", R.string.show_reads, R.string.show_reads_what), Triple("power", R.string.power, R.string.show_power_what), Triple("lights", R.string.show_lights, R.string.show_lights_what),
                         Triple("monitors", R.string.show_monitors, R.string.show_monitors_what), Triple("sound", R.string.show_sound, R.string.show_sound_what), Triple("sleep", R.string.show_sleep, null),
                     )
                     parts.forEachIndexed { at, (part, name, what) ->
@@ -377,7 +377,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         Tile(
             Sign.NIGHT, stringResource(R.string.night), if (busy == "night") working else stringResource(if (night) R.string.night_on else R.string.night_how),
             lit = night, enabled = reached, big = true, modifier = Modifier.fillMaxWidth(),
-        ) { act("night", "/v1/night", on(!night)) { it.copy(night = !night, screen = night) } }
+        ) { act("night", "/v1/night", on(!night)) { it.copy(night = !night, screen = night, lights = night) } }
         Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             // Lit while the screens are on: pressed, they go off, and on again.
             val screen = now.screen
@@ -391,6 +391,17 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 if (busy == "lights") working else when (lights) { true -> stringResource(R.string.lights_on, effectName(now.light.effect)); false -> stringResource(R.string.lights_off); null -> stringResource(R.string.lights_unknown) },
                 lit = lights != false, enabled = reached, modifier = Modifier.weight(1f).fillMaxHeight(),
             ) { act("lights", "/v1/lights", on(lights == false)) { it.copy(lights = lights == false) } }
+        }
+        // The PC's power plan, as it is and to choose: what night changes of it is seen here.
+        if (shown["power"] != false && now.power.size > 1) {
+            Panel {
+                Heading(stringResource(R.string.power))
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (plan in now.power) {
+                        Chip(plan.name, plan.on) { if (reached && !plan.on) act("power", "/v1/power", JSONObject().put("plan", plan.id)) { was -> was.copy(power = was.power.map { it.copy(on = it.id == plan.id) }) } }
+                    }
+                }
+            }
         }
         if (shown["lights"] != false && now.lights == true && !night && light != null) {
             LightsCard(
@@ -440,8 +451,8 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                     Rule()
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Column(Modifier.weight(1f)) {
-                            Text(media.title, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            val about = listOf(stringResource(if (media.playing) R.string.playing else R.string.paused), media.artist, media.app).filter { it.isNotBlank() }
+                            Text(media.title.ifBlank { media.app }, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val about = listOf(stringResource(if (media.playing) R.string.playing else R.string.paused), media.artist, media.app.takeIf { media.title.isNotBlank() }.orEmpty()).filter { it.isNotBlank() }
                             Text(about.joinToString(" · "), color = Dim, fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         Row {

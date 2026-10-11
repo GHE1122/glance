@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Glance Remote</string>
+    <string name="app_name">Glance</string>
     <string name="pair_title">Pair with your PC</string>
     <string name="pair_another">Pair another PC</string>
     <string name="pair_how">On the PC, open Glance\'s remote control and show the pairing code. Both must be on the same network.</string>
@@ -23,6 +23,8 @@
     <string name="show_rig_what">Its parts, coloured by how warm they are</string>
     <string name="show_reads">Temperatures and load</string>
     <string name="show_reads_what">CPU, graphics, memory and disk</string>
+    <string name="power">Power plan</string>
+    <string name="show_power_what">Power saver, balanced, performance; night mode goes to power saver</string>
     <string name="show_lights">Lighting effect and colour</string>
     <string name="show_lights_what">Off, only the lights\' switch is left</string>
     <string name="show_monitors">Monitors</string>

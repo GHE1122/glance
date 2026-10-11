@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Glance 遥控</string>
+    <string name="app_name">Glance</string>
     <string name="pair_title">和电脑配对</string>
     <string name="pair_another">再配对一台电脑</string>
     <string name="pair_how">在电脑上打开 Glance 的手机遥控，显示配对码。手机和电脑要在同一个网络里。</string>
@@ -23,6 +23,8 @@
     <string name="show_rig_what">把这台电脑画出来，部件按温度着色</string>
     <string name="show_reads">温度和占用</string>
     <string name="show_reads_what">CPU、显卡、内存、硬盘各一格</string>
+    <string name="power">电源模式</string>
+    <string name="show_power_what">节能、平衡、高性能，夜间模式会切到节能</string>
     <string name="show_lights">灯光的效果和颜色</string>
     <string name="show_lights_what">关掉后只留灯光的开关</string>
     <string name="show_monitors">显示器</string>

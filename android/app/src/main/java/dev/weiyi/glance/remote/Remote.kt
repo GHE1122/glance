@@ -68,7 +68,10 @@ data class Monitor(val name: String, val x: Int, val y: Int, val width: Int, val
 /** How the lights are when they are on: their colour (RRGGBB), what they do ("steady", "breathing", "rainbow", "heat"), and how bright they are (percent). */
 data class Light(val color: String, val effect: String, val brightness: Int = 100)
 
-/** What is playing on the PC. */
+/** One of the PC's power plans: what the PC knows it by, its name there, and whether it is the one in use. */
+data class Plan(val id: String, val name: String, val on: Boolean)
+
+/** What is playing on the PC ([title] empty where its program does not say: then only that it sounds). */
 data class Media(val title: String, val artist: String, val app: String, val playing: Boolean)
 
 /** One part of the PC: how warm it is (°C) and how busy (%), each where it is known. */
@@ -88,11 +91,12 @@ private fun JSONObject.read(name: String) = optJSONObject(name)?.let { Read(it.i
 /** The PC as it says it is. */
 data class PcState(
     val name: String, val lights: Boolean?, val night: Boolean, val screen: Boolean?, val volume: Int?, val muted: Boolean?, val monitors: List<Monitor> = emptyList(),
-    val light: Light = Light("FFFFFF", "steady"), val media: Media? = null, val reads: Reads? = null,
+    val light: Light = Light("FFFFFF", "steady"), val media: Media? = null, val reads: Reads? = null, val power: List<Plan> = emptyList(),
 ) {
     companion object {
         fun from(json: JSONObject) = PcState(
             light = json.optJSONObject("light")?.let { Light(it.optString("color", "FFFFFF"), it.optString("effect", "steady"), it.optInt("brightness", 100)) } ?: Light("FFFFFF", "steady"),
+            power = json.optJSONArray("power")?.let { list -> (0 until list.length()).map { at -> list.getJSONObject(at).let { Plan(it.optString("id"), it.optString("name"), it.optBoolean("on")) } } } ?: emptyList(),
             media = json.optJSONObject("media")?.let { Media(it.optString("title"), it.optString("artist"), it.optString("app"), it.optBoolean("playing")) },
             reads = json.optJSONObject("reads")?.let { Reads(it.read("cpu"), it.read("gpu"), it.read("ram"), it.read("disk"), it.int("cpu_fan"), it.int("case_fan")) },
             name = json.optString("name"),
@@ -175,7 +179,7 @@ fun on(value: Boolean) = JSONObject().put("on", value)
 /** What the main page shows, and the colours to light the PC in: this phone's own, kept in the app's storage. */
 object Look {
     /** The parts of the main page that may be left out, by the names they are kept under. */
-    val PARTS = listOf("rig", "reads", "lights", "monitors", "sound", "sleep")
+    val PARTS = listOf("rig", "reads", "power", "lights", "monitors", "sound", "sleep")
 
     private fun kept(context: Context) = context.getSharedPreferences("look", Context.MODE_PRIVATE)
 

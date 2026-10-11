@@ -7,7 +7,7 @@ use windows::Win32::Foundation::HLOCAL;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::System::Com::{CoCreateInstance, CoIncrementMTAUsage, CLSCTX_ALL};
-use windows::Win32::System::Power::{PowerGetActiveScheme, PowerSetActiveScheme, SetSuspendState};
+use windows::Win32::System::Power::{PowerEnumerate, PowerGetActiveScheme, PowerReadFriendlyName, PowerSetActiveScheme, SetSuspendState, ACCESS_SCHEME};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
@@ -28,6 +28,26 @@ pub fn power_plan() -> Option<GUID> {
         let _ = windows::Win32::Foundation::LocalFree(Some(HLOCAL(active as *mut _)));
         Some(plan)
     }
+}
+
+/// Every power plan this PC has, each with the name Windows shows for it.
+pub fn power_plans() -> Vec<(GUID, String)> {
+    let mut plans = Vec::new();
+    for index in 0.. {
+        let mut plan = GUID::zeroed();
+        let mut size = size_of::<GUID>() as u32;
+        if unsafe { PowerEnumerate(None, None, None, ACCESS_SCHEME, index, Some(&mut plan as *mut GUID as *mut u8), &mut size) }.is_err() {
+            break;
+        }
+        // The name's length (bytes of UTF-16, its end counted), then the name.
+        let mut length = 0u32;
+        let _ = unsafe { PowerReadFriendlyName(None, Some(&plan), None, None, None, &mut length) };
+        let mut name = vec![0u16; length as usize / 2];
+        if unsafe { PowerReadFriendlyName(None, Some(&plan), None, None, Some(name.as_mut_ptr() as *mut u8), &mut length) }.is_ok() {
+            plans.push((plan, String::from_utf16_lossy(&name).trim_end_matches('\0').to_string()));
+        }
+    }
+    plans
 }
 
 pub fn set_power_plan(plan: GUID) -> bool {
