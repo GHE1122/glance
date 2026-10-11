@@ -1,6 +1,6 @@
 [package]
 name = "glance-remote"
-version = "0.1.0"
+version = "0.3.0"
 license = "MIT"
 edition = "2021"
 description = "Glance's remote control helper: what a paired phone may ask of this PC. Runs as the user, never elevated."
@@ -32,9 +32,9 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
+    "Win32_Networking_WinHttp",
     "Win32_System_Com",
     "Win32_System_Console",
-    "Win32_System_Com_Urlmon",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",

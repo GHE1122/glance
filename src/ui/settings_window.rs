@@ -520,6 +520,8 @@ enum Row {
 const GROUP: f32 = 24.0;
 /// How tall the code's own square is, in its row.
 const CODE: f32 = 176.0;
+/// The room for the words beside it: what the row has left.
+const CODE_WORDS: f32 = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE - CODE - 20.0;
 
 /// A module row being dragged: by how far below the row's top it was
 /// taken, and where the pointer is (document DIPs).
@@ -1145,7 +1147,11 @@ impl Ui {
                 // Inside its module's card, right under the row above.
                 Row::Item(..) => (0.0, (self.words_height(&row) - ROW + ITEM_ROW).max(ITEM_ROW)),
                 Row::ModuleChoice(..) => (0.0, ITEM_ROW),
-                Row::Code => (ROW_GAP, CODE + 2.0 * ROW_SIDE),
+                // As tall as the code, or as the words beside it where those are taller.
+                Row::Code => {
+                    let words = self.code.as_ref().map_or(0.0, |(_, what)| 22.0 + self.gfx.wrapped_height(code_words(self.lang, *what).1, Font::new(Family::Segoe, 12.0, 400.0), CODE_WORDS));
+                    (ROW_GAP, CODE.max(words) + 2.0 * ROW_SIDE)
+                }
                 Row::Group(_) => (20.0, GROUP),
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, self.words_height(&row).max(ROW)),
             };
@@ -2945,7 +2951,7 @@ impl Ui {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     if let Some((code, what)) = &self.code {
                         // Dark on white whatever the theme (what a phone's camera reads), a margin of four cells round it.
-                        let (x0, y0) = (left + ROW_SIDE, y + ROW_SIDE);
+                        let (x0, y0) = (left + ROW_SIDE, y + (row_height - CODE) / 2.0);
                         fill(frame, Color::hex(0xFFFFFF, 1.0), x0, y0, CODE, CODE, 8.0);
                         let cell = CODE / (code.0.len() as f32 + 8.0);
                         for (down, row) in code.0.iter().enumerate() {
@@ -2959,14 +2965,10 @@ impl Ui {
                                 across += run.max(1);
                             }
                         }
-                        let (title, word) = match what {
-                            // (The first of each on one line: short enough for the room beside the code.)
-                            CodeFor::App => (pick(lang, "扫码下载 Glance", "Scan to get Glance"), crate::phone::APP_PAGE.trim_start_matches("https://")),
-                            CodeFor::Pairing => (pick(lang, "用 Glance APP 扫描", "Scan with the Glance app"), pick(lang, "打开手机上的 Glance，扫描这个配对码。10 分钟内有效，只给一部手机用", "Open Glance on the phone and scan this code. Good for ten minutes, for one phone")),
-                            CodeFor::WebPairing => (pick(lang, "用手机相机扫描", "Scan with the phone's camera"), pick(lang, "会在浏览器里打开，之后可以添加到主屏幕。10 分钟内有效，只给一部手机用", "It opens in the browser, and can then be added to the home screen. Good for ten minutes, for one phone")),
-                        };
+                        let (title, word) = code_words(lang, *what);
                         let text_left = x0 + CODE + 20.0;
-                        field_label(frame, palette, title, Some(word), label, hint, text_left, y + row_height / 2.0, left + width - ROW_SIDE - text_left);
+                        field_label(frame, palette, title, Some(word), label, hint, text_left, y + row_height / 2.0, CODE_WORDS);
+
                     }
                 }
                 Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit | Row::GetApp | Row::Pair | Row::Phone(..) => {
@@ -3489,6 +3491,16 @@ fn field_label_in(frame: &Frame, colors: (Color, Color), label: &str, hint: Opti
             text_centred(frame, label, label_font, colors.0, x, top + 10.0, width, Align::Start);
             frame.text_wrapped(hint, hint_font, colors.1, x, top + 22.0, width);
         }
+    }
+}
+
+/// What is said beside a code: what to do with it, and what comes of that.
+fn code_words(lang: Lang, what: CodeFor) -> (&'static str, &'static str) {
+    match what {
+        // (The first of each on one line: short enough for the room beside the code.)
+        CodeFor::App => (pick(lang, "扫码下载 Glance", "Scan to get Glance"), crate::phone::APP_PAGE.trim_start_matches("https://")),
+        CodeFor::Pairing => (pick(lang, "用 Glance APP 扫描", "Scan with the Glance app"), pick(lang, "打开手机上的 Glance，扫描这个配对码。10 分钟内有效，只给一部手机用", "Open Glance on the phone and scan this code. Good for ten minutes, for one phone")),
+        CodeFor::WebPairing => (pick(lang, "用手机相机扫描", "Scan with the camera"), pick(lang, "会在浏览器里打开，之后可以添加到主屏幕。网页不加密，请只在信任的网络（比如家里）使用。10 分钟内有效，只给一部手机用", "It opens in the browser, and can then be added to the home screen. The page is not encrypted: use it only on a network you trust, such as your home's. Good for ten minutes, for one phone")),
     }
 }
 

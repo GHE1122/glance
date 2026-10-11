@@ -12,11 +12,14 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use windows::core::{w, PCWSTR, PWSTR};
+use windows::core::{w, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, LocalFree, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, HLOCAL};
 use windows::Win32::Security::AppLocker::{SaferCloseLevel, SaferComputeTokenFromLevel, SaferCreateLevel, SAFER_COMPUTE_TOKEN_FROM_LEVEL_FLAGS, SAFER_LEVELID_NORMALUSER, SAFER_LEVEL_OPEN, SAFER_SCOPEID_USER};
-use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
-use windows::Win32::Security::{GetLengthSid, SetTokenInformation, TokenIntegrityLevel, PSID, SAFER_LEVEL_HANDLE, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_MANDATORY_LABEL};
+use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, SDDL_REVISION_1};
+use windows::Win32::Security::{
+    GetLengthSid, GetSecurityDescriptorDacl, SetTokenInformation, TokenDefaultDacl, TokenIntegrityLevel, TokenOwner, ACL, PSECURITY_DESCRIPTOR, PSID, SAFER_LEVEL_HANDLE, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES,
+    TOKEN_DEFAULT_DACL, TOKEN_MANDATORY_LABEL, TOKEN_OWNER,
+};
 use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
@@ -66,8 +69,11 @@ impl Drop for Open {
 }
 
 /// This program's own rights with an administrator's taken from them:
-/// those of the same user's ordinary programs (and their standing, which
-/// is "medium"), to start another program with.
+/// those of the same user's ordinary programs, to start another program
+/// with. Their standing too ("medium"), and whose what they make is: the
+/// user's, to be opened again by the user's programs (what an
+/// administrator's program makes is the administrators', by default, and
+/// would be closed to the very program that made it).
 fn plain_rights() -> Option<Open> {
     unsafe {
         let mut level = SAFER_LEVEL_HANDLE::default();
@@ -83,6 +89,19 @@ fn plain_rights() -> Option<Open> {
         let set = SetTokenInformation(token.0, TokenIntegrityLevel, (&label as *const TOKEN_MANDATORY_LABEL).cast(), size_of::<TOKEN_MANDATORY_LABEL>() as u32 + GetLengthSid(medium));
         let _ = LocalFree(Some(HLOCAL(medium.0)));
         set.ok()?;
+        let user = elevation::user_sid()?;
+        let mut owner = PSID::default();
+        ConvertStringSidToSidW(&HSTRING::from(user.as_str()), &mut owner).ok()?;
+        let owned = SetTokenInformation(token.0, TokenOwner, (&TOKEN_OWNER { Owner: owner } as *const TOKEN_OWNER).cast(), size_of::<TOKEN_OWNER>() as u32);
+        let _ = LocalFree(Some(HLOCAL(owner.0)));
+        owned.ok()?;
+        // What it makes, open to the user and to Windows itself: as an ordinary program's is.
+        let mut described = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(&HSTRING::from(format!("D:(A;;GA;;;{user})(A;;GA;;;SY)")), SDDL_REVISION_1, &mut described, None).ok()?;
+        let (mut present, mut defaulted, mut open_to) = (Default::default(), Default::default(), std::ptr::null_mut::<ACL>());
+        let opened = GetSecurityDescriptorDacl(described, &mut present, &mut open_to, &mut defaulted).and_then(|()| SetTokenInformation(token.0, TokenDefaultDacl, (&TOKEN_DEFAULT_DACL { DefaultDacl: open_to } as *const TOKEN_DEFAULT_DACL).cast(), size_of::<TOKEN_DEFAULT_DACL>() as u32));
+        let _ = LocalFree(Some(HLOCAL(described.0)));
+        opened.ok()?;
         Some(token)
     }
 }
@@ -113,14 +132,8 @@ fn quoted(argument: &str) -> String {
     quoted
 }
 
-/// What `program` says, run with `arguments` and without an
-/// administrator's rights (see `plain_rights`), if it ends well. It is
-/// given nothing of this program's but somewhere to say it.
-fn said_plainly(program: &Path, arguments: &[&str]) -> Option<String> {
-    let rights = plain_rights()?;
-    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
-    let name = wide(&program.display().to_string());
-    let mut line = wide(&std::iter::once(quoted(&program.display().to_string())).chain(arguments.iter().map(|argument| quoted(argument))).collect::<Vec<_>>().join(" "));
+/// The one end of a pipe to hear by, and the other (to be passed on) to say by.
+fn pipe() -> Option<(Open, Open)> {
     unsafe {
         let (mut heard, mut said) = (HANDLE::default(), HANDLE::default());
         let passed_on = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, bInheritHandle: true.into(), ..Default::default() };
@@ -128,40 +141,77 @@ fn said_plainly(program: &Path, arguments: &[&str]) -> Option<String> {
         let (heard, said) = (Open(heard), Open(said));
         // (This end stays here.)
         SetHandleInformation(heard.0, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)).ok()?;
-        // Of all this program holds open, the program started is given that one end alone.
+        Some((heard, said))
+    }
+}
+
+/// All that comes by a pipe, till its other end is closed.
+fn all(heard: Open) -> Vec<u8> {
+    let mut all = Vec::new();
+    let mut some = [0u8; 4096];
+    loop {
+        let mut read = 0;
+        if unsafe { ReadFile(heard.0, Some(&mut some), Some(&mut read), None) }.is_err() || read == 0 {
+            return all;
+        }
+        all.extend_from_slice(&some[..read as usize]);
+    }
+}
+
+// (A handle is a number: it is the same in whichever thread.)
+unsafe impl Send for Open {}
+
+/// What `program` says, run with `arguments` and without an
+/// administrator's rights (see `plain_rights`), if it ends well; what it
+/// says of why not goes in the log. It is given nothing of this program's
+/// but somewhere to say those.
+fn said_plainly(program: &Path, arguments: &[&str]) -> Option<String> {
+    let (ended, said, wrong) = run_plainly(program, arguments)?;
+    if ended != 0 {
+        crate::journal::note(format!("the remote, asked to {}: {}", arguments.first().copied().unwrap_or_default(), wrong.trim()));
+    }
+    (ended == 0).then_some(said)
+}
+
+/// `program` run with `arguments` and without an administrator's rights:
+/// how it ended, what it said, and what it said went wrong.
+fn run_plainly(program: &Path, arguments: &[&str]) -> Option<(u32, String, String)> {
+    let rights = plain_rights()?;
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let name = wide(&program.display().to_string());
+    let mut line = wide(&std::iter::once(quoted(&program.display().to_string())).chain(arguments.iter().map(|argument| quoted(argument))).collect::<Vec<_>>().join(" "));
+    let ((heard, said), (heard_wrong, said_wrong)) = (pipe()?, pipe()?);
+    unsafe {
+        // Of all this program holds open, the program started is given those two ends alone.
         let mut size = 0;
         let _ = InitializeProcThreadAttributeList(None, 1, None, &mut size);
         let mut room = vec![0u64; size.div_ceil(8)];
         let list = LPPROC_THREAD_ATTRIBUTE_LIST(room.as_mut_ptr().cast());
         InitializeProcThreadAttributeList(Some(list), 1, None, &mut size).ok()?;
-        let given = [said.0];
+        let given = [said.0, said_wrong.0];
         let mut process = PROCESS_INFORMATION::default();
         let started = UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize, Some(given.as_ptr().cast()), size_of_val(&given), None, None).and_then(|()| {
             let mut startup = STARTUPINFOEXW::default();
             startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
             startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
             startup.StartupInfo.hStdOutput = said.0;
+            startup.StartupInfo.hStdError = said_wrong.0;
             startup.lpAttributeList = list;
             CreateProcessAsUserW(Some(rights.0), PCWSTR(name.as_ptr()), Some(PWSTR(line.as_mut_ptr())), None, None, true, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, None, None, &startup.StartupInfo, &mut process)
         });
         DeleteProcThreadAttributeList(list);
         started.ok()?;
         let (process, _thread) = (Open(process.hProcess), Open(process.hThread));
-        // (Its end is its alone now: what it says ends when it does.)
-        drop(said);
-        let mut all = Vec::new();
-        let mut some = [0u8; 4096];
-        loop {
-            let mut read = 0;
-            if ReadFile(heard.0, Some(&mut some), Some(&mut read), None).is_err() || read == 0 {
-                break;
-            }
-            all.extend_from_slice(&some[..read as usize]);
-        }
+        // (Its ends are its alone now: what it says ends when it does.)
+        drop((said, said_wrong));
+        // (Both heard at once: neither waits on the other being read.)
+        let wrong = std::thread::spawn(move || all(heard_wrong));
+        let said = all(heard);
+        let wrong = wrong.join().unwrap_or_default();
         WaitForSingleObject(process.0, INFINITE);
         let mut ended = 1;
         GetExitCodeProcess(process.0, &mut ended).ok()?;
-        (ended == 0).then(|| String::from_utf8_lossy(&all).into_owned())
+        Some((ended, String::from_utf8_lossy(&said).into_owned(), String::from_utf8_lossy(&wrong).into_owned()))
     }
 }
 

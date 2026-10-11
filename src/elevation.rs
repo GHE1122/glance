@@ -818,7 +818,7 @@ pub fn may_start_unasked() -> bool {
 
 /// The current user's security identifier, which names their tasks: each
 /// account that runs Glance has tasks of its own.
-fn user_sid() -> Option<String> {
+pub fn user_sid() -> Option<String> {
     let mut token = HANDLE::default();
     unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.ok()?;
     let mut buffer = vec![0u64; 64];
