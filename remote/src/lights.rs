@@ -254,7 +254,8 @@ fn server(config: &Config) -> std::io::Result<Client> {
         return Ok(client);
     }
     let program = program(config).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "OpenRGB is not installed"))?;
-    std::process::Command::new(&program).args(["--server", "--noautoconnect"]).current_dir(program.parent().unwrap()).creation_flags(NO_WINDOW).spawn()?;
+    let started = std::process::Command::new(&program).args(["--server", "--noautoconnect"]).current_dir(program.parent().unwrap()).creation_flags(NO_WINDOW).spawn()?.id();
+    let _ = Config::change(|config| config.openrgb_started = Some(started));
     // It listens before it has found the devices, and finds them one
     // after another: asked until it has some, and as many twice running.
     let since = Instant::now();
@@ -270,6 +271,33 @@ fn server(config: &Config) -> std::io::Result<Client> {
         } else if since.elapsed() > STARTING {
             return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "OpenRGB did not start"));
         }
+    }
+}
+
+/// The programs of the makers' own that take a board's lights for
+/// themselves once they start: an OpenRGB running since before can set
+/// those lights no more (it goes on believing it does), one started after
+/// can, whether or not the maker's program is still there. (As seen on a
+/// Gigabyte board, by a camera on the case: lights set before, during and
+/// after Gigabyte Control Center, and after OpenRGB was started afresh.)
+pub const RIVALS: [&str; 1] = ["GCC.exe"];
+
+/// Stops the OpenRGB this helper started, so that the next asking starts
+/// one afresh; whether there was one of its own to stop.
+pub fn afresh() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+    let Some(started) = Config::load().openrgb_started else { return false };
+    // (A number is given again to another program in time: it is OpenRGB's only while OpenRGB has it.)
+    if !crate::actions::programs().iter().any(|(number, name)| *number == started && name.eq_ignore_ascii_case("OpenRGB.exe")) {
+        return false;
+    }
+    unsafe {
+        let Ok(program) = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, started) else { return false };
+        let stopped = TerminateProcess(program, 0).is_ok();
+        WaitForSingleObject(program, 5000);
+        let _ = CloseHandle(program);
+        stopped
     }
 }
 

@@ -16,7 +16,6 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 use windows::Win32::Devices::HumanInterfaceDevice::HidD_GetHidGuid;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{CreateFileW, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
-use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 use windows::Win32::System::TaskScheduler::{IRegisteredTask, ITaskService, TaskScheduler};
 use windows::Win32::System::Variant::VARIANT;
@@ -186,21 +185,9 @@ pub fn dark() -> bool {
     }
 }
 
-/// Whether TRCC is running: its name among the programs there are (none of them opened).
+/// Whether TRCC is running.
 fn running() -> bool {
-    unsafe {
-        let Ok(programs) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return false };
-        let mut one = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
-        let mut found = false;
-        let mut more = Process32FirstW(programs, &mut one).is_ok();
-        while more && !found {
-            let name = String::from_utf16_lossy(&one.szExeFile[..one.szExeFile.iter().position(|c| *c == 0).unwrap_or(one.szExeFile.len())]);
-            found = name.eq_ignore_ascii_case("TRCC.exe");
-            more = Process32NextW(programs, &mut one).is_ok();
-        }
-        let _ = CloseHandle(programs);
-        found
-    }
+    crate::actions::programs().iter().any(|(_, name)| name.eq_ignore_ascii_case("TRCC.exe"))
 }
 
 /// Gives the display back to TRCC, which lights it as it was set to.

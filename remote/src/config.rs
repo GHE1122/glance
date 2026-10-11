@@ -60,6 +60,9 @@ pub struct Config {
     pub openrgb: Option<PathBuf>,
     pub strip_leds: u32,
     pub light: Light,
+    /// The OpenRGB this helper started, by its program's number: its own
+    /// to stop and start afresh (one the user started is not).
+    pub openrgb_started: Option<u32>,
 }
 
 impl Default for Config {
@@ -72,6 +75,7 @@ impl Default for Config {
             openrgb: None,
             strip_leds: STRIP_LEDS,
             light: Light::default(),
+            openrgb_started: None,
         }
     }
 }

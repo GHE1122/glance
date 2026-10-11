@@ -54,6 +54,24 @@ pub fn set_power_plan(plan: GUID) -> bool {
     unsafe { PowerSetActiveScheme(None, Some(&plan)) }.is_ok()
 }
 
+/// The programs running, each by its number and its file's name (none of
+/// them opened: only the list Windows keeps of them is read).
+pub fn programs() -> Vec<(u32, String)> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let mut found = Vec::new();
+    unsafe {
+        let Ok(list) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return found };
+        let mut one = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut more = Process32FirstW(list, &mut one).is_ok();
+        while more {
+            found.push((one.th32ProcessID, String::from_utf16_lossy(&one.szExeFile[..one.szExeFile.iter().position(|c| *c == 0).unwrap_or(one.szExeFile.len())])));
+            more = Process32NextW(list, &mut one).is_ok();
+        }
+        let _ = windows::Win32::Foundation::CloseHandle(list);
+    }
+    found
+}
+
 /// COM for the whole program, for as long as it runs: every thread may use
 /// it. (Kept by each thread for itself, what COM had loaded would be
 /// unloaded some minutes after those threads were gone, under whatever was

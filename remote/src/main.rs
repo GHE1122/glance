@@ -80,12 +80,16 @@ struct Helper {
     state: Mutex<State>,
     /// Held while the lights are being set: one at a time.
     lighting: Mutex<()>,
+    /// A maker's own lighting program has started since OpenRGB was last
+    /// started: OpenRGB is to be started afresh before it is asked again.
+    stale: std::sync::atomic::AtomicBool,
 }
 
 impl Helper {
     fn lights(&self, on: bool) -> Result<(), String> {
         // (The state is not held while OpenRGB is asked: that may take a while.)
         let _one = self.lighting.lock().unwrap();
+        self.refresh();
         let mut light = self.light.lock().unwrap().clone();
         if light.effect == Effect::Heat {
             if let Some(celsius) = reads::read().as_ref().and_then(reads::hottest) {
@@ -103,6 +107,14 @@ impl Helper {
         Ok(())
     }
 
+    /// OpenRGB started afresh, if a maker's program has taken the lights
+    /// from the one running (see `lights::RIVALS`).
+    fn refresh(&self) {
+        if self.stale.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            lights::afresh();
+        }
+    }
+
     /// Lights that follow the heat, put in the colour of how warm the PC
     /// is now, where that is another than `last` (the one they were last
     /// put in by this).
@@ -117,6 +129,7 @@ impl Helper {
             return;
         }
         let Some(color) = reads::read().as_ref().and_then(reads::hottest).map(heat) else { return };
+        self.refresh();
         if last.as_ref() != Some(&color) && lights::set(&self.config, true, &Light { color: color.clone(), effect: Effect::Steady, brightness: self.light.lock().unwrap().brightness }).is_ok() {
             *last = Some(color);
         }
@@ -494,12 +507,21 @@ fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", config.port))?;
     // (Whether the lights are on, as OpenRGB has them if it is running.)
     let state = State { lights: lights::lit(), ..State::default() };
-    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()) });
+    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false) });
     let following = helper.clone();
     std::thread::spawn(move || {
         let mut last = None;
+        // The makers' lighting programs seen running, by their numbers: one not seen before has just started.
+        let mut rivals: Vec<u32> = Vec::new();
         loop {
             std::thread::sleep(FOLLOW);
+            let now: Vec<u32> = actions::programs().into_iter().filter(|(_, name)| lights::RIVALS.iter().any(|rival| name.eq_ignore_ascii_case(rival))).map(|(number, _)| number).collect();
+            if now.iter().any(|number| !rivals.contains(number)) {
+                following.stale.store(true, std::sync::atomic::Ordering::SeqCst);
+                // (Lights that follow the heat are put in their colour again by the OpenRGB to come.)
+                last = None;
+            }
+            rivals = now;
             following.follow(&mut last);
         }
     });
