@@ -44,6 +44,8 @@ struct State {
     seen: sign::Seen,
     /// Whether the lights are on, once this helper has set them.
     lights: Option<bool>,
+    /// How each device was lit before this helper last put the lights out.
+    before: lights::Before,
     night: Option<Night>,
 }
 
@@ -55,8 +57,12 @@ struct Helper {
 
 impl Helper {
     fn lights(&self, on: bool) -> Result<(), String> {
-        lights::set(&self.config, on).map_err(|error| error.to_string())?;
-        self.state.lock().unwrap().lights = Some(on);
+        // (Not held while OpenRGB is asked: that may take a while.)
+        let mut before = self.state.lock().unwrap().before.clone();
+        lights::set(&self.config, on, &mut before).map_err(|error| error.to_string())?;
+        let mut state = self.state.lock().unwrap();
+        state.before = before;
+        state.lights = Some(on);
         Ok(())
     }
 
@@ -86,12 +92,15 @@ impl Helper {
     }
 
     fn state(&self) -> Value {
+        // As OpenRGB has them; while it is not running, as this helper last
+        // set them.
+        let lights = lights::lit().or(self.state.lock().unwrap().lights);
         let state = self.state.lock().unwrap();
         let sound = actions::volume();
         json!({
             "name": self.config.name,
             "version": env!("CARGO_PKG_VERSION"),
-            "lights": state.lights,
+            "lights": lights,
             "night": state.night.is_some(),
             "screen": display::on(),
             "volume": sound.map(|(level, _)| level),

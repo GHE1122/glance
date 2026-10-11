@@ -22,6 +22,10 @@ const VERSION: u32 = 3;
 const STARTING: Duration = Duration::from_secs(40);
 /// How long any one answer may take.
 const ANSWER: Duration = Duration::from_secs(8);
+/// How often a device is asked to be as wanted before it is left as it
+/// is, and how long it is given each time before it is read back.
+const TRIES: usize = 4;
+const SETTLING: Duration = Duration::from_millis(400);
 
 const CONTROLLER_COUNT: u32 = 0;
 const CONTROLLER_DATA: u32 = 1;
@@ -51,8 +55,22 @@ pub struct Zone {
 pub struct Device {
     pub name: String,
     pub modes: Vec<Mode>,
+    /// The mode it is in, as its place among them.
+    pub active: usize,
     pub zones: Vec<Zone>,
     pub leds: usize,
+    /// Each LED's colour as the server has it (0x00BBGGRR).
+    pub colors: Vec<u32>,
+}
+
+impl Device {
+    /// Whether it is lit: not in its "off" mode, and, in a mode that shows
+    /// the colours it is sent, not all black.
+    pub fn lit(&self) -> bool {
+        let mode = self.modes.get(self.active).map_or("", |mode| mode.name.as_str());
+        let painted = mode.eq_ignore_ascii_case("Direct") || mode.eq_ignore_ascii_case("Static");
+        !mode.eq_ignore_ascii_case("Off") && !(painted && self.colors.iter().all(|color| color & 0x00FF_FFFF == 0))
+    }
 }
 
 /// A reader over a packet's body.
@@ -89,7 +107,7 @@ pub fn device(body: &[u8]) -> Option<Device> {
         b.string()?;
     }
     let count = b.u16()?;
-    b.u32()?; // the mode it is in
+    let active = b.u32()? as usize;
     let mut modes = Vec::new();
     for _ in 0..count {
         let whole = b.0;
@@ -112,7 +130,12 @@ pub fn device(body: &[u8]) -> Option<Device> {
         zones.push(Zone { name, leds_max, leds });
     }
     let leds = b.u16()? as usize;
-    Some(Device { name, modes, zones, leds })
+    for _ in 0..leds {
+        b.string()?;
+        b.u32()?; // the LED's own value
+    }
+    let colors = (0..b.u16()?).map(|_| b.u32()).collect::<Option<Vec<u32>>>()?;
+    Some(Device { name, modes, active, zones, leds, colors })
 }
 
 pub struct Client(TcpStream);
@@ -185,13 +208,13 @@ impl Client {
         self.send(index, UPDATE_MODE, &body)
     }
 
-    /// Every LED of device `index`, `count` of them, in one colour.
-    fn set_color(&mut self, index: u32, count: usize, (r, g, b): (u8, u8, u8)) -> std::io::Result<()> {
+    /// The LEDs of device `index`, each in its colour (0x00BBGGRR).
+    fn set_colors(&mut self, index: u32, colors: &[u32]) -> std::io::Result<()> {
         let mut body = Vec::new();
-        body.extend_from_slice(&((4 + 2 + 4 * count) as u32).to_le_bytes());
-        body.extend_from_slice(&(count as u16).to_le_bytes());
-        for _ in 0..count {
-            body.extend_from_slice(&[r, g, b, 0]);
+        body.extend_from_slice(&((4 + 2 + 4 * colors.len()) as u32).to_le_bytes());
+        body.extend_from_slice(&(colors.len() as u16).to_le_bytes());
+        for color in colors {
+            body.extend_from_slice(&color.to_le_bytes());
         }
         self.send(index, UPDATE_LEDS, &body)
     }
@@ -236,11 +259,20 @@ fn rgb(hex: &str) -> Option<(u8, u8, u8)> {
     Some(((value >> 16) as u8, (value >> 8) as u8, value as u8))
 }
 
-/// The lights put out, or lit as the configuration has each device.
-/// Returns how many devices there are.
-pub fn set(config: &Config, on: bool) -> std::io::Result<usize> {
+/// How a device was lit before the lights were put out: its name, the
+/// mode it was in, and its LEDs' colours.
+pub type Before = Vec<(String, String, Vec<u32>)>;
+
+/// The lights put out, or lit: each device as it was before they were last
+/// put out (`before`, kept here as they go out), or, one not lit then, as
+/// the configuration has it. Returns how many devices there are.
+pub fn set(config: &Config, on: bool, before: &mut Before) -> std::io::Result<usize> {
     let mut client = server(config)?;
     let mut devices = client.devices()?;
+    // As OpenRGB has them (what another program set, it does not know).
+    if !on && devices.iter().any(Device::lit) {
+        *before = devices.iter().filter(|device| device.lit()).map(|device| (device.name.clone(), device.modes[device.active].name.clone(), device.colors.clone())).collect();
+    }
     // A header for addressable strips that OpenRGB has no LEDs for sends
     // nothing: given some, so that what is plugged into it is reached.
     let mut resized = false;
@@ -257,35 +289,57 @@ pub fn set(config: &Config, on: bool) -> std::io::Result<usize> {
     if resized {
         devices = client.devices()?;
     }
-    for (index, device) in devices.iter().enumerate() {
-        let index = index as u32;
-        let named = |name: &str| device.modes.iter().enumerate().find(|(_, mode)| mode.name.eq_ignore_ascii_case(name));
-        // In one colour: in the mode that takes each LED's colour as it is
-        // sent (or, where a device has none, its static one).
-        let paint = |client: &mut Client, colour: (u8, u8, u8)| -> std::io::Result<()> {
-            if let Some((at, mode)) = named("Direct").or_else(|| named("Static")) {
-                client.set_mode(index, at, mode)?;
+    // What each device is to be: a mode of its own, or one colour in the
+    // mode that shows the colours it is sent (where it has none such, its
+    // static one).
+    let wanted: Vec<(Option<usize>, Option<Vec<u32>>)> = devices
+        .iter()
+        .map(|device| {
+            let named = |name: &str| device.modes.iter().position(|mode| mode.name.eq_ignore_ascii_case(name));
+            let paint = |(r, g, b): (u8, u8, u8)| (named("Direct").or_else(|| named("Static")), Some(vec![u32::from_le_bytes([r, g, b, 0]); device.leds]));
+            if !on {
+                // Out: the device's own "off", where it has one.
+                return named("Off").map_or_else(|| paint((0, 0, 0)), |off| (Some(off), None));
             }
-            client.set_color(index, device.leds, colour)
-        };
-        let lit = if on { Some(config.lit(&device.name)) } else { None };
-        match lit {
-            // Out: the device's own "off", where it has one.
-            None => match named("Off") {
-                Some((at, mode)) => client.set_mode(index, at, mode)?,
-                None => paint(&mut client, (0, 0, 0))?,
-            },
-            Some(Lit::Mode(name)) => match named(&name) {
-                Some((at, mode)) => client.set_mode(index, at, mode)?,
-                None => paint(&mut client, (255, 255, 255))?,
-            },
-            Some(Lit::Color(hex)) => paint(&mut client, rgb(&hex).unwrap_or((255, 255, 255)))?,
+            // As it was, if it was lit as the lights went out.
+            if let Some((_, mode, colors)) = before.iter().find(|(name, ..)| *name == device.name) {
+                if let Some(mode) = named(mode) {
+                    return (Some(mode), (colors.len() == device.leds).then(|| colors.clone()));
+                }
+            }
+            match config.lit(&device.name) {
+                Lit::Mode(name) => named(&name).map_or_else(|| paint((255, 255, 255)), |mode| (Some(mode), None)),
+                Lit::Color(hex) => paint(rgb(&hex).unwrap_or((255, 255, 255))),
+            }
+        })
+        .collect();
+    // Asked, then read back: a device that is not in the mode asked for
+    // (what is sent over its bus does not always arrive) is asked again.
+    for attempt in 0..TRIES {
+        let behind: Vec<usize> = (0..devices.len()).filter(|at| attempt == 0 || wanted[*at].0.is_some_and(|mode| devices[*at].active != mode)).collect();
+        if behind.is_empty() {
+            break;
         }
+        for at in behind {
+            let (device, (mode, colors)) = (&devices[at], &wanted[at]);
+            if let Some(mode) = *mode {
+                client.set_mode(at as u32, mode, &device.modes[mode])?;
+            }
+            if let Some(colors) = colors {
+                client.set_colors(at as u32, colors)?;
+            }
+        }
+        std::thread::sleep(SETTLING);
+        devices = client.devices()?;
     }
-    // Sent before the connection closes behind them.
-    client.0.flush()?;
-    std::thread::sleep(Duration::from_millis(300));
     Ok(devices.len())
+}
+
+/// Whether the lights are on: any device lit. None while OpenRGB is not
+/// running (it is not started to be asked: how they are is then as they
+/// were left).
+pub fn lit() -> Option<bool> {
+    Some(Client::connect().ok()?.devices().ok()?.iter().any(Device::lit))
 }
 
 /// The lighting devices, for choosing how each is lit.
@@ -334,11 +388,21 @@ mod tests {
         body.extend(zone("GPU", 1, 1));
         body.extend(zone("Strip", 300, 0));
         body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend(string("LED 1"));
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&0x0000_FF00u32.to_le_bytes());
         let read = device(&body).unwrap();
         assert_eq!(read.name, "A card");
         assert_eq!(read.modes, [Mode { name: "Off".into(), raw: off }, Mode { name: "Rainbow Wave".into(), raw: wave }]);
         assert_eq!(read.zones, [Zone { name: "GPU".into(), leds_max: 1, leds: 1 }, Zone { name: "Strip".into(), leds_max: 300, leds: 0 }]);
-        assert_eq!(read.leds, 1);
+        assert_eq!((read.leds, read.active, read.colors.as_slice()), (1, 0, &[0x0000_FF00u32][..]));
+        // In its "off" mode it is out, whatever its colours; in a mode of
+        // its own, lit; painted black, out.
+        assert!(!read.lit());
+        assert!(Device { active: 1, ..read.clone() }.lit());
+        let painted = Device { modes: vec![Mode { name: "Direct".into(), raw: Vec::new() }], active: 0, ..read.clone() };
+        assert!(painted.lit() && !Device { colors: vec![0], ..painted }.lit());
         // Cut short, it is none.
         assert_eq!(device(&body[..body.len() - 3]), None);
         assert_eq!(rgb("ff8000"), Some((255, 128, 0)));

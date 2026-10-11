@@ -267,8 +267,8 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
             Tile(
                 stringResource(R.string.lights),
                 stringResource(when (lights) { true -> R.string.lights_on; false -> R.string.lights_off; null -> R.string.lights_unknown }),
-                lit = lights == true, working = busy == "lights", enabled = reached, modifier = Modifier.weight(1f),
-            ) { act("lights", "/v1/lights", on(lights != true)) }
+                lit = lights != false, working = busy == "lights", enabled = reached, modifier = Modifier.weight(1f),
+            ) { act("lights", "/v1/lights", on(lights == false)) }
         }
     }
     val rest: @Composable () -> Unit = {

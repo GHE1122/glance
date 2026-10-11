@@ -26,7 +26,7 @@
     <string name="lights">Lights</string>
     <string name="lights_on">On</string>
     <string name="lights_off">Off</string>
-    <string name="lights_unknown">Tap to light them</string>
+    <string name="lights_unknown">Tap to put them out</string>
     <string name="volume">Volume</string>
     <string name="mute">Mute</string>
     <string name="unmute">Muted</string>
