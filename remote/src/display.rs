@@ -59,6 +59,8 @@ const OFF: isize = 2;
 
 /// The display's state as Windows last told it.
 static STATE: AtomicU8 = AtomicU8::new(UNKNOWN);
+/// When Windows last said the screens had gone off (see `actions::tick`), once it has.
+static WENT_OFF: Mutex<Option<u32>> = Mutex::new(None);
 /// The window that listens (see `watch`), once there is one.
 static LISTENER: AtomicIsize = AtomicIsize::new(0);
 /// Asks the listening window to hear of what is touched (1) or to stop (0).
@@ -247,8 +249,10 @@ pub fn woken() -> Woken {
     let Some(out) = out.as_mut() else { return Woken::No };
     let (now, input) = (crate::actions::tick(), crate::actions::last_input());
     let after = |later: u32, than: u32| later.wrapping_sub(than) as i32;
-    // (Kept dark by this helper, they are on to Windows all along.)
-    let lit = !kept && !matches!(STATE.load(Ordering::Relaxed), 0 | UNKNOWN);
+    // On again, as Windows has them: they went off after they were put out, and are on now. (Kept dark by this
+    // helper, they are on to Windows all along; and till Windows says they are off, they have not yet gone.)
+    let went_off = WENT_OFF.lock().unwrap().is_some_and(|at| after(at, out.since) >= 0);
+    let lit = !kept && went_off && !matches!(STATE.load(Ordering::Relaxed), 0 | UNKNOWN);
     if after(input, out.since) > SETTLING as i32 && out.nothing_at != Some(input) {
         // (What was heard of it reaches this a moment after Windows has had it.)
         if after(now, input) < HEARD_WITHIN as i32 {
@@ -262,7 +266,7 @@ pub fn woken() -> Woken {
         out.nothing_at = Some(input);
         crate::journal::note(format!("not taken for a touch: {}", last_touch()));
     }
-    if !lit || after(now, out.since) <= SETTLING as i32 {
+    if !lit {
         return Woken::No;
     }
     if out.nothing_at.take().is_some() {
@@ -287,6 +291,7 @@ unsafe extern "system" fn told(window: HWND, message: u32, wparam: WPARAM, lpara
             // (Dimmed is on.) Out, what is touched is heard of, to say what wakes them.
             if (was == 0) != (now == 0) && was != UNKNOWN {
                 if now == 0 {
+                    *WENT_OFF.lock().unwrap() = Some(crate::actions::tick());
                     crate::journal::note("Windows: the screens are off");
                     hear_touches(window, true);
                 } else {
