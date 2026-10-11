@@ -1796,7 +1796,7 @@ impl Ui {
             }
             // The version this is, where the user looks for a newer one.
             Switch::Updates => {
-                return (p("自动检查更新", "Check for updates by itself"), Some(Cow::Borrowed(p("每天检查一次", "Once a day"))), self.settings.check_updates);
+                return (p("自动检查更新", "Check for updates by itself"), Some(Cow::Borrowed(p("每天检查一次，同时向 Glance 的网站告知当前版本，用于统计使用情况；不含任何可识别这台电脑的信息", "Once a day; Glance's site is told this version, for its count of how many run. Nothing that tells this PC from another"))), self.settings.check_updates);
             }
         };
         (name, hint.map(Cow::Borrowed), on)

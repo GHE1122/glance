@@ -398,6 +398,13 @@ pub struct Settings {
     pub heat_alert: bool,
     /// The version that last ran: a newer one starting says it was updated.
     pub last_version: Option<String>,
+    /// The day Glance first ran here (days since 1970), where it has been
+    /// known since: asking its site for a newer version, Glance says how
+    /// many weeks ago that was, and no more of when.
+    pub began: Option<u64>,
+    /// The version that last asked Glance's site for a newer one and was
+    /// answered: the next to ask says which it came from, where another.
+    pub asked_as: Option<String>,
     pub overlay: OverlaySettings,
     /// See `PanelAt`; none while the panel opens from the edge.
     pub panel_at: Option<PanelAt>,
@@ -431,6 +438,8 @@ impl Default for Settings {
             over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
             last_version: None,
+            began: None,
+            asked_as: None,
             overlay: OverlaySettings::default(),
             panel_at: None,
             panel_pinned: None,
@@ -468,8 +477,13 @@ impl Settings {
     /// Read and written so that Glance, running elevated, never follows a
     /// link someone put in the user's folder (see `elevation::read_in_place`).
     pub fn load(dir: &Path) -> Self {
-        let mut settings: Settings =
-            crate::elevation::read_in_place(dir, FILE, MOST).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        let kept = crate::elevation::read_in_place(dir, FILE, MOST);
+        // With none kept, this is where Glance begins here.
+        let begins = kept.is_none().then(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs() / 86400));
+        let mut settings: Settings = kept.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        if begins.is_some() {
+            settings.began = begins;
+        }
         // A number too large to be one (it reads as infinite, and is written
         // as none at all): not a file Glance wrote.
         if serde_json::to_value(&settings).and_then(serde_json::from_value::<Settings>).is_err() {

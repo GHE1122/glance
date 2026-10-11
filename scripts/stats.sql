@@ -26,3 +26,20 @@ CREATE TABLE IF NOT EXISTS reports (
   text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS reports_day ON reports (day, sender);
+
+-- Glance's own askings of the site (see /api/latest in _worker.js): one row for each time a Glance asked for
+-- the latest version ('ask') or took an installer ('take'); which of that day's PCs, the version asking (or
+-- taken), the version it came from, whether it was a new install's first asking, and how many weeks Glance
+-- has been on that PC.
+CREATE TABLE IF NOT EXISTS asks (
+  ts INTEGER NOT NULL,
+  day TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  machine TEXT NOT NULL,
+  version TEXT NOT NULL,
+  came_from TEXT NOT NULL,
+  fresh INTEGER NOT NULL,
+  weeks INTEGER,
+  country TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS asks_day ON asks (day, machine);

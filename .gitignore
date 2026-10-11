@@ -6,3 +6,4 @@ __pycache__/
 
 # Another project's archives, served by the site: fetched by scripts\site.ps1, not kept here
 website/dl/
+website/latest.json

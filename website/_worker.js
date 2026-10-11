@@ -6,6 +6,16 @@
 // day is over, so no visitor can be followed from one day to the next.
 // /api/stats gives the counts to whoever has the key (STATS_KEY).
 //
+// /api/latest is where Glance itself asks, once a day, whether there is a
+// newer version (GitHub and Gitee are asked besides, and serve where this
+// site is out of reach): answered as those two answer, from latest.json,
+// with the installer this site serves. Each asking is counted, with what it
+// says of itself: its version, whether it is the first of a Glance new on
+// its PC, which version it was updated from, and how many weeks it has been
+// there. An installer taken by Glance (not from a page) is counted as an
+// update. No PC is told from another beyond the day: the same hash of its
+// address with that day's salt as for a page's visitors.
+//
 // /api/report takes what a user of Glance sends of their own PC when its
 // hardware is not read or set as it should be (the text Glance showed them
 // first: its parts and what Glance reads of them), and gives it a short
@@ -38,6 +48,56 @@ async function saltOf(db, day) {
 }
 
 const clip = (value, most) => (typeof value === "string" ? value.slice(0, most) : "");
+
+// A version as Glance writes them (numbers and dots), or nothing.
+const version = (value) => (/^[0-9]{1,4}(\.[0-9]{1,4}){1,3}$/.test(value || "") ? value : "");
+// How many askings and takings one address may have counted in a day: the
+// rest are answered all the same, and not counted.
+const ASKS_A_DAY = 24;
+
+// One asking or taking of Glance's own, counted.
+async function count(request, env, kind, of, cameFrom, fresh, weeks) {
+  const now = Date.now();
+  const day = dayOf(now);
+  const address = request.headers.get("cf-connecting-ip") || "";
+  const machine = (await hex(`${await saltOf(env.STATS, day)}|${address}`)).slice(0, 16);
+  await env.STATS.prepare(
+    `INSERT INTO asks (ts, day, kind, machine, version, came_from, fresh, weeks, country)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM asks WHERE day = ? AND machine = ?) < ?`,
+  )
+    .bind(now, day, kind, machine, of, cameFrom, fresh ? 1 : 0, weeks, request.cf?.country || "", day, machine, ASKS_A_DAY)
+    .run();
+}
+
+// Glance asking for the latest release.
+async function latest(request, env, url) {
+  const asked = url.searchParams;
+  const of = version(asked.get("v"));
+  // Only Glance's own asking is counted (a browser's look at the address is not).
+  if (of && /^Glance\//.test(request.headers.get("user-agent") || "")) {
+    const cameFrom = asked.get("f") === "pre" ? "pre" : version(asked.get("f"));
+    const weeks = /^[0-9]{1,4}$/.test(asked.get("w") || "") ? parseInt(asked.get("w"), 10) : null;
+    try {
+      await count(request, env, "ask", of, cameFrom, asked.get("n") === "1", weeks);
+    } catch {
+      // (The count failing is no reason to keep the answer from Glance.)
+    }
+  }
+  const answer = await env.ASSETS.fetch(new Request(new URL("/latest.json", url), { method: "GET" }));
+  return new Response(answer.body, { status: answer.status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+}
+
+// An installer taken by Glance itself (it says which version takes it).
+async function taken(request, env, url) {
+  const of = version((url.pathname.match(/^\/dl\/Glance_([0-9.]+)_x64-setup\.exe$/) || [])[1]);
+  const cameFrom = version(url.searchParams.get("u"));
+  if (of && cameFrom && /^Glance\//.test(request.headers.get("user-agent") || "")) {
+    try {
+      await count(request, env, "take", of, cameFrom, false, null);
+    } catch {}
+  }
+  return env.ASSETS.fetch(new Request(new URL(url.pathname, url), request));
+}
 
 async function record(request, env) {
   let event;
@@ -154,7 +214,7 @@ async function stats(request, env) {
   const days = Math.min(Math.max(parseInt(new URL(request.url).searchParams.get("days") || "30", 10) || 30, 1), 365);
   const since = dayOf(Date.now() - (days - 1) * 86400000);
   const all = (sql) => env.STATS.prepare(sql).bind(since).all().then((r) => r.results);
-  const [daily, countries, sources, refs, pages] = await Promise.all([
+  const [daily, countries, sources, refs, pages, glance, versions, updates, staying] = await Promise.all([
     // Each day: pages shown, visitors, downloads, visitors who downloaded.
     all(`SELECT day,
            SUM(kind = 'view') AS views,
@@ -172,8 +232,23 @@ async function stats(request, env) {
     all(`SELECT source, COUNT(*) AS downloads FROM events WHERE day >= ? AND kind = 'download' GROUP BY source ORDER BY downloads DESC`),
     all(`SELECT ref, COUNT(*) AS views FROM events WHERE day >= ? AND kind = 'view' GROUP BY ref ORDER BY views DESC LIMIT 20`),
     all(`SELECT path, COUNT(*) AS views FROM events WHERE day >= ? AND kind = 'view' GROUP BY path ORDER BY views DESC LIMIT 20`),
+    // Glance itself, each day: how many PCs asked (one address a day counts once), how many of them were new
+    // installs' first asking, and how many installers Glance took (updates).
+    all(`SELECT day,
+           COUNT(DISTINCT CASE WHEN kind = 'ask' THEN machine END) AS running,
+           COUNT(DISTINCT CASE WHEN kind = 'ask' AND fresh = 1 THEN machine END) AS new_installs,
+           SUM(kind = 'take') AS updates
+         FROM asks WHERE day >= ? GROUP BY day ORDER BY day`),
+    // Which versions run, over the latest day there is.
+    all(`SELECT version, COUNT(DISTINCT machine) AS running FROM asks
+         WHERE day >= ? AND kind = 'ask' AND day = (SELECT MAX(day) FROM asks WHERE kind = 'ask') GROUP BY version ORDER BY running DESC`),
+    // Updates, from which version to which.
+    all(`SELECT came_from, version, COUNT(*) AS updates FROM asks WHERE day >= ? AND kind = 'take' GROUP BY came_from, version ORDER BY updates DESC LIMIT 40`),
+    // Staying: of the PCs asking each day (counted per day, then added up), how many weeks Glance has been there.
+    all(`SELECT weeks, COUNT(*) AS asking_days FROM (SELECT DISTINCT day, machine, weeks FROM asks WHERE day >= ? AND kind = 'ask' AND weeks IS NOT NULL)
+         GROUP BY weeks ORDER BY weeks`),
   ]);
-  return json({ since, days, daily, countries, sources, refs, pages });
+  return json({ since, days, daily, countries, sources, refs, pages, glance, versions, updates, staying });
 }
 
 export default {
@@ -183,6 +258,8 @@ export default {
     if (url.pathname === "/api/stats" && request.method === "GET") return stats(request, env);
     if (url.pathname === "/api/report" && request.method === "POST") return report(request, env);
     if (url.pathname === "/api/reports" && request.method === "GET") return reports(request, env);
+    if (url.pathname === "/api/latest" && request.method === "GET") return latest(request, env, url);
+    if (url.pathname.startsWith("/dl/Glance_") && request.method === "GET" && url.searchParams.has("u")) return taken(request, env, url);
     return env.ASSETS.fetch(request);
   },
 };

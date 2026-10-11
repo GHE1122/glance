@@ -34,6 +34,10 @@ use crate::ui::prefs::LanguagePref;
 use crate::ui::text::Lang;
 
 /// Where each site describes the latest release, in the same terms.
+/// Glance's own site, asked first of all: it says the same of the latest
+/// release as the two below do, serves the installer itself, and counts
+/// how many ask (see `site`).
+const SITE: &str = "https://glancepc.com/api/latest";
 const SOURCES: [&str; 2] = [
     "https://api.github.com/repos/lulu-loopp/glance/releases/latest",
     "https://gitee.com/api/v5/repos/lulu-loopp/glance/releases/latest",
@@ -284,7 +288,9 @@ fn fetch_and_run(release: &Release) -> State {
     let mut outcome = State::Failed;
     for (version, url) in &release.installers {
         let host = url.trim_start_matches("https://").split('/').next().unwrap_or(url);
-        let Some(bytes) = get(url) else {
+        // (Glance's site is told which version takes it: its count of updates.)
+        let from = if host == "glancepc.com" { format!("{url}?u={}", env!("CARGO_PKG_VERSION")) } else { url.clone() };
+        let Some(bytes) = get(&from) else {
             note(&format!("the installer could not be downloaded from {host}"));
             continue;
         };
@@ -364,22 +370,53 @@ pub(crate) fn language() -> Lang {
     Lang::resolve(serde_json::from_value::<LanguagePref>(settings.view["language"].clone()).unwrap_or_default())
 }
 
+/// Where Glance's site is asked for the latest release, with what it is
+/// told for its counting: this version; that this is the first asking of a
+/// Glance new here (`n`); which version this one was updated from, where
+/// the last to ask was another (`f`: "pre" for one from before versions
+/// said); and how many weeks Glance has been here (`w`). Nothing that tells
+/// one PC from another: no name, no number kept for it.
+fn site() -> String {
+    let (began, asked_as) = {
+        let settings = crate::app().settings.lock().unwrap();
+        (settings.began, settings.asked_as.clone())
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let mut url = format!("{SITE}?v={version}");
+    match (&asked_as, began) {
+        (None, Some(_)) => url.push_str("&n=1"),
+        (None, None) => url.push_str("&f=pre"),
+        (Some(last), _) if last != version => url.push_str(&format!("&f={last}")),
+        (Some(_), _) => {}
+    }
+    if let Some(began) = began {
+        let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs() / 86400);
+        url.push_str(&format!("&w={}", today.saturating_sub(began) / 7));
+    }
+    url
+}
+
 /// The latest release each site knows of, the newest first. A site that
 /// does not answer (out of reach from where the user is) is noted, and the
-/// other one serves.
+/// others serve.
 fn latest() -> Option<Release> {
     // Both sites at once, each on a thread of its own; their answers in the
     // order they come, a site out of reach answering nothing. Once one has
     // answered, the other is waited for a moment more, not for as long as
     // an unreachable site takes to give up.
     let (sender, answers) = std::sync::mpsc::channel();
-    for url in SOURCES {
+    let sources: Vec<String> = std::iter::once(site()).chain(SOURCES.iter().map(|url| url.to_string())).collect();
+    let asked = sources.len();
+    for url in sources {
         let sender = sender.clone();
         thread::spawn(move || {
-            let answer = get(url).and_then(|body| release(&body));
+            let answer = get(&url).and_then(|body| release(&body));
             if answer.is_none() {
-                let host = url.trim_start_matches("https://").split('/').next().unwrap_or(url);
+                let host = url.trim_start_matches("https://").split('/').next().unwrap_or(&url);
                 crate::journal::note(format!("update check: no answer from {host}"));
+            } else if url.starts_with(SITE) {
+                // Answered: the next asking is this version's, not a new Glance's nor one just updated.
+                crate::app().change(|settings| settings.asked_as = Some(env!("CARGO_PKG_VERSION").to_string()));
             }
             let _ = sender.send(answer);
         });
@@ -387,7 +424,7 @@ fn latest() -> Option<Release> {
     drop(sender);
     let mut installers: Vec<(String, String)> = Vec::new();
     let mut heard = 0;
-    while heard < SOURCES.len() {
+    while heard < asked {
         let next = if installers.is_empty() { answers.recv().ok() } else { answers.recv_timeout(STRAGGLER).ok() };
         let Some(answer) = next else { break };
         heard += 1;

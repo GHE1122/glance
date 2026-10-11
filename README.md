@@ -115,8 +115,8 @@ or following the brightness of your wallpaper. Chinese or English.
 One executable of about 2 MB, drawn natively with Direct2D and
 DirectComposition. About 55 MB of memory and well under 1% of a CPU core
 while the panel is hidden. No account, no ads, and no network access but
-one daily question to GitHub and Gitee about a newer version, which the
-settings can turn off; the diagnostics you choose to send from the
+one daily question about a newer version (to Glance's own site, and to
+GitHub and Gitee), which the settings can turn off; the diagnostics you choose to send from the
 settings (shown to you whole first); and the phone remote, if you turn it
 on.
 
@@ -174,8 +174,13 @@ for administrator rights at every start and cannot start with Windows.
   30 seconds.
 - **Settings**: right-click the tray icon, or start Glance again. The settings
   window works with the keyboard as well (Tab, the arrow keys, Space).
-- **Update**: once a day Glance asks GitHub, and its mirror on Gitee, for a
-  new version, using whichever it can reach. When one is out, the tray says
+- **Update**: once a day Glance asks its own site (glancepc.com), and GitHub
+  and its mirror on Gitee, for a new version, using whichever it can reach.
+  Asking its site, Glance says which version it is, whether this is a new
+  install's first asking, which version it was updated from, and how many
+  weeks it has been on this PC; the site counts those, to know how many
+  copies run and are kept up to date. Nothing tells one PC from another:
+  no name or number is sent, and the site keeps no address. When one is out, the tray says
   so and the settings offer it. Glance downloads the installer and runs it only if it is signed
   by the same publisher as the Glance you have.
 - **Uninstall**: from Windows' Apps list, or from the settings. It removes

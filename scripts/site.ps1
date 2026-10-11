@@ -45,6 +45,23 @@ if (-not (Test-Path (Join-Path $served $source))) {
     Invoke-WebRequest 'https://codeberg.org/OpenRGB/OpenRGB/archive/release_1.0.zip' -OutFile (Join-Path $served $source)
 }
 
+# The latest release, as GitHub has it: its installer served from here too (Glance asks this site first for a
+# newer version, and takes the installer from it: see /api/latest in website\_worker.js), and what Glance is
+# told of it, in the terms GitHub and Gitee answer in. Only an installer signed as the releases are goes up.
+$tag = (gh release view --repo lulu-loopp/glance --json tagName --jq .tagName).Trim()
+if ($LASTEXITCODE -ne 0 -or $tag -notmatch '^v[0-9.]+$') { throw 'the latest release could not be read from GitHub' }
+$installer = "Glance_$($tag.Substring(1))_x64-setup.exe"
+if (-not (Test-Path (Join-Path $served $installer))) {
+    gh release download $tag --repo lulu-loopp/glance --pattern $installer --dir $served --clobber
+    if ($LASTEXITCODE -ne 0) { throw "$installer could not be taken from GitHub" }
+}
+$signed = Get-AuthenticodeSignature (Join-Path $served $installer)
+if ($signed.Status -ne 'Valid') { throw "$installer is not validly signed" }
+# (Those of releases before are no longer served.)
+Get-ChildItem $served -Filter 'Glance_*_x64-setup.exe' | Where-Object Name -ne $installer | Remove-Item
+$told = @{ tag_name = $tag; assets = @(@{ name = $installer; browser_download_url = "https://glancepc.com/dl/$installer" }) } | ConvertTo-Json -Depth 4 -Compress
+[IO.File]::WriteAllText((Join-Path $root 'website\latest.json'), $told, (New-Object Text.UTF8Encoding $false))
+
 foreach ($needed in 'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID') {
     if (-not (Get-Item "env:$needed" -ErrorAction SilentlyContinue)) { throw "$needed is not set" }
 }
