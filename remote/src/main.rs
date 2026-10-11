@@ -86,8 +86,8 @@ impl Helper {
             if let Some(plan) = night.plan {
                 actions::set_power_plan(plan);
             }
-            let woken = display::wake().map_err(|error| error.to_string());
-            self.lights(true).and(woken)
+            display::wake();
+            self.lights(true)
         }
     }
 
@@ -103,6 +103,7 @@ impl Helper {
             "lights": lights,
             "night": state.night.is_some(),
             "screen": display::on(),
+            "monitors": display::monitors().iter().map(|monitor| json!({ "name": monitor.name, "width": monitor.size.0, "height": monitor.size.1, "on": monitor.on })).collect::<Vec<_>>(),
             "volume": sound.map(|(level, _)| level),
             "muted": sound.map(|(_, muted)| muted),
             "idle_seconds": actions::tick().wrapping_sub(actions::last_input()) / 1000,
@@ -116,7 +117,20 @@ impl Helper {
         let on = || asked.get("on").and_then(Value::as_bool).ok_or((400, "\"on\" is missing".to_string()));
         match (method, path) {
             ("GET", "/v1/state") => {}
-            ("POST", "/v1/screen") => if on()? { display::wake() } else { display::sleep() }.map_err(|error| failed(error.to_string()))?,
+            ("POST", "/v1/screen") => {
+                if on()? {
+                    display::wake()
+                } else {
+                    display::sleep().map_err(|error| failed(error.to_string()))?
+                }
+            }
+            // One monitor by itself, by its place among them.
+            ("POST", "/v1/monitor") => {
+                let index = asked.get("index").and_then(Value::as_u64).ok_or((400, "\"index\" is missing".to_string()))? as usize;
+                if !display::turn(index, on()?) {
+                    return Err((500, "the monitor did not take it".into()));
+                }
+            }
             ("POST", "/v1/lights") => self.lights(on()?).map_err(failed)?,
             ("POST", "/v1/night") => self.night(on()?).map_err(failed)?,
             ("POST", "/v1/volume") => {
@@ -200,6 +214,8 @@ fn pairing(config: &Config) -> String {
 }
 
 fn main() -> std::io::Result<()> {
+    // The monitors' sizes in their own pixels, whatever each one's scale.
+    let _ = unsafe { windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let config = Config::load()?;
     match std::env::args().nth(1).as_deref() {
         Some("pair") => {
@@ -219,7 +235,7 @@ fn main() -> std::io::Result<()> {
         }
         Some("monitors") => {
             for monitor in display::monitors() {
-                println!("{}: brightness {:?}, input {:?}, power {:?}", monitor.name, monitor.brightness, monitor.input, monitor.power);
+                println!("{} ({}x{}): on {:?}", monitor.name, monitor.size.0, monitor.size.1, monitor.on);
             }
             return Ok(());
         }

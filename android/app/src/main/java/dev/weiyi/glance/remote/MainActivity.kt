@@ -29,6 +29,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -36,6 +37,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -106,7 +109,7 @@ class MainActivity : ComponentActivity() {
                     val pc = pcs.getOrNull(chosen)
                     if (pc == null || adding) {
                         BackHandler(enabled = adding) { adding = false }
-                        Pairing(first = pcs.isEmpty(), paired = pair)
+                        Pairing(first = pcs.isEmpty(), back = { adding = false }.takeIf { adding }, paired = pair)
                     } else {
                         Column(Modifier.fillMaxSize().safeDrawingPadding()) {
                             Computers(pcs, chosen, choose = { at -> Pcs.choose(this@MainActivity, at); chosen = at }, add = { adding = true })
@@ -151,13 +154,15 @@ private fun Computers(pcs: List<Pc>, chosen: Int, choose: (Int) -> Unit, add: ()
 
 /** A PC's code is scanned, or its link pasted. */
 @Composable
-private fun Pairing(first: Boolean, paired: (Pc) -> Unit) {
+private fun Pairing(first: Boolean, back: (() -> Unit)?, paired: (Pc) -> Unit) {
     var link by remember { mutableStateOf("") }
     var wrong by remember { mutableStateOf(false) }
     val take = { text: String -> Pc.fromLink(text)?.let(paired) ?: run { wrong = true } }
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result -> result.contents?.let(take) }
     val prompt = stringResource(R.string.scan_prompt)
     Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.Center) {
+        // Back to the PCs paired with, where there are some.
+        if (back != null) TextButton(onClick = back, modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) { Text(stringResource(R.string.back), color = Dim, fontSize = 16.sp) }
         Column(Modifier.widthIn(max = 480.dp).verticalScroll(rememberScrollState()).padding(24.dp)) {
             Text(stringResource(if (first) R.string.pair_title else R.string.pair_another), fontSize = 30.sp, fontWeight = FontWeight.SemiBold, lineHeight = 38.sp)
             Spacer(Modifier.height(12.dp))
@@ -183,7 +188,7 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
     var state by remember { mutableStateOf<PcState?>(null) }
     var failure by remember { mutableStateOf<Failure?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
-    var sleepArmed by remember { mutableStateOf(false) }
+    var sleepAsked by remember { mutableStateOf(false) }
     var unpairArmed by remember { mutableStateOf(false) }
     var level by remember { mutableFloatStateOf(0f) }
     var sliding by remember { mutableStateOf(false) }
@@ -199,9 +204,12 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
         }
     }
 
-    fun act(what: String, path: String, body: JSONObject = JSONObject()) {
+    // What is asked shows at once as it will be; the PC's answer then says
+    // how it is.
+    fun act(what: String, path: String, body: JSONObject = JSONObject(), expect: (PcState) -> PcState = { it }) {
         if (busy != null) return
         busy = what
+        state = state?.let(expect)
         scope.launch {
             ask(path, body)
             busy = null
@@ -212,16 +220,26 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
     LaunchedEffect(pc) {
         while (true) {
             if (busy == null) ask("/v1/state")
-            delay(2500)
+            delay(1500)
         }
     }
-    // Sleep and unpairing ask twice: armed for a few seconds.
-    LaunchedEffect(sleepArmed, unpairArmed) {
-        if (sleepArmed || unpairArmed) {
+    // Unpairing asks twice: armed for a few seconds.
+    LaunchedEffect(unpairArmed) {
+        if (unpairArmed) {
             delay(4000)
-            sleepArmed = false
             unpairArmed = false
         }
+    }
+    // Sleep says what it means first.
+    if (sleepAsked) {
+        AlertDialog(
+            onDismissRequest = { sleepAsked = false },
+            title = { Text(stringResource(R.string.sleep_title)) },
+            text = { Text(stringResource(R.string.sleep_what), color = Dim, lineHeight = 21.sp) },
+            confirmButton = { TextButton(onClick = { sleepAsked = false; act("sleep", "/v1/sleep") }) { Text(stringResource(R.string.sleep), color = Bad) } },
+            dismissButton = { TextButton(onClick = { sleepAsked = false }) { Text(stringResource(R.string.cancel), color = Dim) } },
+            containerColor = Card,
+        )
     }
 
     val reached = state != null && failure == null
@@ -254,7 +272,7 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
             title = stringResource(R.string.night),
             detail = stringResource(if (night) R.string.night_on else R.string.night_how),
             lit = night, working = busy == "night", enabled = reached, tall = true,
-        ) { act("night", "/v1/night", on(!night)) }
+        ) { act("night", "/v1/night", on(!night)) { it.copy(night = !night) } }
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             // Lit while the screens are on: pressed, they go off, and on again.
             val screen = state?.screen
@@ -262,13 +280,40 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
                 stringResource(R.string.screen),
                 stringResource(when (screen) { false -> R.string.screen_is_off; else -> R.string.screen_is_on }),
                 lit = screen != false, working = busy == "screen", enabled = reached, modifier = Modifier.weight(1f),
-            ) { act("screen", "/v1/screen", on(screen == false)) }
+            ) { act("screen", "/v1/screen", on(screen == false)) { it.copy(screen = screen == false) } }
             val lights = state?.lights
             Tile(
                 stringResource(R.string.lights),
                 stringResource(when (lights) { true -> R.string.lights_on; false -> R.string.lights_off; null -> R.string.lights_unknown }),
                 lit = lights != false, working = busy == "lights", enabled = reached, modifier = Modifier.weight(1f),
-            ) { act("lights", "/v1/lights", on(lights == false)) }
+            ) { act("lights", "/v1/lights", on(lights == false)) { it.copy(lights = lights == false) } }
+        }
+        // Each monitor by itself, where there are several.
+        val monitors = state?.monitors.orEmpty()
+        if (monitors.size > 1) {
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(horizontal = 18.dp, vertical = 10.dp)) {
+                monitors.forEachIndexed { at, monitor ->
+                    Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            // A monitor Windows has no name for is known by its size.
+                            val named = monitor.name.substringBefore('(').trim().takeUnless { it.startsWith("Generic") || it.isBlank() }
+                            Text(named ?: "${monitor.width} × ${monitor.height}", fontSize = 16.sp, color = if (monitor.on == null) Dim else Ink)
+                            Text(if (monitor.on == null) stringResource(R.string.monitor_fixed) else "${monitor.width} × ${monitor.height}", fontSize = 12.sp, color = Dim)
+                        }
+                        if (monitor.on != null) {
+                            Switch(
+                                checked = monitor.on, enabled = reached && busy == null,
+                                onCheckedChange = { wanted ->
+                                    act("monitor", "/v1/monitor", JSONObject().put("index", at).put("on", wanted)) { now ->
+                                        now.copy(monitors = now.monitors.mapIndexed { i, one -> if (i == at) one.copy(on = wanted) else one })
+                                    }
+                                },
+                                colors = SwitchDefaults.colors(checkedTrackColor = Accent, checkedThumbColor = Color.Black),
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
     val rest: @Composable () -> Unit = {
@@ -291,11 +336,11 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
             )
         }
         Button(
-            onClick = { if (sleepArmed) { sleepArmed = false; act("sleep", "/v1/sleep") } else sleepArmed = true },
+            onClick = { sleepAsked = true },
             enabled = reached && busy == null,
             modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(18.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = if (sleepArmed) Bad else Card, contentColor = Ink),
-        ) { Text(stringResource(if (sleepArmed) R.string.sleep_confirm else R.string.sleep), fontSize = 16.sp) }
+            colors = ButtonDefaults.buttonColors(containerColor = Card, contentColor = Ink),
+        ) { Text(stringResource(R.string.sleep), fontSize = 16.sp) }
     }
 
     // Narrow (a phone, a fold's cover): one column. Wide (unfolded, a

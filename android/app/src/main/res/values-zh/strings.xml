@@ -18,7 +18,7 @@
     <string name="refused">电脑不再认这台手机，请重新配对</string>
     <string name="working">正在执行…</string>
     <string name="night">夜间模式</string>
-    <string name="night_how">关屏、关灯、切到节能。动一下鼠标或键盘就结束。</string>
+    <string name="night_how">电脑继续运行：关屏、关灯、切到节能。动一下鼠标或键盘就结束。</string>
     <string name="night_on">已开启。再点一次结束，或者动一下鼠标、键盘。</string>
     <string name="screen">屏幕</string>
     <string name="screen_is_on">亮着，点一下关闭</string>
@@ -31,5 +31,9 @@
     <string name="mute">静音</string>
     <string name="unmute">已静音</string>
     <string name="sleep">睡眠</string>
-    <string name="sleep_confirm">再点一次让电脑睡眠</string>
+    <string name="sleep_title">让电脑睡眠？</string>
+    <string name="sleep_what">电脑上的一切都会停下：下载、远程连接、正在跑的程序。睡着后不能从手机唤醒，要在电脑上按键盘或电源键。\n\n如果只是想关屏关灯、让电脑继续运行，请用夜间模式。</string>
+    <string name="cancel">取消</string>
+    <string name="back">‹ 返回</string>
+    <string name="monitor_fixed">不支持单独开关</string>
 </resources>

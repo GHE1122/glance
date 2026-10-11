@@ -5,14 +5,14 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, BOOL, GUID};
 use windows::Win32::Devices::Display::{
     DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR, GetVCPFeatureAndVCPFeatureReply, SetVCPFeature, PHYSICAL_MONITOR,
 };
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
 use windows::Win32::System::Power::{RegisterPowerSettingNotification, SetThreadExecutionState, ES_DISPLAY_REQUIRED, POWERBROADCAST_SETTING};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -24,8 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const DISPLAY_STATE: GUID = GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
 /// Not told yet.
 const UNKNOWN: u8 = u8::MAX;
-/// SC_MONITORPOWER's "on" and "off".
-const ON: isize = -1;
+/// SC_MONITORPOWER's "off".
 const OFF: isize = 2;
 
 /// The display's state as Windows last told it.
@@ -74,72 +73,59 @@ fn power(how: isize) -> Result<()> {
     }
 }
 
-/// The input each monitor showed as the screens were last turned off, by
-/// its place among them (see `each_monitor`): a monitor with several PCs
-/// plugged into it may go over to another while this one's signal is gone.
-static INPUTS: Mutex<Vec<(usize, u32)>> = Mutex::new(Vec::new());
-/// How long after the screens are asked on a monitor is given before it is
-/// asked which input it shows.
-const WAKING: Duration = Duration::from_millis(2500);
-
 /// The screens off, until the mouse or the keyboard is touched, or `wake`.
 pub fn sleep() -> Result<()> {
-    let mut inputs = Vec::new();
-    each_monitor(|index, _, monitor| inputs.extend(ask(monitor, INPUT_SOURCE).map(|(now, _)| (index, now & 0xFF))));
-    *INPUTS.lock().unwrap() = inputs;
     power(OFF)
 }
 
-/// A monitor that went over to another input while the screens were off
-/// is told to show this PC's again (one that still answers this PC: a
-/// monitor that has let go of this cable altogether cannot be told).
-fn back_to_this_pc() {
-    let inputs = std::mem::take(&mut *INPUTS.lock().unwrap());
-    each_monitor(|index, _, monitor| {
-        if let Some((_, was)) = inputs.iter().find(|(at, _)| *at == index) {
-            if ask(monitor, INPUT_SOURCE).is_some_and(|(now, _)| now & 0xFF != *was) {
-                unsafe { SetVCPFeature(monitor, INPUT_SOURCE, *was) };
-            }
-        }
-    });
-}
-
-/// The screens on again, as a touch of the mouse brings them: Windows is
-/// told the display is wanted, and the mouse is moved by nothing (which is
-/// input all the same; asking for the monitors' power alone does not wake
-/// them on every system).
-pub fn wake() -> Result<()> {
+/// The screens on again, exactly as a touch of the mouse brings them:
+/// Windows is told the display is wanted, and the mouse is moved by
+/// nothing (which is input all the same). Nothing more is asked of the
+/// monitors: told besides to power on, and which input to show, a monitor
+/// with several PCs plugged into it went over to another. One this helper
+/// turned off by itself (see `turn`), which no touch of the mouse wakes, is
+/// turned on.
+pub fn wake() {
     unsafe {
         SetThreadExecutionState(ES_DISPLAY_REQUIRED);
         let nudge = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: MOUSEEVENTF_MOVE, ..Default::default() } } };
         SendInput(&[nudge], size_of::<INPUT>() as i32);
     }
-    std::thread::spawn(|| {
-        std::thread::sleep(WAKING);
-        back_to_this_pc();
-    });
-    power(ON)
+    let turned_off = std::mem::take(&mut *TURNED_OFF.lock().unwrap());
+    for index in turned_off {
+        tell(index, POWER_MODE, POWER_ON);
+    }
+    *KNOWN.lock().unwrap() = None;
 }
 
-/// A monitor, by what it calls itself, and what it answers over DDC/CI:
-/// its brightness and the most it goes to, the input it shows, and its
-/// power mode (each none where it does not answer).
+/// A monitor: what it calls itself, how many pixels it shows, and whether
+/// it is on, as it answers over DDC/CI (none: it does not answer, and
+/// cannot be turned off by itself).
+#[derive(Clone)]
 pub struct Monitor {
     pub name: String,
-    pub brightness: Option<(u32, u32)>,
-    pub input: Option<u32>,
-    pub power: Option<u32>,
+    pub size: (i32, i32),
+    pub on: Option<bool>,
 }
 
-/// VCP codes: brightness, input source, power mode.
-const BRIGHTNESS: u8 = 0x10;
-const INPUT_SOURCE: u8 = 0x60;
+/// VCP's power mode, and its values for on and for off (standby, from
+/// which the monitor still listens).
 const POWER_MODE: u8 = 0xD6;
+const POWER_ON: u32 = 1;
+const POWER_OFF: u32 = 4;
+/// How long what the monitors answered is taken to stand: asking takes
+/// each of them a moment.
+const KNOWN_FOR: Duration = Duration::from_secs(5);
+
+/// The monitors as they last answered, and when.
+static KNOWN: Mutex<Option<(Instant, Vec<Monitor>)>> = Mutex::new(None);
+/// The monitors this helper turned off by themselves, by their places.
+static TURNED_OFF: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 /// Goes through every monitor that is connected, in the order Windows has
-/// them: `with` is handed each one's place in that order, its name and its
-/// handle for DDC/CI.
-fn each_monitor(mut with: impl FnMut(usize, String, HANDLE)) {
+/// them: `with` is handed each one's place in that order, its name, its
+/// size and its handle for DDC/CI.
+fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32), HANDLE)) {
     unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, found: LPARAM) -> BOOL {
         unsafe { &mut *(found.0 as *mut Vec<HMONITOR>) }.push(monitor);
         true.into()
@@ -148,6 +134,9 @@ fn each_monitor(mut with: impl FnMut(usize, String, HANDLE)) {
     let _ = unsafe { EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut screens as *mut _ as isize)) };
     let mut index = 0;
     for screen in screens {
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = unsafe { GetMonitorInfoW(screen, &mut info) };
+        let size = (info.rcMonitor.right - info.rcMonitor.left, info.rcMonitor.bottom - info.rcMonitor.top);
         let mut count = 0;
         if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(screen, &mut count) }.is_err() || count == 0 {
             continue;
@@ -158,24 +147,27 @@ fn each_monitor(mut with: impl FnMut(usize, String, HANDLE)) {
         }
         for one in &physical {
             let name = one.szPhysicalMonitorDescription;
-            with(index, String::from_utf16_lossy(&name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())]), one.hPhysicalMonitor);
+            with(index, String::from_utf16_lossy(&name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())]), size, one.hPhysicalMonitor);
             index += 1;
         }
         let _ = unsafe { DestroyPhysicalMonitors(&physical) };
     }
 }
 
-fn ask(monitor: HANDLE, code: u8) -> Option<(u32, u32)> {
+fn ask(monitor: HANDLE, code: u8) -> Option<u32> {
     let (mut now, mut most) = (0u32, 0u32);
-    (unsafe { GetVCPFeatureAndVCPFeatureReply(monitor, code, None, &mut now, Some(&mut most)) } != 0).then_some((now, most))
+    (unsafe { GetVCPFeatureAndVCPFeatureReply(monitor, code, None, &mut now, Some(&mut most)) } != 0).then_some(now)
 }
 
-/// Every monitor that is connected, asked over DDC/CI.
+/// Every monitor that is connected, as it answered within `KNOWN_FOR`.
 pub fn monitors() -> Vec<Monitor> {
+    let mut known = KNOWN.lock().unwrap();
+    if let Some((_, monitors)) = known.as_ref().filter(|(at, _)| at.elapsed() < KNOWN_FOR) {
+        return monitors.clone();
+    }
     let mut found = Vec::new();
-    each_monitor(|_, name, monitor| {
-        found.push(Monitor { name, brightness: ask(monitor, BRIGHTNESS), input: ask(monitor, INPUT_SOURCE).map(|(now, _)| now & 0xFF), power: ask(monitor, POWER_MODE).map(|(now, _)| now) })
-    });
+    each_monitor(|_, name, size, monitor| found.push(Monitor { name, size, on: ask(monitor, POWER_MODE).map(|mode| mode == POWER_ON) }));
+    *known = Some((Instant::now(), found.clone()));
     found
 }
 
@@ -183,10 +175,24 @@ pub fn monitors() -> Vec<Monitor> {
 /// `code` is `value`: whether it took it.
 pub fn tell(index: usize, code: u8, value: u32) -> bool {
     let mut told = false;
-    each_monitor(|at, _, monitor| {
+    each_monitor(|at, _, _, monitor| {
         if at == index {
             told = unsafe { SetVCPFeature(monitor, code, value) } != 0;
         }
     });
+    told
+}
+
+/// Turns the monitor at `index` off by itself, or on again: the others
+/// stay as they are, and Windows keeps its windows where they were (to
+/// Windows it is still there). Whether it took it.
+pub fn turn(index: usize, on: bool) -> bool {
+    let told = tell(index, POWER_MODE, if on { POWER_ON } else { POWER_OFF });
+    let mut turned_off = TURNED_OFF.lock().unwrap();
+    turned_off.retain(|at| *at != index);
+    if told && !on {
+        turned_off.push(index);
+    }
+    *KNOWN.lock().unwrap() = None;
     told
 }

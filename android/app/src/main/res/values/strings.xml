@@ -18,7 +18,7 @@
     <string name="refused">The PC no longer takes this phone: pair again</string>
     <string name="working">Working…</string>
     <string name="night">Night mode</string>
-    <string name="night_how">Screens off, lights out, power saving. A touch of the mouse or keyboard ends it.</string>
+    <string name="night_how">The PC keeps running: screens off, lights out, power saving. A touch of the mouse or keyboard ends it.</string>
     <string name="night_on">On. Tap to end it, or touch the mouse or keyboard.</string>
     <string name="screen">Screens</string>
     <string name="screen_is_on">On. Tap to turn them off</string>
@@ -31,5 +31,9 @@
     <string name="mute">Mute</string>
     <string name="unmute">Muted</string>
     <string name="sleep">Sleep</string>
-    <string name="sleep_confirm">Tap again to put the PC to sleep</string>
+    <string name="sleep_title">Put the PC to sleep?</string>
+    <string name="sleep_what">Everything on it stops: downloads, remote sessions, whatever is running. It cannot be woken from this phone; press a key or its power button to wake it.\n\nTo leave it running with the screens and lights off, use Night mode.</string>
+    <string name="cancel">Cancel</string>
+    <string name="back">‹ Back</string>
+    <string name="monitor_fixed">Cannot be turned off by itself</string>
 </resources>

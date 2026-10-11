@@ -62,8 +62,11 @@ object Pcs {
     }
 }
 
+/** One of the PC's monitors: its name, its size, and whether it is on (none: it cannot be asked, nor turned off by itself). */
+data class Monitor(val name: String, val width: Int, val height: Int, val on: Boolean?)
+
 /** The PC as it says it is. */
-data class PcState(val name: String, val lights: Boolean?, val night: Boolean, val screen: Boolean?, val volume: Int?, val muted: Boolean?) {
+data class PcState(val name: String, val lights: Boolean?, val night: Boolean, val screen: Boolean?, val volume: Int?, val muted: Boolean?, val monitors: List<Monitor> = emptyList()) {
     companion object {
         fun from(json: JSONObject) = PcState(
             name = json.optString("name"),
@@ -72,6 +75,12 @@ data class PcState(val name: String, val lights: Boolean?, val night: Boolean, v
             screen = if (json.isNull("screen")) null else json.optBoolean("screen"),
             volume = if (json.isNull("volume")) null else json.optInt("volume"),
             muted = if (json.isNull("muted")) null else json.optBoolean("muted"),
+            monitors = json.optJSONArray("monitors")?.let { list ->
+                (0 until list.length()).map { at ->
+                    val one = list.getJSONObject(at)
+                    Monitor(one.optString("name"), one.optInt("width"), one.optInt("height"), if (one.isNull("on")) null else one.optBoolean("on"))
+                }
+            } ?: emptyList(),
         )
     }
 }
