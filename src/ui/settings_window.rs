@@ -2872,9 +2872,10 @@ impl Ui {
                             }
                         }
                         let (title, word) = match what {
-                            CodeFor::App => (pick(lang, "用手机扫描，下载 Glance", "Scan with the phone to get Glance"), crate::phone::APP_PAGE.trim_start_matches("https://")),
-                            CodeFor::Pairing => (pick(lang, "打开手机上的 Glance，扫描这个配对码", "Open Glance on the phone and scan this code"), pick(lang, "10 分钟内有效，只给一部手机用", "Good for ten minutes, for one phone")),
-                            CodeFor::WebPairing => (pick(lang, "用手机相机扫描，在浏览器里打开", "Scan with the phone's camera; it opens in the browser"), pick(lang, "10 分钟内有效；打开后可以添加到主屏幕", "Good for ten minutes; the page can then be added to the home screen")),
+                            // (The first of each on one line: short enough for the room beside the code.)
+                            CodeFor::App => (pick(lang, "扫码下载 Glance", "Scan to get Glance"), crate::phone::APP_PAGE.trim_start_matches("https://")),
+                            CodeFor::Pairing => (pick(lang, "用 Glance APP 扫描", "Scan with the Glance app"), pick(lang, "打开手机上的 Glance，扫描这个配对码。10 分钟内有效，只给一部手机用", "Open Glance on the phone and scan this code. Good for ten minutes, for one phone")),
+                            CodeFor::WebPairing => (pick(lang, "用手机相机扫描", "Scan with the phone's camera"), pick(lang, "会在浏览器里打开，之后可以添加到主屏幕。10 分钟内有效，只给一部手机用", "It opens in the browser, and can then be added to the home screen. Good for ten minutes, for one phone")),
                         };
                         let text_left = x0 + CODE + 20.0;
                         field_label(frame, palette, title, Some(word), label, hint, text_left, y + row_height / 2.0, left + width - ROW_SIDE - text_left);
