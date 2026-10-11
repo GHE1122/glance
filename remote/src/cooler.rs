@@ -69,10 +69,17 @@ fn packet(says: u8, carries: &[u8]) -> Vec<[u8; REPORT + 1]> {
 
 /// The path the display is opened by, if there is one plugged in.
 fn path() -> Option<Vec<u16>> {
+    paths(DEVICE).into_iter().next()
+}
+
+/// The paths of the HID devices plugged in that name themselves so in
+/// them (`vid_…&pid_…`, in small letters): one for each of a device's
+/// parts, as Windows divides it.
+pub fn paths(device: &str) -> Vec<Vec<u16>> {
+    let mut found = Vec::new();
     unsafe {
         let hid = HidD_GetHidGuid();
-        let devices = SetupDiGetClassDevsW(Some(&hid), PCWSTR::null(), None, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE).ok()?;
-        let mut found = None;
+        let Ok(devices) = SetupDiGetClassDevsW(Some(&hid), PCWSTR::null(), None, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE) else { return found };
         for index in 0.. {
             let mut interface = SP_DEVICE_INTERFACE_DATA { cbSize: size_of::<SP_DEVICE_INTERFACE_DATA>() as u32, ..Default::default() };
             if SetupDiEnumDeviceInterfaces(devices, None, &hid, index, &mut interface).is_err() {
@@ -90,14 +97,13 @@ fn path() -> Option<Vec<u16>> {
             let start = std::ptr::addr_of!((*detail).DevicePath) as *const u16;
             let length = (0..).take_while(|at| *start.add(*at) != 0).count();
             let path = std::slice::from_raw_parts(start, length);
-            if String::from_utf16_lossy(path).to_ascii_lowercase().contains(DEVICE) {
-                found = Some(path.iter().copied().chain([0]).collect());
-                break;
+            if String::from_utf16_lossy(path).to_ascii_lowercase().contains(device) {
+                found.push(path.iter().copied().chain([0]).collect());
             }
         }
         let _ = SetupDiDestroyDeviceInfoList(devices);
-        found
     }
+    found
 }
 
 /// The display, open.

@@ -12,6 +12,7 @@ mod actions;
 mod config;
 mod cooler;
 mod display;
+mod keys;
 mod lights;
 mod media;
 mod power;
@@ -493,6 +494,14 @@ fn main() -> std::io::Result<()> {
             }
             return Ok(());
         }
+        // glance-remote keys LEVEL: the light under a laptop's keys.
+        Some("keys") => {
+            match std::env::args().nth(2).and_then(|text| text.parse::<u8>().ok()) {
+                Some(level) => println!("{}", if keys::light(level) { "taken" } else { "not taken" }),
+                None => println!("{}", if keys::there() { "a keyboard whose light can be set" } else { "none" }),
+            }
+            return Ok(());
+        }
         // glance-remote dim MONITOR PERCENT: one monitor as bright as that.
         Some("dim") => {
             let number = |at: usize| std::env::args().nth(at).and_then(|text| text.parse::<usize>().ok());
@@ -528,12 +537,13 @@ fn main() -> std::io::Result<()> {
     let following = helper.clone();
     std::thread::spawn(move || {
         let mut last = None;
-        // The makers' lighting programs seen running, by their numbers: one not seen before has just started.
+        // The makers' lighting programs seen running, by their numbers: others than last time, one has started or gone.
         let mut rivals: Vec<u32> = Vec::new();
         loop {
             std::thread::sleep(FOLLOW);
             let now: Vec<u32> = actions::programs().into_iter().filter(|(_, name)| lights::RIVALS.iter().any(|rival| name.eq_ignore_ascii_case(rival))).map(|(number, _)| number).collect();
-            if now.iter().any(|number| !rivals.contains(number)) {
+            // (One gone counts too: it does not give the lights back as it goes.)
+            if now != rivals {
                 following.stale.store(true, std::sync::atomic::Ordering::SeqCst);
                 // (Lights that follow the heat are put in their colour again by the OpenRGB to come.)
                 last = None;
