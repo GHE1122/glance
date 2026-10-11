@@ -510,10 +510,9 @@ private fun Brightness(value: Int, enabled: Boolean, set: (Int) -> Unit) {
     var sliding by remember { mutableStateOf(false) }
     // As the monitor says, but for while it is being slid.
     LaunchedEffect(value) { if (!sliding) level = value.toFloat() }
-    Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) { Sign(Sign.BRIGHT, if (enabled) Dim else Faint, size = 18.dp) }
-        Bar(level, 0f..100f, stringResource(R.string.brightness), Modifier.weight(1f), enabled = enabled, track = filled(Ink), change = { sliding = true; level = it }, done = { sliding = false; set(level.toInt()) })
-        Text("${level.toInt()}%", color = if (enabled) Ink else Faint, fontSize = 13.sp, textAlign = TextAlign.End, modifier = Modifier.width(40.dp))
+        Bar(level, 0f..100f, stringResource(R.string.brightness), Modifier.weight(1f), enabled = enabled, slim = true, track = filled(Accent), change = { sliding = true; level = it }, done = { sliding = false; set(level.toInt()) })
     }
 }
 

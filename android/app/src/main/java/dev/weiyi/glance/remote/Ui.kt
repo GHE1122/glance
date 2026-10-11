@@ -156,24 +156,26 @@ fun Toggle(on: Boolean, label: String, enabled: Boolean = true, change: (Boolean
 /**
  * A bar slid along: [value] of [range], on a track painted by [track]
  * (given the fraction along). [change] as it is slid, [done] when let go.
+ * [slim], it is a thin line with a small thumb: for what is set beside
+ * something else, not by itself.
  */
 @Composable
-fun Bar(value: Float, range: ClosedFloatingPointRange<Float>, label: String, modifier: Modifier = Modifier, enabled: Boolean = true, track: (Float) -> Brush, change: (Float) -> Unit, done: () -> Unit) {
+fun Bar(value: Float, range: ClosedFloatingPointRange<Float>, label: String, modifier: Modifier = Modifier, enabled: Boolean = true, slim: Boolean = false, track: (Float) -> Brush, change: (Float) -> Unit, done: () -> Unit) {
     val changed by rememberUpdatedState(change)
     val finished by rememberUpdatedState(done)
     val span = range.endInclusive - range.start
     val along = ((value - range.start) / span).coerceIn(0f, 1f)
     Canvas(
         modifier.fillMaxWidth().height(28.dp).alpha(if (enabled) 1f else 0.4f).semantics { contentDescription = label }
-            .pointerInput(enabled, range) {
+            .pointerInput(enabled, range, slim) {
                 if (!enabled) return@pointerInput
-                val edge = 13.dp.toPx()
+                val edge = (if (slim) 9.dp else 13.dp).toPx()
                 fun at(x: Float) = range.start + ((x - edge) / (size.width - 2 * edge)).coerceIn(0f, 1f) * span
                 detectTapGestures { changed(at(it.x)); finished() }
             }
-            .pointerInput(enabled, range) {
+            .pointerInput(enabled, range, slim) {
                 if (!enabled) return@pointerInput
-                val edge = 13.dp.toPx()
+                val edge = (if (slim) 9.dp else 13.dp).toPx()
                 fun at(x: Float) = range.start + ((x - edge) / (size.width - 2 * edge)).coerceIn(0f, 1f) * span
                 detectHorizontalDragGestures(onDragStart = { changed(at(it.x)) }, onDragEnd = { finished() }, onDragCancel = { finished() }) { touch, _ ->
                     touch.consume()
@@ -181,8 +183,8 @@ fun Bar(value: Float, range: ClosedFloatingPointRange<Float>, label: String, mod
                 }
             },
     ) {
-        val thick = 16.dp.toPx()
-        val edge = 13.dp.toPx()
+        val thick = (if (slim) 6.dp else 16.dp).toPx()
+        val edge = (if (slim) 9.dp else 13.dp).toPx()
         drawRoundRect(track(along), Offset(0f, (size.height - thick) / 2), Size(size.width, thick), CornerRadius(thick / 2))
         val centre = Offset(edge + (size.width - 2 * edge) * along, size.height / 2)
         drawCircle(Color(0x66000000), edge + 1.dp.toPx(), centre + Offset(0f, 1.dp.toPx()))

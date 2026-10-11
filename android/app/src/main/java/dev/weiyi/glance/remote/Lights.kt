@@ -81,10 +81,13 @@ private val HUES = Brush.sweepGradient((0..6).map { Color.hsv(it * 60f % 360f, 1
 fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean, keep: (List<String>) -> Unit, preview: (String?) -> Unit, choose: (color: String?, effect: String?) -> Unit) {
     // The colour the lights had as the ring was opened, to go back to; none: the ring is shut.
     var was by remember { mutableStateOf<String?>(null) }
-    // The colours being taken away: each trembles under a minus, and one pressed is gone.
+    // The colours being taken away: each trembles, the whole round of it, under a minus, and one pressed is gone.
     var removing by remember { mutableStateOf(false) }
     if (own.isEmpty()) removing = false
-    val tremble by rememberInfiniteTransition(label = "tremble").animateFloat(-3.5f, 3.5f, infiniteRepeatable(tween(110), RepeatMode.Reverse), label = "tremble")
+    val trembling = rememberInfiniteTransition(label = "tremble")
+    // (Side to side and up and down at two paces, so that it wanders rather than swings.)
+    val sway by trembling.animateFloat(-1f, 1f, infiniteRepeatable(tween(105), RepeatMode.Reverse), label = "sway")
+    val bob by trembling.animateFloat(-1f, 1f, infiniteRepeatable(tween(140), RepeatMode.Reverse), label = "bob")
     Panel {
         Heading(stringResource(R.string.show_lights)) { if (removing) Words(stringResource(R.string.done), Accent, size = 13f, weight = FontWeight.SemiBold) { removing = false } }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -95,12 +98,20 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
         }
         // The colours, then the one that opens the ring to make another.
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            for (one in own) {
+            own.forEachIndexed { place, one ->
                 val chosen = was == null && light.color.equals(one, ignoreCase = true)
                 val going = removing
                 val named = stringResource(if (going) R.string.delete_colour else R.string.colour, "#$one")
                 Canvas(
-                    Modifier.size(36.dp).graphicsLayer { rotationZ = if (going) tremble else 0f }.semantics { contentDescription = named; role = Role.Button }.pointerInput(one, own, enabled, removing) {
+                    Modifier.size(36.dp).graphicsLayer {
+                        if (going) {
+                            // Each against its neighbours, as apps tremble on a phone.
+                            val way = if (place % 2 == 0) 1f else -1f
+                            rotationZ = sway * way * 5f
+                            translationX = sway * way * 1.4.dp.toPx()
+                            translationY = bob * 1.1.dp.toPx()
+                        }
+                    }.semantics { contentDescription = named; role = Role.Button }.pointerInput(one, own, enabled, removing) {
                         if (!enabled) return@pointerInput
                         detectTapGestures(
                             // A colour held: they may be taken away.
