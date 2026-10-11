@@ -58,6 +58,7 @@
     <string name="screen_is_off">Off. Tap to turn them on</string>
     <string name="lights">Lights</string>
     <string name="lights_on">On · %1$s</string>
+    <string name="lights_plain_on">On</string>
     <string name="lights_off">Off. Tap to turn them on</string>
     <string name="lights_unknown">Tap to turn them off</string>
     <string name="effect_steady">Steady</string>

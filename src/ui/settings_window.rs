@@ -417,6 +417,8 @@ enum Switch {
     OverlayThrough,
     /// The phone remote.
     Remote,
+    /// Whether the remote sets the lights: the program that does, fetched or not.
+    RemoteLights,
 }
 
 /// What a QR code shown is for.
@@ -579,6 +581,12 @@ struct Ui {
     /// read (and when).
     remote_there: bool,
     remote: bool,
+    /// Whether the remote has the program it sets lights by; that being
+    /// fetched or taken away just now (on another thread: it takes a
+    /// while), and whether the last fetching failed.
+    remote_lights: bool,
+    fetching: Option<std::thread::JoinHandle<bool>>,
+    fetch_failed: bool,
     code: Option<(crate::phone::Code, CodeFor)>,
     phones: Vec<crate::phone::Phone>,
     phones_at: Instant,
@@ -707,6 +715,9 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             autostart: elevation::autostart_enabled(),
             remote_there: crate::phone::helper().is_some(),
             remote: crate::phone::on(),
+            remote_lights: crate::phone::lights(),
+            fetching: None,
+            fetch_failed: false,
             code: None,
             phones: crate::phone::phones(),
             phones_at: Instant::now(),
@@ -1026,6 +1037,7 @@ impl Ui {
             Page::Remote => {
                 rows.push(Row::Switch(Switch::Remote));
                 if self.remote {
+                    rows.push(Row::Switch(Switch::RemoteLights));
                     // A code shows under the row that asked for it.
                     let shown = self.code.as_ref().map(|(_, what)| *what);
                     rows.push(Row::GetApp);
@@ -1691,6 +1703,16 @@ impl Ui {
                 Some(p("达到温度警示值 30 秒后从托盘提醒", "A tray warning after 30 s at the alert")),
                 self.settings.heat_alert,
             ),
+            Switch::RemoteLights => {
+                let hint = if self.fetching.is_some() {
+                    p("正在处理，下载需要一会儿…", "Working; the download takes a moment…")
+                } else if self.fetch_failed {
+                    p("没有下载成功，请稍后再试", "The download did not succeed; try again later")
+                } else {
+                    p("主板、显卡等的灯光由开源软件 OpenRGB 控制。第一次打开会从它的官方地址下载（约 22 MB）", "A board's and a card's lights are set through OpenRGB, an open-source program. Turned on first, it is downloaded from its own project (about 22 MB)")
+                };
+                return (p("控制灯光", "Control the lights"), Some(Cow::Borrowed(hint)), self.remote_lights);
+            }
             Switch::Remote => {
                 let hint = if self.remote_there {
                     p("用手机关屏、关灯、调音量和亮度。开启后会运行一个不提权的小程序，只对本地网络开放", "Screens, lights, volume and brightness from a phone. On, a small program runs (never elevated), open to the local network only")
@@ -1744,6 +1766,16 @@ impl Ui {
             Switch::OverlayThrough => settings.overlay.click_through ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
+                return;
+            }
+            Switch::RemoteLights => {
+                // Fetched (or taken away) on a thread of its own: the window goes on meanwhile.
+                if self.fetching.is_none() {
+                    let wanted = !self.remote_lights;
+                    self.fetch_failed = false;
+                    self.fetching = Some(std::thread::spawn(move || crate::phone::set_lights(wanted) == wanted));
+                }
+                self.next_frame = Instant::now();
                 return;
             }
             Switch::Remote => {
@@ -2576,6 +2608,15 @@ impl Ui {
         let label = Font::new(Family::Segoe, 14.0, 400.0);
         let hint = Font::new(Family::Segoe, 12.0, 400.0);
         let mut dragged = None;
+        // The lights' program fetched (or taken away): how that went, once it is over.
+        if self.fetching.as_ref().is_some_and(|fetching| fetching.is_finished()) {
+            let done = self.fetching.take().unwrap().join().unwrap_or(false);
+            self.fetch_failed = !done;
+            self.remote_lights = crate::phone::lights();
+        }
+        if self.fetching.is_some() {
+            self.next_frame = now + Duration::from_millis(300);
+        }
         // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered appears, and its code goes.
         if self.page == Page::Remote && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
             let phones = crate::phone::phones();

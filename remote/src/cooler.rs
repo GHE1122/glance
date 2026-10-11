@@ -67,6 +67,11 @@ fn packet(says: u8, carries: &[u8]) -> Vec<[u8; REPORT + 1]> {
         .collect()
 }
 
+/// Whether there is such a display on this PC.
+pub fn there() -> bool {
+    path().is_some()
+}
+
 /// The path the display is opened by, if there is one plugged in.
 fn path() -> Option<Vec<u16>> {
     paths(DEVICE).into_iter().next()

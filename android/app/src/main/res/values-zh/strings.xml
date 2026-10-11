@@ -58,6 +58,7 @@
     <string name="screen_is_off">已关闭，点一下打开</string>
     <string name="lights">灯光</string>
     <string name="lights_on">开着 · %1$s</string>
+    <string name="lights_plain_on">开着</string>
     <string name="lights_off">关着，点一下打开</string>
     <string name="lights_unknown">点一下关灯</string>
     <string name="effect_steady">常亮</string>

@@ -56,6 +56,18 @@ pub fn app_code() -> Option<Code> {
     code(&mut ask(&["qr", APP_PAGE])?.lines())
 }
 
+/// Whether there is an OpenRGB for the remote to set the lights by.
+pub fn lights() -> bool {
+    ask(&["lights", "there"]).is_some_and(|said| said.trim() == "there")
+}
+
+/// Fetches OpenRGB for the remote (some twenty megabytes, from its own
+/// project), or takes the one fetched away: whether there is one then.
+/// Takes as long as the fetching does.
+pub fn set_lights(on: bool) -> bool {
+    ask(&["lights", if on { "fetch" } else { "forget" }]).is_some_and(|said| said.lines().last().is_some_and(|last| last.trim() == "there"))
+}
+
 /// A phone paired with: its place in the remote's own list, and what it calls itself.
 pub struct Phone {
     pub at: usize,

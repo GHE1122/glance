@@ -12,6 +12,7 @@ mod actions;
 mod config;
 mod cooler;
 mod display;
+mod fetch;
 mod keys;
 mod lights;
 mod media;
@@ -107,7 +108,8 @@ impl Helper {
         if let Some(level) = *self.keys.lock().unwrap() {
             keys::light(if on { level } else { 0 });
         }
-        let set = lights::set(&self.config, on, &light).map_err(|error| error.to_string());
+        // (With no OpenRGB on this PC, the lights it would set are left to their makers' programs: there is still the rest.)
+        let set = if lights::program(&self.config).is_some() { lights::set(&self.config, on, &light).map(|_| ()).map_err(|error| error.to_string()) } else { Ok(()) };
         let _ = cooler.join();
         set?;
         self.state.lock().unwrap().lights = Some(on);
@@ -239,6 +241,10 @@ impl Helper {
             "name": self.config.name,
             "version": env!("CARGO_PKG_VERSION"),
             "lights": lights,
+            // Whether there is the program the lights are set by at all (none: the phone has no lights to show).
+            "lights_there": lights::program(&self.config).is_some() || cooler::there() || keys::there(),
+            // And whether, of those, there is the program that sets a board's and a card's lights and their colours.
+            "colours_there": lights::program(&self.config).is_some(),
             "light": light,
             "reads": reads::read(),
             // A laptop's keys: how bright their light is set to be with the lights on (not known till chosen), of how bright it goes.
@@ -484,6 +490,21 @@ fn main() -> std::io::Result<()> {
         // glance-remote qr TEXT: any text's QR code, as rows of 1 and 0.
         Some("qr") => {
             print!("{}", cells(&std::env::args().nth(2).unwrap_or_default())?);
+            return Ok(());
+        }
+        // glance-remote lights there | fetch | forget: whether there is an
+        // OpenRGB to set the lights by; one fetched for it; that one taken
+        // away again (the lights then left to their makers' own programs).
+        Some("lights") if std::env::args().nth(2).is_some() => {
+            match std::env::args().nth(2).as_deref() {
+                Some("fetch") => println!("{}", fetch::fetch()?.display()),
+                Some("forget") => {
+                    lights::afresh();
+                    fetch::forget()?;
+                }
+                _ => {}
+            }
+            println!("{}", if lights::program(&Config::load()).is_some() { "there" } else { "none" });
             return Ok(());
         }
         Some("lights") => {

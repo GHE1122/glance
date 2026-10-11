@@ -416,9 +416,10 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 lit = screen != false, enabled = reached, modifier = Modifier.weight(1f).fillMaxHeight(),
             ) { act("screen", "/v1/screen", on(screen == false)) { it.copy(screen = screen == false) } }
             val lights = now.lights
-            Tile(
+            // (A PC with no lights to set has no such tile: the screens' then has the row.)
+            if (now.lightsThere) Tile(
                 Sign.LIGHTS, stringResource(R.string.lights),
-                if (busy == "lights") working else when (lights) { true -> stringResource(R.string.lights_on, effectName(now.light.effect)); false -> stringResource(R.string.lights_off); null -> stringResource(R.string.lights_unknown) },
+                if (busy == "lights") working else when (lights) { true -> if (now.coloursThere) stringResource(R.string.lights_on, effectName(now.light.effect)) else stringResource(R.string.lights_plain_on); false -> stringResource(R.string.lights_off); null -> stringResource(R.string.lights_unknown) },
                 lit = lights != false, enabled = reached, modifier = Modifier.weight(1f).fillMaxHeight(),
             ) { act("lights", "/v1/lights", on(lights == false)) { it.copy(lights = lights == false) } }
         }
@@ -435,7 +436,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 }
             }
         }
-        if (shown["lights"] != false && now.lights == true && !night && light != null) {
+        if (shown["lights"] != false && now.coloursThere && now.lights == true && !night && light != null) {
             LightsCard(
                 light, heat = reads != null, own = colours, enabled = reached, keep = keep, preview = { making = it },
                 choose = { color, effect, brightness ->
@@ -450,7 +451,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         }
         // A laptop's keys: how bright the light under them is, with the lights.
         val keys = now.keys
-        if (shown["lights"] != false && now.lights == true && !night && keys != null) {
+        if (shown["lights"] != false && now.lights != false && !night && keys != null) {
             Panel {
                 Heading(stringResource(R.string.keys))
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
