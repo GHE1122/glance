@@ -46,7 +46,25 @@ Lucide (icons: cpu, gpu, memory-stick, hard-drive, arrow-down-up,
   Copyright (c) 2013-present Cole Bemis, under the MIT licence in the same
   file. Their path data is built into glance.exe.
 
+OpenRGB, version 1.0 (not shipped with Glance)
+  OpenRGB - open source RGB lighting control. Copyright (C) Adam Honse and
+  the OpenRGB contributors. Licence: GNU General Public License, version 2
+  or later.
+  The phone remote (glance-remote.exe) sets a motherboard's and a graphics
+  card's lights through OpenRGB, a separate program it starts and talks to
+  over OpenRGB's own network protocol. OpenRGB is not part of Glance and is
+  not installed with it: it is downloaded, unmodified, as its project built
+  it (OpenRGB_1.0_Windows_64_81bbe18.zip), only when "Control the lights"
+  is turned on in the settings, into the user's own folder, and removed
+  when that is turned off. It is taken from a copy attached to Glance's
+  releases, or from the project itself:
+  https://codeberg.org/OpenRGB/OpenRGB/releases/tag/release_1.0
+  Its source code, for this version, is at
+  https://codeberg.org/OpenRGB/OpenRGB/src/tag/release_1.0
+  and is attached as an archive to every Glance release that carries the
+  copy.
+
 Rust crates and the Rust standard library
-  The crates compiled into glance.exe, each with the licence files it ships
-  with, are listed in RUST-CRATES.txt; the standard library's notices are in
+  The crates compiled into glance.exe and glance-remote.exe, each with the
+  licence files it ships with, are listed in RUST-CRATES.txt; the standard library's notices are in
   Rust-standard-library-COPYRIGHT.html (from the Rust 1.94.1 toolchain).

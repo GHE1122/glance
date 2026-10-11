@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glance 手机遥控 · 下载</title>
+<meta name="description" content="用手机给电脑关屏、关灯、调音量和亮度，看一眼温度。Glance 的手机遥控，安卓 APP 免费下载；iPhone 暂时用网页。">
+<meta name="theme-color" content="#0e1116">
+<link rel="icon" href="../assets/img/icon.svg" type="image/svg+xml">
+<link rel="icon" href="../favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="../apple-touch-icon.png">
+<style>
+:root { color-scheme: dark; --page: #0e1116; --card: #171b22; --tile: #1f242c; --ink: #f2f4f7; --dim: #98a2ae; --faint: #5b6470; --accent: #ff7a45; --line: #262c35; }
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+main { max-width: 520px; margin: 0 auto; padding: 28px 16px 48px; display: flex; flex-direction: column; gap: 14px; }
+header { display: flex; align-items: center; gap: 12px; padding: 4px 4px 10px; }
+header img { width: 44px; height: 44px; }
+header b { font-size: 20px; }
+header a { margin-left: auto; color: var(--dim); font-size: 14px; text-decoration: none; }
+h1 { margin: 0; font-size: 26px; line-height: 1.25; text-wrap: balance; }
+.lede { margin: 0; color: var(--dim); }
+section { background: var(--card); border-radius: 20px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+h2 { margin: 0; font-size: 17px; }
+p { margin: 0; }
+.dim { color: var(--dim); font-size: 14px; }
+.get { display: block; text-align: center; background: var(--accent); color: #1a0d06; font-weight: 700; font-size: 17px; padding: 14px; border-radius: 14px; text-decoration: none; }
+.other { color: var(--dim); font-size: 14px; text-align: center; }
+a { color: var(--ink); }
+ol { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; }
+.inapp { background: #2e211d; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="../assets/img/icon.svg" alt="">
+    <b>Glance</b>
+    <a href="../" data-zh>电脑版主页</a>
+    <a href="../en/" data-en hidden>Glance for Windows</a>
+  </header>
+
+  <div data-zh>
+    <h1>用手机遥控电脑</h1>
+  </div>
+  <div data-en hidden>
+    <h1>Your PC, from your phone</h1>
+  </div>
+  <p class="lede" data-zh>躺下之后不想再起来：用手机给电脑关屏、关灯、调音量和亮度，顺便看一眼温度。电脑继续下载、继续跑任务。</p>
+  <p class="lede" data-en hidden>Already in bed: turn the PC's screens and lights off from your phone, set its volume and brightness, and see how warm it runs. The PC keeps downloading and working.</p>
+
+  <section class="inapp" id="inapp" hidden>
+    <p data-zh><strong>请在浏览器里打开这个页面。</strong>在微信、小红书等 APP 里通常下载不了：点右上角的菜单，选“在浏览器中打开”。</p>
+    <p data-en hidden><strong>Open this page in your browser.</strong> Downloads usually do not work inside another app: use its menu to open the page in the browser.</p>
+  </section>
+
+  <section>
+    <h2 data-zh>安卓手机</h2>
+    <h2 data-en hidden>Android</h2>
+    <a class="get" id="get" href="https://gitee.com/lulu-loopp/glance/releases">
+      <span data-zh>下载 Glance APP<span data-version></span></span>
+      <span data-en hidden>Download the Glance app<span data-version></span></span>
+    </a>
+    <p class="other" data-zh>下不动？换一个下载源：<a id="other" href="https://github.com/lulu-loopp/glance/releases/latest">GitHub</a></p>
+    <p class="other" data-en hidden>Too slow? Another place to get it: <a id="other-en" href="https://gitee.com/lulu-loopp/glance/releases">Gitee</a></p>
+    <p class="dim" data-zh>安装时手机会提示“来自未知来源”，这是因为 APP 不在应用商店里，允许这一次即可。免费、开源，没有广告，不需要注册。安卓 8.0 及以上。</p>
+    <p class="dim" data-en hidden>The phone will ask whether to allow an app from outside its store: allow it this once. Free and open source, no ads, no account. Android 8.0 and later.</p>
+  </section>
+
+  <section>
+    <h2>iPhone</h2>
+    <p class="dim" data-zh>iPhone 的 APP 还在做。现在可以先用网页：在电脑上打开 Glance 的设置 → 手机遥控 → 配对一部手机 → 用网页，用 iPhone 的相机扫描出现的二维码，之后可以“添加到主屏幕”。</p>
+    <p class="dim" data-en hidden>The iPhone app is still being made. Meanwhile there is a web page: on the PC, open Glance's settings → Phone → Pair a phone → For the web page, scan the code with the iPhone's camera, and add the page to the home screen if you like.</p>
+  </section>
+
+  <section>
+    <h2 data-zh>怎么连上电脑</h2>
+    <h2 data-en hidden>Pairing with the PC</h2>
+    <ol data-zh>
+      <li>电脑上装好 <a href="../">Glance</a>（0.3.0 或更新），打开设置 → 手机遥控，把开关打开。</li>
+      <li>点“配对一部手机”里的“用 APP”，电脑上会出现一个二维码。</li>
+      <li>手机打开 Glance，扫描这个二维码。手机和电脑要连着同一个路由器（同一个 Wi-Fi 或网线）。</li>
+    </ol>
+    <ol data-en hidden>
+      <li>Install <a href="../en/">Glance</a> (0.3.0 or later) on the PC, open its settings → Phone, and turn the switch on.</li>
+      <li>Under "Pair a phone", press "For the app": a code appears on the PC.</li>
+      <li>Open Glance on the phone and scan the code. The phone and the PC must be on the same network (the same router).</li>
+    </ol>
+    <p class="dim" data-zh>遥控只在你家的局域网里工作，不经过任何服务器；每部手机有自己的配对密钥，随时可以在电脑的设置里移除。</p>
+    <p class="dim" data-en hidden>The remote works only on your own network and goes through no server; each phone has a key of its own, which you can remove in the PC's settings at any time.</p>
+  </section>
+</main>
+<script>
+(function () {
+  "use strict";
+  // The page in the reader's language: Chinese unless the browser reads none.
+  var languages = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || ""];
+  var zh = languages.some(function (l) { return /^zh\b/i.test(l); });
+  if (!zh) {
+    document.documentElement.lang = "en";
+    document.title = "Glance for your phone · Download";
+    Array.prototype.forEach.call(document.querySelectorAll("[data-zh]"), function (e) { e.hidden = true; });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-en]"), function (e) { e.hidden = false; });
+  }
+  // Inside another app's own browser a download goes nowhere: said first.
+  if (/MicroMessenger|xhsdiscover|XiaoHongShu|Weibo|QQ\/|DingTalk|AlipayClient/i.test(navigator.userAgent)) document.getElementById("inapp").hidden = false;
+
+  // The newest release that has the app, from the site this reader reaches best; the other site is offered beside it.
+  var REPO = "lulu-loopp/glance";
+  var SOURCES = {
+    github: { api: "https://api.github.com/repos/" + REPO + "/releases?per_page=10", all: "https://github.com/" + REPO + "/releases/latest" },
+    gitee: { api: "https://gitee.com/api/v5/repos/" + REPO + "/releases?per_page=10&page=1&direction=desc", all: "https://gitee.com/" + REPO + "/releases" }
+  };
+  var primary = zh ? "gitee" : "github", second = zh ? "github" : "gitee";
+  var get = document.getElementById("get"), other = document.getElementById(zh ? "other" : "other-en");
+  get.href = SOURCES[primary].all;
+  other.href = SOURCES[second].all;
+  function newest(source, done) {
+    fetch(SOURCES[source].api).then(function (answer) { return answer.ok ? answer.json() : []; }).then(function (releases) {
+      for (var i = 0; i < releases.length; i++) {
+        var assets = releases[i].assets || [];
+        for (var j = 0; j < assets.length; j++) {
+          if (/^Glance_[0-9.]+\.apk$/.test(assets[j].name || "") && /^https:\/\//.test(assets[j].browser_download_url || "")) return done(assets[j].browser_download_url, assets[j].name.replace(/^Glance_|\.apk$/g, ""));
+        }
+      }
+    }).catch(function () { /* not reached: the link stays on that site's releases */ });
+  }
+  newest(primary, function (url, version) {
+    get.href = url;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-version]"), function (e) { e.textContent = " " + version; });
+  });
+  newest(second, function (url) { other.href = url; });
+  var from = "";
+  try { from = new URLSearchParams(location.search).get("from") || ""; } catch (e) { /* none */ }
+  if (navigator.sendBeacon) navigator.sendBeacon("/api/e", JSON.stringify({ k: "view", p: location.pathname, r: document.referrer, l: zh ? "zh" : "en", f: from }));
+  get.addEventListener("click", function () {
+    var said = JSON.stringify({ k: "download", p: location.pathname, s: get.href.indexOf("gitee.com") >= 0 ? "gitee" : "github", l: zh ? "zh" : "en" });
+    if (navigator.sendBeacon) navigator.sendBeacon("/api/e", said);
+  });
+})();
+</script>
+</body>
+</html>

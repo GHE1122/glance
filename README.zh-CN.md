@@ -43,6 +43,16 @@ Glance 是一个免费开源、不打扰你的 Windows 系统监控。把鼠标�
 
 帧率来自 Windows 自带的事件跟踪：不往游戏里注入任何东西，也从不打开游戏进程，不会触碰反作弊。目前支持 DirectX 游戏，Vulkan 和 OpenGL 游戏暂不显示帧率。
 
+## 手机遥控
+
+躺下之后不想再起来，电脑还要继续下载：手机上装一个小 APP，就能给电脑关屏幕、关机箱灯、调音量和每台显示器的亮度、暂停或切歌、切换电源模式、让电脑睡眠，顺便看一眼温度。“夜间模式”一键关屏、关灯、切到节能，动一下鼠标就恢复。
+
+- **开启**：在设置的“手机遥控”里打开。默认关闭；Glance 本身从不开放端口，遥控由另一个小程序（`glance-remote.exe`）负责，它以你的身份运行、从不提权，防火墙只对本地网络放行。
+- **下载 APP**：[glancepc.com/app](https://glancepc.com/app)（安卓 8.0 及以上，APK 随每个版本发布）。iPhone 的 APP 还在做，暂时可以用遥控程序自带的网页。
+- **配对**：用手机扫描设置里的二维码。每部手机有自己的密钥，只对这一部手机有效，随时可以在设置里移除。每个请求都用它签名，不经过任何服务器，出了你家的网络就用不了。
+- **灯光**：主板和显卡的灯由开源软件 [OpenRGB](https://openrgb.org)（GPL 许可）控制，只有在你打开“控制灯光”时才会从它的官方地址下载（约 22 MB），关闭时一并删除。利民散热器的数显屏、华硕笔记本的键盘背光会跟着一起开关。
+- 网页走的是不加密的 HTTP，请只在信任的网络里使用。APP 的请求别人无法伪造或重放，但电脑返回的内容（温度、正在播放的歌曲）在同一网络里并不保密。
+
 ## 三种外观
 
 记录纸、磨砂玻璃（每一块面板的边缘都会折射背后的桌面）和 Windows 11（与开始菜单相同的亚克力材质）。可选浅色、深色，或跟随壁纸亮度自动切换。界面支持中文和英文。
@@ -51,7 +61,7 @@ Glance 是一个免费开源、不打扰你的 Windows 系统监控。把鼠标�
 
 ## 小巧安静
 
-程序只有一个约 1 MB 的可执行文件，用 Direct2D 和 DirectComposition 原生绘制。面板收起时约占 55 MB 内存，CPU 占用远低于一个核心的 1%。不需要账号，没有广告；除每天向 GitHub 和 Gitee 查询一次新版本外不联网，这项检查可以在设置中关闭。
+程序只有一个约 2 MB 的可执行文件，用 Direct2D 和 DirectComposition 原生绘制。面板收起时约占 55 MB 内存，CPU 占用远低于一个核心的 1%。不需要账号，没有广告；除每天向 GitHub 和 Gitee 查询一次新版本外不联网（这项检查可以在设置中关闭）；另外只有两种情况会用到网络：你在设置里主动发送诊断信息（发送前会完整显示内容），以及你自己开启的手机遥控。
 
 ## 安装
 
@@ -94,7 +104,7 @@ cargo build --release
 makensis installer\glance.nsi
 ```
 
-`scripts\release.ps1` 会完成以上两步；加上 `-Sign` 时，还会为可执行文件、卸载程序和安装程序签名（`scripts\sign.ps1`，使用 Microsoft Artifact Signing）。调试版本启动时不请求管理员权限，因此也没有驱动提供的传感器读数。
+`scripts\release.ps1` 会完成以上两步，并构建手机遥控程序（`remote\`，独立的 crate）；加上 `-Sign` 时，还会为可执行文件、卸载程序和安装程序签名（`scripts\sign.ps1`，使用 Microsoft Artifact Signing）。安卓 APP 在 `android\` 目录（`gradlew assembleRelease`，需要 JDK 17）。调试版本启动时不请求管理员权限，因此也没有驱动提供的传感器读数。
 
 本页的图片和宣传视频都由 Glance 自己绘制：`cargo build --release --features studio` 会加入 `glance --studio script.json out-folder` 命令，按镜头脚本在屏幕外逐帧渲染面板，再由 `studio\readme.py` 和 `studio\compose.py` 合成（见 `studio\`）。
 

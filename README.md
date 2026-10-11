@@ -73,6 +73,35 @@ a game and its process is never opened, so anti-cheat has nothing to object
 to. Games using DirectX are covered; Vulkan and OpenGL games show no frame
 rate yet.
 
+## The phone remote
+
+From bed, with the PC still downloading: a small app on your phone turns
+its screens and case lights off, sets the volume and each monitor's
+brightness, pauses or skips what is playing, changes the power mode, puts
+the PC to sleep, and shows how warm it runs. Night mode does the first
+three at once, and ends at a touch of the mouse.
+
+- **Turn it on** in the settings, under *Phone*. It is off until then, and
+  Glance itself never opens a port: the remote is a second small program
+  (`glance-remote.exe`) that runs as you, never elevated, and is let
+  through the firewall for the local network only.
+- **Get the app** at [glancepc.com/app](https://glancepc.com/app) (Android
+  8.0 and later, an APK attached to each release here). An iPhone can use
+  the web page the remote itself serves, until there is an app for it.
+- **Pair** by scanning the code the settings show. Each phone gets a key of
+  its own, good for that phone alone, which the settings can remove. Every
+  request is signed with it, nothing goes through a server, and nothing
+  works from outside your network.
+- **Lights**: a motherboard's and a graphics card's lights are set through
+  [OpenRGB](https://openrgb.org), an open-source program under the GPL,
+  which is downloaded from its own project (about 22 MB) only when you turn
+  *Control the lights* on, and removed when you turn it off. A Thermalright
+  cooler's display and an ASUS laptop's keyboard light go out with them.
+- The web page is served over plain HTTP: use it only on a network you
+  trust. The app's requests cannot be forged or replayed by someone
+  listening, but what the PC answers (temperatures, the song playing) is
+  not hidden from them.
+
 ## Three looks
 
 Chart paper, frosted glass (the desktop behind bends at the rim of each
@@ -83,11 +112,13 @@ or following the brightness of your wallpaper. Chinese or English.
 
 ## Small and quiet
 
-One executable of about 1 MB, drawn natively with Direct2D and
+One executable of about 2 MB, drawn natively with Direct2D and
 DirectComposition. About 55 MB of memory and well under 1% of a CPU core
 while the panel is hidden. No account, no ads, and no network access but
 one daily question to GitHub and Gitee about a newer version, which the
-settings can turn off.
+settings can turn off; the diagnostics you choose to send from the
+settings (shown to you whole first); and the phone remote, if you turn it
+on.
 
 ## Install
 
@@ -177,9 +208,10 @@ cargo build --release
 makensis installer\glance.nsi
 ```
 
-`scripts\release.ps1` does both; with `-Sign` it signs the executable, the
-uninstaller and the installer (`scripts\sign.ps1`, Microsoft Artifact
-Signing). A debug build runs without asking for administrator rights, and so
+`scripts\release.ps1` does both, and builds the phone remote (`remote\`, a
+crate of its own); with `-Sign` it signs the executables, the uninstaller
+and the installer (`scripts\sign.ps1`, Microsoft Artifact Signing). The
+Android app is in `android\` (`gradlew assembleRelease`, JDK 17). A debug build runs without asking for administrator rights, and so
 without the driver's sensors.
 
 The pictures here and the promotional video are drawn by Glance itself:
