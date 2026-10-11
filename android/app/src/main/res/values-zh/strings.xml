@@ -76,6 +76,11 @@
     <string name="brightness_is">亮度 %1$d%%</string>
     <string name="brightness">亮度</string>
     <string name="use_colour">用这个颜色</string>
+    <string name="keys">键盘背光</string>
+    <string name="keys_off">关</string>
+    <string name="keys_low">低</string>
+    <string name="keys_medium">中</string>
+    <string name="keys_high">高</string>
     <string name="monitors">显示器</string>
     <string name="monitor_fixed">不支持单独开关</string>
     <string name="sound">声音</string>

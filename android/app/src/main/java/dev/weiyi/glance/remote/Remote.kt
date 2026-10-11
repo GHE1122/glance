@@ -88,6 +88,9 @@ data class Light(val color: String, val effect: String, val brightness: Int = 10
 /** One of the PC's power plans: what the PC knows it by, its name there, and whether it is the one in use. */
 data class Plan(val id: String, val name: String, val on: Boolean)
 
+/** The light under a laptop's keys: how bright it is set to be while the lights are on (none: not chosen yet, and left as it is), of how bright it goes. */
+data class Keys(val level: Int?, val most: Int)
+
 /** What is playing on the PC ([title] empty where its program does not say: then only that it sounds). */
 data class Media(val title: String, val artist: String, val app: String, val playing: Boolean)
 
@@ -108,12 +111,13 @@ private fun JSONObject.read(name: String) = optJSONObject(name)?.let { Read(it.i
 /** The PC as it says it is. */
 data class PcState(
     val name: String, val lights: Boolean?, val night: Boolean, val screen: Boolean?, val volume: Int?, val muted: Boolean?, val monitors: List<Monitor> = emptyList(),
-    val light: Light = Light("FFFFFF", "steady"), val media: Media? = null, val reads: Reads? = null, val power: List<Plan> = emptyList(),
+    val light: Light = Light("FFFFFF", "steady"), val media: Media? = null, val reads: Reads? = null, val power: List<Plan> = emptyList(), val keys: Keys? = null,
 ) {
     companion object {
         fun from(json: JSONObject) = PcState(
             light = json.optJSONObject("light")?.let { Light(it.optString("color", "FFFFFF"), it.optString("effect", "steady"), it.optInt("brightness", 100)) } ?: Light("FFFFFF", "steady"),
             power = json.optJSONArray("power")?.let { list -> (0 until list.length()).map { at -> list.getJSONObject(at).let { Plan(it.optString("id"), it.optString("name"), it.optBoolean("on")) } } } ?: emptyList(),
+            keys = json.optJSONObject("keys")?.let { Keys(it.int("level"), it.optInt("most", 3)) },
             media = json.optJSONObject("media")?.let { Media(it.optString("title"), it.optString("artist"), it.optString("app"), it.optBoolean("playing")) },
             reads = json.optJSONObject("reads")?.let { Reads(it.read("cpu"), it.read("gpu"), it.read("ram"), it.read("disk"), it.int("cpu_fan"), it.int("case_fan")) },
             name = json.optString("name"),

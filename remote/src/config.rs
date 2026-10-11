@@ -60,6 +60,10 @@ pub struct Config {
     pub openrgb: Option<PathBuf>,
     pub strip_leds: u32,
     pub light: Light,
+    /// How bright the light under a laptop's keys is while the lights are
+    /// on (see `keys`), once it has been chosen from a phone: none, and
+    /// that light is left as it is, on or off.
+    pub keys: Option<u8>,
     /// The OpenRGB this helper started, by its program's number: its own
     /// to stop and start afresh (one the user started is not).
     pub openrgb_started: Option<u32>,
@@ -75,6 +79,7 @@ impl Default for Config {
             openrgb: None,
             strip_leds: STRIP_LEDS,
             light: Light::default(),
+            keys: None,
             openrgb_started: None,
         }
     }

@@ -200,6 +200,12 @@ function draw() {
     );
     main.append(c);
   }
+  if (lights === true && !night && state.keys) {
+    const keys = state.keys, c = card(t("键盘背光", "Keyboard light"));
+    const names = keys.most === 3 ? [t("关", "Off"), t("低", "Low"), t("中", "Medium"), t("高", "High")] : [t("关", "Off")].concat(Array.from({ length: keys.most }, (_, i) => String(i + 1)));
+    c.append(chips(names.map((name, level) => [name, keys.level === level, () => act("/v1/keys", { level }, s => { s.keys.level = level; })])));
+    main.append(c);
+  }
   const monitors = state.monitors || [];
   if (monitors.length > 1) {
     const c = card(t("显示器", "Monitors")), rows = el("div", "rows");

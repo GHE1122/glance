@@ -76,6 +76,11 @@
     <string name="brightness_is">%1$d%% bright</string>
     <string name="brightness">Light</string>
     <string name="use_colour">Use this colour</string>
+    <string name="keys">Keyboard light</string>
+    <string name="keys_off">Off</string>
+    <string name="keys_low">Low</string>
+    <string name="keys_medium">Medium</string>
+    <string name="keys_high">High</string>
     <string name="monitors">Monitors</string>
     <string name="monitor_fixed">cannot be turned off by itself</string>
     <string name="sound">Sound</string>

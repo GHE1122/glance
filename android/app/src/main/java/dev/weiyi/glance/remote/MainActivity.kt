@@ -425,6 +425,20 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 },
             )
         }
+        // A laptop's keys: how bright the light under them is, with the lights.
+        val keys = now.keys
+        if (shown["lights"] != false && now.lights == true && !night && keys != null) {
+            Panel {
+                Heading(stringResource(R.string.keys))
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Out, then each step up to the brightest: named where there are the usual three, numbered otherwise.
+                    val names = if (keys.most == 3) listOf(R.string.keys_off, R.string.keys_low, R.string.keys_medium, R.string.keys_high).map { stringResource(it) } else listOf(stringResource(R.string.keys_off)) + (1..keys.most).map { it.toString() }
+                    names.forEachIndexed { level, name ->
+                        Chip(name, keys.level == level) { if (reached) act("keys", "/v1/keys", JSONObject().put("level", level)) { it.copy(keys = keys.copy(level = level)) } }
+                    }
+                }
+            }
+        }
         // Each monitor by itself, where there are several.
         if (shown["monitors"] != false && now.monitors.size > 1) {
             Panel {

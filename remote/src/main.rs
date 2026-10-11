@@ -74,6 +74,8 @@ struct Helper {
     config: Config,
     /// How the lights are when they are on: as the phone last chose.
     light: Mutex<Light>,
+    /// How bright the light under the keys is with them, once chosen.
+    keys: Mutex<Option<u8>>,
     /// The phones paired with, as the configuration had them when it was
     /// last kept (and when that was): read again once it is kept anew, by
     /// this or by another of this program offering a pairing.
@@ -101,6 +103,10 @@ impl Helper {
         // (whether or not there are other lights to set), and meanwhile:
         // each takes its own while.
         let cooler = std::thread::spawn(move || if on { cooler::lit() } else { cooler::dark() });
+        // And the light under a laptop's keys, where its brightness has been chosen.
+        if let Some(level) = *self.keys.lock().unwrap() {
+            keys::light(if on { level } else { 0 });
+        }
         let set = lights::set(&self.config, on, &light).map_err(|error| error.to_string());
         let _ = cooler.join();
         set?;
@@ -233,6 +239,8 @@ impl Helper {
             "lights": lights,
             "light": light,
             "reads": reads::read(),
+            // A laptop's keys: how bright their light is set to be with the lights on (not known till chosen), of how bright it goes.
+            "keys": keys::there().then(|| json!({ "level": *self.keys.lock().unwrap(), "most": keys::MOST })),
             "media": playing.map(|media| json!({ "title": media.title, "artist": media.artist, "app": media.app, "playing": media.playing })),
             "night": state.night.is_some(),
             "power": power::choices().iter().map(|choice| json!({ "id": choice.id, "name": choice.name, "on": choice.on })).collect::<Vec<_>>(),
@@ -276,6 +284,17 @@ impl Helper {
                 let effect = asked.get("effect").and_then(|effect| serde_json::from_value::<Effect>(effect.clone()).ok());
                 self.choose(asked.get("color").and_then(Value::as_str), effect, asked.get("brightness").and_then(Value::as_u64));
                 self.lights(asked.get("on").and_then(Value::as_bool).unwrap_or(true)).map_err(failed)?
+            }
+            // How bright the light under the keys is: set now (unless the
+            // lights are out: then for when they are on again), and kept.
+            ("POST", "/v1/keys") => {
+                let level = asked.get("level").and_then(Value::as_u64).ok_or((400, "\"level\" is missing".to_string()))?.min(keys::MOST as u64) as u8;
+                *self.keys.lock().unwrap() = Some(level);
+                let _ = Config::change(|config| config.keys = Some(level));
+                let out = self.state.lock().unwrap().lights == Some(false);
+                if !out && !keys::light(level) {
+                    return Err((500, "the keyboard did not take it".into()));
+                }
             }
             ("POST", "/v1/media") => {
                 match media::ask(asked.get("do").and_then(Value::as_str).unwrap_or_default()) {
@@ -533,7 +552,7 @@ fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", config.port))?;
     // (Whether the lights are on, as OpenRGB has them if it is running.)
     let state = State { lights: lights::lit(), ..State::default() };
-    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false) });
+    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), keys: Mutex::new(config.keys), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false) });
     let following = helper.clone();
     std::thread::spawn(move || {
         let mut last = None;
