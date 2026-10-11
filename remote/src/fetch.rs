@@ -19,10 +19,11 @@ use windows::Win32::Networking::WinHttp::{
 };
 
 /// OpenRGB 1.0 for 64-bit Windows, as its project publishes it: from a
-/// copy kept with Glance's own releases where mainland China reaches it,
-/// then from the project itself.
+/// copy on Glance's own site, which is reached where the project's is not,
+/// then from the project itself. (Gitee, which mirrors Glance's releases
+/// for mainland China, refuses the archive.)
 const SOURCES: [&str; 2] = [
-    "https://gitee.com/lulu-loopp/glance/releases/download/v0.3.0/OpenRGB_1.0_Windows_64_81bbe18.zip",
+    "https://glancepc.com/dl/OpenRGB_1.0_Windows_64_81bbe18.zip",
     "https://codeberg.org/OpenRGB/OpenRGB/releases/download/release_1.0/OpenRGB_1.0_Windows_64_81bbe18.zip",
 ];
 /// The SHA-256 of that archive.
