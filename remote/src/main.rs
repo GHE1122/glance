@@ -93,13 +93,12 @@ impl Helper {
             }
         }
         // A cooler's little display goes out and comes on with them
-        // (whether or not there are other lights to set).
-        if on {
-            cooler::lit();
-        } else {
-            cooler::dark();
-        }
-        lights::set(&self.config, on, &light).map_err(|error| error.to_string())?;
+        // (whether or not there are other lights to set), and meanwhile:
+        // each takes its own while.
+        let cooler = std::thread::spawn(move || if on { cooler::lit() } else { cooler::dark() });
+        let set = lights::set(&self.config, on, &light).map_err(|error| error.to_string());
+        let _ = cooler.join();
+        set?;
         self.state.lock().unwrap().lights = Some(on);
         Ok(())
     }

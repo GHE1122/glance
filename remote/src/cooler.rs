@@ -8,10 +8,7 @@
 //! its user may end and run without being an administrator), and one
 //! frame of no light is sent; to light it again, the task is run.
 
-use std::os::windows::process::CommandExt;
-use std::process::Command;
-
-use windows::core::PCWSTR;
+use windows::core::{BSTR, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
     SP_DEVICE_INTERFACE_DETAIL_DATA_W,
@@ -19,6 +16,10 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 use windows::Win32::Devices::HumanInterfaceDevice::HidD_GetHidGuid;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{CreateFileW, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+use windows::Win32::System::TaskScheduler::{IRegisteredTask, ITaskService, TaskScheduler};
+use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::System::IO::{GetOverlappedResultEx, OVERLAPPED};
 
 /// The display, as its USB device names itself in its path.
@@ -33,8 +34,6 @@ const FRAME: u8 = 2;
 const REPORT: usize = 64;
 /// How long the display is waited on to take or to answer (ms).
 const WAIT: u32 = 500;
-/// A child program started without a window of its own.
-const NO_WINDOW: u32 = 0x0800_0000;
 
 /// How many LEDs the display has, by the model it says it is (the sixth
 /// byte of its answer), as those who have read TRCC's own tables have
@@ -141,38 +140,72 @@ impl Display {
     }
 }
 
-fn task(what: &str) -> bool {
-    Command::new("schtasks").args([what, "/tn", TASK]).creation_flags(NO_WINDOW).output().is_ok_and(|done| done.status.success())
+/// TRCC's task, as Windows' scheduler has it; none where TRCC is not
+/// installed (or is started some other way).
+fn task() -> Option<IRegisteredTask> {
+    crate::actions::com();
+    unsafe {
+        let scheduler: ITaskService = CoCreateInstance(&TaskScheduler, None, CLSCTX_ALL).ok()?;
+        let none = VARIANT::default();
+        scheduler.Connect(&none, &none, &none, &none).ok()?;
+        scheduler.GetFolder(&BSTR::from("\\")).ok()?.GetTask(&BSTR::from(TASK)).ok()
+    }
 }
 
 /// Puts the display out: whether it was (not, where there is no such
 /// display, it is of a model not known, or TRCC is not this user's to stop).
 pub fn dark() -> bool {
     let Some(display) = Display::open() else { return false };
-    // What it is, before anything is changed.
-    let model = display.write(WHO, &[]).then(|| display.read()).flatten().filter(|answer| answer[1..5] == MAGIC).map(|answer| answer[6]);
-    let Some(leds) = model.and_then(leds) else { return false };
-    // TRCC running on, a frame of no light would last a moment: it is
-    // stopped first (one not started by its task is not this user's to stop).
-    task("/end");
-    let stopped = (0..20).any(|_| {
+    // TRCC running on, a frame of no light would last a moment, and the
+    // display is slow to answer anyone else: it is stopped first (one not
+    // started by its task is not this user's to stop).
+    let task = task();
+    if let Some(task) = &task {
+        let _ = unsafe { task.Stop(0) };
+    }
+    let stopped = (0..100).any(|_| {
         let gone = !running();
         if !gone {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         gone
     });
-    stopped && display.write(FRAME, &vec![0u8; leds * 3])
+    if !stopped {
+        return false;
+    }
+    // What it is: one of a model not known is given back to TRCC as it was.
+    let model = display.write(WHO, &[]).then(|| display.read()).flatten().filter(|answer| answer[1..5] == MAGIC).map(|answer| answer[6]);
+    match model.and_then(leds) {
+        Some(leds) => display.write(FRAME, &vec![0u8; leds * 3]),
+        None => {
+            if let Some(task) = &task {
+                let _ = unsafe { task.Run(&VARIANT::default()) };
+            }
+            false
+        }
+    }
 }
 
-/// Whether TRCC is running.
+/// Whether TRCC is running: its name among the programs there are (none of them opened).
 fn running() -> bool {
-    Command::new("tasklist").args(["/fi", "IMAGENAME eq TRCC.exe", "/fo", "csv", "/nh"]).creation_flags(NO_WINDOW).output().is_ok_and(|list| String::from_utf8_lossy(&list.stdout).contains("TRCC.exe"))
+    unsafe {
+        let Ok(programs) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return false };
+        let mut one = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut found = false;
+        let mut more = Process32FirstW(programs, &mut one).is_ok();
+        while more && !found {
+            let name = String::from_utf16_lossy(&one.szExeFile[..one.szExeFile.iter().position(|c| *c == 0).unwrap_or(one.szExeFile.len())]);
+            found = name.eq_ignore_ascii_case("TRCC.exe");
+            more = Process32NextW(programs, &mut one).is_ok();
+        }
+        let _ = CloseHandle(programs);
+        found
+    }
 }
 
 /// Gives the display back to TRCC, which lights it as it was set to.
 pub fn lit() -> bool {
-    path().is_some() && task("/run")
+    path().is_some() && task().is_some_and(|task| unsafe { task.Run(&VARIANT::default()) }.is_ok())
 }
 
 #[cfg(test)]

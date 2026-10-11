@@ -13,6 +13,7 @@ use windows::core::{Interface, Result};
 use windows::Media::Control::{GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager, GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status};
 use windows::Win32::Media::Audio::{eConsole, eRender, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
+use windows::Win32::UI::Shell::{IShellItem, SHCreateItemFromParsingName, SIGDN_NORMALDISPLAY};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK};
 
 pub struct Playing {
@@ -30,12 +31,17 @@ fn session() -> Result<Session> {
     Manager::RequestAsync()?.join()?.GetCurrentSession()
 }
 
-/// A program's name out of how Windows identifies it: "cloudmusic.exe",
-/// or "Vendor.Program_abc123!App".
-fn program(id: &str) -> String {
-    let id = id.split(['_', '!']).next().unwrap_or(id);
-    let id = id.strip_suffix(".exe").or_else(|| id.strip_suffix(".EXE")).unwrap_or(id);
-    id.rsplit('.').next().unwrap_or(id).to_string()
+/// The name Windows shows a program by (as in the Start menu), for one it
+/// identifies as `id`; none for a program Windows has no such name for.
+fn shown_as(id: &str) -> Option<String> {
+    let path: Vec<u16> = format!("shell:AppsFolder\\{id}").encode_utf16().chain([0]).collect();
+    unsafe {
+        let item: IShellItem = SHCreateItemFromParsingName(windows::core::PCWSTR(path.as_ptr()), None).ok()?;
+        let name = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
+        let shown = name.to_string().ok();
+        CoTaskMemFree(Some(name.0 as *const _));
+        shown.filter(|shown| !shown.is_empty())
+    }
 }
 
 /// What a program has told Windows it plays.
@@ -49,7 +55,9 @@ fn told() -> Option<Playing> {
     Some(Playing {
         title,
         artist: about.Artist().map(|artist| artist.to_string()).unwrap_or_default(),
-        app: session.SourceAppUserModelId().map(|id| program(&id.to_string())).unwrap_or_default(),
+        // By the name Windows shows it by; one it has none for is not named
+        // (what plays is said already: a file's name adds nothing to it).
+        app: session.SourceAppUserModelId().ok().and_then(|id| shown_as(&id.to_string())).unwrap_or_default(),
         playing: session.GetPlaybackInfo().and_then(|info| info.PlaybackStatus()).is_ok_and(|status| status == Status::Playing),
     })
 }
@@ -163,13 +171,6 @@ pub fn ask(what: &str) -> Asked {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn names_a_program_shortly() {
-        assert_eq!(super::program("cloudmusic.exe"), "cloudmusic");
-        assert_eq!(super::program("Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"), "ZuneMusic");
-        assert_eq!(super::program("Spotify"), "Spotify");
-    }
-
     #[test]
     fn names_a_program_from_its_sound() {
         assert_eq!(super::named(r"{0.0.0.00000000}.{6f2a}|\Device\HarddiskVolume3\App\CloudMusic\cloudmusic.exe%b{00000000-0000-0000-0000-000000000000}|1%b9044").as_deref(), Some("cloudmusic"));
