@@ -235,12 +235,14 @@ impl Overlay {
         self.lang = lang;
         let sample = history.back();
         // The game played: one found, or one taken for a game by hand.
-        let game = sample.and_then(|s| s.game.as_ref()).filter(|_| playing);
-        let readings = sample.filter(|_| wanted).map(|s| overlay::readings(s, game, playing, &settings.chosen(), lang)).unwrap_or_default();
+        let game = sample.and_then(|s| s.game.as_ref()).filter(|game| playing || game.by_hand);
+        // (One taken by hand does not bring the overlay up: shown where it is up, its frames are.)
+        let framed = playing || game.is_some();
+        let readings = sample.filter(|_| wanted).map(|s| overlay::readings(s, game, framed, &settings.chosen(), lang)).unwrap_or_default();
         if readings.is_empty() {
             return self.hide();
         }
-        let frames = overlay::frames(history.iter(), playing);
+        let frames = overlay::frames(history.iter(), framed);
         // Held as the pointer has it while it is dragged.
         if self.grab.is_some() {
             self.drawn = (readings, frames, self.drawn.2);

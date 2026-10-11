@@ -258,8 +258,9 @@ fn readings(scene: &Scene) -> Vec<Reading> {
         // Its ring: how many of the frames its screen shows it draws (or of
         // the most it drew, if more).
         let most = scene.history.iter().filter_map(|s| s.game.as_ref().map(|g| g.fps)).fold(game.and_then(|g| g.refresh_hz).map_or(0.0, |hz| hz as f32), f32::max);
-        // Its 1% low, as the game's own lane shows it when switched on.
-        let low = game.and_then(|g| g.low).filter(|_| prefs.shows("game", "low")).map(|low| format!("1% low {low:.0}"));
+        // Its 1% low, as the game's own lane shows it when switched on: said for as long as there is a game, a
+        // dash till enough frames have come.
+        let low = game.filter(|_| prefs.shows("game", "low")).map(|game| game.low.map_or("1% low —".to_string(), |low| format!("1% low {low:.0}")));
         readings.push(Reading {
             kind: Kind::Game,
             id: "game".into(),
@@ -271,8 +272,9 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             figure: game.map_or("—".into(), |game| format!("{:.0}", game.fps)),
             unit: "FPS".into(),
             beside: low.clone().unwrap_or_default(),
+            // (A tile says the 1% low after the figure: its head is the game's name's.)
             detail: match game {
-                Some(_) => low.unwrap_or_default(),
+                Some(_) => String::new(),
                 None => super::view::waiting(lang),
             },
             hot: false,
@@ -737,7 +739,14 @@ impl Painter<'_> {
                     y + 86.0
                 }
                 None => {
-                    self.figure(reading, x + 12.0, y + 70.0, self.figure_font(30.0, theme.figure.weight), self.font(12.0, 500.0), theme.text2);
+                    let figure = self.figure(reading, x + 12.0, y + 70.0, self.figure_font(30.0, theme.figure.weight), self.font(12.0, 500.0), theme.text2);
+                    // A game's 1% low, at the far end of its figure's line, where there is room after the figure.
+                    if reading.kind == Kind::Game && !reading.beside.is_empty() && x + 12.0 + figure + 10.0 + self.frame.measure(&reading.beside, theme.small) <= x + tw - 12.0 {
+                        self.name(reading, "beside");
+                        let (ascent, _) = self.frame.baseline(theme.small);
+                        let width = self.frame.measure(&reading.beside, theme.small);
+                        self.frame.text(&reading.beside, theme.small, theme.text3, x + tw - 12.0 - width, y + 70.0 - ascent, width + 2.0, Align::Start);
+                    }
                     y + 78.0
                 }
             };
