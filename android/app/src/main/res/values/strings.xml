@@ -43,7 +43,10 @@
     <string name="unreachable_short">No answer</string>
     <string name="refused_short">Pair again</string>
     <string name="failed_short">Not done</string>
-    <string name="unreachable">This PC does not answer: it may be off, asleep, or on another network than the phone.</string>
+    <string name="unreachable">It may be off, asleep, or on another network than the phone.</string>
+    <string name="away_title">%1$s does not answer</string>
+    <string name="away_refused_title">%1$s no longer takes this phone</string>
+    <string name="away_retry">Asked again every few seconds; this page comes back by itself</string>
     <string name="refused">The PC no longer takes this phone. Unpair it in Settings, then scan its pairing code again.</string>
     <string name="working">Working…</string>
     <string name="no_reads">Glance is not running on the PC: no temperatures or fan speeds</string>

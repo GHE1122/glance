@@ -8,6 +8,12 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -58,6 +64,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
@@ -487,8 +494,13 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
             }
         }
         // Folded, the PC's picture leads the one column; unfolded, it has the right side to itself.
+        // Not heard from yet, or not at all: the PC drawn as it sleeps, and why that may be.
+        if (now == null) {
+            Away(pc.name, failure)
+            return@Column
+        }
         BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-            val pictured = shown["rig"] != false && now != null
+            val pictured = shown["rig"] != false
             val gap = Arrangement.spacedBy(12.dp)
             if (maxWidth >= WIDE && pictured) {
                 Row(Modifier.fillMaxSize()) {
@@ -531,6 +543,26 @@ private fun MonitorRow(at: Int, monitor: Monitor, enabled: Boolean, lit: Boolean
         Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) { Sign(Sign.BRIGHT, if (can) Dim else Faint, size = 18.dp) }
             Bar(level, 0f..100f, stringResource(R.string.brightness), Modifier.weight(1f), enabled = can, slim = true, track = filled(Accent), change = { sliding = true; level = it }, done = { sliding = false; dim(level.toInt()) })
+        }
+    }
+}
+
+/**
+ * A PC that has not answered: drawn dark, breathing slowly as one asleep,
+ * with what may be the matter under it (none yet: it is still being asked).
+ */
+@Composable
+private fun Away(name: String, failure: Failure?) {
+    val breath by rememberInfiniteTransition(label = "asleep").animateFloat(0.45f, 1f, infiniteRepeatable(tween(2600, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "breath")
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Rig(null, null, null, night = true, chosen = Part.Cpu, modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth().aspectRatio(320f / 254f).graphicsLayer { alpha = breath }) {}
+        if (failure != null) {
+            Column(Modifier.widthIn(max = 420.dp).padding(top = 8.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(stringResource(if (failure == Failure.Refused) R.string.away_refused_title else R.string.away_title, name), color = Ink, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                val what = when (failure) { Failure.Refused -> stringResource(R.string.refused); is Failure.Failed -> failure.why; else -> stringResource(R.string.unreachable) }
+                Text(what, color = Dim, fontSize = 14.sp, lineHeight = 22.sp, textAlign = TextAlign.Center)
+                if (failure == Failure.Unreachable) Text(stringResource(R.string.away_retry), color = Faint, fontSize = 12.5.sp, textAlign = TextAlign.Center)
+            }
         }
     }
 }
