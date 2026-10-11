@@ -1019,11 +1019,11 @@ mod tests {
         let chosen = items(&["fps", "low", "frametime", "cpu", "cpu_temp", "gpu", "memory"]);
         let s = sample(true);
         let s4 = |a: &str, b: &str, c: &str, d: &str| (a.to_string(), b.to_string(), c.to_string(), d.to_string());
-        // Unread readings left out, not shown as gaps: no 1% low yet, no
-        // CPU heat, no GPU.
+        // Unread readings left out, not shown as gaps (no CPU heat, no
+        // GPU); but a game's 1% low keeps its place, a dash till it is known.
         assert_eq!(
             plain(readings(&s, s.game.as_ref(), true, &chosen, Lang::Zh)),
-            [s4("帧率", "144", "", "9.3 ms"), s4("CPU", "40", "%", ""), s4("内存", "8.0", "GB", "")]
+            [s4("帧率", "144", "", "1% — · 9.3 ms"), s4("CPU", "40", "%", ""), s4("内存", "8.0", "GB", "")]
         );
         // Without a game, the frame rate is a dash, in its place.
         let s = sample(false);
