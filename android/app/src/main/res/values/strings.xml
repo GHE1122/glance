@@ -88,6 +88,7 @@
     <string name="mute">Mute</string>
     <string name="unmute">Unmute</string>
     <string name="muted">Muted</string>
+    <string name="media_untold">This player does not tell Windows what it plays. In NetEase Cloud Music, turn on “SMTC” in its settings.</string>
     <string name="playing">Playing</string>
     <string name="paused">Paused</string>
     <string name="play">Play</string>

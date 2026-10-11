@@ -174,6 +174,8 @@ private fun App(opened: String?, taken: () -> Unit) {
         val which = pcs.getOrNull(at) ?: return@let
         Ask(stringResource(R.string.unpair_title, which.name), listOf(stringResource(R.string.unpair_what)), stringResource(R.string.unpair), stringResource(R.string.cancel), dismiss = { unpairing = null }) {
             val looked = pcs.getOrNull(chosen)
+            // (Told if it can be reached: one that cannot keeps this phone's key till it is removed there.)
+            kotlin.concurrent.thread { runCatching { which.ask("/v1/unpair", JSONObject()) } }
             Pcs.remove(context, at)
             pcs = Pcs.all(context)
             // The PC looked at stays the one looked at, unless it was the one unpaired.
@@ -246,7 +248,7 @@ private fun Pairing(first: Boolean, wrong: Boolean, back: () -> Unit, scan: () -
 private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>, back: () -> Unit, show: (String, Boolean) -> Unit, add: () -> Unit, unpair: (Int) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         Top(stringResource(R.string.settings), back)
-        Column(Modifier.widthIn(max = 560.dp).verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        val paired: @Composable () -> Unit = {
             Text(stringResource(R.string.paired_pcs), color = Dim, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
             Panel {
                 Column {
@@ -254,9 +256,11 @@ private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>
                         Line(pc.name, pc.host, note = stringResource(R.string.looking_at).takeIf { at == chosen }) { Words(stringResource(R.string.unpair), Bad) { unpair(at) } }
                         Rule()
                     }
-                    Box(Modifier.heightIn(min = 56.dp), contentAlignment = Alignment.CenterStart) { Words(stringResource(R.string.add_pc), Accent, size = 15f, press = add) }
+                    Words(stringResource(R.string.add_pc), Accent, Modifier.padding(top = 4.dp), size = 15f, press = add)
                 }
             }
+        }
+        val showing: @Composable () -> Unit = {
             Text(stringResource(R.string.shows), color = Dim, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
             Panel {
                 Column {
@@ -268,6 +272,21 @@ private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>
                         if (at > 0) Rule()
                         Line(stringResource(name), what?.let { stringResource(it) }) { Toggle(shown[part] != false, stringResource(name)) { show(part, it) } }
                     }
+                }
+            }
+        }
+        // Narrow, one under the other; wide (a phone unfolded, a tablet), side by side.
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val gap = Arrangement.spacedBy(12.dp)
+            if (maxWidth >= WIDE) {
+                Row(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = gap) { paired() }
+                    Column(Modifier.weight(1f), verticalArrangement = gap) { showing() }
+                }
+            } else {
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), verticalArrangement = gap) {
+                    paired()
+                    showing()
                 }
             }
         }
@@ -472,6 +491,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 }
                 now.media?.let { media ->
                     Rule()
+                    if (media.title.isBlank()) Text(stringResource(R.string.media_untold), color = Faint, fontSize = 12.sp, lineHeight = 17.sp)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Column(Modifier.weight(1f)) {
                             Text(media.title.ifBlank { media.app }, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)

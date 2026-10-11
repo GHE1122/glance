@@ -164,7 +164,7 @@ impl Helper {
     /// the phone it calls itself is the one its key belongs to. A key not
     /// used before becomes that phone's.
     #[allow(clippy::too_many_arguments)]
-    fn admit(&self, method: &str, path: &str, time: &str, nonce: &str, sign: &str, body: &[u8], device: &str, name: &str) -> Result<(), sign::Refused> {
+    fn admit(&self, method: &str, path: &str, time: &str, nonce: &str, sign: &str, body: &[u8], device: &str, name: &str) -> Result<String, sign::Refused> {
         let mut phones = self.phones.lock().unwrap();
         let kept = Config::kept_at();
         if phones.0 != kept {
@@ -181,12 +181,14 @@ impl Helper {
             }
             return match &phone.device {
                 Some(owner) if owner != device => Err(sign::Refused::Taken),
-                Some(_) => Ok(()),
+                Some(_) => Ok(phone.key.clone()),
                 // (A request that names no phone leaves the key as it is.)
-                None if device.is_empty() => Ok(()),
+                None if device.is_empty() => Ok(phone.key.clone()),
                 None => {
                     let (key, device, name) = (phone.key.clone(), device.to_string(), name.to_string());
                     let changed = Config::change(|config| {
+                        // A phone paired anew is that phone still: what it was paired by before is gone.
+                        config.phones.retain(|phone| phone.device.as_deref() != Some(device.as_str()));
                         if let Some(phone) = config.phones.iter_mut().find(|phone| phone.key == key) {
                             *phone = Phone { key: key.clone(), name, device: Some(device), offered_till: None };
                         }
@@ -194,7 +196,7 @@ impl Helper {
                     if let Ok(config) = changed {
                         *phones = (Config::kept_at(), config.phones);
                     }
-                    Ok(())
+                    Ok(key)
                 }
             };
         }
@@ -253,7 +255,7 @@ impl Helper {
     }
 
     /// Does what a request asks: its answer, or why not (with the status).
-    fn act(self: &Arc<Self>, method: &str, path: &str, body: &[u8]) -> Result<Value, (u16, String)> {
+    fn act(self: &Arc<Self>, method: &str, path: &str, body: &[u8], key: &str) -> Result<Value, (u16, String)> {
         let failed = |error: String| (500, error);
         let asked: Value = if body.is_empty() { Value::Null } else { serde_json::from_slice(body).map_err(|_| (400, "the body is not JSON".to_string()))? };
         let on = || asked.get("on").and_then(Value::as_bool).ok_or((400, "\"on\" is missing".to_string()));
@@ -321,6 +323,10 @@ impl Helper {
                     return Err((500, "the plan was not taken".into()));
                 }
             }
+            // The phone that asks, paired no more (it has unpaired itself).
+            ("POST", "/v1/unpair") => {
+                let _ = Config::change(|config| config.phones.retain(|phone| phone.key != key));
+            }
             ("POST", "/v1/night") => self.night(on()?).map_err(failed)?,
             ("POST", "/v1/volume") => {
                 let level = asked.get("level").and_then(Value::as_u64).map(|level| level.min(100) as u8);
@@ -383,7 +389,7 @@ impl Helper {
         let checked = self.admit(method, path, header("x-glance-time"), header("x-glance-nonce"), header("x-glance-sign"), &body, header("x-glance-phone"), &unescaped(header("x-glance-name")));
         let (status, answer) = match checked {
             Err(refused) => (401, json!({ "error": format!("{refused:?}").to_lowercase(), "time": sign::now() })),
-            Ok(()) => match self.act(method, path, &body) {
+            Ok(key) => match self.act(method, path, &body, &key) {
                 Ok(answer) => (200, answer),
                 Err((status, error)) => (status, json!({ "error": error })),
             },

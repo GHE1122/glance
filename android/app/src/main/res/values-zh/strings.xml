@@ -88,6 +88,7 @@
     <string name="mute">静音</string>
     <string name="unmute">取消静音</string>
     <string name="muted">静音</string>
+    <string name="media_untold">这个播放器没有把歌名告诉系统。网易云音乐可以在它的设置里打开“开启 SMTC”。</string>
     <string name="playing">正在播放</string>
     <string name="paused">已暂停</string>
     <string name="play">播放</string>

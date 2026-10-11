@@ -49,7 +49,8 @@ header small.good::before { background: var(--good); } header small.bad::before 
 input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 99px; margin: 10px 0; background: linear-gradient(90deg, var(--accent) var(--at, 0%), var(--card2) var(--at, 0%)); }
 input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: #fff; border: 0; box-shadow: 0 1px 4px #0009; }
 input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 50%; background: #fff; border: 0; }
-.keys { display: flex; gap: 4px; } .keys button, .text { font: inherit; color: var(--ink); background: none; border: 0; min-width: 44px; height: 44px; border-radius: 50%; font-size: 18px; }
+.keys { display: flex; gap: 4px; } .keys button, .text { font: inherit; color: var(--ink); background: none; border: 0; min-width: 44px; height: 44px; border-radius: 50%; padding: 0; display: grid; place-items: center; }
+.note.small { font-size: 12px; color: var(--faint); }
 .keys button.main { background: var(--card2); } .text { color: var(--dim); font-size: 13px; border-radius: 12px; height: 32px; }
 .ask { position: fixed; inset: 0; background: #000a; display: grid; place-items: center; padding: 24px; }
 .ask div { background: var(--card2); border-radius: 24px; padding: 24px 24px 12px; max-width: 328px; display: grid; gap: 12px; }
@@ -147,6 +148,14 @@ const EFFECTS = [["steady", t("常亮", "Steady")], ["breathing", t("呼吸", "B
 const COLOURS = ["FF7B4A", "FFFFFF", "70B3FF", "59C98A", "C68CFF", "FF5E7E"];
 const MODES = { efficiency: t("最佳能效", "Best efficiency"), balanced: t("平衡", "Balanced"), performance: t("最佳性能", "Best performance") };
 
+// The signs on what is pressed, drawn (as the app draws them): paths on a square of 24.
+const SIGNS = { play: "M8 5.5v13l11-6.5z", pause: "M8 5v14M16 5v14", previous: "M18 6v12l-9-6zM6.5 6v12", next: "M6 6v12l9-6zM17.5 6v12" };
+function sign_of(name) {
+  const NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg"), path = document.createElementNS(NS, "path");
+  for (const [k, v] of Object.entries({ viewBox: "0 0 24 24", width: 22, height: 22, fill: "none", stroke: "currentColor", "stroke-width": 1.7, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" })) svg.setAttribute(k, v);
+  path.setAttribute("d", SIGNS[name]); svg.append(path);
+  return svg;
+}
 function tile(title, detail, on, press, wide) { const b = el("button", "tile" + (on ? " on" : "") + (wide ? " wide" : "")); b.append(el("b", "", title), el("small", "", detail)); b.onclick = press; return b; }
 function chips(list, cls) { const row = el("div", "chips" + (cls ? " " + cls : "")); for (const [text, on, press, colour] of list) { const b = el("button", on ? "on" : "", text); if (colour) b.style.setProperty("--c", "#" + colour); b.onclick = press; row.append(b); } return row; }
 function toggle(on, enabled, press) { const b = el("button", "switch" + (on ? " on" : "")); b.disabled = !enabled; b.setAttribute("role", "switch"); b.setAttribute("aria-checked", on); b.onclick = () => press(!on); return b; }
@@ -227,8 +236,10 @@ function draw() {
     if (media) {
       const row = el("div", "row"), text = el("div"), keys = el("div", "keys");
       text.append(el("b", "", media.title || media.app), el("small", "", [media.playing ? t("正在播放", "Playing") : t("已暂停", "Paused"), media.artist, media.title ? media.app : ""].filter(Boolean).join(" · ")));
-      for (const [sign, what, cls] of [["⏮", "previous"], [media.playing ? "⏸" : "▶", "toggle", "main"], ["⏭", "next"]]) { const b = el("button", cls || "", sign); b.onclick = () => act("/v1/media", { do: what }); keys.append(b); }
+      for (const [sign, what, cls, said] of [["previous", "previous", "", t("上一首", "Previous")], [media.playing ? "pause" : "play", "toggle", "main", media.playing ? t("暂停", "Pause") : t("播放", "Play")], ["next", "next", "", t("下一首", "Next")]]) { const b = el("button", cls || ""); b.setAttribute("aria-label", said); b.append(sign_of(sign)); b.onclick = () => act("/v1/media", { do: what }); keys.append(b); }
       row.append(text, keys); c.append(row);
+      // A player known only by its sound: how it may be made to say what it plays.
+      if (!media.title) c.append(el("span", "note small", t("这个播放器没有把歌名告诉系统。网易云音乐可以在它的设置里打开“开启 SMTC”。", "This player does not tell Windows what it plays. In NetEase Cloud Music, turn on “SMTC” in its settings.")));
     }
     main.append(c);
   }
