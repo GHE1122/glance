@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Glance 遥控</string>
+    <string name="pair_title">和电脑配对</string>
+    <string name="pair_how">在电脑上打开 Glance 的手机遥控，显示配对码。手机和电脑要在同一个网络里。</string>
+    <string name="scan">扫描配对码</string>
+    <string name="scan_prompt">对准电脑屏幕上的配对码</string>
+    <string name="paste_link">或者粘贴配对链接</string>
+    <string name="pair">配对</string>
+    <string name="not_a_code">这不是 Glance 的配对码</string>
+    <string name="unpair">解除配对</string>
+    <string name="connecting">正在连接…</string>
+    <string name="connected">已连接</string>
+    <string name="unreachable">连不上：电脑关机、睡眠，或者不在同一个网络</string>
+    <string name="refused">电脑不再认这台手机，请重新配对</string>
+    <string name="working">正在执行…</string>
+    <string name="night">夜间模式</string>
+    <string name="night_how">关屏、关灯、切到节能。动一下鼠标或键盘就结束。</string>
+    <string name="night_on">已开启。再点一次结束，或者动一下鼠标、键盘。</string>
+    <string name="screen_off">关闭屏幕</string>
+    <string name="screen_off_how">动一下鼠标或键盘恢复</string>
+    <string name="lights">灯光</string>
+    <string name="lights_on">开着</string>
+    <string name="lights_off">关着</string>
+    <string name="lights_unknown">点一下开灯</string>
+    <string name="volume">音量</string>
+    <string name="mute">静音</string>
+    <string name="unmute">已静音</string>
+    <string name="sleep">睡眠</string>
+    <string name="sleep_confirm">再点一次让电脑睡眠</string>
+</resources>

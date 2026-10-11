@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- What shows before the first frame is drawn: the ground the app draws on. -->
+    <style name="Theme.Glance" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/ground</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+    <color name="ground">#0E1116</color>
+    <color name="mark_ground">#14181E</color>
+</resources>

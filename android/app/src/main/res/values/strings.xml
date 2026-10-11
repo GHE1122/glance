@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Glance Remote</string>
+    <string name="pair_title">Pair with your PC</string>
+    <string name="pair_how">On the PC, open Glance\'s remote control and show the pairing code. Both must be on the same network.</string>
+    <string name="scan">Scan the code</string>
+    <string name="scan_prompt">Point at the code on the PC\'s screen</string>
+    <string name="paste_link">Or paste the pairing link</string>
+    <string name="pair">Pair</string>
+    <string name="not_a_code">That is not a Glance pairing code</string>
+    <string name="unpair">Unpair</string>
+    <string name="connecting">Reaching it…</string>
+    <string name="connected">Connected</string>
+    <string name="unreachable">No answer: off, asleep, or on another network</string>
+    <string name="refused">The PC no longer takes this phone: pair again</string>
+    <string name="working">Working…</string>
+    <string name="night">Night mode</string>
+    <string name="night_how">Screens off, lights out, power saving. A touch of the mouse or keyboard ends it.</string>
+    <string name="night_on">On. Tap to end it, or touch the mouse or keyboard.</string>
+    <string name="screen_off">Screens off</string>
+    <string name="screen_off_how">Until the mouse or keyboard is touched</string>
+    <string name="lights">Lights</string>
+    <string name="lights_on">On</string>
+    <string name="lights_off">Off</string>
+    <string name="lights_unknown">Tap to light them</string>
+    <string name="volume">Volume</string>
+    <string name="mute">Mute</string>
+    <string name="unmute">Muted</string>
+    <string name="sleep">Sleep</string>
+    <string name="sleep_confirm">Tap again to put the PC to sleep</string>
+</resources>

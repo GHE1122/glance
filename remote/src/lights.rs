@@ -204,14 +204,19 @@ fn program(config: &Config) -> Option<PathBuf> {
     config.openrgb.clone().into_iter().chain(installed).find(|path| path.is_file())
 }
 
-/// The server, started if it is not running: with its window out of the
-/// way, and without its trying to reach a server itself.
+/// CREATE_NO_WINDOW: no console for a program started without one.
+const NO_WINDOW: u32 = 0x0800_0000;
+
+/// The server, started if it is not running: as a server alone (no window,
+/// none of its warnings shown, a third of the memory), and without its
+/// trying to reach a server itself.
 fn server(config: &Config) -> std::io::Result<Client> {
+    use std::os::windows::process::CommandExt;
     if let Ok(client) = Client::connect() {
         return Ok(client);
     }
     let program = program(config).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "OpenRGB is not installed"))?;
-    std::process::Command::new(&program).args(["--server", "--startminimized", "--noautoconnect"]).current_dir(program.parent().unwrap()).spawn()?;
+    std::process::Command::new(&program).args(["--server", "--noautoconnect"]).current_dir(program.parent().unwrap()).creation_flags(NO_WINDOW).spawn()?;
     // It listens before it has found the devices: asked until it has some.
     let since = Instant::now();
     loop {
