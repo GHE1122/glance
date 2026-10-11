@@ -57,6 +57,9 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 /// when the user signs in.
 const LAUNCH_TASK: &str = "Glance";
 const LOGON_TASK: &str = "Glance at sign-in";
+/// The task that runs the phone remote (another program, never elevated)
+/// at sign-in and while it is on.
+const REMOTE_TASK: &str = "Glance Remote";
 const NO_WINDOW: u32 = 0x0800_0000;
 
 /// Where Glance notes that it installed PawnIO itself, so that uninstalling
@@ -837,7 +840,7 @@ fn task_folder() -> Option<ITaskFolder> {
 /// Whether a task is one of Glance's: under the names it gives tasks now
 /// (with an account's identifier) or gave them before.
 fn is_glance_task(name: &str) -> bool {
-    [LOGON_TASK, LAUNCH_TASK].iter().any(|base| {
+    [LOGON_TASK, LAUNCH_TASK, REMOTE_TASK].iter().any(|base| {
         name.strip_prefix(base).is_some_and(|rest| rest.is_empty() || rest.strip_prefix(" S-1-").is_some_and(|sid| !sid.is_empty() && sid.chars().all(|c| c.is_ascii_digit() || c == '-')))
     })
 }
@@ -1022,6 +1025,73 @@ pub fn set_autostart(enabled: bool) -> bool {
     autostart_enabled()
 }
 
+// ---- The phone remote ----
+
+fn remote_task() -> String {
+    format!("{REMOTE_TASK} {}", user_sid().unwrap_or_default())
+}
+
+/// A task that runs `helper` as the user, with no more than a user's
+/// rights, at sign-in and for as long as it runs.
+fn remote_task_xml(helper: &Path) -> String {
+    // The account by its identifier, which Windows itself gives (its name
+    // as the environment has it may be missing or another's).
+    let user = user_sid().unwrap_or_default();
+    let escape = |text: &str| text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><LogonTrigger><UserId>{user}</UserId></LogonTrigger></Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec><Command>{helper}</Command></Exec>
+  </Actions>
+</Task>"#,
+        user = escape(&user),
+        helper = escape(&helper.display().to_string()),
+    )
+}
+
+/// Whether this account's task runs the remote at `helper`.
+pub fn remote_enabled(helper: &Path) -> bool {
+    task_program(&remote_task()).is_some_and(|program| same_path(Path::new(&program), helper))
+}
+
+/// Turns the phone remote on (its task registered, and run now) or off
+/// (stopped, its task gone); returns whether it is on then.
+pub fn set_remote(helper: &Path, on: bool) -> bool {
+    let name = remote_task();
+    let Some(folder) = task_folder() else { return false };
+    let none = VARIANT::default();
+    unsafe {
+        if on {
+            let registered = folder.RegisterTask(&BSTR::from(name.as_str()), &BSTR::from(remote_task_xml(helper)), TASK_CREATE_OR_UPDATE.0, &none, &none, TASK_LOGON_INTERACTIVE_TOKEN, &none);
+            if let Ok(task) = registered {
+                let _ = task.Run(&none);
+            }
+        } else {
+            if let Ok(task) = folder.GetTask(&BSTR::from(name.as_str())) {
+                let _ = task.Stop(0);
+            }
+            delete_task(&name);
+        }
+    }
+    remote_enabled(helper)
+}
+
 // ---- The driver ----
 
 /// The PawnIO driver's version, if it is installed.
@@ -1074,6 +1144,17 @@ fn mark_pawnio_ours() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "registers this account's task for the remote on this machine, and runs it"]
+    fn turns_the_remote_on() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let helper = std::path::PathBuf::from(std::env::var("GLANCE_REMOTE_HELPER").expect("the helper's path"));
+        assert!(super::set_remote(&helper, true));
+        assert!(super::remote_enabled(&helper));
+    }
+
     use super::*;
 
     #[test]

@@ -332,10 +332,12 @@ enum Page {
     Shown,
     Overlay,
     Data,
+    /// The phone remote: on or off, and the phones paired with it.
+    Remote,
     System,
 }
 
-const PAGES: [Page; 6] = [Page::Appearance, Page::Opening, Page::Shown, Page::Overlay, Page::Data, Page::System];
+const PAGES: [Page; 7] = [Page::Appearance, Page::Opening, Page::Shown, Page::Overlay, Page::Data, Page::Remote, Page::System];
 
 impl Page {
     fn name(self, lang: Lang) -> &'static str {
@@ -345,6 +347,7 @@ impl Page {
             Page::Shown => pick(lang, "显示内容", "Shown"),
             Page::Overlay => pick(lang, "悬浮窗", "Overlay"),
             Page::Data => pick(lang, "数据", "Data"),
+            Page::Remote => pick(lang, "手机遥控", "Phone"),
             Page::System => pick(lang, "系统", "System"),
         }
     }
@@ -357,6 +360,7 @@ impl Page {
             Page::Shown => "\u{E8A9}",
             Page::Overlay => "\u{E9D9}",
             Page::Data => "\u{E9D2}",
+            Page::Remote => "\u{E8EA}",
             Page::System => "\u{E770}",
         }
     }
@@ -411,6 +415,19 @@ enum Switch {
     Overlay,
     OverlayInGame,
     OverlayThrough,
+    /// The phone remote.
+    Remote,
+}
+
+/// What a QR code shown is for.
+#[derive(Clone, Copy, PartialEq)]
+enum CodeFor {
+    /// Where the phone app is to be had.
+    App,
+    /// A pairing, for the app to scan.
+    Pairing,
+    /// A pairing, for a phone's camera: it opens the remote's page.
+    WebPairing,
 }
 
 /// What a press lands on.
@@ -448,6 +465,12 @@ enum Target {
     Update,
     Uninstall,
     Quit,
+    /// Shows the code that leads to the phone app.
+    GetApp,
+    /// Offers a pairing and shows its code: for the app, or (true) for a phone's browser.
+    Pair(bool),
+    /// Unpairs the phone at that place in the remote's list.
+    Unpair(usize),
 }
 
 /// Modules for developers: listed under "More" while off, out of the way.
@@ -477,7 +500,17 @@ enum Row {
     Update,
     Uninstall,
     Quit,
+    /// The phone remote's: where the app is to be had, pairing a phone,
+    /// the code last asked for, and each phone paired (its place in the
+    /// remote's list, and its name).
+    GetApp,
+    Pair,
+    Code,
+    Phone(usize, String),
 }
+
+/// How tall the code's own square is, in its row.
+const CODE: f32 = 176.0;
 
 /// A module row being dragged: by how far below the row's top it was
 /// taken, and where the pointer is (document DIPs).
@@ -537,6 +570,14 @@ struct Ui {
     dark: bool,
     palette: Palette,
     autostart: bool,
+    /// The phone remote: whether this Glance came with it, whether it is
+    /// on, the code shown (and what for), and the phones paired, as last
+    /// read (and when).
+    remote_there: bool,
+    remote: bool,
+    code: Option<(crate::phone::Code, CodeFor)>,
+    phones: Vec<crate::phone::Phone>,
+    phones_at: Instant,
     /// Whether this copy may start with Windows (see elevation.rs).
     may_autostart: bool,
     /// The installer's uninstaller beside this executable, if it was
@@ -660,6 +701,11 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             prefs,
             page: Page::Appearance,
             autostart: elevation::autostart_enabled(),
+            remote_there: crate::phone::helper().is_some(),
+            remote: crate::phone::on(),
+            code: None,
+            phones: crate::phone::phones(),
+            phones_at: Instant::now(),
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
             copied_at: None,
@@ -973,6 +1019,16 @@ impl Ui {
                 Row::Choice(Field::TempAlert),
                 Row::Switch(Switch::HeatAlert),
             ]),
+            Page::Remote => {
+                rows.push(Row::Switch(Switch::Remote));
+                if self.remote {
+                    rows.extend([Row::GetApp, Row::Pair]);
+                    if self.code.is_some() {
+                        rows.push(Row::Code);
+                    }
+                    rows.extend(self.phones.iter().map(|phone| Row::Phone(phone.at, phone.name.clone())));
+                }
+            }
             Page::System => {
                 // The switches together, then the buttons.
                 rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::Updates), Row::Version]);
@@ -1051,6 +1107,7 @@ impl Ui {
                 // Inside its module's card, right under the row above.
                 Row::Item(..) => (0.0, (self.words_height(&row) - ROW + ITEM_ROW).max(ITEM_ROW)),
                 Row::ModuleChoice(..) => (0.0, ITEM_ROW),
+                Row::Code => (ROW_GAP, CODE + 2.0 * ROW_SIDE),
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, self.words_height(&row).max(ROW)),
             };
             y += before;
@@ -1302,6 +1359,21 @@ impl Ui {
                 p("卸载 Glance", "Uninstall Glance"),
                 p("连同设置一起删除，会先确认", "Removes it and its settings; asks first"),
                 vec![(p("卸载", "Uninstall"), Target::Uninstall, Button::Plain)],
+            ),
+            Row::GetApp => (
+                p("下载手机 APP", "Get the phone app"),
+                p("安卓手机扫码下载；iPhone 暂时用下面的网页", "Scan with an Android phone to download it; on an iPhone, use the web page below for now"),
+                vec![(p("显示二维码", "Show the code"), Target::GetApp, Button::Plain)],
+            ),
+            Row::Pair => (
+                p("配对一部手机", "Pair a phone"),
+                p("每个配对码只给一部手机用，10 分钟内有效", "Each code is for one phone, and lasts ten minutes"),
+                vec![(p("用 APP", "For the app"), Target::Pair(false), Button::Accent), (p("用网页", "For the web page"), Target::Pair(true), Button::Plain)],
+            ),
+            Row::Phone(at, name) => (
+                if name.is_empty() { p("一部手机", "A phone") } else { name.clone() },
+                p("已配对", "Paired"),
+                vec![(p("移除", "Remove"), Target::Unpair(*at), Button::Plain)],
             ),
             Row::Quit => (
                 p("退出 Glance", "Quit Glance"),
@@ -1604,6 +1676,14 @@ impl Ui {
                 Some(p("达到温度警示值 30 秒后从托盘提醒", "A tray warning after 30 s at the alert")),
                 self.settings.heat_alert,
             ),
+            Switch::Remote => {
+                let hint = if self.remote_there {
+                    p("用手机关屏、关灯、调音量和亮度。开启后会运行一个不提权的小程序，只对本地网络开放", "Screens, lights, volume and brightness from a phone. On, a small program runs (never elevated), open to the local network only")
+                } else {
+                    p("这份 Glance 没有带遥控程序", "This copy of Glance came without the remote")
+                };
+                return (p("手机遥控", "Phone remote"), Some(Cow::Borrowed(hint)), self.remote);
+            }
             // The version this is, where the user looks for a newer one.
             Switch::Updates => {
                 return (p("自动检查更新", "Check for updates by itself"), Some(Cow::Borrowed(p("每天检查一次", "Once a day"))), self.settings.check_updates);
@@ -1649,6 +1729,16 @@ impl Ui {
             Switch::OverlayThrough => settings.overlay.click_through ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
+                return;
+            }
+            Switch::Remote => {
+                // What the system then reports, not what was asked.
+                if self.remote_there {
+                    self.remote = crate::phone::turn(!self.remote);
+                    self.code = None;
+                    self.phones = crate::phone::phones();
+                }
+                self.next_frame = Instant::now();
                 return;
             }
             Switch::Startup => {
@@ -2037,6 +2127,12 @@ impl Ui {
                 }
             }
             Target::Quit => crate::quit(),
+            Target::GetApp => self.code = crate::phone::app_code().map(|code| (code, CodeFor::App)),
+            Target::Pair(web) => self.code = crate::phone::offer(web).map(|code| (code, if web { CodeFor::WebPairing } else { CodeFor::Pairing })),
+            Target::Unpair(at) => {
+                crate::phone::unpair(at);
+                self.phones = crate::phone::phones();
+            }
             // Slid by the pointer, stepped by the arrows; pressing alone does nothing more.
             Target::Grip(_) | Target::Slider(_) => {}
         }
@@ -2094,6 +2190,10 @@ impl Ui {
                 Row::Diagnostics => vec![Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
+                Row::GetApp => vec![Target::GetApp],
+                Row::Pair => vec![Target::Pair(false), Target::Pair(true)],
+                Row::Phone(at, _) => vec![Target::Unpair(at)],
+                Row::Code => vec![],
                 Row::More(_) => vec![Target::More],
                 Row::Title => vec![],
             }))
@@ -2226,6 +2326,8 @@ impl Ui {
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
+            (Row::GetApp, Target::GetApp) | (Row::Pair, Target::Pair(_)) => true,
+            (Row::Phone(a, _), Target::Unpair(b)) => a == b,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Slider(f), Target::Slider(g)) => f == g,
@@ -2457,6 +2559,16 @@ impl Ui {
         let label = Font::new(Family::Segoe, 14.0, 400.0);
         let hint = Font::new(Family::Segoe, 12.0, 400.0);
         let mut dragged = None;
+        // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered appears, and its code goes.
+        if self.page == Page::Remote && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
+            let phones = crate::phone::phones();
+            if phones.len() > self.phones.len() && self.code.as_ref().is_some_and(|(_, what)| *what != CodeFor::App) {
+                self.code = None;
+            }
+            self.phones = phones;
+            self.phones_at = now;
+            self.next_frame = now + Duration::from_secs(1);
+        }
         let placed = self.layout();
         // How far each module's card reaches down: its row, and as it opens,
         // that share of the rows inside it; and where the card's top is.
@@ -2720,7 +2832,34 @@ impl Ui {
                         self.targets.truncate(targets);
                     }
                 }
-                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit => {
+                Row::Code => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    if let Some((code, what)) = &self.code {
+                        // Dark on white whatever the theme (what a phone's camera reads), a margin of four cells round it.
+                        let (x0, y0) = (left + ROW_SIDE, y + ROW_SIDE);
+                        fill(frame, Color::hex(0xFFFFFF, 1.0), x0, y0, CODE, CODE, 8.0);
+                        let cell = CODE / (code.0.len() as f32 + 8.0);
+                        for (down, row) in code.0.iter().enumerate() {
+                            // (Each run of dark cells as one piece, and a hair over the row below: no seams between them.)
+                            let mut across = 0;
+                            while across < row.len() {
+                                let run = row[across..].iter().take_while(|dark| **dark).count();
+                                if run > 0 {
+                                    fill(frame, Color::hex(0x000000, 1.0), x0 + (across as f32 + 4.0) * cell, y0 + (down as f32 + 4.0) * cell, run as f32 * cell, cell + 0.3, 0.0);
+                                }
+                                across += run.max(1);
+                            }
+                        }
+                        let (title, word) = match what {
+                            CodeFor::App => (pick(lang, "用手机扫描，下载 Glance", "Scan with the phone to get Glance"), crate::phone::APP_PAGE.trim_start_matches("https://")),
+                            CodeFor::Pairing => (pick(lang, "打开手机上的 Glance，扫描这个配对码", "Open Glance on the phone and scan this code"), pick(lang, "10 分钟内有效，只给一部手机用", "Good for ten minutes, for one phone")),
+                            CodeFor::WebPairing => (pick(lang, "用手机相机扫描，在浏览器里打开", "Scan with the phone's camera; it opens in the browser"), pick(lang, "10 分钟内有效；打开后可以添加到主屏幕", "Good for ten minutes; the page can then be added to the home screen")),
+                        };
+                        let text_left = x0 + CODE + 20.0;
+                        field_label(frame, palette, title, Some(word), label, hint, text_left, y + row_height / 2.0, left + width - ROW_SIDE - text_left);
+                    }
+                }
+                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit | Row::GetApp | Row::Pair | Row::Phone(..) => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;

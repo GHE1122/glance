@@ -31,6 +31,8 @@ mod panel;
 #[cfg(windows)]
 mod pawnio;
 #[cfg(windows)]
+mod phone;
+#[cfg(windows)]
 mod presents;
 mod os;
 mod reading;
