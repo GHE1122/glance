@@ -86,6 +86,9 @@ pub struct Scene<'a> {
     /// its own pin and menu, and its game button: a game asked for or
     /// turned off by hand shows in widgets, not the panel).
     pub buttons: bool,
+    /// A newer Glance is out: a dot on the settings button, for whoever
+    /// did not see it said.
+    pub newer: bool,
 }
 
 impl Scene<'_> {
@@ -1492,6 +1495,9 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
         let icon = Font::new(Family::Icons, 16.0, 400.0);
         let glyph_left = left + (BUTTON - frame.measure(glyph, icon)) / 2.0;
         frame.text(glyph, icon, if hovered || lit { theme.text } else { theme.text2 }, glyph_left, top + 8.0, BUTTON, Align::Start);
+        if hit == Hit::Settings && scene.newer {
+            frame.fill_circle(super::theme::accent(theme.dark), Point { x: left + BUTTON - 7.0, y: top + 7.0 }, 3.0);
+        }
         hits.push((left, top, BUTTON, BUTTON, hit));
     }
     frame.key("");
@@ -1617,7 +1623,7 @@ mod tests {
         read.threads_ghz = vec![Some(5.0), Some(4.5), Some(5.4), Some(4.2)];
         let history = leak(vec![read]);
         let seen = Box::leak(Box::new(Seen::of(history)));
-        let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true };
+        let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
         let cpu = lane(&scene, "cpu", Detail::Full).unwrap();
         let tags: Vec<&String> = cpu.iter().filter_map(|block| if let Block::Threads(cells) = block { Some(cells.iter().map(|(_, _, tag)| tag)) } else { None }).flatten().collect();
         assert_eq!(tags[2], "Thread 3 · 5.40 GHz · 10%");
@@ -1627,7 +1633,7 @@ mod tests {
     fn shows_each_kind_of_cores_clock() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
         // Big and little cores: each kind's clock, in place of the one clock.
         let mut hybrid = sample(None, None, None);
         hybrid.kinds_ghz = vec![Some(5.2), None];
@@ -1640,7 +1646,7 @@ mod tests {
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
@@ -1664,7 +1670,7 @@ mod tests {
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
@@ -1682,7 +1688,7 @@ mod tests {
         two.drives = vec!["NVMe".into(), "SATA".into()];
         two.drive_ids = vec![0, 1];
         let history = leak(vec![with(Vec::new(), vec![(0, 35.0)])]);
-        let scene_two = Scene { info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true };
+        let scene_two = Scene { info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
         let disk = facts(&lane(&scene_two, "disk", Detail::Full).unwrap());
         assert_eq!(&disk[..2], [("NVMe".to_string(), "35 °C".to_string()), ("SATA".to_string(), UNREAD.to_string())]);
         // The first chiplet missed this time: the second's reading stays its own.

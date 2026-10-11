@@ -2440,6 +2440,10 @@ impl Ui {
             let cy = r.y + r.h / 2.0;
             text_centred(frame, page.glyph(), icon, palette.text, r.x + 14.0, cy, 24.0, Align::Start);
             text_centred(frame, page.name(lang), label, palette.text, r.x + 46.0, cy, r.w - 50.0, Align::Start);
+            // A newer Glance is out: a dot on the page it is taken from.
+            if page == Page::System && update::available().is_some() {
+                fill(frame, palette.selection, r.x + r.w - 20.0, cy - 3.0, 6.0, 6.0, 3.0);
+            }
             self.targets.push((r, target));
         }
     }
@@ -3050,7 +3054,7 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true };
+        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let heights: Vec<f32> = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
         let size = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
@@ -3070,7 +3074,7 @@ impl Ui {
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true };
+        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let lanes = view::lanes(&scene);
 
         // The whole height of the screen, and the whole panel with a strip of

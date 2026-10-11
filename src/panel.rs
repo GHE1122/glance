@@ -2186,6 +2186,7 @@ fn scene<'s>(
         pinned,
         overlay,
         buttons: true,
+        newer: crate::update::available().is_some(),
     }
 }
 
