@@ -97,7 +97,10 @@ pub fn turn(on: bool) -> bool {
     // (Whatever rule of that name there was goes first: one, and current.)
     firewall(&["delete", "rule", &name]);
     if on {
-        firewall(&["add", "rule", &name, "dir=in", "action=allow", "protocol=TCP", &format!("localport={PORT}"), "remoteip=localsubnet", "profile=any", &format!("program={}", helper.display())]);
+        // (What phones ask of it, and their looking for it when its address has changed.)
+        for protocol in ["protocol=TCP", "protocol=UDP"] {
+            firewall(&["add", "rule", &name, "dir=in", "action=allow", protocol, &format!("localport={PORT}"), "remoteip=localsubnet", "profile=any", &format!("program={}", helper.display())]);
+        }
     }
     elevation::set_remote(&helper, on)
 }

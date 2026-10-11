@@ -28,6 +28,23 @@ pub fn key(text: &str) -> Option<[u8; 32]> {
     unhex(text)?.try_into().ok()
 }
 
+/// What a phone names its key by, looking for its PC on the network (the
+/// PC's address may have changed): the start of the key's digest, which
+/// says nothing of the key to whoever hears it.
+pub fn key_id(key: &[u8; 32]) -> String {
+    use sha2::Digest;
+    hex(&Sha256::digest(key)[..8])
+}
+
+/// The PC's answer to a phone looking for it: proof that it holds the
+/// key, over the number the phone made up for this asking.
+pub fn here(key: &[u8; 32], nonce: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("a key of any length");
+    mac.update(b"here\n");
+    mac.update(nonce.as_bytes());
+    hex(&mac.finalize().into_bytes())
+}
+
 /// What a request signs: its method, its path, its time, its number and
 /// its body.
 fn signing(key: &[u8; 32], method: &str, path: &str, time: &str, nonce: &str, body: &[u8]) -> Hmac<Sha256> {
@@ -89,6 +106,17 @@ pub fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_is_named_and_answered_for_without_being_said() {
+        let key = [7u8; 32];
+        assert_eq!(key_id(&key).len(), 16);
+        assert_ne!(key_id(&key), key_id(&[8u8; 32]));
+        // The answer is for that asking alone, and that key's alone.
+        assert_ne!(here(&key, "aa"), here(&key, "ab"));
+        assert_ne!(here(&key, "aa"), here(&[8u8; 32], "aa"));
+        assert_eq!(here(&key, "aa").len(), 64);
+    }
 
     #[test]
     fn only_the_paired_phones_requests_are_taken_and_once() {

@@ -579,6 +579,29 @@ fn main() -> std::io::Result<()> {
     }
     display::watch();
     let listener = TcpListener::bind(("0.0.0.0", config.port))?;
+    // A phone that has lost this PC (its address changed) asks the whole
+    // network for it by its key's name: answered with proof of the key,
+    // from the address this PC has now.
+    if let Ok(asked) = UdpSocket::bind(("0.0.0.0", config.port)) {
+        std::thread::spawn(move || {
+            let mut packet = [0u8; 256];
+            loop {
+                let Ok((length, from)) = asked.recv_from(&mut packet) else { continue };
+                let text = String::from_utf8_lossy(&packet[..length]);
+                let mut words = text.split(' ');
+                let (Some("glance-find"), Some(id), Some(nonce)) = (words.next(), words.next(), words.next()) else { continue };
+                if nonce.is_empty() || nonce.len() > 64 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    continue;
+                }
+                let now = sign::now();
+                let phones = Config::load().phones;
+                let key = phones.iter().filter(|phone| phone.offered_till.is_none_or(|till| till > now)).filter_map(|phone| sign::key(&phone.key)).find(|key| sign::key_id(key) == id);
+                if let Some(key) = key {
+                    let _ = asked.send_to(format!("glance-here {nonce} {}", sign::here(&key, nonce)).as_bytes(), from);
+                }
+            }
+        });
+    }
     // (Whether the lights are on, as OpenRGB has them if it is running.)
     let state = State { lights: lights::lit(), ..State::default() };
     let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), keys: Mutex::new(config.keys), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false) });

@@ -149,7 +149,9 @@ private fun App(opened: String?, taken: () -> Unit) {
                 Empty(scan) { wrong = false; page = Page.Pairing }
             } else {
                 // Each PC with what was last heard of it, not the one before it.
-                key(pc.key) { Control(pc, shown, colours) { kept -> Look.keep(context, kept); colours = kept } }
+                key(pc.key) {
+                    Control(pc, shown, colours, moved = { host -> Pcs.move(context, pc.key, host); pcs = Pcs.all(context) }) { kept -> Look.keep(context, kept); colours = kept }
+                }
             }
         }
         // A page over the main one covers it, and takes what is pressed.
@@ -298,7 +300,7 @@ private class Asking(val what: String, val path: String, val body: JSONObject)
 
 /** A PC paired with: how it is, and what it may be asked. */
 @Composable
-private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, keep: (List<String>) -> Unit) {
+private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, moved: (String) -> Unit, keep: (List<String>) -> Unit) {
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf<PcState?>(null) }
     var failure by remember { mutableStateOf<Failure?>(null) }
@@ -351,6 +353,8 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
     LaunchedEffect(pc) {
         while (true) {
             if (busy == null) ask("/v1/state")
+            // Not answering where it was: looked for on the network, in case its address has changed.
+            if (failure == Failure.Unreachable) withContext(Dispatchers.IO) { pc.find() }?.takeIf { it != pc.host }?.let(moved)
             delay(1500)
         }
     }

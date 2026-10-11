@@ -72,6 +72,11 @@ object Pcs {
         keep(context, list, if (at >= 0) at else list.size - 1)
     }
 
+    /** The PC with that key is at [host] now. */
+    fun move(context: Context, key: String, host: String) {
+        keep(context, all(context).map { if (it.key == key) it.copy(host = host) else it }, chosen(context))
+    }
+
     fun remove(context: Context, at: Int) {
         val list = all(context).toMutableList()
         if (at in list.indices) list.removeAt(at)
@@ -199,6 +204,40 @@ fun Pc.ask(path: String, body: JSONObject? = null): PcState {
 }
 
 fun on(value: Boolean) = JSONObject().put("on", value)
+
+/**
+ * Looks for the PC on the network the phone is on now (its address may
+ * have changed since it was paired): everyone there is asked for the PC
+ * that holds this key, by the key's name; the PC proves it holds it. Its
+ * address, or none if it does not answer. Blocks for a second at most.
+ */
+fun Pc.find(): String? {
+    val secret = unhex(key)
+    val id = hex(java.security.MessageDigest.getInstance("SHA-256").digest(secret).copyOf(8))
+    val nonce = hex(ByteArray(8).also { SecureRandom().nextBytes(it) })
+    val proof = hex(Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(secret, "HmacSHA256")) }.doFinal("here\n$nonce".toByteArray()))
+    return runCatching {
+        java.net.DatagramSocket().use { socket ->
+            socket.broadcast = true
+            socket.soTimeout = 350
+            val asked = "glance-find $id $nonce".toByteArray()
+            // To everyone on each network this phone is on.
+            val everyone = java.net.NetworkInterface.getNetworkInterfaces().toList().filter { it.isUp && !it.isLoopback }.flatMap { it.interfaceAddresses }.mapNotNull { it.broadcast } + java.net.InetAddress.getByName("255.255.255.255")
+            for (address in everyone.distinct()) runCatching { socket.send(java.net.DatagramPacket(asked, asked.size, address, port)) }
+            val answer = java.net.DatagramPacket(ByteArray(256), 256)
+            val until = System.currentTimeMillis() + 1000
+            while (System.currentTimeMillis() < until) {
+                try {
+                    socket.receive(answer)
+                } catch (late: java.net.SocketTimeoutException) {
+                    continue
+                }
+                if (String(answer.data, 0, answer.length) == "glance-here $nonce $proof") return@use answer.address.hostAddress
+            }
+            null
+        }
+    }.getOrNull()
+}
 
 /** What the main page shows, and the colours to light the PC in: this phone's own, kept in the app's storage. */
 object Look {
