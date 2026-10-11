@@ -8,6 +8,10 @@
 //!     glance-remote lights     lists the lighting devices OpenRGB reaches
 //!     glance-remote monitors   lists the monitors and what they answer over DDC/CI
 
+// No console of its own: it runs unseen for as long as the remote is on.
+// (Asked something from a terminal, it answers into that terminal: see `main`.)
+#![windows_subsystem = "windows"]
+
 mod actions;
 mod config;
 mod cooler;
@@ -461,7 +465,28 @@ fn pairing(config: &Config, key: &str) -> String {
     format!("glance://pair?h={}&p={}&k={key}&n={}", address().unwrap_or_default(), config.port, escaped(&config.name))
 }
 
+/// What this says goes to whoever started it and gave it somewhere to say
+/// it (Glance, reading it); started from a terminal with nowhere given, to
+/// that terminal.
+fn speak_to_the_terminal() {
+    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    use windows::Win32::System::Console::{AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    unsafe {
+        if GetStdHandle(STD_OUTPUT_HANDLE).is_ok_and(|given| !given.is_invalid() && !given.0.is_null()) {
+            return;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_ok() {
+            if let Ok(terminal) = CreateFileW(windows::core::w!("CONOUT$"), (GENERIC_READ | GENERIC_WRITE).0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, Default::default(), None) {
+                let _ = SetStdHandle(STD_OUTPUT_HANDLE, terminal);
+                let _ = SetStdHandle(STD_ERROR_HANDLE, terminal);
+            }
+        }
+    }
+}
+
 fn main() -> std::io::Result<()> {
+    speak_to_the_terminal();
     // The monitors' sizes in their own pixels, whatever each one's scale.
     let _ = unsafe { windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let config = Config::load();

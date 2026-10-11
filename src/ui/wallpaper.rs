@@ -139,6 +139,25 @@ fn file(path: &str, width: u32, height: u32) -> Result<Vec<u8>> {
     }
 }
 
+/// A picture kept in the program itself (a JPEG or a PNG, whole), read:
+/// its size and its pixels, rows top to bottom, premultiplied BGRA.
+pub fn picture(file: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    unsafe {
+        let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let stream = factory.CreateStream().ok()?;
+        stream.InitializeFromMemory(file).ok()?;
+        let decoder = factory.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
+        let image = decoder.GetFrame(0).ok()?;
+        let (mut width, mut height) = (0, 0);
+        image.GetSize(&mut width, &mut height).ok()?;
+        let converter = factory.CreateFormatConverter().ok()?;
+        converter.Initialize(&image, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).ok()?;
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        converter.CopyPixels(std::ptr::null(), width * 4, &mut pixels).ok()?;
+        Some((width, height, pixels))
+    }
+}
+
 /// `image` scaled to cover `width` × `height` and cropped to it about its
 /// centre, as premultiplied BGRA.
 fn cover(factory: &IWICImagingFactory, image: &IWICBitmapSource, width: u32, height: u32) -> Result<Vec<u8>> {
