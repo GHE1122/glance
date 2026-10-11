@@ -10,10 +10,12 @@ use std::time::{Duration, Instant};
 use windows::core::{w, Result, BOOL, GUID};
 use windows::Win32::Devices::Display::{
     DestroyPhysicalMonitors, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR,
-    GetVCPFeatureAndVCPFeatureReply, QueryDisplayConfig, SetVCPFeature, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    GetVCPFeatureAndVCPFeatureReply, QueryDisplayConfig, SetVCPFeature, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
     DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, PHYSICAL_MONITOR, QDC_ONLY_ACTIVE_PATHS,
 };
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW};
 use windows::Win32::System::Power::{RegisterPowerSettingNotification, SetThreadExecutionState, ES_DISPLAY_REQUIRED, POWERBROADCAST_SETTING};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT};
@@ -119,7 +121,7 @@ fn text(wide: &[u16]) -> String {
 /// Each display output in use (as `\\.\DISPLAY1`) with the name the
 /// monitor on it gives itself ("DELL S2725QS"): what Windows' own display
 /// settings call it.
-fn names() -> Vec<(String, String)> {
+fn names() -> Vec<(String, String, bool)> {
     let (mut paths, mut modes) = (0u32, 0u32);
     if unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut paths, &mut modes) }.is_err() {
         return Vec::new();
@@ -138,7 +140,9 @@ fn names() -> Vec<(String, String)> {
             target.header = DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32, adapterId: path.targetInfo.adapterId, id: path.targetInfo.id };
             let got = unsafe { DisplayConfigGetDeviceInfo(&mut source.header) == 0 && DisplayConfigGetDeviceInfo(&mut target.header) == 0 };
             let name = text(&target.monitorFriendlyDeviceName);
-            (got && !name.is_empty()).then(|| (text(&source.viewGdiDeviceName), name))
+            // A screen that is part of the PC itself (a laptop's): wired inside it.
+            let built_in = [DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED].contains(&path.targetInfo.outputTechnology);
+            got.then(|| (text(&source.viewGdiDeviceName), name, built_in))
         })
         .collect()
 }
@@ -161,8 +165,8 @@ static TURNED_OFF: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 /// Goes through every monitor that is connected, in the order Windows has
 /// them: `with` is handed each one's place in that order, its name, where
-/// it is on the desktop and its handle for DDC/CI.
-fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32, i32, i32), HANDLE)) {
+/// it is on the desktop, whether it is the PC's own screen, and its handle for DDC/CI.
+fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32, i32, i32), bool, HANDLE)) {
     let names = names();
     unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, found: LPARAM) -> BOOL {
         unsafe { &mut *(found.0 as *mut Vec<HMONITOR>) }.push(monitor);
@@ -178,7 +182,9 @@ fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32, i32, i32), HANDLE
         let at = info.monitorInfo.rcMonitor;
         let place = (at.left, at.top, at.right - at.left, at.bottom - at.top);
         let output = text(&info.szDevice);
-        let named = names.iter().find(|(source, _)| *source == output).map(|(_, name)| name.clone());
+        let known = names.iter().find(|(source, _, _)| *source == output);
+        let named = known.map(|(_, name, _)| name.clone()).filter(|name| !name.is_empty());
+        let built_in = known.is_some_and(|(_, _, built_in)| *built_in);
         let mut count = 0;
         if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(screen, &mut count) }.is_err() || count == 0 {
             continue;
@@ -190,7 +196,7 @@ fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32, i32, i32), HANDLE
         for one in &physical {
             // As the monitor names itself; one that does not, as its driver does.
             let described = one.szPhysicalMonitorDescription;
-            with(index, named.clone().unwrap_or_else(|| text(&described)), place, one.hPhysicalMonitor);
+            with(index, named.clone().unwrap_or_else(|| text(&described)), place, built_in, one.hPhysicalMonitor);
             index += 1;
         }
         let _ = unsafe { DestroyPhysicalMonitors(&physical) };
@@ -212,6 +218,35 @@ fn brightness(monitor: HANDLE) -> Option<u8> {
     asked(monitor, BRIGHTNESS).filter(|(_, most)| *most > 0).map(|(now, most)| ((now.min(most) * 100 + most / 2) / most) as u8)
 }
 
+/// Windows' own way to a laptop's screen: how bright it is, asked and set
+/// (IOCTL_VIDEO_QUERY_DISPLAY_BRIGHTNESS and _SET_).
+const PANEL_BRIGHTNESS: u32 = 0x0023_0498;
+const SET_PANEL_BRIGHTNESS: u32 = 0x0023_049C;
+
+fn panel() -> Option<HANDLE> {
+    unsafe { CreateFileW(windows::core::w!(r"\\.\LCD"), (GENERIC_READ | GENERIC_WRITE).0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, Default::default(), None) }.ok()
+}
+
+/// How bright the PC's own screen is (percent), as it is powered now.
+fn panel_brightness() -> Option<u8> {
+    let panel = panel()?;
+    // Which of the two that follow is in force (1, on mains; 2, on battery), on mains, on battery.
+    let mut answer = [0u8; 3];
+    let mut length = 0u32;
+    let read = unsafe { DeviceIoControl(panel, PANEL_BRIGHTNESS, None, 0, Some(answer.as_mut_ptr().cast()), 3, Some(&mut length), None) };
+    let _ = unsafe { CloseHandle(panel) };
+    (read.is_ok() && length == 3).then(|| if answer[0] == 2 { answer[2] } else { answer[1] })
+}
+
+/// Makes the PC's own screen as bright as `percent`, on mains and on battery alike.
+fn set_panel_brightness(percent: u8) -> bool {
+    let Some(panel) = panel() else { return false };
+    let asked = [3u8, percent, percent];
+    let set = unsafe { DeviceIoControl(panel, SET_PANEL_BRIGHTNESS, Some(asked.as_ptr().cast()), 3, None, 0, None, None) };
+    let _ = unsafe { CloseHandle(panel) };
+    set.is_ok()
+}
+
 /// Every monitor that is connected, as it answered within `KNOWN_FOR`.
 pub fn monitors() -> Vec<Monitor> {
     let mut known = KNOWN.lock().unwrap();
@@ -219,7 +254,11 @@ pub fn monitors() -> Vec<Monitor> {
         return monitors.clone();
     }
     let mut found = Vec::new();
-    each_monitor(|_, name, place, monitor| found.push(Monitor { name, place, on: ask(monitor, POWER_MODE).map(|mode| mode == POWER_ON), brightness: brightness(monitor) }));
+    each_monitor(|_, name, place, built_in, monitor| {
+        // A laptop's own screen says how bright it is through Windows, not over DDC/CI.
+        let bright = brightness(monitor).or_else(|| built_in.then(panel_brightness).flatten());
+        found.push(Monitor { name, place, on: ask(monitor, POWER_MODE).map(|mode| mode == POWER_ON), brightness: bright })
+    });
     *known = Some((Instant::now(), found.clone()));
     found
 }
@@ -228,7 +267,7 @@ pub fn monitors() -> Vec<Monitor> {
 /// `code` is `value`: whether it took it.
 pub fn tell(index: usize, code: u8, value: u32) -> bool {
     let mut told = false;
-    each_monitor(|at, _, _, monitor| {
+    each_monitor(|at, _, _, _, monitor| {
         if at == index {
             told = unsafe { SetVCPFeature(monitor, code, value) } != 0;
         }
@@ -240,10 +279,12 @@ pub fn tell(index: usize, code: u8, value: u32) -> bool {
 /// whether it took it.
 pub fn dim(index: usize, percent: u8) -> bool {
     let mut told = false;
-    each_monitor(|at, _, _, monitor| {
+    each_monitor(|at, _, _, built_in, monitor| {
         if at == index {
             if let Some((_, most)) = asked(monitor, BRIGHTNESS).filter(|(_, most)| *most > 0) {
                 told = unsafe { SetVCPFeature(monitor, BRIGHTNESS, (percent.min(100) as u32 * most + 50) / 100) } != 0;
+            } else if built_in {
+                told = set_panel_brightness(percent.min(100));
             }
         }
     });

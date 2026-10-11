@@ -493,6 +493,23 @@ fn main() -> std::io::Result<()> {
             }
             return Ok(());
         }
+        // glance-remote dim MONITOR PERCENT: one monitor as bright as that.
+        Some("dim") => {
+            let number = |at: usize| std::env::args().nth(at).and_then(|text| text.parse::<usize>().ok());
+            if let (Some(monitor), Some(percent)) = (number(2), number(3)) {
+                println!("{}", if display::dim(monitor, percent.min(100) as u8) { "taken" } else { "not taken" });
+            }
+            return Ok(());
+        }
+        // glance-remote screen off|on: every screen.
+        Some("screen") => {
+            if std::env::args().nth(2).as_deref() == Some("off") {
+                println!("{:?}", display::sleep());
+            } else {
+                display::wake();
+            }
+            return Ok(());
+        }
         // glance-remote vcp MONITOR CODE VALUE: one feature of one monitor, set.
         Some("vcp") => {
             let number = |at: usize, radix: u32| std::env::args().nth(at).and_then(|text| u32::from_str_radix(&text, radix).ok());
