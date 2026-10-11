@@ -46,6 +46,9 @@ const LIT: Color = Color::hex(0x2E211D, 1.0);
 const STEEL: Color = Color::hex(0x8EA2C0, 1.0);
 
 type Point = [f32; 3];
+/// A figure of a path: where it starts, its curves (each by a corner, to
+/// an end), and whether it closes.
+type Figure = (Vector2, Vec<(Vector2, Vector2)>, bool);
 
 /// A point of the case as it is seen: x to the right and down, y to the
 /// left and down, z up.
@@ -91,7 +94,7 @@ struct Picture<'a> {
 impl Picture<'_> {
     /// A path through `figures` (each a start, then curves by a corner and
     /// an end; closed or left open), as the case's room has it.
-    fn path(&self, figures: &[(Vector2, Vec<(Vector2, Vector2)>, bool)], through: Matrix3x2) -> Option<ID2D1Geometry> {
+    fn path(&self, figures: &[Figure], through: Matrix3x2) -> Option<ID2D1Geometry> {
         unsafe {
             let path = self.frame.gfx.factory.CreatePathGeometry().ok()?;
             let sink = path.Open().ok()?;
