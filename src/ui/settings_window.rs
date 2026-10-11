@@ -471,7 +471,7 @@ enum Target {
     GetApp,
     /// Offers a pairing and shows its code: for the app, or (true) for a phone's browser.
     Pair(bool),
-    /// Unpairs the phone at that place in the remote's list.
+    /// Unpairs the phone at that place among those shown.
     Unpair(usize),
     /// Sends the diagnostics to Glance's site, shown first in a window of
     /// their own to be read and agreed to.
@@ -1064,7 +1064,7 @@ impl Ui {
                     // The phones paired, a group of their own.
                     if !self.phones.is_empty() {
                         rows.push(Row::Group(pick(self.lang, "已配对的手机", "Phones paired")));
-                        rows.extend(self.phones.iter().map(|phone| Row::Phone(phone.at, phone.name.clone())));
+                        rows.extend(self.phones.iter().enumerate().map(|(at, phone)| Row::Phone(at, phone.name.clone())));
                     }
                 }
             }
@@ -2218,7 +2218,9 @@ impl Ui {
             Target::GetApp => self.code = crate::phone::app_code().map(|code| (code, CodeFor::App)),
             Target::Pair(web) => self.code = crate::phone::offer(web).map(|code| (code, if web { CodeFor::WebPairing } else { CodeFor::Pairing })),
             Target::Unpair(at) => {
-                crate::phone::unpair(at);
+                if let Some(phone) = self.phones.get(at) {
+                    crate::phone::unpair(&phone.id);
+                }
                 self.phones = crate::phone::phones();
             }
             // Slid by the pointer, stepped by the arrows; pressing alone does nothing more.

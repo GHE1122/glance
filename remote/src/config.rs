@@ -101,6 +101,9 @@ const OFFERED_FOR: u64 = 600;
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Phone {
+    /// What it is told from the others by, to whoever lists them: the name
+    /// of its key (see `sign::key_id`), which says nothing of the key.
+    pub id: String,
     /// The key shared with it (hex, 32 bytes).
     pub key: String,
     /// What it calls itself.
@@ -113,24 +116,75 @@ pub struct Phone {
     pub offered_till: Option<u64>,
 }
 
+/// Held while the configuration is read, changed and kept again: by one
+/// of this program at a time, whichever of them (the one listening, and
+/// those Glance asks things of) and whichever of its threads.
+struct Alone(windows::Win32::Foundation::HANDLE);
+
+impl Alone {
+    fn wait() -> std::io::Result<Alone> {
+        use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject, INFINITE};
+        unsafe {
+            let held = CreateMutexW(None, false, windows::core::w!("Local\\dev.weiyi.glance.remote.config")).map_err(std::io::Error::other)?;
+            // (Left held by one that ended before letting go, it is this one's all the same.)
+            WaitForSingleObject(held, INFINITE);
+            Ok(Alone(held))
+        }
+    }
+}
+
+impl Drop for Alone {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::System::Threading::ReleaseMutex(self.0);
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
 impl Config {
-    /// The configuration kept (or a new one), with the pairings offered
-    /// and never taken gone from it, and the one key of before as a
-    /// phone of its own.
-    pub fn load() -> Config {
-        let mut config: Config = std::fs::read_to_string(path()).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+    /// The configuration as it is kept: a new one where none is kept yet;
+    /// not one at all where what is kept cannot be read (it is not to be
+    /// written over as if there had been nothing).
+    fn read() -> std::io::Result<Config> {
+        let mut config: Config = match std::fs::read_to_string(path()) {
+            Ok(text) => serde_json::from_str(&text).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(error) => return Err(error),
+        };
         if crate::sign::key(&config.key).is_some() && !config.phones.iter().any(|phone| phone.key == config.key) {
             config.phones.push(Phone { key: std::mem::take(&mut config.key), ..Phone::default() });
         }
         let now = crate::sign::now();
-        config.phones.retain(|phone| crate::sign::key(&phone.key).is_some() && phone.offered_till.is_none_or(|till| till > now));
-        config
+        // The pairings offered and never taken are gone from it.
+        config.phones.retain(|phone| phone.offered_till.is_none_or(|till| till > now));
+        config.phones.retain_mut(|phone| match crate::sign::key(&phone.key) {
+            Some(key) => {
+                phone.id = crate::sign::key_id(&key);
+                true
+            }
+            None => false,
+        });
+        Ok(config)
+    }
+
+    /// The configuration kept (or a new one), with the one key of before
+    /// as a phone of its own.
+    pub fn load() -> Config {
+        Config::read().unwrap_or_default()
+    }
+
+    /// Whether what is kept can be read (or nothing is kept yet).
+    pub fn readable() -> bool {
+        Config::read().is_ok()
     }
 
     /// Changes the configuration as it is kept now (another of this
-    /// program may have changed it since it was read) and keeps it.
+    /// program may have changed it since it was read) and keeps it: one
+    /// change at a time, each whole.
     pub fn change(with: impl FnOnce(&mut Config)) -> std::io::Result<Config> {
-        let mut config = Config::load();
+        let _alone = Alone::wait()?;
+        let mut config = Config::read()?;
         with(&mut config);
         config.save()?;
         Ok(config)
@@ -151,10 +205,12 @@ impl Config {
         std::fs::metadata(path()).and_then(|file| file.modified()).ok()
     }
 
-    pub fn save(&self) -> std::io::Result<()> {
+    /// Kept whole or not at all: written beside, then put in its place.
+    fn save(&self) -> std::io::Result<()> {
         let path = path();
         std::fs::create_dir_all(path.parent().unwrap())?;
-        std::fs::write(path, serde_json::to_string_pretty(self).unwrap())
+        let beside = path.with_extension("json.new");
+        std::fs::write(&beside, serde_json::to_string_pretty(self).unwrap())?;
+        std::fs::rename(beside, path)
     }
-
 }

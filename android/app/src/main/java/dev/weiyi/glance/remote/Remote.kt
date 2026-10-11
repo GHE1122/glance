@@ -159,20 +159,41 @@ private fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
 
 private fun unhex(text: String) = ByteArray(text.length / 2) { text.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
 
+/** The most of an answer that is read: none of the PC's is near it. */
+private const val MOST = 256 * 1024
+
+/**
+ * What a PC said of itself when it last refused a request as not of now:
+ * which run of its helper it is (a request is signed for one), and how far
+ * its clock is from this phone's (seconds). By the PC's key.
+ */
+private val told = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
+
+private fun mac(key: ByteArray, parts: List<String>, body: ByteArray): String {
+    val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(key, "HmacSHA256")) }
+    for (part in parts) mac.update("$part\n".toByteArray())
+    return hex(mac.doFinal(body))
+}
+
 /**
  * Asks the PC for [path] (with [body], a POST; without, a GET), signed with
- * the shared key over what is asked, when, and a number used once. Blocks:
- * call it off the main thread. A long wait is allowed: the PC may be
- * starting its lighting program.
+ * the shared key over what is asked, when, by which phone, for which run of
+ * the PC's helper, and a number used once; the answer is signed by the PC
+ * in turn, and none that is not is believed. Blocks: call it off the main
+ * thread. A long wait is allowed: the PC may be starting its lighting
+ * program.
  */
-fun Pc.ask(path: String, body: JSONObject? = null): PcState {
+fun Pc.ask(path: String, body: JSONObject? = null): PcState = ask(path, body, again = true)
+
+private fun Pc.ask(path: String, body: JSONObject?, again: Boolean): PcState {
+    val secret = unhex(key)
     val method = if (body == null) "GET" else "POST"
     val sent = body?.toString()?.toByteArray() ?: ByteArray(0)
-    val time = (System.currentTimeMillis() / 1000).toString()
+    val (session, ahead) = told[key] ?: ("" to 0L)
+    val time = (System.currentTimeMillis() / 1000 + ahead).toString()
     val nonce = hex(ByteArray(8).also { SecureRandom().nextBytes(it) })
-    val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(unhex(key), "HmacSHA256")) }
-    for (part in listOf(method, path, time, nonce)) mac.update("$part\n".toByteArray())
-    val sign = hex(mac.doFinal(sent))
+    val name = java.net.URLEncoder.encode(Phone.name, "UTF-8").replace("+", "%20")
+    val sign = mac(secret, listOf(method, path, time, nonce, Phone.id, name, session), sent)
     val connection = try {
         (URL("http://$host:$port$path").openConnection() as HttpURLConnection).apply {
             requestMethod = method
@@ -181,9 +202,10 @@ fun Pc.ask(path: String, body: JSONObject? = null): PcState {
             setRequestProperty("X-Glance-Time", time)
             setRequestProperty("X-Glance-Nonce", nonce)
             setRequestProperty("X-Glance-Sign", sign)
+            setRequestProperty("X-Glance-Session", session)
             // Which phone this is: the PC keeps a key to the phone that first used it.
             setRequestProperty("X-Glance-Phone", Phone.id)
-            setRequestProperty("X-Glance-Name", java.net.URLEncoder.encode(Phone.name, "UTF-8").replace("+", "%20"))
+            setRequestProperty("X-Glance-Name", name)
             if (body != null) {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
@@ -195,11 +217,36 @@ fun Pc.ask(path: String, body: JSONObject? = null): PcState {
     }
     try {
         val status = try { connection.responseCode } catch (error: Exception) { throw Failure.Unreachable }
-        val text = (if (status == 200) connection.inputStream else connection.errorStream)?.use { it.readBytes().decodeToString() } ?: ""
-        val json = runCatching { JSONObject(text) }.getOrElse { JSONObject() }
-        return when (status) {
-            200 -> PcState.from(json)
-            401 -> throw Failure.Refused
+        val answer = try {
+            (if (status == 200) connection.inputStream else connection.errorStream)?.use { from ->
+                val all = java.io.ByteArrayOutputStream()
+                val some = ByteArray(8192)
+                while (true) {
+                    val read = from.read(some)
+                    if (read < 0) break
+                    all.write(some, 0, read)
+                    if (all.size() > MOST) throw Failure.Unreachable
+                }
+                all.toByteArray()
+            } ?: ByteArray(0)
+        } catch (error: java.io.IOException) {
+            throw Failure.Unreachable
+        }
+        // The PC's own, to this asking: signed as only the holder of the key can.
+        val signed = java.security.MessageDigest.isEqual(mac(secret, listOf("answer", nonce, status.toString()), answer).toByteArray(), connection.getHeaderField("X-Glance-Sign").orEmpty().toByteArray())
+        val json = runCatching { JSONObject(answer.decodeToString()) }.getOrElse { JSONObject() }
+        return when {
+            // (Refused by one that does not know the key: there is nothing it could sign with.)
+            status == 401 && !signed -> throw Failure.Refused
+            // Whatever else is not signed is not the PC's.
+            !signed -> throw Failure.Unreachable
+            status == 200 -> PcState.from(json)
+            // Not of now, as the PC has it: asked again, for the run it says it is and by its clock.
+            status == 401 && json.optString("error") == "stale" && again -> {
+                told[key] = json.optString("session") to (json.optLong("time") - System.currentTimeMillis() / 1000)
+                ask(path, body, again = false)
+            }
+            status == 401 -> throw Failure.Refused
             else -> throw Failure.Failed(json.optString("error", status.toString()))
         }
     } finally {

@@ -74,33 +74,69 @@ async function record(request, env) {
   return new Response(null, { status: 204 });
 }
 
-// The most a report may be, and how many one sender may send in a day.
+// The most of a report that is kept (its text, in characters) and the most
+// that is read of what carries it (bytes), how many one sender may send in a day and how many are taken in a
+// day from everyone, and how long one is kept.
 const REPORT_MOST = 32 * 1024;
+const REPORT_BYTES = 4 * REPORT_MOST;
 const REPORTS_A_DAY = 6;
+const REPORTS_A_DAY_IN_ALL = 500;
+const REPORTS_KEPT_FOR = 180 * 86400000;
+
+// What a request carries, as text, if it is no more than `most` bytes: read
+// no further than that.
+async function bodyWithin(request, most) {
+  if (Number(request.headers.get("content-length")) > most || !request.body) return null;
+  const reader = request.body.getReader();
+  const parts = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > most) {
+      await reader.cancel();
+      return null;
+    }
+    parts.push(value);
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) {
+    all.set(part, at);
+    at += part.byteLength;
+  }
+  return new TextDecoder().decode(all);
+}
 
 async function report(request, env) {
-  const body = await request.text();
-  if (body.length > REPORT_MOST * 2) return json({ error: "too long" }, 413);
+  // Only what Glance sends.
+  if (!/^Glance\//.test(request.headers.get("user-agent") || "")) return json({ error: "nothing" }, 400);
+  const body = await bodyWithin(request, REPORT_BYTES);
+  if (body === null) return json({ error: "too long" }, 413);
   let sent;
   try {
     sent = JSON.parse(body);
   } catch {
     return json({ error: "not json" }, 400);
   }
-  const text = clip(sent.text, REPORT_MOST);
-  // Only what Glance sends.
-  if (!text || !/^Glance\//.test(request.headers.get("user-agent") || "")) return json({ error: "nothing" }, 400);
+  if (!sent || typeof sent !== "object" || typeof sent.text !== "string" || !sent.text) return json({ error: "nothing" }, 400);
   const now = Date.now();
   const day = dayOf(now);
   const sender = (await hex(`${await saltOf(env.STATS, day)}|${request.headers.get("cf-connecting-ip") || ""}`)).slice(0, 16);
-  const before = await env.STATS.prepare("SELECT COUNT(*) AS n FROM reports WHERE day = ? AND sender = ?").bind(day, sender).first();
-  if (before.n >= REPORTS_A_DAY) return json({ error: "too many" }, 429);
   // A name of six letters and figures, none easily taken for another.
   const letters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   const id = [...crypto.getRandomValues(new Uint8Array(6))].map((b) => letters[b % letters.length]).join("");
-  await env.STATS.prepare("INSERT INTO reports (id, ts, day, sender, version, country, text) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, now, day, sender, clip(sent.version, 20), request.cf?.country || "", text)
+  // Kept only while there is room for it today (this sender's, and everyone's): counted and kept as one, so that several sent at once are not each counted before any is kept.
+  const kept = await env.STATS.prepare(
+    `INSERT INTO reports (id, ts, day, sender, version, country, text)
+     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+     WHERE (SELECT COUNT(*) FROM reports WHERE day = ?3 AND sender = ?4) < ?8 AND (SELECT COUNT(*) FROM reports WHERE day = ?3) < ?9`,
+  )
+    .bind(id, now, day, sender, clip(sent.version, 20), request.cf?.country || "", clip(sent.text, REPORT_MOST), REPORTS_A_DAY, REPORTS_A_DAY_IN_ALL)
     .run();
+  if (!kept.meta.changes) return json({ error: "too many" }, 429);
+  await env.STATS.prepare("DELETE FROM reports WHERE ts < ?").bind(now - REPORTS_KEPT_FOR).run();
   return json({ id });
 }
 

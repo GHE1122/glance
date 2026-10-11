@@ -62,11 +62,12 @@ pub fn fetch() -> std::io::Result<PathBuf> {
     for source in SOURCES {
         let _ = std::fs::remove_file(&archive);
         // (Windows' own way to fetch a file: by this user's proxy and certificates.)
+        // (Read once: what is checked is what is unpacked, whatever becomes of the file meanwhile.)
         taken = unsafe { URLDownloadToFileW(None, &HSTRING::from(source), &HSTRING::from(archive.as_os_str()), 0, None) }.map_err(other).and_then(|()| {
-            let digest = Sha256::digest(std::fs::read(&archive)?);
-            let digest: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            let fetched = std::fs::read(&archive)?;
+            let digest: String = Sha256::digest(&fetched).iter().map(|byte| format!("{byte:02x}")).collect();
             if digest == DIGEST {
-                Ok(())
+                Ok(fetched)
             } else {
                 Err(other("what was fetched is not the release meant"))
             }
@@ -75,15 +76,15 @@ pub fn fetch() -> std::io::Result<PathBuf> {
             break;
         }
     }
-    let unpacked = taken.and_then(|()| unpack(&archive, &folder));
+    let unpacked = taken.and_then(|fetched| unpack(fetched, &folder));
     let _ = std::fs::remove_file(&archive);
     unpacked?;
     fetched().ok_or_else(|| other("the archive held no OpenRGB"))
 }
 
 /// Unpacks an archive into `folder`: every file under it, none anywhere else.
-fn unpack(archive: &Path, folder: &Path) -> std::io::Result<()> {
-    let mut archive = zip::ZipArchive::new(std::fs::File::open(archive)?).map_err(other)?;
+fn unpack(archive: Vec<u8>, folder: &Path) -> std::io::Result<()> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(other)?;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(other)?;
         // (A name that would lead out of the folder is no file of this archive's.)

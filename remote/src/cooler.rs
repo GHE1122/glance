@@ -14,12 +14,12 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SP_DEVICE_INTERFACE_DETAIL_DATA_W,
 };
 use windows::Win32::Devices::HumanInterfaceDevice::HidD_GetHidGuid;
-use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{CreateFileW, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 use windows::Win32::System::TaskScheduler::{IRegisteredTask, ITaskService, TaskScheduler};
 use windows::Win32::System::Variant::VARIANT;
-use windows::Win32::System::IO::{GetOverlappedResultEx, OVERLAPPED};
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED};
 
 /// The display, as its USB device names itself in its path.
 const DEVICE: &str = "vid_0416&pid_8001";
@@ -127,13 +127,29 @@ impl Display {
         opened.ok().map(Display)
     }
 
+    /// Waits for what was `begun` on the display to be done: how many
+    /// bytes went, if it was in time. One not done in time is called off
+    /// and waited out, so that nothing of it is left to finish into
+    /// `waiting` (or what it reads into) once those are gone.
+    unsafe fn done(&self, begun: windows::core::Result<()>, waiting: &OVERLAPPED) -> Option<u32> {
+        if begun.is_err_and(|error| error.code() != ERROR_IO_PENDING.to_hresult()) {
+            return None;
+        }
+        let mut went = 0;
+        if GetOverlappedResultEx(self.0, waiting, &mut went, WAIT, false).is_ok() {
+            return Some(went);
+        }
+        let _ = CancelIoEx(self.0, Some(waiting));
+        let _ = GetOverlappedResult(self.0, waiting, &mut went, true);
+        None
+    }
+
     /// Writes a packet: whether the display took all of it in time.
     fn write(&self, says: u8, carries: &[u8]) -> bool {
         packet(says, carries).iter().all(|report| unsafe {
             let mut waiting = OVERLAPPED::default();
-            let _ = WriteFile(self.0, Some(report), None, Some(&mut waiting));
-            let mut written = 0;
-            GetOverlappedResultEx(self.0, &waiting, &mut written, WAIT, false).is_ok() && written as usize == report.len()
+            let begun = WriteFile(self.0, Some(report), None, Some(&mut waiting));
+            self.done(begun, &waiting) == Some(report.len() as u32)
         })
     }
 
@@ -142,9 +158,8 @@ impl Display {
         let mut report = [0u8; REPORT + 1];
         unsafe {
             let mut waiting = OVERLAPPED::default();
-            let _ = ReadFile(self.0, Some(&mut report), None, Some(&mut waiting));
-            let mut read = 0;
-            GetOverlappedResultEx(self.0, &waiting, &mut read, WAIT, false).ok()?;
+            let begun = ReadFile(self.0, Some(&mut report), None, Some(&mut waiting));
+            self.done(begun, &waiting)?;
         }
         Some(report)
     }

@@ -12,6 +12,15 @@
 // (Asked something from a terminal, it answers into that terminal: see `main`.)
 #![windows_subsystem = "windows"]
 
+/// Says a line to whoever asked (see `speak_to_the_terminal`); one who has
+/// stopped listening is not said it, and that is no failure of this.
+macro_rules! say {
+    ($($said:tt)*) => {{
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), $($said)*);
+    }};
+}
+
 mod actions;
 mod config;
 mod cooler;
@@ -36,6 +45,10 @@ use serde_json::{json, Value};
 const MOST: usize = 16 << 10;
 /// How long a request may take to arrive whole.
 const ARRIVING: Duration = Duration::from_secs(5);
+/// How many requests are answered at once, and how many of them one
+/// address may have: more are turned away till those are done.
+const AT_ONCE: usize = 64;
+const AT_ONCE_EACH: usize = 16;
 /// How long after night mode begins the mouse and the keyboard are not yet
 /// minded (whoever asked for it may still be letting go of them), and how
 /// often they are looked at after.
@@ -91,6 +104,36 @@ struct Helper {
     /// A maker's own lighting program has started since OpenRGB was last
     /// started: OpenRGB is to be started afresh before it is asked again.
     stale: std::sync::atomic::AtomicBool,
+    /// Held while night begins or ends: one such change at a time, whole.
+    nighting: Mutex<()>,
+    /// This run of the helper, by a number made up as it started: a request
+    /// is signed for the run it is meant for, so that one overheard before
+    /// the helper started again (what it had seen forgotten) is not taken.
+    session: String,
+    /// The addresses being answered now, and how many requests of each.
+    callers: Mutex<std::collections::HashMap<std::net::IpAddr, usize>>,
+}
+
+/// A request being answered: counted for its address till it is done.
+struct Caller(Arc<Helper>, std::net::IpAddr);
+
+impl Drop for Caller {
+    fn drop(&mut self) {
+        let mut callers = self.0.callers.lock().unwrap();
+        if let Some(count) = callers.get_mut(&self.1) {
+            *count -= 1;
+            if *count == 0 {
+                callers.remove(&self.1);
+            }
+        }
+    }
+}
+
+/// A request that is a paired phone's: the key it was signed with, as it
+/// is kept and as it signs.
+struct Admitted {
+    key: String,
+    secret: [u8; 32],
 }
 
 impl Helper {
@@ -166,53 +209,71 @@ impl Helper {
         let _ = Config::change(|config| config.light = chosen);
     }
 
-    /// Whether a request is a paired phone's (see `sign::Seen::check`), and
-    /// the phone it calls itself is the one its key belongs to. A key not
-    /// used before becomes that phone's.
-    #[allow(clippy::too_many_arguments)]
-    fn admit(&self, method: &str, path: &str, time: &str, nonce: &str, sign: &str, body: &[u8], device: &str, name: &str) -> Result<String, sign::Refused> {
+    /// Whether there is room to answer one more request from `from`:
+    /// then it is counted, till what is returned is let go.
+    fn room(self: &Arc<Self>, from: std::net::IpAddr) -> Option<Caller> {
+        let mut callers = self.callers.lock().unwrap();
+        if callers.values().sum::<usize>() >= AT_ONCE || callers.get(&from).is_some_and(|count| *count >= AT_ONCE_EACH) {
+            return None;
+        }
+        *callers.entry(from).or_default() += 1;
+        Some(Caller(self.clone(), from))
+    }
+
+    /// Whether a request is a paired phone's: signed with a key kept, for
+    /// this run of the helper, now, by the phone the key belongs to, and
+    /// not sent before. A key not used before becomes that phone's.
+    /// Refused, the key it was signed with comes too where there was one
+    /// (the answer can then be signed).
+    fn admit(&self, request: &sign::Request) -> Result<Admitted, (sign::Refused, Option<[u8; 32]>)> {
         let mut phones = self.phones.lock().unwrap();
         let kept = Config::kept_at();
         if phones.0 != kept {
             *phones = (kept, Config::load().phones);
         }
         let now = sign::now();
-        let mut state = self.state.lock().unwrap();
-        for phone in phones.1.iter().filter(|phone| phone.offered_till.is_none_or(|till| till > now)) {
-            let Some(key) = sign::key(&phone.key) else { continue };
-            match state.seen.check(&key, method, path, time, nonce, sign, body, now) {
-                Err(sign::Refused::Forged) => continue,
-                Err(refused) => return Err(refused),
-                Ok(()) => {}
+        let signed = phones.1.iter().filter(|phone| phone.offered_till.is_none_or(|till| till > now)).find_map(|phone| {
+            let secret = sign::key(&phone.key)?;
+            match sign::verify(&secret, request) {
+                Ok(at) => Some(Ok((phone, secret, at))),
+                Err(sign::Refused::Forged) => None,
+                Err(refused) => Some(Err(refused)),
             }
-            return match &phone.device {
-                Some(owner) if owner != device => Err(sign::Refused::Taken),
-                Some(_) => Ok(phone.key.clone()),
-                // (A request that names no phone leaves the key as it is.)
-                None if device.is_empty() => Ok(phone.key.clone()),
-                None => {
-                    let (key, device, name) = (phone.key.clone(), device.to_string(), name.to_string());
-                    let changed = Config::change(|config| {
-                        // A phone paired anew is that phone still: what it was paired by before is gone.
-                        config.phones.retain(|phone| phone.device.as_deref() != Some(device.as_str()));
-                        if let Some(phone) = config.phones.iter_mut().find(|phone| phone.key == key) {
-                            *phone = Phone { key: key.clone(), name, device: Some(device), offered_till: None };
-                        }
-                    });
-                    if let Ok(config) = changed {
-                        *phones = (Config::kept_at(), config.phones);
-                    }
-                    Ok(key)
-                }
-            };
+        });
+        let Some((phone, secret, at)) = signed.transpose().map_err(|refused| (refused, None))? else { return Err((sign::Refused::Forged, None)) };
+        let refused = |why| Err((why, Some(secret)));
+        if request.session != self.session || !sign::timely(at, now) {
+            return refused(sign::Refused::Stale);
         }
-        Err(sign::Refused::Forged)
+        if phone.device.as_deref().is_some_and(|owner| owner != request.phone) {
+            return refused(sign::Refused::Taken);
+        }
+        if let Err(why) = self.state.lock().unwrap().seen.take(&secret, at, request.nonce, now) {
+            return refused(why);
+        }
+        let key = phone.key.clone();
+        // (A request that names no phone leaves the key as it is.)
+        if phone.device.is_none() && !request.phone.is_empty() {
+            let (device, name) = (request.phone.to_string(), unescaped(request.name));
+            let changed = Config::change(|config| {
+                // A phone paired anew is that phone still: what it was paired by before is gone.
+                config.phones.retain(|phone| phone.device.as_deref() != Some(device.as_str()));
+                if let Some(phone) = config.phones.iter_mut().find(|phone| phone.key == key) {
+                    *phone = Phone { id: phone.id.clone(), key: key.clone(), name, device: Some(device), offered_till: None };
+                }
+            });
+            if let Ok(config) = changed {
+                *phones = (Config::kept_at(), config.phones);
+            }
+        }
+        Ok(Admitted { key, secret })
     }
 
     /// Night: the lights out, the power-saving plan, the screens off. Day
     /// again: the plan there was and the lights on (the screens come on at
     /// the touch that ends it, or stay off till one).
     fn night(&self, on: bool) -> Result<(), String> {
+        let _one = self.nighting.lock().unwrap();
         if on {
             if self.state.lock().unwrap().night.is_some() {
                 return Ok(());
@@ -358,18 +419,25 @@ impl Helper {
     /// Reads one request from `stream`, checks it is the paired phone's,
     /// does it and answers.
     fn serve(self: &Arc<Self>, mut stream: TcpStream) -> std::io::Result<()> {
-        stream.set_read_timeout(Some(ARRIVING))?;
         stream.set_write_timeout(Some(ARRIVING))?;
-        let mut taken = Vec::new();
+        // The whole of it is to have come by then, however it trickles in.
+        let by = std::time::Instant::now() + ARRIVING;
         let mut chunk = [0u8; 2048];
+        let mut more = |stream: &mut TcpStream| -> std::io::Result<Vec<u8>> {
+            let left = by.checked_duration_since(std::time::Instant::now()).filter(|left| !left.is_zero()).ok_or(std::io::ErrorKind::TimedOut)?;
+            stream.set_read_timeout(Some(left))?;
+            let read = stream.read(&mut chunk)?;
+            Ok(chunk[..read].to_vec())
+        };
+        let mut taken = Vec::new();
         // The head, then as much body as it says.
         let (head, mut body) = loop {
-            let read = stream.read(&mut chunk)?;
-            taken.extend_from_slice(&chunk[..read]);
+            let came = more(&mut stream)?;
+            taken.extend_from_slice(&came);
             if let Some(end) = taken.windows(4).position(|four| four == b"\r\n\r\n") {
                 break (String::from_utf8_lossy(&taken[..end]).into_owned(), taken[end + 4..].to_vec());
             }
-            if read == 0 || taken.len() > MOST {
+            if came.is_empty() || taken.len() > MOST {
                 return Ok(());
             }
         };
@@ -382,11 +450,11 @@ impl Helper {
             return Ok(());
         }
         while body.len() < length {
-            let read = stream.read(&mut chunk)?;
-            if read == 0 {
+            let came = more(&mut stream)?;
+            if came.is_empty() {
                 return Ok(());
             }
-            body.extend_from_slice(&chunk[..read]);
+            body.extend_from_slice(&came);
         }
         body.truncate(length);
         // The page a phone's browser controls this PC from (a phone with no
@@ -396,17 +464,21 @@ impl Helper {
             let page = include_str!("web.html");
             return write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
         }
-        let checked = self.admit(method, path, header("x-glance-time"), header("x-glance-nonce"), header("x-glance-sign"), &body, header("x-glance-phone"), &unescaped(header("x-glance-name")));
-        let (status, answer) = match checked {
-            Err(refused) => (401, json!({ "error": format!("{refused:?}").to_lowercase(), "time": sign::now() })),
-            Ok(key) => match self.act(method, path, &body, &key) {
-                Ok(answer) => (200, answer),
-                Err((status, error)) => (status, json!({ "error": error })),
+        let nonce = header("x-glance-nonce");
+        let request = sign::Request { method, path, time: header("x-glance-time"), nonce, sign: header("x-glance-sign"), phone: header("x-glance-phone"), name: header("x-glance-name"), session: header("x-glance-session"), body: &body };
+        let (status, answer, secret) = match self.admit(&request) {
+            // (With which run this is, and what time it has: a phone that had them wrong asks again by them.)
+            Err((refused, secret)) => (401, json!({ "error": format!("{refused:?}").to_lowercase(), "time": sign::now(), "session": self.session }), secret),
+            Ok(admitted) => match self.act(method, path, &body, &admitted.key) {
+                Ok(answer) => (200, answer, Some(admitted.secret)),
+                Err((status, error)) => (status, json!({ "error": error }), Some(admitted.secret)),
             },
         };
         let answer = answer.to_string();
         let reason = if status == 200 { "OK" } else { "Error" };
-        write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len())
+        // Signed, to whoever signed the request: the answer is this PC's, and to that asking.
+        let signed = secret.map(|secret| format!("X-Glance-Sign: {}\r\n", sign::answer(&secret, nonce, status, answer.as_bytes()))).unwrap_or_default();
+        write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n{signed}Content-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len())
     }
 }
 
@@ -500,21 +572,21 @@ fn main() -> std::io::Result<()> {
             let asked = |word: &str| std::env::args().skip(2).any(|given| given == word);
             let key = Config::offer()?;
             let link = if asked("web") { pairing_web(&config, &key) } else { pairing(&config, &key) };
-            println!("{link}");
+            say!("{link}");
             if asked("cells") {
-                print!("{}", cells(&link)?);
+                say!("{}", cells(&link)?.trim_end());
             } else {
                 let code = qrcode::QrCode::new(link.as_bytes()).map_err(std::io::Error::other)?;
                 let picture = code.render::<qrcode::render::svg::Color>().min_dimensions(480, 480).quiet_zone(true).build();
                 let path = std::env::temp_dir().join("glance-pair.svg");
                 std::fs::write(&path, picture)?;
-                println!("{}", path.display());
+                say!("{}", path.display());
             }
             return Ok(());
         }
         // glance-remote qr TEXT: any text's QR code, as rows of 1 and 0.
         Some("qr") => {
-            print!("{}", cells(&std::env::args().nth(2).unwrap_or_default())?);
+            say!("{}", cells(&std::env::args().nth(2).unwrap_or_default())?.trim_end());
             return Ok(());
         }
         // glance-remote lights there | fetch | forget: whether there is an
@@ -536,92 +608,91 @@ fn main() -> std::io::Result<()> {
                 }
                 _ => {}
             }
-            println!("{}", if lights::program(&Config::load()).is_some() { "there" } else { "none" });
+            say!("{}", if lights::program(&Config::load()).is_some() { "there" } else { "none" });
             return Ok(());
         }
         Some("lights") => {
             for device in lights::devices(&config)? {
-                println!("{} now: {} ({}), first colours {:06X?}", device.name, device.modes.get(device.active).map_or("?", |mode| mode.name.as_str()), if device.lit() { "lit" } else { "dark" }, device.colors.iter().take(3).collect::<Vec<_>>());
-                println!("{}\n  modes: {}\n  zones: {}", device.name, device.modes.iter().map(|mode| mode.name.as_str()).collect::<Vec<_>>().join(", "), device.zones.iter().map(|zone| format!("{} ({} LEDs)", zone.name, zone.leds)).collect::<Vec<_>>().join(", "));
+                say!("{} now: {} ({}), first colours {:06X?}", device.name, device.modes.get(device.active).map_or("?", |mode| mode.name.as_str()), if device.lit() { "lit" } else { "dark" }, device.colors.iter().take(3).collect::<Vec<_>>());
+                say!("{}\n  modes: {}\n  zones: {}", device.name, device.modes.iter().map(|mode| mode.name.as_str()).collect::<Vec<_>>().join(", "), device.zones.iter().map(|zone| format!("{} ({} LEDs)", zone.name, zone.leds)).collect::<Vec<_>>().join(", "));
             }
             return Ok(());
         }
         // The phones paired with (and the pairings offered), in their order.
         Some("phones") => {
-            for (at, phone) in config.phones.iter().enumerate() {
+            for phone in &config.phones {
                 let what = match (&phone.device, phone.offered_till) {
                     (Some(_), _) => "paired",
                     (None, Some(_)) => "offered",
                     (None, None) => "paired before phones were told apart",
                 };
-                println!("{at}: {} ({what})", if phone.name.is_empty() { "?" } else { &phone.name });
+                say!("{}: {} ({what})", phone.id, if phone.name.is_empty() { "?" } else { &phone.name });
             }
             return Ok(());
         }
-        // glance-remote unpair N: the phone at that place, paired no more.
+        // glance-remote unpair ID: the phone of that name (as `phones` lists them), paired no more.
         Some("unpair") => {
-            if let Some(at) = std::env::args().nth(2).and_then(|text| text.parse::<usize>().ok()) {
-                Config::change(|config| {
-                    if at < config.phones.len() {
-                        config.phones.remove(at);
-                    }
-                })?;
+            if let Some(id) = std::env::args().nth(2) {
+                Config::change(|config| config.phones.retain(|phone| phone.id != id))?;
             }
             return Ok(());
         }
         // glance-remote cooler off|on: the cooler's display alone.
         Some("cooler") => {
             let off = std::env::args().nth(2).as_deref() == Some("off");
-            println!("{}", if off { cooler::dark() } else { cooler::lit() });
+            say!("{}", if off { cooler::dark() } else { cooler::lit() });
             return Ok(());
         }
         Some("media") => {
-            println!("{:?}", media::sounding());
+            say!("{:?}", media::sounding());
             if let Some(playing) = media::playing() {
-                println!("{:?} by {:?} in {}: playing {}", playing.title, playing.artist, playing.app, playing.playing);
+                say!("{:?} by {:?} in {}: playing {}", playing.title, playing.artist, playing.app, playing.playing);
             }
             return Ok(());
         }
         Some("power") => {
             for choice in power::choices() {
-                println!("{} {}{}", choice.id, choice.name, if choice.on { " *" } else { "" });
+                say!("{} {}{}", choice.id, choice.name, if choice.on { " *" } else { "" });
             }
             return Ok(());
         }
         Some("monitors") => {
             for monitor in display::monitors() {
-                println!("{} ({}x{} at {},{}): on {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on);
-                println!("  brightness {:?}", monitor.brightness);
+                say!("{} ({}x{} at {},{}): on {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on);
+                say!("  brightness {:?}", monitor.brightness);
             }
             return Ok(());
         }
         // glance-remote report: what there is on this PC for the remote to
         // set, for a report of what is not right (nothing of the phones paired).
         Some("report") => {
-            println!("version {}", env!("CARGO_PKG_VERSION"));
-            println!("OpenRGB: {}", lights::program(&config).map_or("none".to_string(), |path| path.display().to_string()));
+            say!("version {}", env!("CARGO_PKG_VERSION"));
+            if !Config::readable() {
+                say!("configuration: kept, but not to be read");
+            }
+            say!("OpenRGB: {}", lights::program(&config).map_or("none".to_string(), |path| path.display().to_string()));
             // (Only an OpenRGB running already is asked: one is not started for a report.)
             match lights::known() {
                 Some(devices) => {
                     for device in devices {
-                        println!("light: {} ({}), modes {}, zones {}", device.name, device.modes.get(device.active).map_or("?", |mode| mode.name.as_str()), device.modes.iter().map(|mode| mode.name.as_str()).collect::<Vec<_>>().join("/"), device.zones.iter().map(|zone| format!("{}:{}", zone.name, zone.leds)).collect::<Vec<_>>().join("/"));
+                        say!("light: {} ({}), modes {}, zones {}", device.name, device.modes.get(device.active).map_or("?", |mode| mode.name.as_str()), device.modes.iter().map(|mode| mode.name.as_str()).collect::<Vec<_>>().join("/"), device.zones.iter().map(|zone| format!("{}:{}", zone.name, zone.leds)).collect::<Vec<_>>().join("/"));
                     }
                 }
-                None => println!("lights: OpenRGB not running"),
+                None => say!("lights: OpenRGB not running"),
             }
             for monitor in display::monitors() {
-                println!("monitor: {} {}x{} at {},{}; on {:?}; brightness {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on, monitor.brightness);
+                say!("monitor: {} {}x{} at {},{}; on {:?}; brightness {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on, monitor.brightness);
             }
-            println!("cooler display: {}", if cooler::there() { "there" } else { "none" });
-            println!("keyboard light: {}", if keys::there() { "there" } else { "none" });
-            println!("power: {}", power::choices().iter().map(|choice| format!("{}{}", if choice.name.is_empty() { &choice.id } else { &choice.name }, if choice.on { "*" } else { "" })).collect::<Vec<_>>().join(", "));
+            say!("cooler display: {}", if cooler::there() { "there" } else { "none" });
+            say!("keyboard light: {}", if keys::there() { "there" } else { "none" });
+            say!("power: {}", power::choices().iter().map(|choice| format!("{}{}", if choice.name.is_empty() { &choice.id } else { &choice.name }, if choice.on { "*" } else { "" })).collect::<Vec<_>>().join(", "));
             return Ok(());
         }
         // glance-remote keys LEVEL: the light under a laptop's keys.
         Some("keys") => {
             match std::env::args().nth(2).and_then(|text| text.parse::<u8>().ok()) {
-                Some(level) => println!("{}", if keys::light(level) { "taken" } else { "not taken" }),
-                None => println!("{}", if keys::there() { "a keyboard whose light can be set" } else { "none" }),
+                Some(level) => say!("{}", if keys::light(level) { "taken" } else { "not taken" }),
+                None => say!("{}", if keys::there() { "a keyboard whose light can be set" } else { "none" }),
             }
             return Ok(());
         }
@@ -629,14 +700,14 @@ fn main() -> std::io::Result<()> {
         Some("dim") => {
             let number = |at: usize| std::env::args().nth(at).and_then(|text| text.parse::<usize>().ok());
             if let (Some(monitor), Some(percent)) = (number(2), number(3)) {
-                println!("{}", if display::dim(monitor, percent.min(100) as u8) { "taken" } else { "not taken" });
+                say!("{}", if display::dim(monitor, percent.min(100) as u8) { "taken" } else { "not taken" });
             }
             return Ok(());
         }
         // glance-remote screen off|on: every screen.
         Some("screen") => {
             if std::env::args().nth(2).as_deref() == Some("off") {
-                println!("{:?}", display::sleep());
+                say!("{:?}", display::sleep());
             } else {
                 display::wake();
             }
@@ -646,7 +717,7 @@ fn main() -> std::io::Result<()> {
         Some("vcp") => {
             let number = |at: usize, radix: u32| std::env::args().nth(at).and_then(|text| u32::from_str_radix(&text, radix).ok());
             if let (Some(monitor), Some(code), Some(value)) = (number(2, 10), number(3, 16), number(4, 10)) {
-                println!("{}", if display::tell(monitor as usize, code as u8, value) { "told" } else { "not taken" });
+                say!("{}", if display::tell(monitor as usize, code as u8, value) { "told" } else { "not taken" });
             }
             return Ok(());
         }
@@ -677,9 +748,14 @@ fn main() -> std::io::Result<()> {
             }
         });
     }
+    let mut session = [0u8; 8];
+    getrandom::getrandom(&mut session).map_err(|error| std::io::Error::other(error.to_string()))?;
+    let session = sign::hex(&session);
+    // (Kept once as this version keeps it: each phone with what it is told from the others by.)
+    let _ = Config::change(|_| {});
     // (Whether the lights are on, as OpenRGB has them if it is running.)
     let state = State { lights: lights::lit(), ..State::default() };
-    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), keys: Mutex::new(config.keys), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false) });
+    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), keys: Mutex::new(config.keys), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false), nighting: Mutex::new(()), session, callers: Mutex::default() });
     let following = helper.clone();
     std::thread::spawn(move || {
         let mut last = None;
@@ -708,8 +784,11 @@ fn main() -> std::io::Result<()> {
         }
     });
     for stream in listener.incoming().flatten() {
+        // (One for whom there is no room, or no thread to be had, is hung up on.)
+        let Some(caller) = stream.peer_addr().ok().and_then(|from| helper.room(from.ip())) else { continue };
         let helper = helper.clone();
-        std::thread::spawn(move || {
+        let _ = std::thread::Builder::new().spawn(move || {
+            let _caller = caller;
             let _ = helper.serve(stream);
         });
     }

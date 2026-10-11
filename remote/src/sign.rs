@@ -45,11 +45,29 @@ pub fn here(key: &[u8; 32], nonce: &str) -> String {
     hex(&mac.finalize().into_bytes())
 }
 
-/// What a request signs: its method, its path, its time, its number and
-/// its body.
-fn signing(key: &[u8; 32], method: &str, path: &str, time: &str, nonce: &str, body: &[u8]) -> Hmac<Sha256> {
+/// A request as it came: what it asks, and what it gives to prove whose
+/// it is.
+pub struct Request<'a> {
+    pub method: &'a str,
+    pub path: &'a str,
+    /// Seconds since 1970, by the phone's clock.
+    pub time: &'a str,
+    /// Any text of its own, used once.
+    pub nonce: &'a str,
+    /// Its signature, in hex.
+    pub sign: &'a str,
+    /// The number the phone gave itself, and what it calls itself (as it
+    /// was sent: see `unescaped` where it is read).
+    pub phone: &'a str,
+    pub name: &'a str,
+    /// The helper's run the request is meant for (see `Helper::session`).
+    pub session: &'a str,
+    pub body: &'a [u8],
+}
+
+fn mac(key: &[u8; 32], parts: &[&str], body: &[u8]) -> Hmac<Sha256> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("a key of any length");
-    for part in [method, path, time, nonce] {
+    for part in parts {
         mac.update(part.as_bytes());
         mac.update(b"\n");
     }
@@ -57,15 +75,24 @@ fn signing(key: &[u8; 32], method: &str, path: &str, time: &str, nonce: &str, bo
     mac
 }
 
-/// The numbers of the requests taken lately, each with its time: one seen
-/// again is a request sent again.
-#[derive(Default)]
-pub struct Seen(VecDeque<(u64, String)>);
+/// What a request signs: its method, its path, its time, its number,
+/// which phone it is and what it is called, the run of the helper it is
+/// for, and its body.
+fn signing(key: &[u8; 32], request: &Request) -> Hmac<Sha256> {
+    mac(key, &[request.method, request.path, request.time, request.nonce, request.phone, request.name, request.session], request.body)
+}
+
+/// The signature of an answer: by the key of the request it answers, over
+/// that request's number, so that it is this PC's and for that asking.
+pub fn answer(key: &[u8; 32], nonce: &str, status: u16, body: &[u8]) -> String {
+    hex(&mac(key, &["answer", nonce, &status.to_string()], body).finalize().into_bytes())
+}
 
 /// Why a request is not taken.
 #[derive(Debug, PartialEq)]
 pub enum Refused {
     Unsigned,
+    /// Of another time than now, or meant for an earlier run of the helper.
     Stale,
     Replayed,
     Forged,
@@ -73,28 +100,37 @@ pub enum Refused {
     Taken,
 }
 
+/// Whether the request is signed with `key`: then the time it says it is of.
+pub fn verify(key: &[u8; 32], request: &Request) -> Result<u64, Refused> {
+    let (Ok(at), Some(given)) = (request.time.parse::<u64>(), unhex(request.sign)) else { return Err(Refused::Unsigned) };
+    if request.nonce.is_empty() || request.nonce.len() > 64 {
+        return Err(Refused::Unsigned);
+    }
+    // Compared whole, in the same time whatever differs.
+    signing(key, request).verify_slice(&given).map_err(|_| Refused::Forged)?;
+    Ok(at)
+}
+
+/// Whether a request of that time is of now, near enough.
+pub fn timely(at: u64, now: u64) -> bool {
+    at.abs_diff(now) <= SKEW.as_secs()
+}
+
+/// The numbers of the requests taken lately, each with its time and the
+/// key it was signed with (by that key's name): one seen again under the
+/// same key is a request sent again.
+#[derive(Default)]
+pub struct Seen(VecDeque<(u64, String, String)>);
+
 impl Seen {
-    /// Whether the request is the paired phone's, now, and not one sent
-    /// before: `time` in seconds since 1970, `nonce` any text of its own,
-    /// `sign` its signature in hex. `now`, this PC's time.
-    #[allow(clippy::too_many_arguments)]
-    pub fn check(&mut self, key: &[u8; 32], method: &str, path: &str, time: &str, nonce: &str, sign: &str, body: &[u8], now: u64) -> Result<(), Refused> {
-        let (Ok(at), Some(given)) = (time.parse::<u64>(), unhex(sign)) else { return Err(Refused::Unsigned) };
-        if nonce.is_empty() || nonce.len() > 64 {
-            return Err(Refused::Unsigned);
-        }
-        // Compared whole, in the same time whatever differs.
-        if signing(key, method, path, time, nonce, body).verify_slice(&given).is_err() {
-            return Err(Refused::Forged);
-        }
-        if at.abs_diff(now) > SKEW.as_secs() {
-            return Err(Refused::Stale);
-        }
-        self.0.retain(|(seen, _)| seen.abs_diff(now) <= 2 * SKEW.as_secs());
-        if self.0.iter().any(|(_, seen)| seen == nonce) {
+    /// Takes a request's number as used, unless it was already.
+    pub fn take(&mut self, key: &[u8; 32], at: u64, nonce: &str, now: u64) -> Result<(), Refused> {
+        let id = key_id(key);
+        self.0.retain(|(seen, ..)| seen.abs_diff(now) <= 2 * SKEW.as_secs());
+        if self.0.iter().any(|(_, whose, seen)| *whose == id && seen == nonce) {
             return Err(Refused::Replayed);
         }
-        self.0.push_back((at, nonce.to_string()));
+        self.0.push_back((at, id, nonce.to_string()));
         Ok(())
     }
 }
@@ -121,21 +157,31 @@ mod tests {
     #[test]
     fn only_the_paired_phones_requests_are_taken_and_once() {
         let key = [7u8; 32];
-        let sign = |path: &str, time: &str, nonce: &str, body: &[u8]| hex(&signing(&key, "POST", path, time, nonce, body).finalize().into_bytes());
-        let mut seen = Seen::default();
-        let good = sign("/v1/lights", "1000", "a1", b"{\"on\":false}");
-        assert_eq!(seen.check(&key, "POST", "/v1/lights", "1000", "a1", &good, b"{\"on\":false}", 1010), Ok(()));
-        // Sent again, as it was.
-        assert_eq!(seen.check(&key, "POST", "/v1/lights", "1000", "a1", &good, b"{\"on\":false}", 1011), Err(Refused::Replayed));
-        // Another body, path or key under the same signature.
-        assert_eq!(seen.check(&key, "POST", "/v1/lights", "1000", "a2", &good, b"{\"on\":true}", 1010), Err(Refused::Forged));
-        assert_eq!(seen.check(&key, "POST", "/v1/sleep", "1000", "a1", &good, b"{\"on\":false}", 1010), Err(Refused::Forged));
-        assert_eq!(seen.check(&[8u8; 32], "POST", "/v1/lights", "1000", "a3", &sign("/v1/lights", "1000", "a3", b""), b"", 1010), Err(Refused::Forged));
-        // Kept and sent much later.
-        let late = sign("/v1/sleep", "1000", "b1", b"");
-        assert_eq!(seen.check(&key, "POST", "/v1/sleep", "1000", "b1", &late, b"", 5000), Err(Refused::Stale));
+        let asked = |path: &'static str, nonce: &'static str, phone: &'static str, body: &'static [u8]| Request { method: "POST", path, time: "1000", nonce, sign: "", phone, name: "a%20phone", session: "s1", body };
+        let signed = |request: &Request| hex(&signing(&key, request).finalize().into_bytes());
+        let good = asked("/v1/lights", "a1", "p1", b"{\"on\":false}");
+        let sign = signed(&good);
+        assert_eq!(verify(&key, &Request { sign: &sign, ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") }), Ok(1000));
+        // Another body, path, phone, name, run or key under the same signature.
+        assert_eq!(verify(&key, &Request { sign: &sign, ..asked("/v1/lights", "a1", "p1", b"{\"on\":true}") }), Err(Refused::Forged));
+        assert_eq!(verify(&key, &Request { sign: &sign, ..asked("/v1/sleep", "a1", "p1", b"{\"on\":false}") }), Err(Refused::Forged));
+        assert_eq!(verify(&key, &Request { sign: &sign, ..asked("/v1/lights", "a1", "p2", b"{\"on\":false}") }), Err(Refused::Forged));
+        assert_eq!(verify(&key, &Request { sign: &sign, name: "another", ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") }), Err(Refused::Forged));
+        assert_eq!(verify(&key, &Request { sign: &sign, session: "s2", ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") }), Err(Refused::Forged));
+        assert_eq!(verify(&[8u8; 32], &Request { sign: &sign, ..asked("/v1/lights", "a1", "p1", b"{\"on\":false}") }), Err(Refused::Forged));
         // Not signed at all.
-        assert_eq!(seen.check(&key, "POST", "/v1/sleep", "", "", "", b"", 1010), Err(Refused::Unsigned));
+        assert_eq!(verify(&key, &Request { time: "", nonce: "", ..asked("/v1/sleep", "", "", b"") }), Err(Refused::Unsigned));
+        // Of now, or kept and sent much later.
+        assert!(timely(1000, 1010) && timely(1000, 950) && !timely(1000, 5000));
+        // Once: again under the same key is a request sent again; under another key it is that key's own.
+        let mut seen = Seen::default();
+        assert_eq!(seen.take(&key, 1000, "a1", 1010), Ok(()));
+        assert_eq!(seen.take(&key, 1000, "a1", 1011), Err(Refused::Replayed));
+        assert_eq!(seen.take(&[8u8; 32], 1000, "a1", 1011), Ok(()));
+        // An answer is for that asking, that outcome and those words alone.
+        assert_ne!(answer(&key, "a1", 200, b"{}"), answer(&key, "a2", 200, b"{}"));
+        assert_ne!(answer(&key, "a1", 200, b"{}"), answer(&key, "a1", 401, b"{}"));
+        assert_ne!(answer(&key, "a1", 200, b"{}"), answer(&key, "a1", 200, b"{ }"));
         assert!(super::key(&hex(&key)).is_some() && super::key("12").is_none());
     }
 }

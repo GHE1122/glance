@@ -2,6 +2,7 @@ package dev.weiyi.glance.remote
 
 import android.content.Intent
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -295,6 +296,9 @@ private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>
     }
 }
 
+/** How long a PC may go without answering before it is said to be away (ms). */
+private const val PATIENCE = 4000L
+
 /** What is waiting to be asked of the PC, in turn. */
 private class Asking(val what: String, val path: String, val body: JSONObject)
 
@@ -304,6 +308,8 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf<PcState?>(null) }
     var failure by remember { mutableStateOf<Failure?>(null) }
+    // Since when the PC has not answered a look (none: it answered the last): it is not said to be away till that has gone on a while.
+    var silent by remember { mutableStateOf<Long?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
     val waiting = remember { ArrayDeque<Asking>() }
     // How many things have been asked: what a look answers is stale if one was asked meanwhile.
@@ -320,9 +326,15 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         val answer = try {
             withContext(Dispatchers.IO) { pc.ask(path, body) }
         } catch (error: Failure) {
+            // A look unanswered may be a moment's matter (the phone just woken, the network just joined): it is asked again first.
+            if (body == null && error == Failure.Unreachable) {
+                val since = silent ?: SystemClock.elapsedRealtime().also { silent = it }
+                if (SystemClock.elapsedRealtime() - since < PATIENCE) return
+            }
             if (body != null || asked[0] == before) failure = error
             return
         }
+        silent = null
         if (body == null && asked[0] != before) return
         state = answer
         failure = null
@@ -354,8 +366,9 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         while (true) {
             if (busy == null) ask("/v1/state")
             // Not answering where it was: looked for on the network, in case its address has changed.
-            if (failure == Failure.Unreachable) withContext(Dispatchers.IO) { pc.find() }?.takeIf { it != pc.host }?.let(moved)
-            delay(1500)
+            if (silent != null) withContext(Dispatchers.IO) { pc.find() }?.takeIf { it != pc.host }?.let(moved)
+            // (Sooner while it is not yet said to be away.)
+            delay(if (silent != null && failure == null) 400 else 1500)
         }
     }
     // Sleep says what it means first.

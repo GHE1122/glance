@@ -115,12 +115,25 @@ let phone = kept.get("phone");
 if (!phone) { phone = random(16); kept.set("phone", phone); }
 const called = /iPhone|iPad/.test(navigator.userAgent) ? (/iPad/.test(navigator.userAgent) ? "iPad" : "iPhone") : /Android/.test(navigator.userAgent) ? "Android" : "Browser";
 
-// ---- asking the PC: signed, as the app signs
-async function ask(path, body) {
-  const method = body ? "POST" : "GET", sent = body ? JSON.stringify(body) : "", time = String(Math.floor(Date.now() / 1000)), nonce = random(8);
-  const sign = hex(hmac(unhex(key), new TextEncoder().encode(`${method}\n${path}\n${time}\n${nonce}\n${sent}`)));
-  const answer = await fetch(path, { method, body: body ? sent : undefined, cache: "no-store", headers: { "X-Glance-Time": time, "X-Glance-Nonce": nonce, "X-Glance-Sign": sign, "X-Glance-Phone": phone, "X-Glance-Name": encodeURIComponent(called + " (web)") } });
-  const json = await answer.json().catch(() => ({}));
+// ---- asking the PC: signed, as the app signs (over what is asked, when, by which browser, for which run of the PC's helper, and a number used once); the PC signs its answer in turn, and none that is not signed is believed
+// What the PC said of itself when it last refused a request as not of now: which run of its helper it is, and how far its clock is from this one's (seconds).
+const told = { session: "", ahead: 0 };
+const signed = (parts, body) => hex(hmac(unhex(key), new TextEncoder().encode(parts.map(part => part + "\n").join("") + body)));
+async function ask(path, body, again = true) {
+  const method = body ? "POST" : "GET", sent = body ? JSON.stringify(body) : "", time = String(Math.floor(Date.now() / 1000) + told.ahead), nonce = random(8), name = encodeURIComponent(called + " (web)");
+  const sign = signed([method, path, time, nonce, phone, name, told.session], sent);
+  const answer = await fetch(path, { method, body: body ? sent : undefined, cache: "no-store", headers: { "X-Glance-Time": time, "X-Glance-Nonce": nonce, "X-Glance-Sign": sign, "X-Glance-Session": told.session, "X-Glance-Phone": phone, "X-Glance-Name": name } });
+  const text = await answer.text();
+  const own = signed(["answer", nonce, String(answer.status)], text) === answer.headers.get("X-Glance-Sign");
+  let json = {};
+  try { json = JSON.parse(text); } catch (e) {}
+  // (Refused by one that does not know the key: there is nothing it could sign with. Whatever else is not signed is not the PC's.)
+  if (!own) throw Object.assign(new Error(answer.status === 401 ? "forged" : "unsigned"), { status: answer.status === 401 ? 401 : 0 });
+  // Not of now, as the PC has it: asked again, for the run it says it is and by its clock.
+  if (answer.status === 401 && json.error === "stale" && again) {
+    told.session = String(json.session || ""); told.ahead = (Number(json.time) || 0) - Math.floor(Date.now() / 1000);
+    return ask(path, body, false);
+  }
   if (!answer.ok) throw Object.assign(new Error(json.error || String(answer.status)), { status: answer.status });
   return json;
 }
