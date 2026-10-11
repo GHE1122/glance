@@ -19,6 +19,7 @@ Unicode true
 !define VERSION "0.2.7"
 !define PUBLISHER "lulu-loopp"
 !define EXE "glance.exe"
+!define REMOTE "glance-remote.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NAME}"
 !define PAWNIO_KEY "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO"
 
@@ -88,6 +89,8 @@ LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver as well?$\r$\n
   ; System tools by their full path: never one that happens to lie beside
   ; the installer.
   nsExec::Exec '"$SYSDIR\taskkill.exe" /IM ${EXE} /F'
+  ; The phone remote, if it is running: its file is replaced or removed too.
+  nsExec::Exec '"$SYSDIR\taskkill.exe" /IM ${REMOTE} /F'
   Sleep 500
 !macroend
 
@@ -224,6 +227,8 @@ Section "Glance"
   ; again, and copies them in. A silent install never installs "anyway".
   SetOutPath "$PLUGINSDIR\payload"
   File "..\target\release\${EXE}"
+  ; The phone remote: another program, run only if turned on in the settings, never elevated.
+  File "..\remote\target\release\${REMOTE}"
   SetOutPath "$PLUGINSDIR\payload\resources"
   File "..\resources\PawnIO_setup.exe"
   ; What Glance is built from and ships with, and the source the modules'

@@ -209,7 +209,7 @@ fn folders_hold(folder: &Path) -> bool {
 }
 
 /// What an install folder may already hold: an earlier Glance.
-const INSTALLED: [&str; 4] = ["glance.exe", "uninstall.exe", "resources", "licenses"];
+const INSTALLED: [&str; 5] = ["glance.exe", "glance-remote.exe", "uninstall.exe", "resources", "licenses"];
 
 /// What a folder chosen to install into is, or why installing failed.
 #[derive(Debug, PartialEq)]
@@ -754,22 +754,34 @@ pub fn ensure_folder(folder: &Path) -> std::io::Result<()> {
 /// the link) and checked by handle to lie in it, and each removed by its
 /// handle: nothing elsewhere can be reached through a link.
 pub fn remove_settings() -> bool {
-    let folder = crate::settings::config_dir();
+    // Glance's own, and the phone remote's (its one file: the phones paired, and how the lights are lit).
+    let remote = std::env::var_os("APPDATA").map(|roaming| std::path::PathBuf::from(roaming).join("dev.weiyi.glance.remote"));
+    let own = remove_kept(&crate::settings::config_dir(), &["settings.json", crate::journal::FILE]);
+    let remotes = remote.is_none_or(|folder| remove_kept(&folder, &["config.json"]));
+    own && remotes
+}
+
+/// Takes the files named out of `folder`, and the folder if nothing else
+/// is left in it: as `remove_settings` says.
+fn remove_kept(folder: &Path, names: &[&str]) -> bool {
     if !folder.exists() {
         return true;
     }
-    let Some(held) = held_where_it_says(&folder) else { return false };
-    // The settings and the log, each by its handle.
-    let gone = ["settings.json", crate::journal::FILE].map(|name| match Held::open(&folder.join(name)) {
-        Some(file) if file.lies_in(&held) => file.delete(),
-        Some(_) => false,
-        // Not opened: gone already, or held by another program.
-        None => folder.join(name).symlink_metadata().is_err(),
-    });
+    let Some(held) = held_where_it_says(folder) else { return false };
+    // Each file by its handle.
+    let gone: Vec<bool> = names
+        .iter()
+        .map(|name| match Held::open(&folder.join(name)) {
+            Some(file) if file.lies_in(&held) => file.delete(),
+            Some(_) => false,
+            // Not opened: gone already, or held by another program.
+            None => folder.join(name).symlink_metadata().is_err(),
+        })
+        .collect();
     // Then the folder, by a handle able to delete it, if it is still the
     // one held (which is let go first: it shares no deletion).
     drop(held);
-    if let Some(folder_held) = pin(&folder).filter(|held| held.place().is_some_and(|place| std::path::absolute(&folder).is_ok_and(|path| same_path(&place, &path)))) {
+    if let Some(folder_held) = pin(folder).filter(|held| held.place().is_some_and(|place| std::path::absolute(folder).is_ok_and(|path| same_path(&place, &path)))) {
         folder_held.delete();
     }
     gone.iter().all(|gone| *gone)
@@ -849,7 +861,22 @@ fn is_glance_task(name: &str) -> bool {
 /// installed, protected copy of Glance, run elevated.
 pub fn remove_all_tasks() {
     for name in glance_tasks() {
+        // (What a task has running is stopped with it: the phone remote runs for as long as its task does.)
+        if let Some(task) = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(name.as_str())) }.ok()) {
+            let _ = unsafe { task.Stop(0) };
+        }
         delete_task(&name);
+    }
+}
+
+/// Runs this account's task for the phone remote, if it has one for the
+/// remote at `helper`: Glance starting finds the remote running, or
+/// starts it (an update stops it to replace it).
+pub fn run_remote(helper: &Path) {
+    if remote_enabled(helper) {
+        if let Some(task) = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(remote_task())) }.ok()) {
+            let _ = unsafe { task.Run(&VARIANT::default()) };
+        }
     }
 }
 

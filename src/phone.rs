@@ -83,6 +83,18 @@ fn firewall(arguments: &[&str]) -> bool {
     Command::new("netsh").args(["advfirewall", "firewall"]).args(arguments).creation_flags(NO_WINDOW).output().is_ok_and(|done| done.status.success())
 }
 
+/// The firewall closed to the remote again: for the uninstaller.
+pub fn forget() {
+    firewall(&["delete", "rule", &format!("name={RULE}")]);
+}
+
+/// The remote running, if it is on: asked of it as Glance starts.
+pub fn keep() {
+    if let Some(helper) = helper() {
+        elevation::run_remote(&helper);
+    }
+}
+
 /// Whether the remote is on: started at sign-in, by this account's task.
 pub fn on() -> bool {
     helper().is_some_and(|helper| elevation::remote_enabled(&helper))

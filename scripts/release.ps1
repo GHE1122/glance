@@ -18,6 +18,9 @@ Set-Location -LiteralPath $root
 
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "cargo build exited $LASTEXITCODE" }
+# The phone remote: a crate of its own, built into its own folder.
+cargo build --release --manifest-path remote\Cargo.toml
+if ($LASTEXITCODE -ne 0) { throw "cargo build (remote) exited $LASTEXITCODE" }
 
 $found = Get-Command makensis -ErrorAction SilentlyContinue
 $makensis = if ($found) { $found.Source } else { Join-Path $env:LOCALAPPDATA 'tauri\NSIS\makensis.exe' }
@@ -25,6 +28,7 @@ if (-not (Test-Path -LiteralPath $makensis)) { throw 'makensis not found; instal
 
 if ($Sign) {
     & (Join-Path $PSScriptRoot 'sign.ps1') -Files (Join-Path $root 'target\release\glance.exe')
+    & (Join-Path $PSScriptRoot 'sign.ps1') -Files (Join-Path $root 'remote\target\release\glance-remote.exe')
     # The installer signs its uninstaller and itself as it is made (glance.nsi).
     & $makensis /V2 /DSIGN 'installer\glance.nsi'
 }

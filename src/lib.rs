@@ -262,6 +262,8 @@ pub fn run() {
     // account's tasks: through Task Scheduler itself, nothing else loaded.
     if std::env::args().any(|arg| arg == "--remove-tasks") {
         elevation::remove_all_tasks();
+        // The way through the firewall made for the phone remote.
+        phone::forget();
         // And an update's installer, if one was left behind.
         elevation::forget_download();
         return;
@@ -346,6 +348,8 @@ pub fn run() {
         move || controller.run()
     });
     thread::spawn(update::watch);
+    // The phone remote, if it is on: running from now, whatever stopped it.
+    thread::spawn(phone::keep);
     // The frames programs present (for the game in front), while Glance runs.
     presents::start();
     thread::spawn(move || {
