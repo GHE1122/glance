@@ -246,9 +246,14 @@ pub fn offer(web: bool) -> Option<Code> {
     code(&mut said.lines().skip(1))
 }
 
+/// The QR code that holds `text`.
+pub fn code_of(text: &str) -> Option<Code> {
+    code(&mut ask(&["qr", text])?.lines())
+}
+
 /// The QR code that sends a phone to where the app is to be had.
 pub fn app_code() -> Option<Code> {
-    code(&mut ask(&["qr", APP_PAGE])?.lines())
+    code_of(APP_PAGE)
 }
 
 /// Whether there is an OpenRGB for the remote to set the lights by.

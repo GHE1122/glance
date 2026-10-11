@@ -276,20 +276,27 @@ impl Helper {
         match Config::load().screens {
             Screens::Signal => display::sleep().map_err(|error| error.to_string()),
             Screens::Kept => {
-                let darkened = display::darken();
-                // Kept, for a helper that ends before it has put them back.
-                Config::change(|config| config.darkened = darkened).map(|_| ()).map_err(|error| error.to_string())
+                display::darken();
+                self.keep_held().map_err(|error| error.to_string())
             }
         }
     }
 
+    /// The monitors this helper has put out with their signal kept, kept
+    /// in its configuration as they are now: one that ends before it has
+    /// put them back does so when it next starts.
+    fn keep_held(&self) -> std::io::Result<()> {
+        let held = display::held();
+        if Config::load().darkened == held {
+            return Ok(());
+        }
+        Config::change(|config| config.darkened = held).map(|_| ())
+    }
+
     /// The screens on again, whichever way they were put out.
     fn screens_on(&self) {
-        let kept_dark = display::kept_dark();
         display::wake();
-        if kept_dark {
-            let _ = Config::change(|config| config.darkened.clear());
-        }
+        let _ = self.keep_held();
     }
 
     /// Night: the lights out, the power-saving plan, the screens off. Day
@@ -373,6 +380,7 @@ impl Helper {
                     Some(percent) => display::dim(index, percent.min(100) as u8),
                     None => display::turn(index, on()?),
                 };
+                let _ = self.keep_held();
                 if !took {
                     return Err((500, "the monitor did not take it".into()));
                 }

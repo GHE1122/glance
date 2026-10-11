@@ -432,6 +432,8 @@ enum CodeFor {
     Pairing,
     /// A pairing, for a phone's camera: it opens the remote's page.
     WebPairing,
+    /// The remote's page, for a phone paired by it before.
+    WebPage,
 }
 
 /// What a press lands on.
@@ -473,8 +475,8 @@ enum Target {
     GetApp,
     /// Offers a pairing and shows its code: for the app, or (true) for a phone's browser.
     Pair(bool),
-    /// Copies where the remote's web page is.
-    CopyAddress,
+    /// Shows the code that opens the remote's web page again.
+    OpenPage,
     /// Unpairs the phone at that place among those shown.
     Unpair(usize),
     /// Sends the diagnostics to Glance's site, shown first in a window of
@@ -610,9 +612,8 @@ struct Ui {
     uninstaller: Option<std::path::PathBuf>,
     /// When the diagnostics were last copied.
     copied_at: Option<Instant>,
-    /// Where the remote's page for a phone's browser is, and when that was last copied.
+    /// Where the remote's page for a phone's browser is.
     web_address: Option<String>,
-    address_copied_at: Option<Instant>,
     /// The diagnostics being sent (on a thread of its own), and how the
     /// last sending went: the name the site gave them, or none.
     sending: Option<std::thread::JoinHandle<Option<String>>>,
@@ -748,7 +749,6 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             // Run elevated, so only where no ordinary program can change it.
             copied_at: None,
             web_address: crate::phone::web_address(),
-            address_copied_at: None,
             sending: None,
             sent: None,
             phone_from: Instant::now(),
@@ -1079,6 +1079,9 @@ impl Ui {
                     }
                     if self.web_address.is_some() {
                         rows.push(Row::WebPage);
+                        if shown == Some(CodeFor::WebPage) {
+                            rows.push(Row::Code);
+                        }
                     }
                     // The phones paired, a group of their own.
                     if !self.phones.is_empty() {
@@ -1438,18 +1441,18 @@ impl Ui {
             ),
             Row::GetApp => (
                 p("下载手机 APP", "Get the phone app"),
-                p("安卓手机扫码下载；iPhone 暂时用下面的网页", "Scan with an Android phone to download it; on an iPhone, use the web page below for now"),
+                p("安卓手机扫码下载；iPhone 暂请使用下方的网页遥控", "Scan with an Android phone to download it; on an iPhone, use the web page below for now"),
                 vec![(if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) { p("收起", "Hide") } else { p("显示二维码", "Show the code") }, Target::GetApp, Button::Plain)],
             ),
             Row::Pair => (
                 p("配对一部手机", "Pair a phone"),
-                p("每个配对码只给一部手机用，10 分钟内有效", "Each code is for one phone, and lasts ten minutes"),
+                p("每个配对码仅供一部手机使用，10 分钟内有效", "Each code is for one phone, and lasts ten minutes"),
                 vec![(p("用 APP", "For the app"), Target::Pair(false), Button::Accent), (p("用网页", "For the web page"), Target::Pair(true), Button::Plain)],
             ),
             Row::WebPage => (
-                p("网页遥控的地址", "The web page's address"),
-                format!("{}　{}", self.web_address.as_deref().unwrap_or_default(), p("用网页配对过的手机，在浏览器里打开它即可", "A phone paired by the web page opens it in its browser")),
-                vec![(if self.address_copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR) { p("已复制", "Copied") } else { p("复制", "Copy") }, Target::CopyAddress, Button::Plain)],
+                p("重新打开网页遥控", "Open the web page again"),
+                p("已通过网页配对的手机，扫码即可再次打开", "A phone paired by the web page scans this to open it again"),
+                vec![(if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::WebPage) { p("收起", "Hide") } else { p("显示二维码", "Show the code") }, Target::OpenPage, Button::Plain)],
             ),
             Row::Phone(at, name) => (
                 if name.is_empty() { p("一部手机", "A phone") } else { name.clone() },
@@ -1759,27 +1762,27 @@ impl Ui {
             ),
             Switch::RemoteLights => {
                 let hint = if self.fetching.is_some() {
-                    p("正在处理，下载需要一会儿…", "Working; the download takes a moment…")
+                    p("正在处理，下载需要一些时间…", "Working; the download takes a moment…")
                 } else if self.fetch_failed {
-                    p("没有下载成功，请稍后再试", "The download did not succeed; try again later")
+                    p("下载未成功，请稍后重试", "The download did not succeed; try again later")
                 } else {
-                    p("主板、显卡等的灯光由开源软件 OpenRGB 控制。第一次打开会从它的官方地址下载（约 22 MB）；关闭后不再控制这些灯，下载的 OpenRGB 也一并删除", "A board's and a card's lights are set through OpenRGB, an open-source program. Turned on first, it is downloaded from its own project (about 22 MB); turned off, those lights are left alone and the download is removed")
+                    p("主板、显卡等的灯光由开源软件 OpenRGB 控制。首次开启时将从其官方地址下载（约 22 MB）；关闭后不再控制灯光，并删除已下载的 OpenRGB", "A board's and a card's lights are set through OpenRGB, an open-source program. Turned on first, it is downloaded from its own project (about 22 MB); turned off, those lights are left alone and the download is removed")
                 };
                 return (p("控制灯光", "Control the lights"), Some(Cow::Borrowed(hint)), self.remote_lights);
             }
             Switch::RemoteScreens => (
                 p("关屏时保持显示器连接", "Keep monitors connected while off"),
                 Some(p(
-                    "显示器还接着别的电脑、鼠标键盘插在显示器上，或者关屏久了窗口会跑到别的屏幕时打开。能单独关闭的显示器照常关闭，其余的用黑色画面盖住并调到最暗，背光仍然亮着",
+                    "适用于显示器同时连接其他电脑、鼠标键盘接在显示器上，或长时间关屏后窗口移至其他屏幕的情况。可单独关闭的显示器照常关闭，其余显示器以黑色画面覆盖并调至最暗，背光保持开启",
                     "For a monitor that has another computer plugged in too, a mouse or keyboard plugged into a monitor, or windows that move to other screens after a long while dark. A monitor that can be turned off by itself still is; the others are covered in black and made as dim as they go, their backlight still on",
                 )),
                 self.remote_screens,
             ),
             Switch::Remote => {
                 let hint = if self.remote_there {
-                    p("用手机关屏、关灯、调音量和亮度。开启后会运行一个不提权的小程序，只对本地网络开放", "Screens, lights, volume and brightness from a phone. On, a small program runs (never elevated), open to the local network only")
+                    p("通过手机关闭屏幕与灯光、调节音量和亮度。开启后将运行一个不提权的辅助程序，仅对本地网络开放", "Screens, lights, volume and brightness from a phone. On, a small program runs (never elevated), open to the local network only")
                 } else {
-                    p("这份 Glance 没有带遥控程序", "This copy of Glance came without the remote")
+                    p("此版本的 Glance 未附带遥控程序", "This copy of Glance came without the remote")
                 };
                 return (p("手机遥控", "Phone remote"), Some(Cow::Borrowed(hint)), self.remote);
             }
@@ -2260,10 +2263,11 @@ impl Ui {
             Target::GetApp if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) => self.code = None,
             Target::GetApp => self.code = crate::phone::app_code().map(|code| (code, CodeFor::App)),
             Target::Pair(web) => self.code = crate::phone::offer(web).map(|code| (code, if web { CodeFor::WebPairing } else { CodeFor::Pairing })),
-            Target::CopyAddress => {
-                if self.web_address.as_ref().is_some_and(|address| crate::diagnostics::copy(self.hwnd, address)) {
-                    self.address_copied_at = Some(Instant::now());
-                }
+            Target::OpenPage if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::WebPage) => self.code = None,
+            Target::OpenPage => {
+                // (Where it is now: this PC's address may have changed.)
+                self.web_address = crate::phone::web_address();
+                self.code = self.web_address.as_deref().and_then(crate::phone::code_of).map(|code| (code, CodeFor::WebPage));
             }
             Target::Unpair(at) => {
                 if let Some(phone) = self.phones.get(at) {
@@ -2330,7 +2334,7 @@ impl Ui {
                 Row::Quit => vec![Target::Quit],
                 Row::GetApp => vec![Target::GetApp],
                 Row::Pair => vec![Target::Pair(false), Target::Pair(true)],
-                Row::WebPage => vec![Target::CopyAddress],
+                Row::WebPage => vec![Target::OpenPage],
                 Row::Phone(at, _) => vec![Target::Unpair(at)],
                 Row::Code | Row::Group(_) => vec![],
                 Row::More(_) => vec![Target::More],
@@ -2465,7 +2469,7 @@ impl Ui {
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
-            (Row::GetApp, Target::GetApp) | (Row::Pair, Target::Pair(_)) | (Row::WebPage, Target::CopyAddress) => true,
+            (Row::GetApp, Target::GetApp) | (Row::Pair, Target::Pair(_)) | (Row::WebPage, Target::OpenPage) => true,
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
@@ -2717,7 +2721,7 @@ impl Ui {
         // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered appears, and its code goes.
         if self.page == Page::Remote && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
             let phones = crate::phone::phones();
-            if phones.len() > self.phones.len() && self.code.as_ref().is_some_and(|(_, what)| *what != CodeFor::App) {
+            if phones.len() > self.phones.len() && self.code.as_ref().is_some_and(|(_, what)| matches!(what, CodeFor::Pairing | CodeFor::WebPairing)) {
                 self.code = None;
             }
             self.phones = phones;
@@ -3543,8 +3547,9 @@ fn code_words(lang: Lang, what: CodeFor) -> (&'static str, &'static str) {
     match what {
         // (The first of each on one line: short enough for the room beside the code.)
         CodeFor::App => (pick(lang, "扫码下载 Glance", "Scan to get Glance"), crate::phone::APP_PAGE.trim_start_matches("https://")),
-        CodeFor::Pairing => (pick(lang, "用 Glance APP 扫描", "Scan with the Glance app"), pick(lang, "打开手机上的 Glance，扫描这个配对码。10 分钟内有效，只给一部手机用", "Open Glance on the phone and scan this code. Good for ten minutes, for one phone")),
-        CodeFor::WebPairing => (pick(lang, "用手机相机扫描", "Scan with the camera"), pick(lang, "会在浏览器里打开，之后可以添加到主屏幕。网页不加密，请只在信任的网络（比如家里）使用。10 分钟内有效，只给一部手机用", "It opens in the browser, and can then be added to the home screen. The page is not encrypted: use it only on a network you trust, such as your home's. Good for ten minutes, for one phone")),
+        CodeFor::Pairing => (pick(lang, "用 Glance APP 扫描", "Scan with the Glance app"), pick(lang, "打开手机上的 Glance，扫描此配对码。10 分钟内有效，仅供一部手机使用", "Open Glance on the phone and scan this code. Good for ten minutes, for one phone")),
+        CodeFor::WebPage => (pick(lang, "用手机相机扫描", "Scan with the camera"), pick(lang, "在此前配对时使用的浏览器中打开。电脑的网络地址变更后，原配对随之失效，请通过“用网页”重新配对", "Open it in the browser the phone was paired with. Once this PC's address on the network has changed, that pairing no longer holds: pair again with “For the web page”")),
+        CodeFor::WebPairing => (pick(lang, "用手机相机扫描", "Scan with the camera"), pick(lang, "扫码后将在浏览器中打开，之后可添加到主屏幕。网页未加密，请仅在可信任的网络（如家庭网络）中使用。10 分钟内有效，仅供一部手机使用", "It opens in the browser, and can then be added to the home screen. The page is not encrypted: use it only on a network you trust, such as your home's. Good for ten minutes, for one phone")),
     }
 }
 

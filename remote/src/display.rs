@@ -363,14 +363,20 @@ pub struct Darkened {
     pub brightness: Option<u8>,
 }
 
+/// A thread that holds covers up, by its number: told to end by that, and waited for.
+type Covering = (u32, std::thread::JoinHandle<()>);
+
 /// The screens kept dark by this helper: which monitors and how, and the
 /// thread that holds the covers up.
 struct Dark {
     monitors: Vec<Darkened>,
-    covering: (u32, std::thread::JoinHandle<()>),
+    covering: Covering,
 }
 
 static DARK: Mutex<Option<Dark>> = Mutex::new(None);
+/// The monitors put out one by one (see `turn`), each with the thread
+/// that holds its cover up, where it is covered.
+static SINGLY: Mutex<Vec<(Darkened, Option<Covering>)>> = Mutex::new(Vec::new());
 /// How long a monitor told to turn off is given to say it has, and how
 /// often it is asked meanwhile.
 const TURNING_OFF: Duration = Duration::from_millis(2000);
@@ -390,14 +396,17 @@ unsafe extern "system" fn cover(window: HWND, message: u32, wparam: WPARAM, lpar
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
 }
 
-/// Holds a black window over each of `places` (and the signal on: Windows
-/// is not to stop it for want of a touch) till it is told to end; its
-/// thread's number is sent once the covers are up.
-fn hold_covers(places: Vec<(i32, i32, i32, i32)>, up: std::sync::mpsc::Sender<u32>) {
+/// Holds a black window over each of `places` till it is told to end
+/// (and, with `signal_kept`, the signal on meanwhile: Windows is not to
+/// stop it for want of a touch); its thread's number is sent once the
+/// covers are up.
+fn hold_covers(places: Vec<(i32, i32, i32, i32)>, signal_kept: bool, up: std::sync::mpsc::Sender<u32>) {
     unsafe {
         let class = WNDCLASSW { lpfnWndProc: Some(cover), lpszClassName: w!("GlanceRemoteCover"), hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0), ..Default::default() };
         RegisterClassW(&class);
-        SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED);
+        if signal_kept {
+            SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED);
+        }
         let covers: Vec<HWND> = places
             .iter()
             .filter_map(|(left, top, width, height)| CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, class.lpszClassName, w!(""), WS_POPUP | WS_VISIBLE, *left, *top, *width, *height, None, None, None, None).ok())
@@ -413,59 +422,92 @@ fn hold_covers(places: Vec<(i32, i32, i32, i32)>, up: std::sync::mpsc::Sender<u3
         for one in covers {
             let _ = DestroyWindow(one);
         }
-        SetThreadExecutionState(ES_CONTINUOUS);
+        if signal_kept {
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
     }
+}
+
+/// Covers put up over `places` on a thread of their own: the thread, once they are up.
+fn covering(places: Vec<(i32, i32, i32, i32)>, signal_kept: bool) -> Option<Covering> {
+    let (up, is_up) = std::sync::mpsc::channel();
+    let holding = std::thread::spawn(move || hold_covers(places, signal_kept, up));
+    Some((is_up.recv().ok()?, holding))
+}
+
+fn uncover(covering: Covering) {
+    let _ = unsafe { PostThreadMessageW(covering.0, WM_QUIT, WPARAM(0), LPARAM(0)) };
+    let _ = covering.1.join();
+}
+
+/// Puts one monitor out with its signal kept: turned off by itself where
+/// it then says it is; else made as dim as it goes, to be covered in black
+/// (whether it is to be covered comes with what was done to it).
+fn put_out(index: usize, name: String, built_in: bool, monitor: HANDLE) -> Darkened {
+    // Told to turn off, it is off once it no longer says it is on (one that says nothing of its power is not told).
+    let mut off = false;
+    if ask(monitor, POWER_MODE).is_some() && unsafe { SetVCPFeature(monitor, POWER_MODE, POWER_OFF) } != 0 {
+        let told = Instant::now();
+        while !off && told.elapsed() < TURNING_OFF {
+            std::thread::sleep(ASKED_EVERY);
+            off = ask(monitor, POWER_MODE) != Some(POWER_ON);
+        }
+    }
+    let mut was = None;
+    if !off {
+        was = brightness(monitor).or_else(|| built_in.then(panel_brightness).flatten());
+        let dimmed = match asked(monitor, BRIGHTNESS) {
+            Some(_) => unsafe { SetVCPFeature(monitor, BRIGHTNESS, 0) != 0 },
+            None => built_in && set_panel_brightness(0),
+        };
+        if !dimmed {
+            was = None;
+        }
+    }
+    crate::journal::note(format!("monitor {index} {name}: {}", if off { "turned off by itself".to_string() } else { format!("covered in black{}", if was.is_some() { " and dimmed" } else { "" }) }));
+    Darkened { index, name, off, brightness: was }
+}
+
+/// Every monitor this helper has put out with its signal kept, all of
+/// them together or one by one: as each is to be put back (see `restore`).
+pub fn held() -> Vec<Darkened> {
+    let mut held: Vec<Darkened> = DARK.lock().unwrap().as_ref().map(|dark| dark.monitors.clone()).unwrap_or_default();
+    held.extend(SINGLY.lock().unwrap().iter().map(|(one, _)| one.clone()));
+    held
 }
 
 /// The screens out with their signal kept: each monitor turned off by
 /// itself where it says it has been; the others covered in black and made
-/// as dim as they go. What was done to each is returned (to be kept: see
-/// `restore`); already dark, nothing more is done but that what is touched
-/// just now is not minded.
-pub fn darken() -> Vec<Darkened> {
+/// as dim as they go (one put out by itself before stays as it is).
+/// Already dark, nothing more is done but that what is touched just now is
+/// not minded.
+pub fn darken() {
     let mut dark = DARK.lock().unwrap();
-    if let Some(dark) = dark.as_ref() {
+    if dark.is_some() {
         out(crate::actions::tick());
-        return dark.monitors.clone();
+        return;
     }
+    let singly: Vec<usize> = SINGLY.lock().unwrap().iter().map(|(one, _)| one.index).collect();
     let mut monitors = Vec::new();
     let mut covered = Vec::new();
     each_monitor(|index, name, place, built_in, monitor| {
-        // Told to turn off, it is off once it no longer says it is on (one that says nothing of its power is not told).
-        let mut off = false;
-        if ask(monitor, POWER_MODE).is_some() && unsafe { SetVCPFeature(monitor, POWER_MODE, POWER_OFF) } != 0 {
-            let told = Instant::now();
-            while !off && told.elapsed() < TURNING_OFF {
-                std::thread::sleep(ASKED_EVERY);
-                off = ask(monitor, POWER_MODE) != Some(POWER_ON);
-            }
+        if singly.contains(&index) {
+            return;
         }
-        let mut was = None;
-        if !off {
-            was = brightness(monitor).or_else(|| built_in.then(panel_brightness).flatten());
-            let dimmed = match asked(monitor, BRIGHTNESS) {
-                Some(_) => unsafe { SetVCPFeature(monitor, BRIGHTNESS, 0) != 0 },
-                None => built_in && set_panel_brightness(0),
-            };
-            if !dimmed {
-                was = None;
-            }
+        let done = put_out(index, name, built_in, monitor);
+        if !done.off {
             covered.push(place);
         }
-        crate::journal::note(format!("monitor {index} {name}: {}", if off { "turned off by itself".to_string() } else { format!("covered in black{}", if was.is_some() { " and dimmed" } else { "" }) }));
-        monitors.push(Darkened { index, name, off, brightness: was });
+        monitors.push(done);
     });
-    let (up, is_up) = std::sync::mpsc::channel();
-    let holding = std::thread::spawn(move || hold_covers(covered, up));
-    let Ok(thread) = is_up.recv() else { return monitors };
+    let Some(covering) = covering(covered, true) else { return };
     let listener = LISTENER.load(Ordering::SeqCst);
     if listener != 0 {
         let _ = unsafe { PostMessageW(Some(HWND(listener as *mut _)), HEAR_TOUCHES, WPARAM(1), LPARAM(0)) };
     }
     *KNOWN.lock().unwrap() = None;
-    *dark = Some(Dark { monitors: monitors.clone(), covering: (thread, holding) });
+    *dark = Some(Dark { monitors, covering });
     out(crate::actions::tick());
-    monitors
 }
 
 /// Each of `monitors` as it was before it was put out (see `darken`): on
@@ -494,9 +536,7 @@ pub fn restore(monitors: &[Darkened]) {
 /// The screens this helper kept dark, on again: whether it had.
 fn lighten() -> bool {
     let Some(dark) = DARK.lock().unwrap().take() else { return false };
-    let (thread, holding) = dark.covering;
-    let _ = unsafe { PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0)) };
-    let _ = holding.join();
+    uncover(dark.covering);
     restore(&dark.monitors);
     true
 }
@@ -506,8 +546,8 @@ fn lighten() -> bool {
 /// nothing (which is input all the same). Nothing more is asked of the
 /// monitors: told besides to power on, and which input to show, a monitor
 /// with several PCs plugged into it went over to another. One this helper
-/// turned off by itself (see `turn`), which no touch of the mouse wakes, is
-/// turned on.
+/// put out by itself (see `turn`), which no touch of the mouse wakes, is
+/// put on again.
 pub fn wake() {
     *OUT.lock().unwrap() = None;
     lighten();
@@ -521,11 +561,15 @@ pub fn wake() {
         let nudge = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: MOUSEEVENTF_MOVE, ..Default::default() } } };
         SendInput(&[nudge], size_of::<INPUT>() as i32);
     }
-    let turned_off = std::mem::take(&mut *TURNED_OFF.lock().unwrap());
-    for index in turned_off {
-        tell(index, POWER_MODE, POWER_ON);
+    let singly = std::mem::take(&mut *SINGLY.lock().unwrap());
+    let mut back = Vec::new();
+    for (one, covering) in singly {
+        if let Some(covering) = covering {
+            uncover(covering);
+        }
+        back.push(one);
     }
-    *KNOWN.lock().unwrap() = None;
+    restore(&back);
 }
 
 /// A monitor: what it calls itself, where it is on the desktop (left, top,
@@ -586,8 +630,6 @@ const KNOWN_FOR: Duration = Duration::from_secs(5);
 
 /// The monitors as they last answered, and when.
 static KNOWN: Mutex<Option<(Instant, Vec<Monitor>)>> = Mutex::new(None);
-/// The monitors this helper turned off by themselves, by their places.
-static TURNED_OFF: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 /// Goes through every monitor that is connected, in the order Windows has
 /// them: `with` is handed each one's place in that order, its name, where
@@ -675,15 +717,19 @@ fn set_panel_brightness(percent: u8) -> bool {
 
 /// Every monitor that is connected, as it answered within `KNOWN_FOR`.
 pub fn monitors() -> Vec<Monitor> {
+    // (Those put out one by one first: `turn` holds them while it changes what is known.)
+    let singly: Vec<usize> = SINGLY.lock().unwrap().iter().map(|(one, _)| one.index).collect();
     let mut known = KNOWN.lock().unwrap();
     if let Some((_, monitors)) = known.as_ref().filter(|(at, _)| at.elapsed() < KNOWN_FOR) {
         return monitors.clone();
     }
     let mut found = Vec::new();
-    each_monitor(|_, name, place, built_in, monitor| {
+    each_monitor(|index, name, place, built_in, monitor| {
         // A laptop's own screen says how bright it is through Windows, not over DDC/CI.
         let bright = brightness(monitor).or_else(|| built_in.then(panel_brightness).flatten());
-        found.push(Monitor { name, place, on: ask(monitor, POWER_MODE).map(|mode| mode == POWER_ON), brightness: bright })
+        // On, unless this helper has put it out by itself or it says it is off (one that says nothing of its power is on).
+        let on = !singly.contains(&index) && ask(monitor, POWER_MODE).is_none_or(|mode| mode == POWER_ON);
+        found.push(Monitor { name, place, on: Some(on), brightness: bright })
     });
     *known = Some((Instant::now(), found.clone()));
     found
@@ -718,16 +764,41 @@ pub fn dim(index: usize, percent: u8) -> bool {
     told
 }
 
-/// Turns the monitor at `index` off by itself, or on again: the others
+/// Puts the monitor at `index` out by itself, or on again: the others
 /// stay as they are, and Windows keeps its windows where they were (to
-/// Windows it is still there). Whether it took it.
+/// Windows it is still there). Out, it is turned off where it then says
+/// it is, and covered in black (made as dim as it goes) where not. Whether
+/// there is such a monitor.
 pub fn turn(index: usize, on: bool) -> bool {
-    let told = tell(index, POWER_MODE, if on { POWER_ON } else { POWER_OFF });
-    let mut turned_off = TURNED_OFF.lock().unwrap();
-    turned_off.retain(|at| *at != index);
-    if told && !on {
-        turned_off.push(index);
+    let mut singly = SINGLY.lock().unwrap();
+    let held = singly.iter().position(|(one, _)| one.index == index);
+    let mut there = false;
+    match (on, held) {
+        (false, Some(_)) => there = true,
+        (false, None) => {
+            let mut done = None;
+            each_monitor(|at, name, place, built_in, monitor| {
+                if at == index {
+                    done = Some((put_out(at, name, built_in, monitor), place));
+                }
+            });
+            if let Some((done, place)) = done {
+                let cover = if done.off { None } else { covering(vec![place], false) };
+                singly.push((done, cover));
+                there = true;
+            }
+        }
+        (true, Some(held)) => {
+            let (one, cover) = singly.remove(held);
+            if let Some(cover) = cover {
+                uncover(cover);
+            }
+            restore(&[one]);
+            there = true;
+        }
+        // (Off by other means than this helper's: told to turn on.)
+        (true, None) => there = tell(index, POWER_MODE, POWER_ON),
     }
     *KNOWN.lock().unwrap() = None;
-    told
+    there
 }
