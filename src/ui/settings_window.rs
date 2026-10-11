@@ -1170,7 +1170,7 @@ impl Ui {
                 Row::ModuleChoice(..) => (0.0, ITEM_ROW),
                 // As tall as the code, or as the words beside it where those are taller.
                 Row::Code => {
-                    let words = self.code.as_ref().map_or(0.0, |(_, what)| 22.0 + self.gfx.wrapped_height(code_words(self.lang, *what).1, Font::new(Family::Segoe, 12.0, 400.0), CODE_WORDS));
+                    let words = self.code.as_ref().map_or(0.0, |(_, what)| 22.0 + self.gfx.wrapped_height(&code_words(self.lang, *what, self.web_address.as_deref()).1, Font::new(Family::Segoe, 12.0, 400.0), CODE_WORDS));
                     (ROW_GAP, CODE.max(words) + 2.0 * ROW_SIDE)
                 }
                 Row::Group(_) => (20.0, GROUP),
@@ -1445,7 +1445,7 @@ impl Ui {
                 vec![(if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) { p("收起", "Hide") } else { p("显示二维码", "Show the code") }, Target::GetApp, Button::Plain)],
             ),
             Row::Pair => (
-                p("配对一部手机", "Pair a phone"),
+                p("配对手机", "Pair a phone"),
                 p("每个配对码仅供一部手机使用，10 分钟内有效", "Each code is for one phone, and lasts ten minutes"),
                 vec![(p("用 APP", "For the app"), Target::Pair(false), Button::Accent), (p("用网页", "For the web page"), Target::Pair(true), Button::Plain)],
             ),
@@ -3013,7 +3013,8 @@ impl Ui {
                                 across += run.max(1);
                             }
                         }
-                        let (title, word) = code_words(lang, *what);
+                        let (title, word) = code_words(lang, *what, self.web_address.as_deref());
+                        let word = word.as_ref();
                         let text_left = x0 + CODE + 20.0;
                         field_label(frame, palette, title, Some(word), label, hint, text_left, y + row_height / 2.0, CODE_WORDS);
 
@@ -3543,14 +3544,20 @@ fn field_label_in(frame: &Frame, colors: (Color, Color), label: &str, hint: Opti
 }
 
 /// What is said beside a code: what to do with it, and what comes of that.
-fn code_words(lang: Lang, what: CodeFor) -> (&'static str, &'static str) {
-    match what {
+fn code_words(lang: Lang, what: CodeFor, page: Option<&str>) -> (&'static str, Cow<'static, str>) {
+    let (title, words) = match what {
         // (The first of each on one line: short enough for the room beside the code.)
         CodeFor::App => (pick(lang, "扫码下载 Glance", "Scan to get Glance"), crate::phone::APP_PAGE.trim_start_matches("https://")),
         CodeFor::Pairing => (pick(lang, "用 Glance APP 扫描", "Scan with the Glance app"), pick(lang, "打开手机上的 Glance，扫描此配对码。10 分钟内有效，仅供一部手机使用", "Open Glance on the phone and scan this code. Good for ten minutes, for one phone")),
-        CodeFor::WebPage => (pick(lang, "用手机相机扫描", "Scan with the camera"), pick(lang, "在此前配对时使用的浏览器中打开。电脑的网络地址变更后，原配对随之失效，请通过“用网页”重新配对", "Open it in the browser the phone was paired with. Once this PC's address on the network has changed, that pairing no longer holds: pair again with “For the web page”")),
+        // (The address itself too, to be typed where the code cannot be scanned.)
+        CodeFor::WebPage => {
+            let words = pick(lang, "在此前配对时使用的浏览器中打开。电脑的网络地址变更后，原配对随之失效，请通过“用网页”重新配对", "Open it in the browser the phone was paired with. Once this PC's address on the network has changed, that pairing no longer holds: pair again with “For the web page”");
+            return (pick(lang, "用手机相机扫描", "Scan with the camera"), Cow::Owned(format!("{}
+{words}", page.unwrap_or_default())));
+        }
         CodeFor::WebPairing => (pick(lang, "用手机相机扫描", "Scan with the camera"), pick(lang, "扫码后将在浏览器中打开，之后可添加到主屏幕。网页未加密，请仅在可信任的网络（如家庭网络）中使用。10 分钟内有效，仅供一部手机使用", "It opens in the browser, and can then be added to the home screen. The page is not encrypted: use it only on a network you trust, such as your home's. Good for ten minutes, for one phone")),
-    }
+    };
+    (title, Cow::Borrowed(words))
 }
 
 /// A row's label and hint, each on one line, cut short if they do not fit.
