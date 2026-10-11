@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -224,6 +226,20 @@ fun Words(text: String, color: Color, modifier: Modifier = Modifier, size: Float
 }
 
 /** A question over the app: what it is, what doing it means, and the two answers. */
+/** Something long to read, in a box that scrolls, and a word to put it away. */
+@Composable
+fun Read(title: String, text: String, close: String, dismiss: () -> Unit) {
+    Dialog(onDismissRequest = dismiss) {
+        Column(Modifier.widthIn(max = 420.dp).clip(RoundedCornerShape(24.dp)).background(Card2).padding(start = 24.dp, top = 24.dp, end = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(title, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = Ink, modifier = Modifier.padding(end = 12.dp))
+            Text(text, fontSize = 12.sp, lineHeight = 18.sp, color = Dim, modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(end = 12.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Words(close, Ink, Modifier.padding(horizontal = 4.dp).widthIn(min = 56.dp), size = 15f, weight = FontWeight.SemiBold, press = dismiss)
+            }
+        }
+    }
+}
+
 @Composable
 fun Ask(title: String, paragraphs: List<String>, verb: String, cancel: String, dismiss: () -> Unit, done: () -> Unit) {
     Dialog(onDismissRequest = dismiss) {

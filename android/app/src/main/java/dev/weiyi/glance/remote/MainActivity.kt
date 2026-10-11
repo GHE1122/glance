@@ -249,8 +249,21 @@ private fun Pairing(first: Boolean, wrong: Boolean, back: () -> Unit, scan: () -
 /** The page behind the gear: every PC paired with, each unpaired by itself, and what the main page shows. */
 @Composable
 private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>, back: () -> Unit, show: (String, Boolean) -> Unit, add: () -> Unit, unpair: (Int) -> Unit) {
+    var licences by remember { mutableStateOf(false) }
+    if (licences) Read(stringResource(R.string.licences), LocalContext.current.resources.openRawResource(R.raw.licences).use { it.readBytes().decodeToString() }, stringResource(R.string.close)) { licences = false }
     Column(Modifier.fillMaxSize()) {
         Top(stringResource(R.string.settings), back)
+        // What this is, and what it is built with.
+        val about: @Composable () -> Unit = {
+            Text(stringResource(R.string.about), color = Dim, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
+            Panel {
+                Column {
+                    Line("Glance", stringResource(R.string.version, BuildConfig.VERSION_NAME)) {}
+                    Rule()
+                    Line(stringResource(R.string.licences), stringResource(R.string.licences_what)) { Words(stringResource(R.string.view), Accent) { licences = true } }
+                }
+            }
+        }
         val paired: @Composable () -> Unit = {
             Text(stringResource(R.string.paired_pcs), color = Dim, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
             Panel {
@@ -283,13 +296,14 @@ private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>
             val gap = Arrangement.spacedBy(12.dp)
             if (maxWidth >= WIDE) {
                 Row(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Column(Modifier.weight(1f), verticalArrangement = gap) { paired() }
+                    Column(Modifier.weight(1f), verticalArrangement = gap) { paired(); about() }
                     Column(Modifier.weight(1f), verticalArrangement = gap) { showing() }
                 }
             } else {
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), verticalArrangement = gap) {
                     paired()
                     showing()
+                    about()
                 }
             }
         }

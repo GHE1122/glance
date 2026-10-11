@@ -111,4 +111,10 @@
     <string name="rpm">rpm</string>
     <string name="cpu_fan_line">CPU fan %1$d rpm</string>
     <string name="case_fan_line">Case fans %1$d rpm</string>
+    <string name="about">About</string>
+    <string name="version">Version %1$s</string>
+    <string name="licences">Open-source licences</string>
+    <string name="licences_what">This app\'s own, and those of what it is built with</string>
+    <string name="view">View</string>
+    <string name="close">Close</string>
 </resources>
