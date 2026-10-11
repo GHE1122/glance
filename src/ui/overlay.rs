@@ -359,7 +359,7 @@ pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&
                 vec![
                     chosen("fps", Some(game.map_or("—".into(), |game| format!("{:.0}", game.fps))), &FRAMES_A_SECOND),
                     // No 1% low yet is no part, as for any reading not yet read.
-                    chosen("low", game.map_or(Some("1% —".into()), |game| game.low.map(|low| format!("1% {low:.0}"))), &LOW),
+                    chosen("low", Some(game.and_then(|game| game.low).map_or("1% —".into(), |low| format!("1% {low:.0}"))), &LOW),
                     chosen("frametime", Some(game.map_or("— ms".into(), |game| format!("{:.1} ms", game.longest_ms))), &FRAME_TIME),
                 ],
             )],
