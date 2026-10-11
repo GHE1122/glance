@@ -47,8 +47,11 @@ impl Presents {
     }
 
     /// The frames as of `now`: none if it has presented no two frames in the
-    /// last second.
-    pub fn stats(&self, now: Duration) -> Option<FrameStats> {
+    /// last second. `heard` is the moment of the latest frame heard of from
+    /// any program: frames are told of a while after they are presented
+    /// (in batches), so only up to there is it known that this program
+    /// presented no more.
+    pub fn stats(&self, now: Duration, heard: Duration) -> Option<FrameStats> {
         let recent: Vec<Duration> = self.times.iter().copied().filter(|&t| now.saturating_sub(t) <= RECENT).collect();
         let (first, last) = (*recent.first()?, *recent.last()?);
         if recent.len() < 2 || last <= first {
@@ -57,7 +60,7 @@ impl Presents {
         // The frame being waited for is as long as the wait for it already: counted with the rest once that is
         // longer than they are (a few frames in a burst and then none are not that many a second).
         let span = (last - first).as_secs_f64();
-        let waited = now.saturating_sub(last).as_secs_f64();
+        let waited = heard.saturating_sub(last).as_secs_f64();
         let pending = (waited > span / (recent.len() - 1) as f64).then_some(waited);
         let fps = (recent.len() - 1) as f64 / (span + pending.unwrap_or(0.0));
         let longest_ms = recent.windows(2).map(|pair| (pair[1] - pair[0]).as_secs_f64() * 1000.0).fold(0.0, f64::max);
@@ -87,7 +90,7 @@ mod tests {
         for t in [0.0, 20.0, 10.0, 30.0, 50.0, 40.0] {
             presents.push(ms(t));
         }
-        let stats = presents.stats(ms(50.0)).unwrap();
+        let stats = presents.stats(ms(50.0), ms(50.0)).unwrap();
         assert!((stats.fps - 100.0).abs() < 0.01);
         assert!((stats.longest_ms - 10.0).abs() < 0.01);
     }
@@ -102,11 +105,28 @@ mod tests {
             t += if i % 100 == 99 { 50.0 } else { 10.0 };
             presents.push(ms(t));
         }
-        let stats = presents.stats(ms(t)).unwrap();
+        let stats = presents.stats(ms(t), ms(t)).unwrap();
         assert!((stats.fps - 100.0).abs() < 5.0, "{stats:?}");
         // The slowest hundredth are the 50 ms ones: 20 frames a second.
         assert!((stats.low.unwrap() - 20.0).abs() < 0.5, "{stats:?}");
         assert!((stats.longest_ms - 50.0).abs() < 0.5, "{stats:?}");
+    }
+
+    #[test]
+    fn frames_not_yet_told_of_are_not_taken_for_a_wait() {
+        let mut presents = Presents::default();
+        // 200 frames a second, told of up to a quarter of a second ago (they come in batches).
+        let mut t = 0.0;
+        for _ in 0..400 {
+            t += 5.0;
+            presents.push(ms(t));
+        }
+        let stats = presents.stats(ms(t + 250.0), ms(t)).unwrap();
+        assert!((stats.fps - 200.0).abs() < 0.5, "{stats:?}");
+        assert!((stats.low.unwrap() - 200.0).abs() < 0.5, "{stats:?}");
+        // Heard of beyond its last frame (another program's frames came since): it is waiting for one.
+        let stats = presents.stats(ms(t + 250.0), ms(t + 250.0)).unwrap();
+        assert!(stats.fps < 160.0, "{stats:?}");
     }
 
     #[test]
@@ -118,7 +138,7 @@ mod tests {
             t += if i == 1800 { 300.0 } else { 5.0 };
             presents.push(ms(t));
         }
-        let stats = presents.stats(ms(t)).unwrap();
+        let stats = presents.stats(ms(t), ms(t)).unwrap();
         // The last second holds the stutter: fewer frames a second than the game makes when it runs freely.
         assert!(stats.fps < 160.0, "{stats:?}");
         // Its slowest hundredth (19 frames, the 300 ms one among them) come to about 49 a second: below that.
@@ -132,10 +152,10 @@ mod tests {
         presents.push(ms(0.0));
         presents.push(ms(16.0));
         // A frame and its follower, then nothing for two seconds.
-        assert!(presents.stats(ms(16.0)).is_some());
-        assert_eq!(presents.stats(ms(2016.0)), None);
+        assert!(presents.stats(ms(16.0), ms(16.0)).is_some());
+        assert_eq!(presents.stats(ms(2016.0), ms(2016.0)), None);
         // Too few frames for a 1% low.
-        assert_eq!(presents.stats(ms(16.0)).unwrap().low, None);
+        assert_eq!(presents.stats(ms(16.0), ms(16.0)).unwrap().low, None);
     }
 
     #[test]

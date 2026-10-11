@@ -42,6 +42,10 @@ const SESSION: &str = "Glance.Frames.Debug";
 
 /// Each process's presents, by process id, in QPC ticks since boot.
 static PRESENTS: Mutex<Option<HashMap<u32, Presents>>> = Mutex::new(None);
+/// The moment of the latest event heard of from the session (QPC ticks):
+/// frames are told of in batches, a while after they were presented, and
+/// only up to here is it known what has been presented.
+static HEARD: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 /// QPC ticks a second.
 static FREQUENCY: Mutex<i64> = Mutex::new(0);
 
@@ -57,6 +61,8 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
         D3D9 => header.EventDescriptor.Id == D3D9_PRESENT,
         _ => false,
     };
+    // (Every event of either provider, a frame presented or not: they come in the order they happened, near enough.)
+    HEARD.fetch_max(header.TimeStamp, std::sync::atomic::Ordering::Relaxed);
     if present {
         let at = ticks(header.TimeStamp);
         if let Some(presents) = PRESENTS.lock().unwrap().as_mut() {
@@ -203,8 +209,9 @@ pub fn presenting() -> Vec<Presenting> {
     let stats: HashMap<u32, FrameStats> = {
         let mut presents = PRESENTS.lock().unwrap();
         let Some(presents) = presents.as_mut() else { return Vec::new() };
-        presents.retain(|_, frames| frames.stats(now).is_some());
-        presents.iter().filter_map(|(pid, frames)| Some((*pid, frames.stats(now)?))).collect()
+        let heard = ticks(HEARD.load(std::sync::atomic::Ordering::Relaxed));
+        presents.retain(|_, frames| frames.stats(now, heard).is_some());
+        presents.iter().filter_map(|(pid, frames)| Some((*pid, frames.stats(now, heard)?))).collect()
     };
     if stats.is_empty() {
         return Vec::new();
@@ -322,7 +329,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(|presents| presents.iter().filter_map(|(pid, frames)| Some((*pid, frames.stats(now)?.fps))).collect())
+                .map(|presents| presents.iter().filter_map(|(pid, frames)| Some((*pid, frames.stats(now, now)?.fps))).collect())
                 .unwrap_or_default();
             rates.sort_by(|a, b| b.1.total_cmp(&a.1));
             let windows: Vec<String> = presenting()

@@ -50,6 +50,8 @@ pub struct Overlay {
     /// clicks pass through it.
     clear: f32,
     through: bool,
+    /// Whether its glass is frosted (see `OverlaySettings::frosted`).
+    frosted: bool,
     /// Letting clicks through, and Ctrl held: it takes them now.
     taken: bool,
     /// How clear its glass was just made: said on it until it has been
@@ -200,6 +202,7 @@ impl Overlay {
             locked: false,
             clear: 0.0,
             through: false,
+            frosted: true,
             taken: false,
             said: None,
             lang: Lang::En,
@@ -229,6 +232,7 @@ impl Overlay {
         }
         self.clear = clear;
         self.through = settings.click_through;
+        self.frosted = settings.frosted;
         self.taken = self.through && (ctrl_down() || self.grab.is_some());
         self.window.set_click_through(self.through && !self.taken);
         self.beneath = beneath;
@@ -361,7 +365,7 @@ impl Overlay {
         } else {
             Hand::Free
         };
-        self.surface.set_frost(1.0 - self.clear);
+        self.surface.set_frost(if self.frosted { 1.0 - self.clear } else { 0.0 });
         let said = self.said.map(|clear| (if self.lang == Lang::Zh { "透明度" } else { "Clarity" }, format!("{:.0}", clear * 100.0)));
         let painted = self.surface.draw(&self.gfx, (width as u32, height as u32), scale, (0.0, 0.0, width as f32, height as f32, radius), |frame| {
             frame.crisp_text();
