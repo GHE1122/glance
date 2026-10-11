@@ -347,7 +347,9 @@ fn set_those_there(config: &Config, on: bool, light: &Light) -> std::io::Result<
     // (what is sent over its bus does not always arrive) is asked again.
     for attempt in 0..TRIES {
         let behind: Vec<usize> = (0..devices.len()).filter(|at| attempt == 0 || wanted[*at].0.as_ref().is_some_and(|(mode, _)| devices[*at].active != *mode)).collect();
-        if behind.is_empty() {
+        // (Putting out, one asking is enough: what has not gone out by its
+        // own "off" is painted dark below, which it takes at once.)
+        if behind.is_empty() || (!on && attempt > 0) {
             break;
         }
         for at in behind {
@@ -364,6 +366,22 @@ fn set_those_there(config: &Config, on: bool, light: &Light) -> std::io::Result<
         devices = client.devices()?;
         if devices.iter().map(|device| &device.name).ne(named.iter()) {
             return Ok(None);
+        }
+    }
+    // Put out, a device that would not go to its own "off" (some take a
+    // colour but not a change of mode) is painted with no light instead.
+    if !on {
+        let mut painted = false;
+        for (at, device) in devices.iter().enumerate().filter(|(_, device)| device.lit()) {
+            let paintable = ["Direct", "Static"].iter().find_map(|name| device.modes.iter().position(|mode| mode.name.eq_ignore_ascii_case(name)));
+            if let Some(mode) = paintable {
+                client.set_mode(at as u32, mode, &device.modes[mode])?;
+                client.set_colors(at as u32, &vec![0; device.leds])?;
+                painted = true;
+            }
+        }
+        if painted {
+            std::thread::sleep(SETTLING);
         }
     }
     Ok(Some(devices.len()))

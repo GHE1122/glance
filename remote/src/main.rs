@@ -426,6 +426,7 @@ fn main() -> std::io::Result<()> {
         }
         Some("lights") => {
             for device in lights::devices(&config)? {
+                println!("{} now: {} ({}), first colours {:06X?}", device.name, device.modes.get(device.active).map_or("?", |mode| mode.name.as_str()), if device.lit() { "lit" } else { "dark" }, device.colors.iter().take(3).collect::<Vec<_>>());
                 println!("{}\n  modes: {}\n  zones: {}", device.name, device.modes.iter().map(|mode| mode.name.as_str()).collect::<Vec<_>>().join(", "), device.zones.iter().map(|zone| format!("{} ({} LEDs)", zone.name, zone.leds)).collect::<Vec<_>>().join(", "));
             }
             return Ok(());
