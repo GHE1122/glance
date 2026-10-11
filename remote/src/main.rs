@@ -497,9 +497,16 @@ fn main() -> std::io::Result<()> {
         // away again (the lights then left to their makers' own programs).
         Some("lights") if std::env::args().nth(2).is_some() => {
             match std::env::args().nth(2).as_deref() {
-                Some("fetch") => println!("{}", fetch::fetch()?.display()),
+                // (One the user has put there themselves does as well as one fetched.)
+                Some("fetch") => {
+                    let config = Config::change(|config| config.lights_left_alone = false)?;
+                    if lights::program(&config).is_none() {
+                        fetch::fetch()?;
+                    }
+                }
                 Some("forget") => {
                     lights::afresh();
+                    Config::change(|config| config.lights_left_alone = true)?;
                     fetch::forget()?;
                 }
                 _ => {}

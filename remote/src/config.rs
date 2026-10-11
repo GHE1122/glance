@@ -64,6 +64,9 @@ pub struct Config {
     /// on (see `keys`), once it has been chosen from a phone: none, and
     /// that light is left as it is, on or off.
     pub keys: Option<u8>,
+    /// The board's and the card's lights are left alone (the user turned
+    /// their control off), whatever OpenRGB there is on this PC.
+    pub lights_left_alone: bool,
     /// The OpenRGB this helper started, by its program's number: its own
     /// to stop and start afresh (one the user started is not).
     pub openrgb_started: Option<u32>,
@@ -80,6 +83,7 @@ impl Default for Config {
             strip_leds: STRIP_LEDS,
             light: Light::default(),
             keys: None,
+            lights_left_alone: false,
             openrgb_started: None,
         }
     }

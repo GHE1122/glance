@@ -238,6 +238,9 @@ impl Client {
 /// Where OpenRGB is: where the configuration says, where its installer
 /// puts it, or where this helper fetched it to.
 pub fn program(config: &Config) -> Option<PathBuf> {
+    if config.lights_left_alone {
+        return None;
+    }
     let installed = std::env::var_os("ProgramFiles").map(|files| Path::new(&files).join("OpenRGB").join("OpenRGB.exe"));
     config.openrgb.clone().into_iter().chain(installed).find(|path| path.is_file()).or_else(crate::fetch::fetched)
 }
