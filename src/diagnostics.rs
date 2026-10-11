@@ -127,3 +127,14 @@ pub fn copy(owner: HWND, text: &str) -> bool {
         placed.is_some()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "sends a report to Glance's site"]
+    fn sends_a_report() {
+        let id = super::send("Glance (a test of sending from this program; nothing is wrong)");
+        println!("sent as {id:?}");
+        assert!(id.is_some_and(|id| id.len() == 6));
+    }
+}
