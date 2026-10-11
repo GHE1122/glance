@@ -105,7 +105,8 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
             }
         }
         // The colours, then the one that opens the ring to make another.
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        // (A little room round them: one that trembles is not cut off at the row's edge.)
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(3.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             own.forEachIndexed { place, one ->
                 val chosen = was == null && light.color.equals(one, ignoreCase = true)
                 val going = removing

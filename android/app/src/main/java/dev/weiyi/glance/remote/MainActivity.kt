@@ -494,8 +494,8 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
             }
         }
         // Folded, the PC's picture leads the one column; unfolded, it has the right side to itself.
-        // Not heard from yet, or not at all: the PC drawn as it sleeps, and why that may be.
-        if (now == null) {
+        // Not heard from yet, or no longer (what was last heard of it is not how it is now): the PC drawn as it sleeps, and why that may be.
+        if (now == null || failure == Failure.Unreachable || failure == Failure.Refused) {
             Away(pc.name, failure)
             return@Column
         }
@@ -553,7 +553,7 @@ private fun MonitorRow(at: Int, monitor: Monitor, enabled: Boolean, lit: Boolean
  */
 @Composable
 private fun Away(name: String, failure: Failure?) {
-    val breath by rememberInfiniteTransition(label = "asleep").animateFloat(0.45f, 1f, infiniteRepeatable(tween(2600, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "breath")
+    val breath by rememberInfiniteTransition(label = "asleep").animateFloat(0.6f, 1f, infiniteRepeatable(tween(2600, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "breath")
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Rig(null, null, null, night = true, chosen = Part.Cpu, modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth().aspectRatio(320f / 254f).graphicsLayer { alpha = breath }) {}
         if (failure != null) {
