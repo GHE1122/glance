@@ -507,8 +507,12 @@ enum Row {
     Pair,
     Code,
     Phone(usize, String),
+    /// What the rows under it are, said small above them: a group of their own.
+    Group(&'static str),
 }
 
+/// How tall a group's name is, above its rows.
+const GROUP: f32 = 24.0;
 /// How tall the code's own square is, in its row.
 const CODE: f32 = 176.0;
 
@@ -1022,11 +1026,21 @@ impl Ui {
             Page::Remote => {
                 rows.push(Row::Switch(Switch::Remote));
                 if self.remote {
-                    rows.extend([Row::GetApp, Row::Pair]);
-                    if self.code.is_some() {
+                    // A code shows under the row that asked for it.
+                    let shown = self.code.as_ref().map(|(_, what)| *what);
+                    rows.push(Row::GetApp);
+                    if shown == Some(CodeFor::App) {
                         rows.push(Row::Code);
                     }
-                    rows.extend(self.phones.iter().map(|phone| Row::Phone(phone.at, phone.name.clone())));
+                    rows.push(Row::Pair);
+                    if matches!(shown, Some(CodeFor::Pairing | CodeFor::WebPairing)) {
+                        rows.push(Row::Code);
+                    }
+                    // The phones paired, a group of their own.
+                    if !self.phones.is_empty() {
+                        rows.push(Row::Group(pick(self.lang, "已配对的手机", "Phones paired")));
+                        rows.extend(self.phones.iter().map(|phone| Row::Phone(phone.at, phone.name.clone())));
+                    }
                 }
             }
             Page::System => {
@@ -1108,6 +1122,7 @@ impl Ui {
                 Row::Item(..) => (0.0, (self.words_height(&row) - ROW + ITEM_ROW).max(ITEM_ROW)),
                 Row::ModuleChoice(..) => (0.0, ITEM_ROW),
                 Row::Code => (ROW_GAP, CODE + 2.0 * ROW_SIDE),
+                Row::Group(_) => (20.0, GROUP),
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, self.words_height(&row).max(ROW)),
             };
             y += before;
@@ -1363,7 +1378,7 @@ impl Ui {
             Row::GetApp => (
                 p("下载手机 APP", "Get the phone app"),
                 p("安卓手机扫码下载；iPhone 暂时用下面的网页", "Scan with an Android phone to download it; on an iPhone, use the web page below for now"),
-                vec![(p("显示二维码", "Show the code"), Target::GetApp, Button::Plain)],
+                vec![(if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) { p("收起", "Hide") } else { p("显示二维码", "Show the code") }, Target::GetApp, Button::Plain)],
             ),
             Row::Pair => (
                 p("配对一部手机", "Pair a phone"),
@@ -2127,6 +2142,8 @@ impl Ui {
                 }
             }
             Target::Quit => crate::quit(),
+            // (Pressed again, its code is put away.)
+            Target::GetApp if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) => self.code = None,
             Target::GetApp => self.code = crate::phone::app_code().map(|code| (code, CodeFor::App)),
             Target::Pair(web) => self.code = crate::phone::offer(web).map(|code| (code, if web { CodeFor::WebPairing } else { CodeFor::Pairing })),
             Target::Unpair(at) => {
@@ -2193,7 +2210,7 @@ impl Ui {
                 Row::GetApp => vec![Target::GetApp],
                 Row::Pair => vec![Target::Pair(false), Target::Pair(true)],
                 Row::Phone(at, _) => vec![Target::Unpair(at)],
-                Row::Code => vec![],
+                Row::Code | Row::Group(_) => vec![],
                 Row::More(_) => vec![Target::More],
                 Row::Title => vec![],
             }))
@@ -2831,6 +2848,10 @@ impl Ui {
                     if !usable {
                         self.targets.truncate(targets);
                     }
+                }
+                Row::Group(name) => {
+                    let small = Font::new(Family::Segoe, 13.0, 600.0);
+                    text_centred(frame, name, small, palette.text2, left + 4.0, y + row_height / 2.0, width, Align::Start);
                 }
                 Row::Code => {
                     card(frame, palette, left, y, width, row_height, palette.card);
