@@ -126,6 +126,9 @@ pub struct Frosted {
     graphics: CompositionGraphicsDevice,
     surface: Option<CompositionDrawingSurface>,
     size: (u32, u32),
+    /// Its window, and whether the compositor is asked for what is behind it (see `set_frost`).
+    hwnd: HWND,
+    frosting: bool,
 }
 
 impl Frosted {
@@ -149,7 +152,7 @@ impl Frosted {
         let content = compositor.CreateSpriteVisual()?;
         root.Children()?.InsertAtTop(&content)?;
         let graphics = graphics(&compositor, gfx)?;
-        Ok(Frosted { compositor, _target: target, root, pane, content, gfx: gfx.clone(), graphics, surface: None, size: (0, 0) })
+        Ok(Frosted { compositor, _target: target, root, pane, content, gfx: gfx.clone(), graphics, surface: None, size: (0, 0), hwnd, frosting: true })
     }
 
     /// Draws one frame on `gfx` (the thread's device: a new one, after the
@@ -202,10 +205,22 @@ impl Frosted {
 
     /// How frosted the glass is: 1, the screen behind blurred; 0, as it
     /// is (the frosting gone, what is drawn over it standing).
+    ///
+    /// With no frosting at all the compositor is not asked for what is
+    /// behind the window, and the pane is out of what it composes: asked,
+    /// it must draw the game behind into the window every frame, which
+    /// costs the game frames whether or not any of it then shows.
     pub fn set_frost(&mut self, frost: f32) {
-        if let Some(pane) = &self.pane {
-            let _ = pane.sprite.SetOpacity(frost.clamp(0.0, 1.0));
+        let Some(pane) = &self.pane else { return };
+        let frost = frost.clamp(0.0, 1.0);
+        let wanted = frost > 0.0;
+        if wanted != self.frosting {
+            let asked = BOOL::from(wanted);
+            let _ = unsafe { DwmSetWindowAttribute(self.hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, &asked as *const _ as *const _, size_of::<BOOL>() as u32) };
+            let _ = self.root.Children().and_then(|children| if wanted { children.InsertAtBottom(&pane.sprite) } else { children.Remove(&pane.sprite) });
+            self.frosting = wanted;
         }
+        let _ = pane.sprite.SetOpacity(frost);
     }
 
     /// Lets go of the drawing memory while the window is away.
