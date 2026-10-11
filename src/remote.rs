@@ -89,7 +89,8 @@ fn fans(named: &[(String, f32)]) -> (Option<f32>, Option<f32>) {
 
 /// The few figures of a sample the helper is told: how warm (°C) and how
 /// busy (%) the processor, the busiest graphics card, the memory and the
-/// disks are, and how fast the fans turn; `null` where one is not known.
+/// disks are, the power the first two draw (watts), and how fast the fans
+/// turn; `null` where one is not known.
 fn figures(sample: &Sample, info: &StaticInfo) -> Value {
     let whole = |value: Option<f32>| value.map(|value| value.round() as i64);
     let hottest = |temps: &mut dyn Iterator<Item = f32>| temps.max_by(f32::total_cmp);
@@ -97,8 +98,8 @@ fn figures(sample: &Sample, info: &StaticInfo) -> Value {
     let (cpu_fan, case_fan) = sample.board.as_ref().map_or((None, None), |board| fans(&board.fans));
     json!({
         "t": sample.t,
-        "cpu": { "temp": whole(sample.cpu_sensors.as_ref().and_then(|sensors| sensors.temp)), "load": whole(sample.cpu) },
-        "gpu": { "temp": whole(gpu.and_then(|gpu| gpu.temp)), "load": whole(gpu.and_then(|gpu| gpu.usage)) },
+        "cpu": { "temp": whole(sample.cpu_sensors.as_ref().and_then(|sensors| sensors.temp)), "load": whole(sample.cpu), "watts": sample.cpu_sensors.as_ref().and_then(|sensors| sensors.power) },
+        "gpu": { "temp": whole(gpu.and_then(|gpu| gpu.temp)), "load": whole(gpu.and_then(|gpu| gpu.usage)), "watts": gpu.and_then(|gpu| gpu.power) },
         "ram": { "temp": whole(hottest(&mut sample.dimm_temps.iter().copied())), "load": whole(Some(sample.memory.used as f32 / info.mem_total.max(1) as f32 * 100.0)) },
         "disk": { "temp": whole(hottest(&mut sample.drive_temps.iter().map(|drive| drive.celsius))), "load": whole(sample.disk_active) },
         "cpu_fan": whole(cpu_fan),
