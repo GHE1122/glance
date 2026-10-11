@@ -106,20 +106,24 @@ impl Helper {
             return;
         }
         let Some(color) = reads::read().as_ref().and_then(reads::hottest).map(heat) else { return };
-        if last.as_ref() != Some(&color) && lights::set(&self.config, true, &Light { color: color.clone(), effect: Effect::Steady }).is_ok() {
+        if last.as_ref() != Some(&color) && lights::set(&self.config, true, &Light { color: color.clone(), effect: Effect::Steady, brightness: self.light.lock().unwrap().brightness }).is_ok() {
             *last = Some(color);
         }
     }
 
     /// The lights' colour or what they do, changed from the phone: kept,
     /// for the lights on from then on.
-    fn choose(&self, color: Option<&str>, effect: Option<Effect>) {
+    fn choose(&self, color: Option<&str>, effect: Option<Effect>, brightness: Option<u64>) {
         let mut light = self.light.lock().unwrap();
         if let Some(color) = color.filter(|color| color.len() == 6 && color.bytes().all(|b| b.is_ascii_hexdigit())) {
             light.color = color.to_ascii_uppercase();
         }
         if let Some(effect) = effect {
             light.effect = effect;
+        }
+        // (Never none: that is the lights off, which is asked for as such.)
+        if let Some(brightness) = brightness {
+            light.brightness = brightness.clamp(1, 100) as u8;
         }
         let _ = Config { light: light.clone(), ..self.config.clone() }.save();
     }
@@ -203,7 +207,7 @@ impl Helper {
             // them. A colour or an effect alone lights them so.
             ("POST", "/v1/lights") => {
                 let effect = asked.get("effect").and_then(|effect| serde_json::from_value::<Effect>(effect.clone()).ok());
-                self.choose(asked.get("color").and_then(Value::as_str), effect);
+                self.choose(asked.get("color").and_then(Value::as_str), effect, asked.get("brightness").and_then(Value::as_u64));
                 self.lights(asked.get("on").and_then(Value::as_bool).unwrap_or(true)).map_err(failed)?
             }
             ("POST", "/v1/media") => {

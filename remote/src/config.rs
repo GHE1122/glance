@@ -28,18 +28,19 @@ pub enum Effect {
     Heat,
 }
 
-/// How the lights are when they are on: their colour (RRGGBB) and what
-/// they do.
+/// How the lights are when they are on: their colour (RRGGBB), what they
+/// do, and how bright they are (percent of the colour's own brightness).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Light {
     pub color: String,
     pub effect: Effect,
+    pub brightness: u8,
 }
 
 impl Default for Light {
     fn default() -> Self {
-        Light { color: "FFFFFF".into(), effect: Effect::Steady }
+        Light { color: "FFFFFF".into(), effect: Effect::Steady, brightness: 100 }
     }
 }
 

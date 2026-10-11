@@ -27,6 +27,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -80,7 +82,7 @@ private val HUES = Brush.sweepGradient((0..6).map { Color.hsv(it * 60f % 360f, 1
  * when let go.
  */
 @Composable
-fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean, keep: (List<String>) -> Unit, preview: (String?) -> Unit, choose: (color: String?, effect: String?) -> Unit) {
+fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean, keep: (List<String>) -> Unit, preview: (String?) -> Unit, choose: (color: String?, effect: String?, brightness: Int?) -> Unit) {
     // The colour the lights had as the ring was opened, to go back to; none: the ring is shut.
     var was by remember { mutableStateOf<String?>(null) }
     // The colours being taken away: each trembles, the whole round of it, under a minus, and one pressed is gone.
@@ -90,12 +92,16 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
     val trembling = rememberInfiniteTransition(label = "tremble")
     val even by trembling.animateFloat(-1f, 1f, infiniteRepeatable(tween(125, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "even")
     val odd by trembling.animateFloat(1f, -1f, infiniteRepeatable(tween(140, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "odd")
+    // How bright they are, slid: as the PC says, but for while it is being slid.
+    var level by remember { mutableFloatStateOf(light.brightness.toFloat()) }
+    var sliding by remember { mutableStateOf(false) }
+    LaunchedEffect(light.brightness) { if (!sliding) level = light.brightness.toFloat() }
     Panel {
         Heading(stringResource(R.string.show_lights)) { if (removing) Words(stringResource(R.string.done), Accent, size = 13f, weight = FontWeight.SemiBold) { removing = false } }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             for ((effect, name) in EFFECTS) {
                 if (effect == "heat" && !heat) continue
-                Chip(stringResource(name), light.effect == effect) { if (enabled) choose(null, effect) }
+                Chip(stringResource(name), light.effect == effect) { if (enabled) choose(null, effect, null) }
             }
         }
         // The colours, then the one that opens the ring to make another.
@@ -123,7 +129,7 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
                                     removing = false
                                     was = null
                                     preview(null)
-                                    choose(one, null)
+                                    choose(one, null, null)
                                 }
                             },
                         )
@@ -149,12 +155,19 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
             }
         }
         Text(stringResource(if (removing) R.string.colours_removing else R.string.colours_hint), color = Faint, fontSize = 12.sp, lineHeight = 17.sp)
+        // How bright, whatever the colour (every colour in turn has its own brightness: not that).
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            val can = enabled && light.effect != "rainbow"
+            Sign(Sign.BRIGHT, if (can) Dim else Faint, size = 18.dp)
+            Bar(level, 5f..100f, stringResource(R.string.brightness), Modifier.weight(1f), enabled = can, slim = true, track = filled(Accent), change = { sliding = true; level = it }, done = { sliding = false; choose(null, null, level.toInt()) })
+            Text("${level.toInt()}%", color = if (can) Dim else Faint, fontSize = 12.5.sp, textAlign = TextAlign.End, modifier = Modifier.width(36.dp))
+        }
         was?.let { before ->
             Picker(
                 from = before,
                 changed = { preview(it) },
-                settled = { choose(it, null) },
-                cancel = { was = null; preview(null); if (!light.color.equals(before, ignoreCase = true)) choose(before, null) },
+                settled = { choose(it, null, null) },
+                cancel = { was = null; preview(null); if (!light.color.equals(before, ignoreCase = true)) choose(before, null, null) },
                 use = { made -> if (own.none { it.equals(made, ignoreCase = true) }) keep(own + made); was = null },
             )
         }

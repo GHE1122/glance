@@ -65,8 +65,8 @@ object Pcs {
 /** One of the PC's monitors: its name, where it is on the desktop, and whether it is on and how bright (percent), each none where it cannot be asked nor changed by itself. */
 data class Monitor(val name: String, val x: Int, val y: Int, val width: Int, val height: Int, val on: Boolean?, val brightness: Int?)
 
-/** How the lights are when they are on: their colour (RRGGBB) and what they do ("steady", "breathing", "rainbow", "heat"). */
-data class Light(val color: String, val effect: String)
+/** How the lights are when they are on: their colour (RRGGBB), what they do ("steady", "breathing", "rainbow", "heat"), and how bright they are (percent). */
+data class Light(val color: String, val effect: String, val brightness: Int = 100)
 
 /** What is playing on the PC. */
 data class Media(val title: String, val artist: String, val app: String, val playing: Boolean)
@@ -92,7 +92,7 @@ data class PcState(
 ) {
     companion object {
         fun from(json: JSONObject) = PcState(
-            light = json.optJSONObject("light")?.let { Light(it.optString("color", "FFFFFF"), it.optString("effect", "steady")) } ?: Light("FFFFFF", "steady"),
+            light = json.optJSONObject("light")?.let { Light(it.optString("color", "FFFFFF"), it.optString("effect", "steady"), it.optInt("brightness", 100)) } ?: Light("FFFFFF", "steady"),
             media = json.optJSONObject("media")?.let { Media(it.optString("title"), it.optString("artist"), it.optString("app"), it.optBoolean("playing")) },
             reads = json.optJSONObject("reads")?.let { Reads(it.read("cpu"), it.read("gpu"), it.read("ram"), it.read("disk"), it.int("cpu_fan"), it.int("case_fan")) },
             name = json.optString("name"),

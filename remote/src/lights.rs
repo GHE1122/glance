@@ -301,6 +301,9 @@ pub fn set(config: &Config, on: bool, light: &Light) -> std::io::Result<usize> {
         devices = client.devices()?;
     }
     let (r, g, b) = rgb(&light.color).unwrap_or((255, 255, 255));
+    // As bright as asked: each of its three lights that share of itself.
+    let dimmed = |part: u8| ((part as u32 * light.brightness.min(100) as u32 + 50) / 100) as u8;
+    let (r, g, b) = (dimmed(r), dimmed(g), dimmed(b));
     let colour = u32::from_le_bytes([r, g, b, 0]);
     // What each device is to be: a mode (as it is sent), and, in the mode
     // that shows the colours it is sent, those colours.

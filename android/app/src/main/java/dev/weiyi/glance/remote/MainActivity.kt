@@ -395,12 +395,13 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         if (shown["lights"] != false && now.lights == true && !night && light != null) {
             LightsCard(
                 light, heat = reads != null, own = colours, enabled = reached, keep = keep, preview = { making = it },
-                choose = { color, effect ->
+                choose = { color, effect, brightness ->
                     making = null
                     val body = JSONObject().put("on", true)
                     color?.let { body.put("color", it) }
                     effect?.let { body.put("effect", it) }
-                    act("light", "/v1/lights", body) { it.copy(light = Light(color ?: it.light.color, effect ?: it.light.effect)) }
+                    brightness?.let { body.put("brightness", it) }
+                    act("light", "/v1/lights", body) { it.copy(light = Light(color ?: it.light.color, effect ?: it.light.effect, brightness ?: it.light.brightness)) }
                 },
             )
         }
