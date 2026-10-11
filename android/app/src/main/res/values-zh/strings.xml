@@ -65,6 +65,7 @@
     <string name="this_colour">当前颜色</string>
     <string name="hue">色相</string>
     <string name="saturation">浓度</string>
+    <string name="brightness_is">亮度 %1$d%%</string>
     <string name="brightness">亮度</string>
     <string name="use_colour">用这个颜色</string>
     <string name="monitors">显示器</string>

@@ -411,23 +411,11 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 Column {
                     now.monitors.forEachIndexed { at, monitor ->
                         if (at > 0) Rule()
-                        val size = "${monitor.width} × ${monitor.height}"
-                        Line(
-                            monitor.name, if (monitor.on == null) "$size · ${stringResource(R.string.monitor_fixed)}" else size,
-                            lead = {
-                                Box(Modifier.size(24.dp).clip(RoundedCornerShape(7.dp)).background(Card2), contentAlignment = Alignment.Center) { Text("${at + 1}", color = Dim, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
-                            },
-                        ) {
-                            Toggle(monitor.on != false && now.screen != false, monitor.name, enabled = reached && monitor.on != null && now.screen != false) { wanted ->
-                                act("monitor$at", "/v1/monitor", JSONObject().put("index", at).put("on", wanted)) { was -> was.copy(monitors = was.monitors.mapIndexed { i, one -> if (i == at) one.copy(on = wanted) else one }) }
-                            }
-                        }
-                        // How bright it is, where it says: under its row.
-                        monitor.brightness?.let { bright ->
-                            Brightness(bright, enabled = reached && monitor.on != false && now.screen != false) { wanted ->
-                                act("bright$at", "/v1/monitor", JSONObject().put("index", at).put("brightness", wanted)) { was -> was.copy(monitors = was.monitors.mapIndexed { i, one -> if (i == at) one.copy(brightness = wanted) else one }) }
-                            }
-                        }
+                        MonitorRow(
+                            at, monitor, enabled = reached && now.screen != false, lit = now.screen != false,
+                            turn = { wanted -> act("monitor$at", "/v1/monitor", JSONObject().put("index", at).put("on", wanted)) { was -> was.copy(monitors = was.monitors.mapIndexed { i, one -> if (i == at) one.copy(on = wanted) else one }) } },
+                            dim = { wanted -> act("bright$at", "/v1/monitor", JSONObject().put("index", at).put("brightness", wanted)) { was -> was.copy(monitors = was.monitors.mapIndexed { i, one -> if (i == at) one.copy(brightness = wanted) else one }) } },
+                        )
                     }
                 }
             }
@@ -503,16 +491,33 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
     }
 }
 
-/** How bright a monitor is ([value] percent), slid to another: [set] when let go. */
+/**
+ * One monitor: its number and name, its size and how bright it is, its
+ * switch; and under them, where it says how bright it is, that as a line
+ * to slide (the figure beside its size follows the finger).
+ */
 @Composable
-private fun Brightness(value: Int, enabled: Boolean, set: (Int) -> Unit) {
-    var level by remember { mutableFloatStateOf(value.toFloat()) }
+private fun MonitorRow(at: Int, monitor: Monitor, enabled: Boolean, lit: Boolean, turn: (Boolean) -> Unit, dim: (Int) -> Unit) {
+    var level by remember { mutableFloatStateOf((monitor.brightness ?: 0).toFloat()) }
     var sliding by remember { mutableStateOf(false) }
     // As the monitor says, but for while it is being slid.
-    LaunchedEffect(value) { if (!sliding) level = value.toFloat() }
-    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) { Sign(Sign.BRIGHT, if (enabled) Dim else Faint, size = 18.dp) }
-        Bar(level, 0f..100f, stringResource(R.string.brightness), Modifier.weight(1f), enabled = enabled, slim = true, track = filled(Accent), change = { sliding = true; level = it }, done = { sliding = false; set(level.toInt()) })
+    LaunchedEffect(monitor.brightness) { if (!sliding) monitor.brightness?.let { level = it.toFloat() } }
+    val size = "${monitor.width} × ${monitor.height}"
+    val detail = when {
+        monitor.on == null -> "$size · ${stringResource(R.string.monitor_fixed)}"
+        monitor.brightness != null -> "$size · ${stringResource(R.string.brightness_is, level.toInt())}"
+        else -> size
+    }
+    Line(
+        monitor.name, detail,
+        lead = { Box(Modifier.size(24.dp).clip(RoundedCornerShape(7.dp)).background(Card2), contentAlignment = Alignment.Center) { Text("${at + 1}", color = Dim, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) } },
+    ) { Toggle(monitor.on != false && lit, monitor.name, enabled = enabled && monitor.on != null, change = turn) }
+    if (monitor.brightness != null) {
+        val can = enabled && monitor.on != false
+        Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) { Sign(Sign.BRIGHT, if (can) Dim else Faint, size = 18.dp) }
+            Bar(level, 0f..100f, stringResource(R.string.brightness), Modifier.weight(1f), enabled = can, slim = true, track = filled(Accent), change = { sliding = true; level = it }, done = { sliding = false; dim(level.toInt()) })
+        }
     }
 }
 

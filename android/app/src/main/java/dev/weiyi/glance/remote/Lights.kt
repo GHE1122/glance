@@ -1,5 +1,6 @@
 package dev.weiyi.glance.remote
 
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -38,6 +39,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
@@ -84,10 +86,10 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
     // The colours being taken away: each trembles, the whole round of it, under a minus, and one pressed is gone.
     var removing by remember { mutableStateOf(false) }
     if (own.isEmpty()) removing = false
+    // As apps tremble on a phone to be taken away: a slight turn to and fro, a quarter of a second round, each against its neighbours and a little out of step with them.
     val trembling = rememberInfiniteTransition(label = "tremble")
-    // (Side to side and up and down at two paces, so that it wanders rather than swings.)
-    val sway by trembling.animateFloat(-1f, 1f, infiniteRepeatable(tween(105), RepeatMode.Reverse), label = "sway")
-    val bob by trembling.animateFloat(-1f, 1f, infiniteRepeatable(tween(140), RepeatMode.Reverse), label = "bob")
+    val even by trembling.animateFloat(-1f, 1f, infiniteRepeatable(tween(125, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "even")
+    val odd by trembling.animateFloat(1f, -1f, infiniteRepeatable(tween(140, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "odd")
     Panel {
         Heading(stringResource(R.string.show_lights)) { if (removing) Words(stringResource(R.string.done), Accent, size = 13f, weight = FontWeight.SemiBold) { removing = false } }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -105,11 +107,9 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
                 Canvas(
                     Modifier.size(36.dp).graphicsLayer {
                         if (going) {
-                            // Each against its neighbours, as apps tremble on a phone.
-                            val way = if (place % 2 == 0) 1f else -1f
-                            rotationZ = sway * way * 5f
-                            translationX = sway * way * 1.4.dp.toPx()
-                            translationY = bob * 1.1.dp.toPx()
+                            // Turned about a point off its middle, so that a round shows it turns.
+                            transformOrigin = TransformOrigin(0.5f, if (place % 2 == 0) 0.2f else 0.8f)
+                            rotationZ = (if (place % 2 == 0) even else odd) * 2.2f
                         }
                     }.semantics { contentDescription = named; role = Role.Button }.pointerInput(one, own, enabled, removing) {
                         if (!enabled) return@pointerInput
