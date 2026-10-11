@@ -13,6 +13,8 @@ use windows::core::{Interface, Result};
 use windows::Media::Control::{GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager, GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status};
 use windows::Win32::Media::Audio::{eConsole, eRender, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
+use windows::core::PCWSTR;
+use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::UI::Shell::{IShellItem, SHCreateItemFromParsingName, SIGDN_NORMALDISPLAY};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK};
 
@@ -36,7 +38,7 @@ fn session() -> Result<Session> {
 fn shown_as(id: &str) -> Option<String> {
     let path: Vec<u16> = format!("shell:AppsFolder\\{id}").encode_utf16().chain([0]).collect();
     unsafe {
-        let item: IShellItem = SHCreateItemFromParsingName(windows::core::PCWSTR(path.as_ptr()), None).ok()?;
+        let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None).ok()?;
         let name = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
         let shown = name.to_string().ok();
         CoTaskMemFree(Some(name.0 as *const _));
@@ -55,9 +57,9 @@ fn told() -> Option<Playing> {
     Some(Playing {
         title,
         artist: about.Artist().map(|artist| artist.to_string()).unwrap_or_default(),
-        // By the name Windows shows it by; one it has none for is not named
-        // (what plays is said already: a file's name adds nothing to it).
-        app: session.SourceAppUserModelId().ok().and_then(|id| shown_as(&id.to_string())).unwrap_or_default(),
+        // (One with no name to show is not named: what plays is said
+        // already, and a file's name adds nothing to it.)
+        app: session.SourceAppUserModelId().ok().and_then(|id| shown(&id.to_string())).unwrap_or_default(),
         playing: session.GetPlaybackInfo().and_then(|info| info.PlaybackStatus()).is_ok_and(|status| status == Status::Playing),
     })
 }
@@ -67,6 +69,11 @@ fn told() -> Option<Playing> {
 /// out of what the sound's session is called, which has the program's path
 /// in it: the program itself is not opened.)
 pub fn sounding() -> Result<Vec<(String, bool)>> {
+    Ok(sounds()?.into_iter().map(|(name, _, active)| (name, active)).collect())
+}
+
+/// The same, each with the path of its program's file as the session has it.
+fn sounds() -> Result<Vec<(String, String, bool)>> {
     crate::actions::com();
     let mut found = Vec::new();
     unsafe {
@@ -82,22 +89,58 @@ pub fn sounding() -> Result<Vec<(String, bool)>> {
             let called = session.GetSessionInstanceIdentifier()?;
             let name = called.to_string().unwrap_or_default();
             CoTaskMemFree(Some(called.0 as *const _));
-            if let Some(program) = named(&name) {
-                found.push((program, session.GetState()? == AudioSessionStateActive));
+            if let Some((program, path)) = named(&name) {
+                found.push((program, path, session.GetState()? == AudioSessionStateActive));
             }
         }
     }
     Ok(found)
 }
 
-/// A program's name out of what its sound's session is called
-/// (`{…}|\Device\…\cloudmusic.exe%b{…}|…`); none for a session with no
-/// program's path in it.
-fn named(session: &str) -> Option<String> {
+/// A program's name, and the path of its file, out of what its sound's
+/// session is called (`{…}|\Device\…\cloudmusic.exe%b{…}|…`); none for a
+/// session with no program's path in it.
+fn named(session: &str) -> Option<(String, String)> {
     let path = session.split('|').nth(1)?.split("%b").next()?;
     let file = path.strip_suffix(".exe").or_else(|| path.strip_suffix(".EXE"))?;
     let name = file.rsplit('\\').next()?;
-    (!name.is_empty()).then(|| name.to_string())
+    (!name.is_empty()).then(|| (name.to_string(), path.to_string()))
+}
+
+/// What a program's file says the program is ("NetEase Cloud Music"), in
+/// the first language it says it in. `path` as a sound's session has it:
+/// from the device up.
+fn described(path: &str) -> Option<String> {
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let file = wide(&format!(r"\\?\GLOBALROOT{path}"));
+    unsafe {
+        let size = GetFileVersionInfoSizeW(PCWSTR(file.as_ptr()), None);
+        let mut about = vec![0u8; size as usize];
+        GetFileVersionInfoW(PCWSTR(file.as_ptr()), None, size, about.as_mut_ptr().cast()).ok()?;
+        let (mut found, mut length) = (std::ptr::null_mut(), 0u32);
+        // The languages it is described in (each a language and a code page), then the description in the first.
+        VerQueryValueW(about.as_ptr().cast(), PCWSTR(wide(r"\VarFileInfo\Translation").as_ptr()), &mut found, &mut length).ok().ok()?;
+        if length < 4 {
+            return None;
+        }
+        let said_in = std::slice::from_raw_parts(found as *const u16, 2);
+        let asked = wide(&format!(r"\StringFileInfo\{:04x}{:04x}\FileDescription", said_in[0], said_in[1]));
+        VerQueryValueW(about.as_ptr().cast(), PCWSTR(asked.as_ptr()), &mut found, &mut length).ok().ok()?;
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(found as *const u16, length as usize));
+        let text = text.trim_end_matches('\0').trim();
+        (!text.is_empty()).then(|| text.to_string())
+    }
+}
+
+/// What a program is shown as: by the name Windows has for it (as in the
+/// Start menu), else as its file describes it, where its file is known by
+/// the sound it has open; `id` as Windows identifies it.
+fn shown(id: &str) -> Option<String> {
+    shown_as(id).or_else(|| {
+        let file = id.strip_suffix(".exe").or_else(|| id.strip_suffix(".EXE")).unwrap_or(id);
+        let sounds = sounds().ok()?;
+        sounds.iter().find(|(name, _, _)| name.eq_ignore_ascii_case(file)).and_then(|(_, path, _)| described(path))
+    })
 }
 
 /// The program last heard sounding, of those that do not tell Windows what
@@ -108,15 +151,17 @@ static HEARD: Mutex<Option<String>> = Mutex::new(None);
 /// or, none sounding, the one heard before, paused, for as long as it has
 /// its sound open.
 fn heard() -> Option<Playing> {
-    let programs = sounding().ok()?;
+    let programs = sounds().ok()?;
     let mut heard = HEARD.lock().unwrap();
-    let is = |name: &String, sounding: bool| programs.iter().any(|(program, active)| program == name && *active == sounding);
-    let now = heard.clone().filter(|name| is(name, true)).or_else(|| programs.iter().find(|(_, active)| *active).map(|(name, _)| name.clone()));
-    let (app, playing) = match now {
+    let is = |name: &String, sounding: bool| programs.iter().any(|(program, _, active)| program == name && *active == sounding);
+    let now = heard.clone().filter(|name| is(name, true)).or_else(|| programs.iter().find(|(_, _, active)| *active).map(|(name, _, _)| name.clone()));
+    let (name, playing) = match now {
         Some(name) => (name, true),
         None => (heard.clone().filter(|name| is(name, false))?, false),
     };
-    *heard = Some(app.clone());
+    *heard = Some(name.clone());
+    // As its file describes it; one that does not say, by its file's name.
+    let app = programs.iter().find(|(program, _, _)| *program == name).and_then(|(_, path, _)| described(path)).unwrap_or(name);
     Some(Playing { title: String::new(), artist: String::new(), app, playing })
 }
 
@@ -173,7 +218,8 @@ pub fn ask(what: &str) -> Asked {
 mod tests {
     #[test]
     fn names_a_program_from_its_sound() {
-        assert_eq!(super::named(r"{0.0.0.00000000}.{6f2a}|\Device\HarddiskVolume3\App\CloudMusic\cloudmusic.exe%b{00000000-0000-0000-0000-000000000000}|1%b9044").as_deref(), Some("cloudmusic"));
+        let named = super::named(r"{0.0.0.00000000}.{6f2a}|\Device\HarddiskVolume3\App\CloudMusic\cloudmusic.exe%b{00000000-0000-0000-0000-000000000000}|1%b9044");
+        assert_eq!(named, Some(("cloudmusic".to_string(), r"\Device\HarddiskVolume3\App\CloudMusic\cloudmusic.exe".to_string())));
         // A session with no program's path in it.
         assert_eq!(super::named("{0.0.0.00000000}.{6f2a}|#%b{6f2a}|1%b#"), None);
         assert_eq!(super::named("nothing of the kind"), None);

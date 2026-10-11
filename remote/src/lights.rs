@@ -255,14 +255,18 @@ fn server(config: &Config) -> std::io::Result<Client> {
     }
     let program = program(config).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "OpenRGB is not installed"))?;
     std::process::Command::new(&program).args(["--server", "--noautoconnect"]).current_dir(program.parent().unwrap()).creation_flags(NO_WINDOW).spawn()?;
-    // It listens before it has found the devices: asked until it has some.
+    // It listens before it has found the devices, and finds them one
+    // after another: asked until it has some, and as many twice running.
     let since = Instant::now();
+    let mut before = 0;
     loop {
         std::thread::sleep(Duration::from_millis(500));
         if let Ok(mut client) = Client::connect() {
-            if client.devices().is_ok_and(|devices| !devices.is_empty()) || since.elapsed() > STARTING {
+            let found = client.devices().map_or(0, |devices| devices.len());
+            if (found > 0 && found == before) || since.elapsed() > STARTING {
                 return Ok(client);
             }
+            before = found;
         } else if since.elapsed() > STARTING {
             return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "OpenRGB did not start"));
         }
@@ -282,6 +286,19 @@ const RAINBOWS: [&str; 6] = ["Rainbow Wave", "Rainbow", "Spectrum Cycle", "Color
 /// colour and doing that, as nearly as it can (one with no such mode of
 /// its own, steady in the colour). Returns how many devices there are.
 pub fn set(config: &Config, on: bool, light: &Light) -> std::io::Result<usize> {
+    // (Begun again, a few times at most, should the devices there are change under it.)
+    for _ in 0..TRIES {
+        if let Some(devices) = set_those_there(config, on, light)? {
+            return Ok(devices);
+        }
+    }
+    Err(std::io::Error::other("the lighting devices keep changing"))
+}
+
+/// `set`, for the devices there are as it begins: none, if by the time
+/// they are read back they are others (OpenRGB still finding them, or one
+/// plugged in or out).
+fn set_those_there(config: &Config, on: bool, light: &Light) -> std::io::Result<Option<usize>> {
     let mut client = server(config)?;
     let mut devices = client.devices()?;
     // A header for addressable strips that OpenRGB has no LEDs for sends
@@ -343,9 +360,13 @@ pub fn set(config: &Config, on: bool, light: &Light) -> std::io::Result<usize> {
             }
         }
         std::thread::sleep(SETTLING);
+        let named: Vec<String> = devices.iter().map(|device| device.name.clone()).collect();
         devices = client.devices()?;
+        if devices.iter().map(|device| &device.name).ne(named.iter()) {
+            return Ok(None);
+        }
     }
-    Ok(devices.len())
+    Ok(Some(devices.len()))
 }
 
 /// Whether the lights are on: any device lit. None while OpenRGB is not
