@@ -156,7 +156,24 @@ impl SuperIo {
             Kind::Nuvoton { .. } | Kind::NuvotonEc => "Nuvoton",
         };
         let wiring = if self.layout.is_some() { "board layout known" } else { "generic input names" };
-        format!("{maker} chip {:04X} at {:#X}, {wiring}", self.chip, self.base)
+        let raw = self.raw().map(|raw| format!("; raw {raw}")).unwrap_or_default();
+        format!("{maker} chip {:04X} at {:#X}, {wiring}{raw}", self.chip, self.base)
+    }
+
+    /// A Nuvoton monitor's registers as they read, for a report: where a
+    /// board gives no reading, they say whether its inputs are unconnected,
+    /// its values elsewhere, or nothing answering. Each run of registers by
+    /// its first, in hex; `--` for one that could not be read.
+    fn raw(&self) -> Option<String> {
+        let Kind::Nuvoton { .. } = self.kind else { return None };
+        let _lock = NamedLock::acquire(ISA_LOCK, LOCK_WAIT)?;
+        let run = |from: u16, count: u16| {
+            let bytes: Vec<String> = (from..from + count).map(|register| self.register(register).map_or("--".to_string(), |value| format!("{value:02X}"))).collect();
+            format!("{from:03X}: {}", bytes.join(" "))
+        };
+        // The temperatures by fixed input and the fans' speeds (as read here); the temperatures the chip itself
+        // monitors, by source, with which source each is of; the fans' counts; and whether monitoring runs.
+        Some([run(0x490, 7), run(0x4C0, 16), run(0x027, 1), run(0x073, 12), run(0x100, 8), run(0x150, 2), run(0x4B0, 14), run(0x040, 1)].join(" | "))
     }
 
     /// Finds a supported chip at either configuration port; or says what
