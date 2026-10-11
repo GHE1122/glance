@@ -18,7 +18,7 @@ class NightTile : TileService() {
 
     /** Asks the PC ([body] for a change, none for how it is) and shows what it answers. */
     private fun ask(change: Boolean?) {
-        val pc = Pc.load(this) ?: return show(null)
+        val pc = Pcs.all(this).getOrNull(Pcs.chosen(this)) ?: return show(null)
         thread {
             val night = runCatching { if (change == null) pc.ask("/v1/state") else pc.ask("/v1/night", on(change)) }.getOrNull()?.night
             show(night)

@@ -9,6 +9,9 @@
     <string name="pair">Pair</string>
     <string name="not_a_code">That is not a Glance pairing code</string>
     <string name="unpair">Unpair</string>
+    <string name="unpair_confirm">Tap again to unpair</string>
+    <string name="add_pc">+ Add a PC</string>
+    <string name="pair_another">Pair another PC</string>
     <string name="connecting">Reaching it…</string>
     <string name="connected">Connected</string>
     <string name="unreachable">No answer: off, asleep, or on another network</string>
@@ -17,8 +20,9 @@
     <string name="night">Night mode</string>
     <string name="night_how">Screens off, lights out, power saving. A touch of the mouse or keyboard ends it.</string>
     <string name="night_on">On. Tap to end it, or touch the mouse or keyboard.</string>
-    <string name="screen_off">Screens off</string>
-    <string name="screen_off_how">Until the mouse or keyboard is touched</string>
+    <string name="screen">Screens</string>
+    <string name="screen_is_on">On. Tap to turn them off</string>
+    <string name="screen_is_off">Off. Tap to turn them on</string>
     <string name="lights">Lights</string>
     <string name="lights_on">On</string>
     <string name="lights_off">Off</string>

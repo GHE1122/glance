@@ -2,6 +2,7 @@ package dev.weiyi.glance.remote
 
 import android.content.Context
 import android.net.Uri
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -21,26 +22,54 @@ data class Pc(val host: String, val port: Int, val key: String, val name: String
             val key = uri.getQueryParameter("k")?.takeIf { it.length == 64 && it.all { c -> c.isDigit() || c in 'a'..'f' } } ?: return null
             return Pc(host, port, key, uri.getQueryParameter("n") ?: host)
         }
-
-        fun load(context: Context): Pc? {
-            val kept = context.getSharedPreferences("pc", Context.MODE_PRIVATE)
-            return Pc(kept.getString("host", null) ?: return null, kept.getInt("port", 0), kept.getString("key", null) ?: return null, kept.getString("name", "") ?: "")
-        }
-
-        fun forget(context: Context) = context.getSharedPreferences("pc", Context.MODE_PRIVATE).edit().clear().apply()
     }
 
-    fun keep(context: Context) =
-        context.getSharedPreferences("pc", Context.MODE_PRIVATE).edit().putString("host", host).putInt("port", port).putString("key", key).putString("name", name).apply()
+    fun toJson(): JSONObject = JSONObject().put("host", host).put("port", port).put("key", key).put("name", name)
+}
+
+/** The PCs paired with, and the one being looked at: kept in the app's own storage. */
+object Pcs {
+    private fun kept(context: Context) = context.getSharedPreferences("pcs", Context.MODE_PRIVATE)
+
+    fun all(context: Context): List<Pc> {
+        val list = runCatching { JSONArray(kept(context).getString("list", "[]")) }.getOrElse { JSONArray() }
+        return (0 until list.length()).mapNotNull { at ->
+            val one = list.optJSONObject(at) ?: return@mapNotNull null
+            Pc(one.optString("host"), one.optInt("port"), one.optString("key"), one.optString("name")).takeIf { it.host.isNotBlank() && it.key.length == 64 }
+        }
+    }
+
+    private fun keep(context: Context, list: List<Pc>, chosen: Int) =
+        kept(context).edit().putString("list", JSONArray(list.map(Pc::toJson)).toString()).putInt("chosen", chosen).apply()
+
+    /** The one being looked at, as its place among them (0 when there is none). */
+    fun chosen(context: Context): Int = kept(context).getInt("chosen", 0).coerceIn(0, (all(context).size - 1).coerceAtLeast(0))
+
+    fun choose(context: Context, at: Int) = keep(context, all(context), at)
+
+    /** Pairs with [pc] (a PC paired before, by its key, is paired anew in its place) and looks at it. */
+    fun add(context: Context, pc: Pc) {
+        val list = all(context).toMutableList()
+        val at = list.indexOfFirst { it.key == pc.key }
+        if (at >= 0) list[at] = pc else list.add(pc)
+        keep(context, list, if (at >= 0) at else list.size - 1)
+    }
+
+    fun remove(context: Context, at: Int) {
+        val list = all(context).toMutableList()
+        if (at in list.indices) list.removeAt(at)
+        keep(context, list, (at - 1).coerceAtLeast(0))
+    }
 }
 
 /** The PC as it says it is. */
-data class PcState(val name: String, val lights: Boolean?, val night: Boolean, val volume: Int?, val muted: Boolean?) {
+data class PcState(val name: String, val lights: Boolean?, val night: Boolean, val screen: Boolean?, val volume: Int?, val muted: Boolean?) {
     companion object {
         fun from(json: JSONObject) = PcState(
             name = json.optString("name"),
             lights = if (json.isNull("lights")) null else json.optBoolean("lights"),
             night = json.optBoolean("night"),
+            screen = if (json.isNull("screen")) null else json.optBoolean("screen"),
             volume = if (json.isNull("volume")) null else json.optInt("volume"),
             muted = if (json.isNull("muted")) null else json.optBoolean("muted"),
         )

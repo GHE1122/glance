@@ -9,6 +9,9 @@
     <string name="pair">配对</string>
     <string name="not_a_code">这不是 Glance 的配对码</string>
     <string name="unpair">解除配对</string>
+    <string name="unpair_confirm">再点一次解除</string>
+    <string name="add_pc">+ 添加电脑</string>
+    <string name="pair_another">再配对一台电脑</string>
     <string name="connecting">正在连接…</string>
     <string name="connected">已连接</string>
     <string name="unreachable">连不上：电脑关机、睡眠，或者不在同一个网络</string>
@@ -17,8 +20,9 @@
     <string name="night">夜间模式</string>
     <string name="night_how">关屏、关灯、切到节能。动一下鼠标或键盘就结束。</string>
     <string name="night_on">已开启。再点一次结束，或者动一下鼠标、键盘。</string>
-    <string name="screen_off">关闭屏幕</string>
-    <string name="screen_off_how">动一下鼠标或键盘恢复</string>
+    <string name="screen">屏幕</string>
+    <string name="screen_is_on">亮着，点一下关闭</string>
+    <string name="screen_is_off">已关闭，点一下打开</string>
     <string name="lights">灯光</string>
     <string name="lights_on">开着</string>
     <string name="lights_off">关着</string>

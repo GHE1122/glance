@@ -2,30 +2,17 @@
 //! sleep, the sound's level, and the power plan. Each as any program of the
 //! user's may do it: none needs administrator rights.
 
-use windows::core::{w, Result, GUID};
-use windows::Win32::Foundation::{HLOCAL, LPARAM, WPARAM};
+use windows::core::{Result, GUID};
+use windows::Win32::Foundation::HLOCAL;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
 use windows::Win32::System::Power::{PowerGetActiveScheme, PowerSetActiveScheme, SetSuspendState};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
-use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DefWindowProcW, DestroyWindow, SC_MONITORPOWER, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SYSCOMMAND};
 
 /// Windows' own "Power saver" plan.
 pub const POWER_SAVER: GUID = GUID::from_u128(0xa1841308_3541_4fab_bc81_f71556f20b4a);
-/// SC_MONITORPOWER's "off".
-const OFF: isize = 2;
-
-/// The screens off, until the mouse or the keyboard is touched: asked of a
-/// window of this program's own, as Windows asks it to be done.
-pub fn screens_off() -> Result<()> {
-    unsafe {
-        let window = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, None, None, None, None)?;
-        DefWindowProcW(window, WM_SYSCOMMAND, WPARAM(SC_MONITORPOWER as usize), LPARAM(OFF));
-        DestroyWindow(window)
-    }
-}
 
 /// The PC to sleep (not hibernation), letting what is running hear of it.
 pub fn sleep() -> bool {

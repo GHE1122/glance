@@ -6,9 +6,11 @@
 //!     glance-remote            listens
 //!     glance-remote pair       shows the pairing code (a QR code) for the phone
 //!     glance-remote lights     lists the lighting devices OpenRGB reaches
+//!     glance-remote monitors   lists the monitors and what they answer over DDC/CI
 
 mod actions;
 mod config;
+mod display;
 mod lights;
 mod sign;
 
@@ -70,7 +72,7 @@ impl Helper {
             let lit = self.lights(false);
             let plan = actions::power_plan().filter(|plan| *plan != actions::POWER_SAVER);
             actions::set_power_plan(actions::POWER_SAVER);
-            let dark = actions::screens_off().map_err(|error| error.to_string());
+            let dark = display::sleep().map_err(|error| error.to_string());
             self.state.lock().unwrap().night = Some(Night { plan, since: actions::tick() });
             lit.and(dark)
         } else {
@@ -78,7 +80,8 @@ impl Helper {
             if let Some(plan) = night.plan {
                 actions::set_power_plan(plan);
             }
-            self.lights(true)
+            let woken = display::wake().map_err(|error| error.to_string());
+            self.lights(true).and(woken)
         }
     }
 
@@ -90,6 +93,7 @@ impl Helper {
             "version": env!("CARGO_PKG_VERSION"),
             "lights": state.lights,
             "night": state.night.is_some(),
+            "screen": display::on(),
             "volume": sound.map(|(level, _)| level),
             "muted": sound.map(|(_, muted)| muted),
             "idle_seconds": actions::tick().wrapping_sub(actions::last_input()) / 1000,
@@ -103,7 +107,7 @@ impl Helper {
         let on = || asked.get("on").and_then(Value::as_bool).ok_or((400, "\"on\" is missing".to_string()));
         match (method, path) {
             ("GET", "/v1/state") => {}
-            ("POST", "/v1/screen-off") => actions::screens_off().map_err(|error| failed(error.to_string()))?,
+            ("POST", "/v1/screen") => if on()? { display::wake() } else { display::sleep() }.map_err(|error| failed(error.to_string()))?,
             ("POST", "/v1/lights") => self.lights(on()?).map_err(failed)?,
             ("POST", "/v1/night") => self.night(on()?).map_err(failed)?,
             ("POST", "/v1/volume") => {
@@ -204,8 +208,23 @@ fn main() -> std::io::Result<()> {
             }
             return Ok(());
         }
+        Some("monitors") => {
+            for monitor in display::monitors() {
+                println!("{}: brightness {:?}, input {:?}, power {:?}", monitor.name, monitor.brightness, monitor.input, monitor.power);
+            }
+            return Ok(());
+        }
+        // glance-remote vcp MONITOR CODE VALUE: one feature of one monitor, set.
+        Some("vcp") => {
+            let number = |at: usize, radix: u32| std::env::args().nth(at).and_then(|text| u32::from_str_radix(&text, radix).ok());
+            if let (Some(monitor), Some(code), Some(value)) = (number(2, 10), number(3, 16), number(4, 10)) {
+                println!("{}", if display::tell(monitor as usize, code as u8, value) { "told" } else { "not taken" });
+            }
+            return Ok(());
+        }
         _ => {}
     }
+    display::watch();
     let key = sign::key(&config.key).expect("a key made at first run");
     let listener = TcpListener::bind(("0.0.0.0", config.port))?;
     let helper = Arc::new(Helper { config, key, state: Mutex::new(State::default()) });

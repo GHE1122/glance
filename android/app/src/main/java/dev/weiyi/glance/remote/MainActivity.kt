@@ -3,13 +3,17 @@ package dev.weiyi.glance.remote
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,7 +42,9 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -67,31 +74,50 @@ private val Dim = Color(0xFF98A2AE)
 private val Good = Color(0xFF58C98B)
 private val Bad = Color(0xFFE5645A)
 
+/** From this width on (a tablet, a phone unfolded) the controls are in two columns. */
+private val WIDE = 600.dp
+
 class MainActivity : ComponentActivity() {
     /** A pairing link this activity was opened with, till it is taken. */
     private var opened by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Dark behind the system's bars too, their icons light.
+        enableEdgeToEdge(SystemBarStyle.dark(android.graphics.Color.TRANSPARENT), SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         opened = intent?.dataString
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Accent, onPrimary = Color.Black, background = Ground, surface = Card, onBackground = Ink, onSurface = Ink)) {
                 Surface(Modifier.fillMaxSize(), color = Ground) {
-                    var pc by remember { mutableStateOf(Pc.load(this)) }
-                    // A link opened pairs anew.
+                    var pcs by remember { mutableStateOf(Pcs.all(this)) }
+                    var chosen by remember { mutableIntStateOf(Pcs.chosen(this)) }
+                    var adding by remember { mutableStateOf(false) }
+                    val pair = { pc: Pc ->
+                        Pcs.add(this, pc)
+                        pcs = Pcs.all(this)
+                        chosen = Pcs.chosen(this)
+                        adding = false
+                    }
+                    // A link opened pairs with its PC.
                     LaunchedEffect(opened) {
-                        opened?.let(Pc::fromLink)?.let {
-                            it.keep(this@MainActivity)
-                            pc = it
-                        }
+                        opened?.let(Pc::fromLink)?.let(pair)
                         opened = null
                     }
-                    when (val paired = pc) {
-                        null -> Pairing { pc = it.also { found -> found.keep(this) } }
-                        else -> Control(paired) {
-                            Pc.forget(this)
-                            pc = null
+                    val pc = pcs.getOrNull(chosen)
+                    if (pc == null || adding) {
+                        BackHandler(enabled = adding) { adding = false }
+                        Pairing(first = pcs.isEmpty(), paired = pair)
+                    } else {
+                        Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+                            Computers(pcs, chosen, choose = { at -> Pcs.choose(this@MainActivity, at); chosen = at }, add = { adding = true })
+                            // Each PC with what was last heard of it, not the one before it.
+                            key(pc.key) {
+                                Control(pc) {
+                                    Pcs.remove(this@MainActivity, chosen)
+                                    pcs = Pcs.all(this@MainActivity)
+                                    chosen = Pcs.chosen(this@MainActivity)
+                                }
+                            }
                         }
                     }
                 }
@@ -105,32 +131,52 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** Not paired yet: the PC's code is scanned, or its link pasted. */
+/** The PCs paired with, in a row: the one looked at lit; and one more to add. */
 @Composable
-private fun Pairing(paired: (Pc) -> Unit) {
+private fun Computers(pcs: List<Pc>, chosen: Int, choose: (Int) -> Unit, add: () -> Unit) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        pcs.forEachIndexed { at, pc ->
+            val here = at == chosen
+            Text(
+                pc.name, fontSize = 14.sp, fontWeight = if (here) FontWeight.SemiBold else FontWeight.Normal, color = if (here) Color.Black else Dim,
+                modifier = Modifier.clip(RoundedCornerShape(50)).background(if (here) Accent else Card).clickable { choose(at) }.padding(horizontal = 14.dp, vertical = 8.dp),
+            )
+        }
+        Text(
+            stringResource(R.string.add_pc), fontSize = 14.sp, color = Dim,
+            modifier = Modifier.clip(RoundedCornerShape(50)).background(Card).clickable(onClick = add).padding(horizontal = 14.dp, vertical = 8.dp),
+        )
+    }
+}
+
+/** A PC's code is scanned, or its link pasted. */
+@Composable
+private fun Pairing(first: Boolean, paired: (Pc) -> Unit) {
     var link by remember { mutableStateOf("") }
     var wrong by remember { mutableStateOf(false) }
     val take = { text: String -> Pc.fromLink(text)?.let(paired) ?: run { wrong = true } }
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result -> result.contents?.let(take) }
     val prompt = stringResource(R.string.scan_prompt)
-    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp), verticalArrangement = Arrangement.Center) {
-        Text(stringResource(R.string.pair_title), fontSize = 30.sp, fontWeight = FontWeight.SemiBold, lineHeight = 38.sp)
-        Spacer(Modifier.height(12.dp))
-        Text(stringResource(R.string.pair_how), color = Dim, fontSize = 15.sp, lineHeight = 22.sp)
-        Spacer(Modifier.height(28.dp))
-        Button(
-            onClick = { scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt(prompt).setBeepEnabled(false).setOrientationLocked(true)) },
-            modifier = Modifier.fillMaxWidth().height(56.dp),
-            shape = RoundedCornerShape(16.dp),
-        ) { Text(stringResource(R.string.scan), fontSize = 17.sp, fontWeight = FontWeight.SemiBold) }
-        Spacer(Modifier.height(28.dp))
-        OutlinedTextField(link, { link = it; wrong = false }, Modifier.fillMaxWidth(), label = { Text(stringResource(R.string.paste_link)) }, singleLine = true, isError = wrong)
-        if (wrong) Text(stringResource(R.string.not_a_code), color = Bad, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
-        TextButton(onClick = { take(link) }, enabled = link.isNotBlank()) { Text(stringResource(R.string.pair)) }
+    Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.Center) {
+        Column(Modifier.widthIn(max = 480.dp).verticalScroll(rememberScrollState()).padding(24.dp)) {
+            Text(stringResource(if (first) R.string.pair_title else R.string.pair_another), fontSize = 30.sp, fontWeight = FontWeight.SemiBold, lineHeight = 38.sp)
+            Spacer(Modifier.height(12.dp))
+            Text(stringResource(R.string.pair_how), color = Dim, fontSize = 15.sp, lineHeight = 22.sp)
+            Spacer(Modifier.height(28.dp))
+            Button(
+                onClick = { scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt(prompt).setBeepEnabled(false).setOrientationLocked(false)) },
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(16.dp),
+            ) { Text(stringResource(R.string.scan), fontSize = 17.sp, fontWeight = FontWeight.SemiBold) }
+            Spacer(Modifier.height(28.dp))
+            OutlinedTextField(link, { link = it; wrong = false }, Modifier.fillMaxWidth(), label = { Text(stringResource(R.string.paste_link)) }, singleLine = true, isError = wrong)
+            if (wrong) Text(stringResource(R.string.not_a_code), color = Bad, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
+            TextButton(onClick = { take(link) }, enabled = link.isNotBlank()) { Text(stringResource(R.string.pair)) }
+        }
     }
 }
 
-/** Paired: the PC as it is, and what it may be asked. */
+/** A PC paired with: how it is, and what it may be asked. */
 @Composable
 private fun Control(pc: Pc, unpair: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -138,6 +184,7 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
     var failure by remember { mutableStateOf<Failure?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
     var sleepArmed by remember { mutableStateOf(false) }
+    var unpairArmed by remember { mutableStateOf(false) }
     var level by remember { mutableFloatStateOf(0f) }
     var sliding by remember { mutableStateOf(false) }
 
@@ -152,7 +199,7 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
         }
     }
 
-    fun act(what: String, path: String, body: JSONObject? = JSONObject()) {
+    fun act(what: String, path: String, body: JSONObject = JSONObject()) {
         if (busy != null) return
         busy = what
         scope.launch {
@@ -168,16 +215,17 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
             delay(2500)
         }
     }
-    // The sleep button asks twice: armed for a few seconds.
-    LaunchedEffect(sleepArmed) {
-        if (sleepArmed) {
+    // Sleep and unpairing ask twice: armed for a few seconds.
+    LaunchedEffect(sleepArmed, unpairArmed) {
+        if (sleepArmed || unpairArmed) {
             delay(4000)
             sleepArmed = false
+            unpairArmed = false
         }
     }
 
     val reached = state != null && failure == null
-    Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    val head: @Composable () -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(state?.name?.ifBlank { pc.name } ?: pc.name, fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
@@ -195,20 +243,26 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
                     )
                 }
             }
-            TextButton(onClick = unpair) { Text(stringResource(R.string.unpair), color = Dim) }
+            TextButton(onClick = { if (unpairArmed) unpair() else unpairArmed = true }) {
+                Text(stringResource(if (unpairArmed) R.string.unpair_confirm else R.string.unpair), color = if (unpairArmed) Bad else Dim)
+            }
         }
-
+    }
+    val switches: @Composable () -> Unit = {
         val night = state?.night == true
         Tile(
             title = stringResource(R.string.night),
             detail = stringResource(if (night) R.string.night_on else R.string.night_how),
             lit = night, working = busy == "night", enabled = reached, tall = true,
         ) { act("night", "/v1/night", on(!night)) }
-
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            Tile(stringResource(R.string.screen_off), stringResource(R.string.screen_off_how), lit = false, working = busy == "screen", enabled = reached, modifier = Modifier.weight(1f)) {
-                act("screen", "/v1/screen-off")
-            }
+            // Lit while the screens are on: pressed, they go off, and on again.
+            val screen = state?.screen
+            Tile(
+                stringResource(R.string.screen),
+                stringResource(when (screen) { false -> R.string.screen_is_off; else -> R.string.screen_is_on }),
+                lit = screen != false, working = busy == "screen", enabled = reached, modifier = Modifier.weight(1f),
+            ) { act("screen", "/v1/screen", on(screen == false)) }
             val lights = state?.lights
             Tile(
                 stringResource(R.string.lights),
@@ -216,7 +270,8 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
                 lit = lights == true, working = busy == "lights", enabled = reached, modifier = Modifier.weight(1f),
             ) { act("lights", "/v1/lights", on(lights != true)) }
         }
-
+    }
+    val rest: @Composable () -> Unit = {
         Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(horizontal = 18.dp, vertical = 14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(stringResource(R.string.volume), fontSize = 17.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
@@ -235,7 +290,6 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
                 colors = SliderDefaults.colors(thumbColor = Accent, activeTrackColor = Accent),
             )
         }
-
         Button(
             onClick = { if (sleepArmed) { sleepArmed = false; act("sleep", "/v1/sleep") } else sleepArmed = true },
             enabled = reached && busy == null,
@@ -243,13 +297,34 @@ private fun Control(pc: Pc, unpair: () -> Unit) {
             colors = ButtonDefaults.buttonColors(containerColor = if (sleepArmed) Bad else Card, contentColor = Ink),
         ) { Text(stringResource(if (sleepArmed) R.string.sleep_confirm else R.string.sleep), fontSize = 16.sp) }
     }
+
+    // Narrow (a phone, a fold's cover): one column. Wide (unfolded, a
+    // tablet): the switches beside the rest, no wider than reads well.
+    BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        val gap = Arrangement.spacedBy(14.dp)
+        if (maxWidth < WIDE) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = gap) {
+                head()
+                switches()
+                rest()
+            }
+        } else {
+            Column(Modifier.widthIn(max = 920.dp).verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                head()
+                Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = gap) { switches() }
+                    Column(Modifier.weight(1f), verticalArrangement = gap) { rest() }
+                }
+            }
+        }
+    }
 }
 
 /** One thing to ask, as a large button: lit while it is on. */
 @Composable
 private fun Tile(title: String, detail: String, lit: Boolean, working: Boolean, enabled: Boolean, modifier: Modifier = Modifier, tall: Boolean = false, press: () -> Unit) {
     Column(
-        modifier.fillMaxWidth().height(if (tall) 132.dp else 112.dp).clip(RoundedCornerShape(20.dp)).background(if (lit) Lit else Card)
+        modifier.fillMaxWidth().height(if (tall) 132.dp else 112.dp).clip(RoundedCornerShape(20.dp)).background(if (lit && enabled) Lit else Card)
             .clickable(enabled = enabled && !working, onClick = press).padding(18.dp),
         verticalArrangement = Arrangement.SpaceBetween,
     ) {
