@@ -46,14 +46,27 @@ pub fn helper() -> Option<PathBuf> {
     beside.is_file().then_some(beside)
 }
 
+/// What the remote in `folder` fetched for this user (OpenRGB, in the
+/// user's own folder) taken away again, by that remote, as the user: for
+/// the uninstaller, which runs from elsewhere.
+pub fn forget_fetched(folder: &Path) {
+    let helper = folder.join("glance-remote.exe");
+    if helper.is_file() {
+        let _ = asked(&helper, &["lights", "forget"]);
+    }
+}
+
 /// What the remote says, asked with `arguments`. It is asked as the user
 /// is without an administrator's rights, as it runs: what it reads and
 /// keeps is in the user's own folders, which anything of the user's may
 /// have changed, and nothing there is to be acted on with Glance's rights.
 fn ask(arguments: &[&str]) -> Option<String> {
-    let helper = helper()?;
+    asked(&helper()?, arguments)
+}
+
+fn asked(helper: &Path, arguments: &[&str]) -> Option<String> {
     if elevation::is_elevated() {
-        return said_plainly(&helper, arguments);
+        return said_plainly(helper, arguments);
     }
     let said = Command::new(helper).args(arguments).creation_flags(NO_WINDOW).output().ok()?;
     said.status.success().then(|| String::from_utf8_lossy(&said.stdout).into_owned())

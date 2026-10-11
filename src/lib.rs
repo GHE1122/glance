@@ -287,7 +287,11 @@ pub fn run() {
             std::process::exit(code(elevation::install_folder(std::path::Path::new(folder))))
         }
         [_, flag, folder] if flag == "--uninstall-from" => done(elevation::uninstall_from(std::path::Path::new(folder))),
-        [_, flag] if flag == "--remove-settings" => std::process::exit(if elevation::remove_settings() { 0 } else { 4 }),
+        [_, flag, folder] if flag == "--remove-settings" => {
+            // (First what the phone remote fetched: by the remote, while its configuration is still there.)
+            phone::forget_fetched(std::path::Path::new(folder));
+            std::process::exit(if elevation::remove_settings() { 0 } else { 4 })
+        }
         // The studio films the panel for the video and the README.
         #[cfg(feature = "studio")]
         [_, flag, script, out] if flag == "--studio" => {

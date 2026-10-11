@@ -17,6 +17,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, Interface, BSTR, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
@@ -631,10 +632,31 @@ fn copy_into(from: &Path, to: &Path) -> std::io::Result<()> {
             }
             copy_into(&entry.path(), &target)?;
         } else {
-            std::fs::copy(entry.path(), &target)?;
+            replace(&entry.path(), &target)?;
         }
     }
     Ok(())
+}
+
+/// How long a file still held by a program that was just ended is waited
+/// for, and how often it is tried meanwhile.
+const LET_GO_WITHIN: Duration = Duration::from_secs(15);
+const TRIED_EVERY: Duration = Duration::from_millis(100);
+
+/// Copies `from` over `to`. A program ended a moment ago (the Glance being
+/// replaced, its phone remote) holds its own file till Windows has done
+/// with it, which may be a while after it was ended: such a file is waited
+/// for, that long.
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let began = Instant::now();
+    loop {
+        match std::fs::copy(from, to) {
+            Ok(_) => return Ok(()),
+            // (In use by another, mapped as a running program, or refused as a running program's is.)
+            Err(error) if matches!(error.raw_os_error(), Some(5 | 32 | 1224)) && began.elapsed() < LET_GO_WITHIN => std::thread::sleep(TRIED_EVERY),
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Takes Glance's own files out of `folder`, for the uninstaller: held, and

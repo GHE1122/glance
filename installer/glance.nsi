@@ -302,8 +302,10 @@ Section "Uninstall"
   DeleteRegKey HKLM "SOFTWARE\Glance"
 
   ; The settings of the user uninstalling (the one file Glance keeps, and
-  ; its folder), removed by the helper through handles, following no link.
-  !insertmacro Ask '--remove-settings'
+  ; its folder), removed by the helper through handles, following no link;
+  ; and what the phone remote fetched for that user, taken away by the
+  ; remote itself (still in its place), as that user.
+  !insertmacro Ask '--remove-settings "$INSTDIR"'
   ${If} $0 != 0
     MessageBox MB_ICONEXCLAMATION "$(SettingsLeft)" /SD IDOK
   ${EndIf}

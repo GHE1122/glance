@@ -165,10 +165,16 @@ fn unpack(archive: Vec<u8>, folder: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Takes the OpenRGB fetched away again.
+/// Takes the OpenRGB fetched away again, and the folder it was kept in if
+/// nothing else is left there.
 pub fn forget() -> std::io::Result<()> {
-    match folder() {
-        Some(folder) if folder.is_dir() => std::fs::remove_dir_all(folder),
-        _ => Ok(()),
+    let Some(folder) = folder() else { return Ok(()) };
+    if folder.is_dir() {
+        std::fs::remove_dir_all(&folder)?;
     }
+    if let Some(above) = folder.parent() {
+        // (Not empty, it stays: refused, which is as it should be.)
+        let _ = std::fs::remove_dir(above);
+    }
+    Ok(())
 }
