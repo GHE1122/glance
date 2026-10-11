@@ -51,10 +51,8 @@ const ARRIVING: Duration = Duration::from_secs(5);
 /// address may have: more are turned away till those are done.
 const AT_ONCE: usize = 64;
 const AT_ONCE_EACH: usize = 16;
-/// How long after night mode begins the mouse and the keyboard are not yet
-/// minded (whoever asked for it may still be letting go of them), and how
-/// often they are looked at after.
-const SETTLING_MS: u32 = 3000;
+/// How often screens this helper has put out are looked at: whether the PC
+/// has been touched since.
 const WATCH: Duration = Duration::from_millis(500);
 /// How often lights that follow the heat are looked at again.
 const FOLLOW: Duration = Duration::from_secs(2);
@@ -77,11 +75,9 @@ fn heat(celsius: i64) -> String {
     format!("{:02X}{:02X}{:02X}", channel(5.0), channel(3.0), channel(1.0))
 }
 
-/// Night mode: the power plan to go back to, and when it began (see
-/// `actions::tick`).
+/// Night mode: the power plan to go back to.
 struct Night {
     power: Option<power::Before>,
-    since: u32,
 }
 
 #[derive(Default)]
@@ -287,7 +283,7 @@ impl Helper {
 
     /// The screens on again, whichever way they were put out.
     fn screens_on(&self) {
-        let kept_dark = display::dark_since().is_some();
+        let kept_dark = display::kept_dark();
         display::wake();
         if kept_dark {
             let _ = Config::change(|config| config.darkened.clear());
@@ -307,7 +303,7 @@ impl Helper {
             let lit = self.lights(false);
             let power = power::save();
             let dark = self.screens_off();
-            self.state.lock().unwrap().night = Some(Night { power, since: actions::tick() });
+            self.state.lock().unwrap().night = Some(Night { power });
             journal::note(format!("night began (lights: {}; screens: {})", lit.as_ref().map_or_else(|error| error.as_str(), |_| "out"), dark.as_ref().map_or_else(|error| error.as_str(), |_| "out")));
             lit.and(dark)
         } else {
@@ -404,10 +400,7 @@ impl Helper {
                     // would end and the screens wake: it is none of the user's,
                     // so night goes on and the screens are put out again.
                     media::Asked::Pressed => {
-                        let mut state = self.state.lock().unwrap();
-                        if let Some(night) = state.night.as_mut() {
-                            night.since = actions::tick();
-                            drop(state);
+                        if self.state.lock().unwrap().night.is_some() {
                             let _ = self.screens_off();
                         }
                     }
@@ -854,13 +847,22 @@ fn main() -> std::io::Result<()> {
     let watching = helper.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(WATCH);
-        let since = |from: u32| actions::last_input().wrapping_sub(from) as i32 > SETTLING_MS as i32;
-        let night = watching.state.lock().unwrap().night.as_ref().is_some_and(|night| since(night.since));
+        let woken = display::woken();
+        match woken {
+            display::Woken::No => continue,
+            // A report that said nothing is no touch: the screens Windows put on at it are put out again.
+            display::Woken::ByNothing => {
+                journal::note(format!("the screens came on with nothing touched ({}): put out again", display::last_touch()));
+                let _ = display::sleep();
+                continue;
+            }
+            display::Woken::Touched => journal::note(format!("touched while the screens were out ({})", display::last_touch())),
+            display::Woken::Unasked => journal::note(format!("the screens came on unasked, nothing heard from ({}): left on", display::last_touch())),
+        }
+        let night = watching.state.lock().unwrap().night.is_some();
         if night {
-            journal::note(format!("touched during the night ({})", display::last_touch()));
             let _ = watching.night(false);
-        } else if display::dark_since().is_some_and(since) && watching.state.lock().unwrap().night.is_none() {
-            journal::note(format!("touched while the screens were kept dark ({})", display::last_touch()));
+        } else {
             watching.screens_on();
         }
     });
