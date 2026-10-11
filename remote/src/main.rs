@@ -10,6 +10,7 @@
 
 mod actions;
 mod config;
+mod cooler;
 mod display;
 mod lights;
 mod media;
@@ -90,6 +91,13 @@ impl Helper {
             if let Some(celsius) = reads::read().as_ref().and_then(reads::hottest) {
                 light.color = heat(celsius);
             }
+        }
+        // A cooler's little display goes out and comes on with them
+        // (whether or not there are other lights to set).
+        if on {
+            cooler::lit();
+        } else {
+            cooler::dark();
         }
         lights::set(&self.config, on, &light).map_err(|error| error.to_string())?;
         self.state.lock().unwrap().lights = Some(on);
@@ -429,6 +437,12 @@ fn main() -> std::io::Result<()> {
                     }
                 })?;
             }
+            return Ok(());
+        }
+        // glance-remote cooler off|on: the cooler's display alone.
+        Some("cooler") => {
+            let off = std::env::args().nth(2).as_deref() == Some("off");
+            println!("{}", if off { cooler::dark() } else { cooler::lit() });
             return Ok(());
         }
         Some("media") => {
