@@ -301,7 +301,8 @@ impl Default for OverlaySettings {
             locked: false,
             clear: 0.0,
             click_through: false,
-            frosted: true,
+            // (Its tint alone, till frosting is asked for: frosting costs a game frames.)
+            frosted: false,
             layout: Default::default(),
             rows: 1,
             size: 1.0,

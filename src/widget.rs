@@ -17,6 +17,35 @@ use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, PostMessageW, SM
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::journal::note;
+
+/// How long a kind of note that can come many times a second (a widget
+/// being dragged takes the desktop again and again, and may draw slowly
+/// all the while) is kept to one: the log is for what went wrong, and a
+/// user's report carries only its last lines.
+const SPARINGLY: Duration = Duration::from_secs(30);
+
+/// Notes `what` of `kind`, unless one of that kind was noted within
+/// `SPARINGLY`: then it is only counted, and the next one noted says how
+/// many came between.
+fn note_sparingly(kind: &'static str, what: impl FnOnce() -> String) {
+    static LAST: std::sync::Mutex<Vec<(&'static str, Instant, u32)>> = std::sync::Mutex::new(Vec::new());
+    let mut last = LAST.lock().unwrap();
+    let now = Instant::now();
+    match last.iter_mut().find(|(of, _, _)| *of == kind) {
+        Some((_, at, between)) if now.duration_since(*at) < SPARINGLY => *between += 1,
+        Some((_, at, between)) => {
+            let more = std::mem::take(between);
+            *at = now;
+            drop(last);
+            note(if more > 0 { format!("{} ({more} more like it since the last)", what()) } else { what() });
+        }
+        None => {
+            last.push((kind, now, 0));
+            drop(last);
+            note(what());
+        }
+    }
+}
 use crate::panel::{cursor_position, monitor_at, Contact};
 use crate::settings::{WidgetAt, WidgetSide};
 use crate::ui::arrange::{self, Choice, Form, Want};
@@ -400,6 +429,8 @@ struct Widget {
     /// Light or dark is to be measured again where it comes to rest (see
     /// `retone`).
     tone_due: bool,
+    /// How long the last frame's painting took, and how long handing it to the compositor then did.
+    frame_took: (Duration, Duration),
     /// The form it shows and the room it was taken in while sized: a form
     /// showing more comes back only with room to spare.
     taken: Option<arrange::Shown>,
@@ -894,6 +925,7 @@ impl Widget {
             shown_once: false,
             frost_at: None,
             tone_due: false,
+            frame_took: (Duration::ZERO, Duration::ZERO),
             taken: None,
             hover: false,
             behind: None,
@@ -1612,7 +1644,7 @@ impl Widget {
                 .collect::<Vec<_>>()
                 .join(", ");
             if !why.is_empty() {
-                note(format!("widget: the desktop taken again ({why})"));
+                note_sparingly("retake", || format!("widget: the desktop taken again ({why})"));
             }
             self.retake = false;
             // On another thread: the widget goes on meanwhile (with what it
@@ -1661,14 +1693,11 @@ impl Widget {
         let whole = started.elapsed();
         if whole > SLOW_FRAME {
             let ms = |d: Duration| d.as_secs_f32() * 1000.0;
-            note(format!(
-                "widget: a frame took {:.1} ms: laid out {:.1}, the desktop taken {:.1}, drawn {:.1} ({})",
-                ms(whole),
-                ms(laid_out),
-                ms(taken - laid_out),
-                ms(whole - taken),
-                self.choice.form.key()
-            ));
+            let form = self.choice.form.key();
+            let (painted, handed) = self.frame_took;
+            note_sparingly("slow", || {
+                format!("widget: a frame took {:.1} ms: laid out {:.1}, the desktop taken {:.1}, drawn {:.1} (painted {:.1}, handed to the compositor {:.1}; {form})", ms(whole), ms(laid_out), ms(taken - laid_out), ms(whole - taken), ms(painted), ms(handed))
+            });
         }
         if moving { Frame::Moving } else { Frame::Rest }
     }
@@ -1739,6 +1768,7 @@ impl Widget {
         let pixels = ((window.right - window.left) as u32, (window.bottom - window.top) as u32);
         // Every layer of it drawn (see below).
         let mut whole = true;
+        let (began, painted) = (Instant::now(), std::cell::Cell::new(Duration::ZERO));
         let drawn = surface.draw(&gfx, pixels, px, |frame| {
             frame.origin(0.0, 0.0);
             if opacity < 1.0 {
@@ -1829,7 +1859,9 @@ impl Widget {
             if opacity < 1.0 {
                 unsafe { frame.dc.PopLayer() };
             }
+            painted.set(began.elapsed());
         });
+        self.frame_took = (painted.get(), began.elapsed().saturating_sub(painted.get()));
         if let Err(error) = &drawn {
             note(format!("widget: its surface not drawn: {error}"));
             gfx::lost();
