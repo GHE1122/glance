@@ -35,6 +35,8 @@ mod presents;
 mod os;
 mod reading;
 #[cfg(windows)]
+mod remote;
+#[cfg(windows)]
 mod screens;
 #[cfg(windows)]
 mod sensors;
@@ -346,6 +348,8 @@ pub fn run() {
     presents::start();
     thread::spawn(move || {
         let mut watch = watch::Watch::default();
+        // What the remote-control helper is told of each sample.
+        let mut told = remote::Told::open();
         let mut next = Instant::now();
         for tick in 0u64.. {
             let (interval, wsl, docker) = {
@@ -363,6 +367,9 @@ pub fn run() {
             let refresh_slow = controller.is_shown() || ui::settings_window::is_open() || tick % HIDDEN_SLOW_TICKS == 0;
             if let Some(sample) = sampler.sample(refresh_slow, wsl, docker) {
                 watch.sample(&sample, Instant::now());
+                if let Some(told) = &mut told {
+                    told.tell(&sample, &app().info);
+                }
                 controller.record(sample);
             }
         }
