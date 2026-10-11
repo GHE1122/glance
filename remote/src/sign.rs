@@ -52,6 +52,8 @@ pub enum Refused {
     Stale,
     Replayed,
     Forged,
+    /// Its key is another phone's: this one is to be paired for itself.
+    Taken,
 }
 
 impl Seen {

@@ -22,7 +22,7 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use config::{Config, Effect, Light};
+use config::{Config, Effect, Light, Phone};
 use serde_json::{json, Value};
 
 /// The most a request may be: none of the phone's is near it.
@@ -72,7 +72,10 @@ struct Helper {
     config: Config,
     /// How the lights are when they are on: as the phone last chose.
     light: Mutex<Light>,
-    key: [u8; 32],
+    /// The phones paired with, as the configuration had them when it was
+    /// last kept (and when that was): read again once it is kept anew, by
+    /// this or by another of this program offering a pairing.
+    phones: Mutex<(Option<std::time::SystemTime>, Vec<Phone>)>,
     state: Mutex<State>,
     /// Held while the lights are being set: one at a time.
     lighting: Mutex<()>,
@@ -126,7 +129,49 @@ impl Helper {
         if let Some(brightness) = brightness {
             light.brightness = brightness.clamp(1, 100) as u8;
         }
-        let _ = Config { light: light.clone(), ..self.config.clone() }.save();
+        let chosen = light.clone();
+        let _ = Config::change(|config| config.light = chosen);
+    }
+
+    /// Whether a request is a paired phone's (see `sign::Seen::check`), and
+    /// the phone it calls itself is the one its key belongs to. A key not
+    /// used before becomes that phone's.
+    #[allow(clippy::too_many_arguments)]
+    fn admit(&self, method: &str, path: &str, time: &str, nonce: &str, sign: &str, body: &[u8], device: &str, name: &str) -> Result<(), sign::Refused> {
+        let mut phones = self.phones.lock().unwrap();
+        let kept = Config::kept_at();
+        if phones.0 != kept {
+            *phones = (kept, Config::load().phones);
+        }
+        let now = sign::now();
+        let mut state = self.state.lock().unwrap();
+        for phone in phones.1.iter().filter(|phone| phone.offered_till.is_none_or(|till| till > now)) {
+            let Some(key) = sign::key(&phone.key) else { continue };
+            match state.seen.check(&key, method, path, time, nonce, sign, body, now) {
+                Err(sign::Refused::Forged) => continue,
+                Err(refused) => return Err(refused),
+                Ok(()) => {}
+            }
+            return match &phone.device {
+                Some(owner) if owner != device => Err(sign::Refused::Taken),
+                Some(_) => Ok(()),
+                // (A request that names no phone leaves the key as it is.)
+                None if device.is_empty() => Ok(()),
+                None => {
+                    let (key, device, name) = (phone.key.clone(), device.to_string(), name.to_string());
+                    let changed = Config::change(|config| {
+                        if let Some(phone) = config.phones.iter_mut().find(|phone| phone.key == key) {
+                            *phone = Phone { key: key.clone(), name, device: Some(device), offered_till: None };
+                        }
+                    });
+                    if let Ok(config) = changed {
+                        *phones = (Config::kept_at(), config.phones);
+                    }
+                    Ok(())
+                }
+            };
+        }
+        Err(sign::Refused::Forged)
     }
 
     /// Night: the lights out, the power-saving plan, the screens off. Day
@@ -288,7 +333,7 @@ impl Helper {
             body.extend_from_slice(&chunk[..read]);
         }
         body.truncate(length);
-        let checked = self.state.lock().unwrap().seen.check(&self.key, method, path, header("x-glance-time"), header("x-glance-nonce"), header("x-glance-sign"), &body, sign::now());
+        let checked = self.admit(method, path, header("x-glance-time"), header("x-glance-nonce"), header("x-glance-sign"), &body, header("x-glance-phone"), &unescaped(header("x-glance-name")));
         let (status, answer) = match checked {
             Err(refused) => (401, json!({ "error": format!("{refused:?}").to_lowercase(), "time": sign::now() })),
             Ok(()) => match self.act(method, path, &body) {
@@ -311,19 +356,45 @@ fn address() -> Option<String> {
     Some(socket.local_addr().ok()?.ip().to_string())
 }
 
-/// What the phone needs to pair, as the link its QR code holds.
-fn pairing(config: &Config) -> String {
-    let name: String = config.name.bytes().map(|b| if b.is_ascii_alphanumeric() || b == b'-' { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
-    format!("glance://pair?h={}&p={}&k={}&n={name}", address().unwrap_or_default(), config.port, config.key)
+/// Text as a link carries it: all but letters, figures and hyphens by
+/// their bytes' numbers.
+fn escaped(text: &str) -> String {
+    text.bytes().map(|b| if b.is_ascii_alphanumeric() || b == b'-' { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// The text a link carried (see `escaped`).
+fn unescaped(text: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut rest = text.as_bytes();
+    while let Some((first, after)) = rest.split_first() {
+        let number = (*first == b'%' && after.len() >= 2).then(|| std::str::from_utf8(&after[..2]).ok().and_then(|hex| u8::from_str_radix(hex, 16).ok())).flatten();
+        match number {
+            Some(byte) => {
+                bytes.push(byte);
+                rest = &after[2..];
+            }
+            None => {
+                bytes.push(*first);
+                rest = after;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// What a phone needs to pair, as the link its QR code holds: where this
+/// PC is, and a key offered to the phone that takes it.
+fn pairing(config: &Config, key: &str) -> String {
+    format!("glance://pair?h={}&p={}&k={key}&n={}", address().unwrap_or_default(), config.port, escaped(&config.name))
 }
 
 fn main() -> std::io::Result<()> {
     // The monitors' sizes in their own pixels, whatever each one's scale.
     let _ = unsafe { windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    let config = Config::load()?;
+    let config = Config::load();
     match std::env::args().nth(1).as_deref() {
         Some("pair") => {
-            let link = pairing(&config);
+            let link = pairing(&config, &Config::offer()?);
             let code = qrcode::QrCode::new(link.as_bytes()).map_err(std::io::Error::other)?;
             let picture = code.render::<qrcode::render::svg::Color>().min_dimensions(480, 480).quiet_zone(true).build();
             let path = std::env::temp_dir().join("glance-pair.svg");
@@ -334,6 +405,29 @@ fn main() -> std::io::Result<()> {
         Some("lights") => {
             for device in lights::devices(&config)? {
                 println!("{}\n  modes: {}\n  zones: {}", device.name, device.modes.iter().map(|mode| mode.name.as_str()).collect::<Vec<_>>().join(", "), device.zones.iter().map(|zone| format!("{} ({} LEDs)", zone.name, zone.leds)).collect::<Vec<_>>().join(", "));
+            }
+            return Ok(());
+        }
+        // The phones paired with (and the pairings offered), in their order.
+        Some("phones") => {
+            for (at, phone) in config.phones.iter().enumerate() {
+                let what = match (&phone.device, phone.offered_till) {
+                    (Some(_), _) => "paired",
+                    (None, Some(_)) => "offered",
+                    (None, None) => "paired before phones were told apart",
+                };
+                println!("{at}: {} ({what})", if phone.name.is_empty() { "?" } else { &phone.name });
+            }
+            return Ok(());
+        }
+        // glance-remote unpair N: the phone at that place, paired no more.
+        Some("unpair") => {
+            if let Some(at) = std::env::args().nth(2).and_then(|text| text.parse::<usize>().ok()) {
+                Config::change(|config| {
+                    if at < config.phones.len() {
+                        config.phones.remove(at);
+                    }
+                })?;
             }
             return Ok(());
         }
@@ -368,11 +462,10 @@ fn main() -> std::io::Result<()> {
         _ => {}
     }
     display::watch();
-    let key = sign::key(&config.key).expect("a key made at first run");
     let listener = TcpListener::bind(("0.0.0.0", config.port))?;
     // (Whether the lights are on, as OpenRGB has them if it is running.)
     let state = State { lights: lights::lit(), ..State::default() };
-    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), config, key, state: Mutex::new(state), lighting: Mutex::new(()) });
+    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()) });
     let following = helper.clone();
     std::thread::spawn(move || {
         let mut last = None;
@@ -401,6 +494,16 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn text_goes_through_a_link_and_back() {
+        for text in ["DESKTOP-9950X", "书房 的电脑", "SM-F971U1", "100%"] {
+            assert_eq!(super::unescaped(&super::escaped(text)), text);
+        }
+        assert_eq!(super::escaped("a b"), "a%20b");
+        // What is no number stays as it is.
+        assert_eq!(super::unescaped("%zz%4"), "%zz%4");
+    }
+
     #[test]
     fn the_heat_goes_from_blue_to_red() {
         assert_eq!(super::heat(20), "0080FF");

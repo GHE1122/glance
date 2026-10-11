@@ -27,9 +27,26 @@ data class Pc(val host: String, val port: Int, val key: String, val name: String
     fun toJson(): JSONObject = JSONObject().put("host", host).put("port", port).put("key", key).put("name", name)
 }
 
+/**
+ * This phone, as it tells each PC: a number it gave itself once (a PC's
+ * key is this phone's alone from its first use) and what it is called.
+ */
+object Phone {
+    var id = ""
+        private set
+    val name: String get() = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL).filter { it.isNotBlank() }.joinToString(" ")
+
+    /** Reads the number kept, or makes and keeps one. */
+    fun know(context: Context) {
+        if (id.isNotEmpty()) return
+        val kept = context.getSharedPreferences("phone", Context.MODE_PRIVATE)
+        id = kept.getString("id", null) ?: java.util.UUID.randomUUID().toString().also { kept.edit().putString("id", it).apply() }
+    }
+}
+
 /** The PCs paired with, and the one being looked at: kept in the app's own storage. */
 object Pcs {
-    private fun kept(context: Context) = context.getSharedPreferences("pcs", Context.MODE_PRIVATE)
+    private fun kept(context: Context) = context.getSharedPreferences("pcs", Context.MODE_PRIVATE).also { Phone.know(context) }
 
     fun all(context: Context): List<Pc> {
         val list = runCatching { JSONArray(kept(context).getString("list", "[]")) }.getOrElse { JSONArray() }
@@ -151,6 +168,9 @@ fun Pc.ask(path: String, body: JSONObject? = null): PcState {
             setRequestProperty("X-Glance-Time", time)
             setRequestProperty("X-Glance-Nonce", nonce)
             setRequestProperty("X-Glance-Sign", sign)
+            // Which phone this is: the PC keeps a key to the phone that first used it.
+            setRequestProperty("X-Glance-Phone", Phone.id)
+            setRequestProperty("X-Glance-Name", java.net.URLEncoder.encode(Phone.name, "UTF-8").replace("+", "%20"))
             if (body != null) {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
