@@ -473,11 +473,9 @@ enum Target {
     Pair(bool),
     /// Unpairs the phone at that place in the remote's list.
     Unpair(usize),
-    /// Shows the diagnostics as they would be sent to Glance's site; then
-    /// sends them, or puts them away.
+    /// Sends the diagnostics to Glance's site, shown first in a window of
+    /// their own to be read and agreed to.
     SendReport,
-    ConfirmReport,
-    CancelReport,
 }
 
 /// Modules for developers: listed under "More" while off, out of the way.
@@ -516,14 +514,8 @@ enum Row {
     Phone(usize, String),
     /// What the rows under it are, said small above them: a group of their own.
     Group(&'static str),
-    /// The diagnostics about to be sent, to be read first: in a box of
-    /// their own, scrolled by the wheel.
-    Report,
 }
 
-/// How tall the box the diagnostics are read in is, and each of its lines.
-const REPORT: f32 = 264.0;
-const REPORT_LINE: f32 = 17.0;
 /// How tall a group's name is, above its rows.
 const GROUP: f32 = 24.0;
 /// How tall the code's own square is, in its row.
@@ -612,15 +604,9 @@ struct Ui {
     /// last sending went: the name the site gave them, or none.
     sending: Option<std::thread::JoinHandle<Option<String>>>,
     sent: Option<Option<String>>,
-    /// The diagnostics shown to be read before they are sent: the text,
-    /// its lines as they fit the box, how far the box is scrolled, and
-    /// where the box is in the window (as last painted).
-    report: Option<(String, Vec<String>)>,
     /// The phone app as the phone shows it, for the phone remote's page:
     /// a picture in the language the settings are in, once drawn.
     phone_art: Option<(Lang, ID2D1Bitmap1, (f32, f32))>,
-    report_scroll: f32,
-    report_box: Option<Rect>,
     scroll: f32,
     scroll_target: f32,
     motion: HashMap<String, Transition>,
@@ -750,10 +736,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             copied_at: None,
             sending: None,
             sent: None,
-            report: None,
             phone_art: None,
-            report_scroll: 0.0,
-            report_box: None,
             uninstaller: std::env::current_exe().ok().and_then(|exe| elevation::trusted(&exe.with_file_name("uninstall.exe"))),
             scroll: 0.0,
             scroll_target: 0.0,
@@ -1092,9 +1075,6 @@ impl Ui {
                     rows.push(Row::Update);
                 }
                 rows.push(Row::Diagnostics);
-                if self.report.is_some() {
-                    rows.push(Row::Report);
-                }
                 if self.uninstaller.is_some() {
                     rows.push(Row::Uninstall);
                 }
@@ -1168,7 +1148,6 @@ impl Ui {
                 Row::ModuleChoice(..) => (0.0, ITEM_ROW),
                 Row::Code => (ROW_GAP, CODE + 2.0 * ROW_SIDE),
                 Row::Group(_) => (20.0, GROUP),
-                Row::Report => (ROW_GAP, REPORT),
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, self.words_height(&row).max(ROW)),
             };
             y += before;
@@ -1414,14 +1393,6 @@ impl Ui {
                 // "Copied" for a moment after the press.
                 let copied = self.copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR);
                 let action = if copied { p("已复制", "Copied") } else { p("复制", "Copy") };
-                // Shown to be read: sent, or put away.
-                if self.report.is_some() {
-                    return Some((
-                        p("诊断信息", "Diagnostics"),
-                        p("下面是将要发送的全部内容，可以滚动查看。不包含你的文件、账号或网络地址", "Below is all that would be sent; scroll to read it. Nothing of your files, accounts or network address"),
-                        vec![(p("确认发送", "Send it"), Target::ConfirmReport, Button::Accent), (p("取消", "Cancel"), Target::CancelReport, Button::Plain)],
-                    ));
-                }
                 // What became of the last sending, once there was one.
                 let (detail, send) = match (&self.sending, &self.sent) {
                     (Some(_), _) => (p("正在发送…", "Sending…"), (p("发送中", "Sending"), Target::SendReport, Button::Quiet)),
@@ -2229,40 +2200,18 @@ impl Ui {
                 }
             }
             Target::Quit => crate::quit(),
-            // Shown whole first: nothing leaves this PC that was not read and agreed to.
+            // Shown whole first, in a small window that scrolls: nothing leaves this PC that was not read and agreed to.
             Target::SendReport if self.sending.is_none() => {
                 let report = crate::diagnostics::report();
-                // Its lines as they fit the box: a long one over several.
-                let font = Font::new(Family::Segoe, 12.0, 400.0);
-                let room = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE - 10.0;
-                let mut lines = Vec::new();
-                for line in report.lines() {
-                    let mut rest: Vec<char> = line.chars().collect();
-                    loop {
-                        let whole: String = rest.iter().collect();
-                        if rest.is_empty() || self.gfx.measure(&whole, font) <= room {
-                            lines.push(whole);
-                            break;
-                        }
-                        // As many of its letters as fit, the rest to the next line.
-                        let mut fits = rest.len();
-                        while fits > 1 && self.gfx.measure(&rest[..fits].iter().collect::<String>(), font) > room {
-                            fits -= (fits / 8).max(1);
-                        }
-                        lines.push(rest[..fits].iter().collect());
-                        rest.drain(..fits);
-                    }
-                }
-                self.report = Some((report, lines));
-                self.report_scroll = 0.0;
-            }
-            Target::ConfirmReport => {
-                if let Some((report, _)) = self.report.take() {
+                let (title, intro, yes, no) = match self.lang {
+                    Lang::Zh => ("发送诊断信息", "下面是将要发送给 Glance（glancepc.com）的全部内容：这台电脑的硬件、Glance 读到的数值和它最近的日志。不包含你的文件、账号或网络地址。", "发送", "取消"),
+                    Lang::En => ("Send diagnostics", "Below is all that would be sent to Glance (glancepc.com): this PC's hardware, what Glance reads of it, and Glance's recent log. Nothing of your files, accounts or network address.", "Send", "Cancel"),
+                };
+                if super::ask::read_and_agree(self.hwnd, title, intro, &report, yes, no) {
                     self.sent = None;
                     self.sending = Some(std::thread::spawn(move || crate::diagnostics::send(&report)));
                 }
             }
-            Target::CancelReport => self.report = None,
             Target::SendReport => {}
             // (Pressed again, its code is put away.)
             Target::GetApp if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) => self.code = None,
@@ -2326,9 +2275,7 @@ impl Ui {
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::Update if update::available().is_some_and(|(_, state)| state == update::State::Downloading) => vec![],
                 Row::Update => vec![Target::Update],
-                Row::Diagnostics if self.report.is_some() => vec![Target::CancelReport, Target::ConfirmReport],
                 Row::Diagnostics => vec![Target::SendReport, Target::Diagnostics],
-                Row::Report => vec![],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
                 Row::GetApp => vec![Target::GetApp],
@@ -2465,7 +2412,7 @@ impl Ui {
     fn reveal_focus(&mut self) {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
-            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport | Target::ConfirmReport | Target::CancelReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
+            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
             (Row::GetApp, Target::GetApp) | (Row::Pair, Target::Pair(_)) => true,
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
@@ -2492,18 +2439,6 @@ impl Ui {
         let Some((x, _)) = self.pointer else { return };
         if !(NAV..NAV + PANE).contains(&x) {
             return;
-        }
-        // Over the diagnostics shown, the wheel scrolls those, for as far as they go.
-        if let (Some(area), Some((_, lines)), Some((_, y))) = (self.report_box, &self.report, self.pointer) {
-            if x >= area.x && x < area.x + area.w && y >= area.y && y < area.y + area.h {
-                let most = (lines.len() as f32 * REPORT_LINE + 24.0 - REPORT).max(0.0);
-                let to = (self.report_scroll - delta as f32 / 120.0 * WHEEL).clamp(0.0, most);
-                if to != self.report_scroll {
-                    self.report_scroll = to;
-                    self.next_frame = Instant::now();
-                    return;
-                }
-            }
         }
         let height = self.client().1;
         let most = (self.content_height() - height).max(0.0);
@@ -2999,28 +2934,6 @@ impl Ui {
                     self.segmented(frame, palette, field, &options, chosen, active, right, y + row_height / 2.0, now, &hovered);
                     if !usable {
                         self.targets.truncate(targets);
-                    }
-                }
-                Row::Report => {
-                    card(frame, palette, left, y, width, row_height, palette.card);
-                    self.report_box = Some(Rect { x: left, y, w: width, h: row_height });
-                    if let Some((_, lines)) = &self.report {
-                        let small = Font::new(Family::Segoe, 12.0, 400.0);
-                        unsafe { frame.dc.PushAxisAlignedClip(&rect(left, y + 1.0, width, row_height - 2.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-                        for (at, line) in lines.iter().enumerate() {
-                            let cy = y + 12.0 + (at as f32 + 0.5) * REPORT_LINE - self.report_scroll;
-                            if cy > y - REPORT_LINE && cy < y + row_height + REPORT_LINE {
-                                text_centred(frame, line, small, palette.text2, left + ROW_SIDE, cy, width - 2.0 * ROW_SIDE, Align::Start);
-                            }
-                        }
-                        unsafe { frame.dc.PopAxisAlignedClip() };
-                        // A thin thumb shows where in them the view is.
-                        let content = lines.len() as f32 * REPORT_LINE + 24.0;
-                        if content > row_height {
-                            let thumb = (row_height * row_height / content).max(24.0);
-                            let at = (row_height - thumb) * self.report_scroll / (content - row_height);
-                            fill(frame, palette.text3.alpha(0.6), left + width - 7.0, y + at + 2.0, 3.0, thumb - 4.0, 1.5);
-                        }
                     }
                 }
                 Row::Group(name) => {

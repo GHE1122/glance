@@ -22,6 +22,8 @@ pub mod seen;
 #[cfg(windows)]
 pub mod render;
 #[cfg(windows)]
+mod ask;
+#[cfg(windows)]
 pub mod settings_window;
 #[cfg(windows)]
 pub mod skins;
