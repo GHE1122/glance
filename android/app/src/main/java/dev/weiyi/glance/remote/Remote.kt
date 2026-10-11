@@ -62,13 +62,39 @@ object Pcs {
     }
 }
 
-/** One of the PC's monitors: its name, its size, and whether it is on (none: it cannot be asked, nor turned off by itself). */
-data class Monitor(val name: String, val width: Int, val height: Int, val on: Boolean?)
+/** One of the PC's monitors: its name, where it is on the desktop, and whether it is on (none: it cannot be asked, nor turned off by itself). */
+data class Monitor(val name: String, val x: Int, val y: Int, val width: Int, val height: Int, val on: Boolean?)
+
+/** How the lights are when they are on: their colour (RRGGBB) and what they do ("steady", "breathing", "rainbow", "heat"). */
+data class Light(val color: String, val effect: String)
+
+/** What is playing on the PC. */
+data class Media(val title: String, val artist: String, val app: String, val playing: Boolean)
+
+/** One part of the PC: how warm it is (°C) and how busy (%), each where it is known. */
+data class Read(val temp: Int?, val load: Int?)
+
+/** The PC's parts as Glance reads them there, and how fast its fans turn. */
+data class Reads(val cpu: Read, val gpu: Read, val ram: Read, val disk: Read, val cpuFan: Int?, val caseFan: Int?) {
+    fun of(part: Part) = when (part) { Part.Cpu -> cpu; Part.Gpu -> gpu; Part.Ram -> ram; Part.Disk -> disk }
+}
+
+enum class Part { Cpu, Gpu, Ram, Disk }
+
+private fun JSONObject.int(name: String) = if (isNull(name)) null else optInt(name)
+
+private fun JSONObject.read(name: String) = optJSONObject(name)?.let { Read(it.int("temp"), it.int("load")) } ?: Read(null, null)
 
 /** The PC as it says it is. */
-data class PcState(val name: String, val lights: Boolean?, val night: Boolean, val screen: Boolean?, val volume: Int?, val muted: Boolean?, val monitors: List<Monitor> = emptyList()) {
+data class PcState(
+    val name: String, val lights: Boolean?, val night: Boolean, val screen: Boolean?, val volume: Int?, val muted: Boolean?, val monitors: List<Monitor> = emptyList(),
+    val light: Light = Light("FFFFFF", "steady"), val media: Media? = null, val reads: Reads? = null,
+) {
     companion object {
         fun from(json: JSONObject) = PcState(
+            light = json.optJSONObject("light")?.let { Light(it.optString("color", "FFFFFF"), it.optString("effect", "steady")) } ?: Light("FFFFFF", "steady"),
+            media = json.optJSONObject("media")?.let { Media(it.optString("title"), it.optString("artist"), it.optString("app"), it.optBoolean("playing")) },
+            reads = json.optJSONObject("reads")?.let { Reads(it.read("cpu"), it.read("gpu"), it.read("ram"), it.read("disk"), it.int("cpu_fan"), it.int("case_fan")) },
             name = json.optString("name"),
             lights = if (json.isNull("lights")) null else json.optBoolean("lights"),
             night = json.optBoolean("night"),
@@ -78,7 +104,7 @@ data class PcState(val name: String, val lights: Boolean?, val night: Boolean, v
             monitors = json.optJSONArray("monitors")?.let { list ->
                 (0 until list.length()).map { at ->
                     val one = list.getJSONObject(at)
-                    Monitor(one.optString("name"), one.optInt("width"), one.optInt("height"), if (one.isNull("on")) null else one.optBoolean("on"))
+                    Monitor(one.optString("name"), one.optInt("x"), one.optInt("y"), one.optInt("width"), one.optInt("height"), if (one.isNull("on")) null else one.optBoolean("on"))
                 }
             } ?: emptyList(),
         )
@@ -145,3 +171,21 @@ fun Pc.ask(path: String, body: JSONObject? = null): PcState {
 }
 
 fun on(value: Boolean) = JSONObject().put("on", value)
+
+/** What the main page shows, and the colours made by hand: this phone's own, kept in the app's storage. */
+object Look {
+    /** The parts of the main page that may be left out, by the names they are kept under. */
+    val PARTS = listOf("rig", "reads", "lights", "monitors", "sound", "sleep")
+
+    private fun kept(context: Context) = context.getSharedPreferences("look", Context.MODE_PRIVATE)
+
+    /** Which parts are shown (all, till one is turned off). */
+    fun shown(context: Context): Map<String, Boolean> = PARTS.associateWith { kept(context).getBoolean("show_$it", true) }
+
+    fun show(context: Context, part: String, on: Boolean) = kept(context).edit().putBoolean("show_$part", on).apply()
+
+    /** The colours made by hand (RRGGBB), the oldest first. */
+    fun colours(context: Context): List<String> = kept(context).getString("colours", "").orEmpty().split(',').filter { it.length == 6 }
+
+    fun keep(context: Context, colours: List<String>) = kept(context).edit().putString("colours", colours.joinToString(",")).apply()
+}
