@@ -776,10 +776,10 @@ pub fn ensure_folder(folder: &Path) -> std::io::Result<()> {
 /// the link) and checked by handle to lie in it, and each removed by its
 /// handle: nothing elsewhere can be reached through a link.
 pub fn remove_settings() -> bool {
-    // Glance's own, and the phone remote's (its one file: the phones paired, and how the lights are lit).
+    // Glance's own, and the phone remote's (the phones paired and how the lights are lit, as kept and as it was being kept anew; and its log).
     let remote = std::env::var_os("APPDATA").map(|roaming| std::path::PathBuf::from(roaming).join("dev.weiyi.glance.remote"));
     let own = remove_kept(&crate::settings::config_dir(), &["settings.json", crate::journal::FILE]);
-    let remotes = remote.is_none_or(|folder| remove_kept(&folder, &["config.json"]));
+    let remotes = remote.is_none_or(|folder| remove_kept(&folder, &["config.json", "config.json.new", "remote.log"]));
     own && remotes
 }
 
