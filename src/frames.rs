@@ -1,8 +1,10 @@
 //! A game's frames: the moments it handed each to the screen, and what they
 //! tell. Frames a second over the last second; the 1% low over the last ten
-//! (the 99th percentile frame time, as frames a second: what PresentMon and
-//! CapFrameX call it); and the longest frame of the last second, the spike
-//! a stutter makes.
+//! (the slowest hundredth of the frames, as the frames a second they come to
+//! together: what FrameView and CapFrameX give by that name; one stutter
+//! shows in it, where the frame time at the 99th percentile would pass it
+//! over); and the longest frame of the last second, the spike a stutter
+//! makes.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -59,13 +61,13 @@ impl Presents {
         let pending = (waited > span / (recent.len() - 1) as f64).then_some(waited);
         let fps = (recent.len() - 1) as f64 / (span + pending.unwrap_or(0.0));
         let longest_ms = recent.windows(2).map(|pair| (pair[1] - pair[0]).as_secs_f64() * 1000.0).fold(0.0, f64::max);
-        // Every frame time kept, the slowest 1% from the 99th percentile on.
+        // Every frame time kept: the slowest 1% of them, as the frames a second they come to together.
         // (With them the frame being waited for, where it counts: the frames a second and their 1% low are of the same frames.)
         let mut times: Vec<f64> = self.times.iter().collect::<Vec<_>>().windows(2).map(|pair| (*pair[1] - *pair[0]).as_secs_f64()).chain(pending).collect();
         let low = (times.len() >= LOW_FRAMES).then(|| {
             times.sort_by(f64::total_cmp);
-            let index = ((times.len() as f64 * 0.99).ceil() as usize).clamp(1, times.len()) - 1;
-            (1.0 / times[index]) as f32
+            let slowest = &times[times.len() - (times.len() as f64 * 0.01).ceil() as usize..];
+            (slowest.len() as f64 / slowest.iter().sum::<f64>()) as f32
         });
         Some(FrameStats { fps: fps as f32, low, longest_ms: longest_ms as f32 })
     }
@@ -102,9 +104,26 @@ mod tests {
         }
         let stats = presents.stats(ms(t)).unwrap();
         assert!((stats.fps - 100.0).abs() < 5.0, "{stats:?}");
-        // The 99th percentile frame time is the 50 ms one: 20 frames a second.
+        // The slowest hundredth are the 50 ms ones: 20 frames a second.
         assert!((stats.low.unwrap() - 20.0).abs() < 0.5, "{stats:?}");
         assert!((stats.longest_ms - 50.0).abs() < 0.5, "{stats:?}");
+    }
+
+    #[test]
+    fn one_stutter_shows_in_the_1_percent_low_and_never_puts_it_above_the_frames_a_second() {
+        let mut presents = Presents::default();
+        // Nine and a half seconds at 200 frames a second, one frame of 300 ms among them near the end.
+        let mut t = 0.0;
+        for i in 0..1900 {
+            t += if i == 1800 { 300.0 } else { 5.0 };
+            presents.push(ms(t));
+        }
+        let stats = presents.stats(ms(t)).unwrap();
+        // The last second holds the stutter: fewer frames a second than the game makes when it runs freely.
+        assert!(stats.fps < 160.0, "{stats:?}");
+        // Its slowest hundredth (19 frames, the 300 ms one among them) come to about 49 a second: below that.
+        let low = stats.low.unwrap();
+        assert!((low - 19.0 / 0.39).abs() < 1.0 && low < stats.fps, "{stats:?}");
     }
 
     #[test]
