@@ -28,6 +28,17 @@ pub enum Effect {
     Heat,
 }
 
+/// How the screens are put out (see `display`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Screens {
+    /// Windows stops the signal to every monitor.
+    #[default]
+    Signal,
+    /// The signal is kept: each monitor is turned off by itself, or covered in black.
+    Kept,
+}
+
 /// How the lights are when they are on: their colour (RRGGBB), what they
 /// do, and how bright they are (percent of the colour's own brightness).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -70,6 +81,12 @@ pub struct Config {
     /// The OpenRGB this helper started, by its program's number: its own
     /// to stop and start afresh (one the user started is not).
     pub openrgb_started: Option<u32>,
+    /// How the screens are put out.
+    pub screens: Screens,
+    /// The monitors this helper is keeping dark with their signal kept,
+    /// each as it is to be put back: one that ends before it has put them
+    /// back does so when it next starts.
+    pub darkened: Vec<crate::display::Darkened>,
 }
 
 impl Default for Config {
@@ -85,13 +102,20 @@ impl Default for Config {
             keys: None,
             lights_left_alone: false,
             openrgb_started: None,
+            screens: Screens::default(),
+            darkened: Vec::new(),
         }
     }
 }
 
-fn path() -> PathBuf {
+/// The folder what the helper keeps is in.
+pub fn folder() -> PathBuf {
     let roaming = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
-    roaming.join("dev.weiyi.glance.remote").join("config.json")
+    roaming.join("dev.weiyi.glance.remote")
+}
+
+fn path() -> PathBuf {
+    folder().join("config.json")
 }
 
 /// How long a pairing offered may wait to be taken (seconds).

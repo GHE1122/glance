@@ -7,6 +7,7 @@
 //!     glance-remote pair       shows the pairing code (a QR code) for the phone
 //!     glance-remote lights     lists the lighting devices OpenRGB reaches
 //!     glance-remote monitors   lists the monitors and what they answer over DDC/CI
+//!     glance-remote screens    says how the screens are put out (signal, kept); with one of those, sets it
 
 // No console of its own: it runs unseen for as long as the remote is on.
 // (Asked something from a terminal, it answers into that terminal: see `main`.)
@@ -26,6 +27,7 @@ mod config;
 mod cooler;
 mod display;
 mod fetch;
+mod journal;
 mod keys;
 mod lights;
 mod media;
@@ -38,7 +40,7 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use config::{Config, Effect, Light, Phone};
+use config::{Config, Effect, Light, Phone, Screens};
 use serde_json::{json, Value};
 
 /// The most a request may be: none of the phone's is near it.
@@ -56,6 +58,8 @@ const SETTLING_MS: u32 = 3000;
 const WATCH: Duration = Duration::from_millis(500);
 /// How often lights that follow the heat are looked at again.
 const FOLLOW: Duration = Duration::from_secs(2);
+/// How many of the log's latest lines go into a report.
+const REPORTED: usize = 120;
 /// The heat the coolest colour is for, and the warmest (°C).
 const COOL: i64 = 40;
 const HOT: i64 = 85;
@@ -269,6 +273,27 @@ impl Helper {
         Ok(Admitted { key, secret })
     }
 
+    /// The screens out, the way that is chosen (see `display`).
+    fn screens_off(&self) -> Result<(), String> {
+        match Config::load().screens {
+            Screens::Signal => display::sleep().map_err(|error| error.to_string()),
+            Screens::Kept => {
+                let darkened = display::darken();
+                // Kept, for a helper that ends before it has put them back.
+                Config::change(|config| config.darkened = darkened).map(|_| ()).map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    /// The screens on again, whichever way they were put out.
+    fn screens_on(&self) {
+        let kept_dark = display::dark_since().is_some();
+        display::wake();
+        if kept_dark {
+            let _ = Config::change(|config| config.darkened.clear());
+        }
+    }
+
     /// Night: the lights out, the power-saving plan, the screens off. Day
     /// again: the plan there was and the lights on (the screens come on at
     /// the touch that ends it, or stay off till one).
@@ -281,16 +306,19 @@ impl Helper {
             // The lights first: they may take OpenRGB a while to reach.
             let lit = self.lights(false);
             let power = power::save();
-            let dark = display::sleep().map_err(|error| error.to_string());
+            let dark = self.screens_off();
             self.state.lock().unwrap().night = Some(Night { power, since: actions::tick() });
+            journal::note(format!("night began (lights: {}; screens: {})", lit.as_ref().map_or_else(|error| error.as_str(), |_| "out"), dark.as_ref().map_or_else(|error| error.as_str(), |_| "out")));
             lit.and(dark)
         } else {
             let Some(night) = self.state.lock().unwrap().night.take() else { return Ok(()) };
             if let Some(power) = night.power {
                 power::restore(power);
             }
-            display::wake();
-            self.lights(true)
+            self.screens_on();
+            let lit = self.lights(true);
+            journal::note(format!("night ended (lights: {})", lit.as_ref().map_or_else(|error| error.as_str(), |_| "on")));
+            lit
         }
     }
 
@@ -334,9 +362,9 @@ impl Helper {
             ("GET", "/v1/state") => {}
             ("POST", "/v1/screen") => {
                 if on()? {
-                    display::wake()
+                    self.screens_on()
                 } else {
-                    display::sleep().map_err(|error| failed(error.to_string()))?
+                    self.screens_off().map_err(failed)?
                 }
             }
             // One monitor by itself, by its place among them.
@@ -380,7 +408,7 @@ impl Helper {
                         if let Some(night) = state.night.as_mut() {
                             night.since = actions::tick();
                             drop(state);
-                            let _ = display::sleep();
+                            let _ = self.screens_off();
                         }
                     }
                     media::Asked::Not => return Err((500, "nothing playing took it".into())),
@@ -468,11 +496,25 @@ impl Helper {
         let request = sign::Request { method, path, time: header("x-glance-time"), nonce, sign: header("x-glance-sign"), phone: header("x-glance-phone"), name: header("x-glance-name"), session: header("x-glance-session"), body: &body };
         let (status, answer, secret) = match self.admit(&request) {
             // (With which run this is, and what time it has: a phone that had them wrong asks again by them.)
-            Err((refused, secret)) => (401, json!({ "error": format!("{refused:?}").to_lowercase(), "time": sign::now(), "session": self.session }), secret),
-            Ok(admitted) => match self.act(method, path, &body, &admitted.key) {
-                Ok(answer) => (200, answer, Some(admitted.secret)),
-                Err((status, error)) => (status, json!({ "error": error }), Some(admitted.secret)),
-            },
+            Err((refused, secret)) => {
+                // (Not of now is how every phone's first asking of a run is refused: nothing to note.)
+                if refused != sign::Refused::Stale {
+                    journal::note(format!("refused {method} {} from {}: {refused:?}", path.chars().take(40).collect::<String>(), stream.peer_addr().map_or_else(|_| "?".into(), |from| from.ip().to_string())));
+                }
+                (401, json!({ "error": format!("{refused:?}").to_lowercase(), "time": sign::now(), "session": self.session }), secret)
+            }
+            Ok(admitted) => {
+                let done = self.act(method, path, &body, &admitted.key);
+                // What was asked to be done, and how it went (not each look, nor each step of a slider: how loud, how bright).
+                let slid = path == "/v1/volume" || (path == "/v1/monitor" && body.windows(10).any(|part| part == b"brightness"));
+                if method == "POST" && !(slid && done.is_ok()) {
+                    journal::note(format!("asked {path} {}: {}", String::from_utf8_lossy(&body), done.as_ref().map_or_else(|(_, error)| error.as_str(), |_| "done")));
+                }
+                match done {
+                    Ok(answer) => (200, answer, Some(admitted.secret)),
+                    Err((status, error)) => (status, json!({ "error": error }), Some(admitted.secret)),
+                }
+            }
         };
         let answer = answer.to_string();
         let reason = if status == 200 { "OK" } else { "Error" };
@@ -656,6 +698,23 @@ fn main() -> std::io::Result<()> {
             }
             return Ok(());
         }
+        // glance-remote screens [signal|kept]: how the screens are put out, set (with one of the two) and said.
+        Some("screens") => {
+            let way = match std::env::args().nth(2).as_deref() {
+                Some("signal") => Some(Screens::Signal),
+                Some("kept") => Some(Screens::Kept),
+                _ => None,
+            };
+            let config = match way {
+                Some(way) => {
+                    journal::note(format!("the screens are to be put out the {way:?} way"));
+                    Config::change(|config| config.screens = way)?
+                }
+                None => config,
+            };
+            say!("{}", format!("{:?}", config.screens).to_lowercase());
+            return Ok(());
+        }
         Some("monitors") => {
             for monitor in display::monitors() {
                 say!("{} ({}x{} at {},{}): on {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on);
@@ -686,6 +745,10 @@ fn main() -> std::io::Result<()> {
             say!("cooler display: {}", if cooler::there() { "there" } else { "none" });
             say!("keyboard light: {}", if keys::there() { "there" } else { "none" });
             say!("power: {}", power::choices().iter().map(|choice| format!("{}{}", if choice.name.is_empty() { &choice.id } else { &choice.name }, if choice.on { "*" } else { "" })).collect::<Vec<_>>().join(", "));
+            say!("screens put out: {}", format!("{:?}", config.screens).to_lowercase());
+            for line in journal::recent(REPORTED) {
+                say!("log: {line}");
+            }
             return Ok(());
         }
         // glance-remote keys LEVEL: the light under a laptop's keys.
@@ -723,8 +786,19 @@ fn main() -> std::io::Result<()> {
         }
         _ => {}
     }
+    journal::note_crashes();
+    journal::note(format!("started: version {}, port {}, the screens put out the {:?} way", env!("CARGO_PKG_VERSION"), config.port, config.screens));
+    for monitor in display::monitors() {
+        journal::note(format!("monitor: {} {}x{} at {},{}; says it is on: {:?}; brightness: {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on, monitor.brightness));
+    }
+    // Monitors a helper before this one kept dark and did not put back (it was ended first): put back now.
+    if !config.darkened.is_empty() {
+        journal::note(format!("{} monitors were left dark by a helper that ended: put on again", config.darkened.len()));
+        display::restore(&config.darkened);
+        Config::change(|config| config.darkened.clear())?;
+    }
     display::watch();
-    let listener = TcpListener::bind(("0.0.0.0", config.port))?;
+    let listener = TcpListener::bind(("0.0.0.0", config.port)).inspect_err(|error| journal::note(format!("port {} cannot be listened on: {error}", config.port)))?;
     // A phone that has lost this PC (its address changed) asks the whole
     // network for it by its key's name: answered with proof of the key,
     // from the address this PC has now.
@@ -774,13 +848,20 @@ fn main() -> std::io::Result<()> {
             following.follow(&mut last);
         }
     });
-    // Night ends at the first touch of the mouse or the keyboard.
+    // Night ends at the first touch of the mouse or the keyboard; and so do
+    // screens this helper keeps dark with their signal kept (Windows, which
+    // has them as on, wakes nothing).
     let watching = helper.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(WATCH);
-        let touched = watching.state.lock().unwrap().night.as_ref().is_some_and(|night| actions::last_input().wrapping_sub(night.since) as i32 > SETTLING_MS as i32);
-        if touched {
+        let since = |from: u32| actions::last_input().wrapping_sub(from) as i32 > SETTLING_MS as i32;
+        let night = watching.state.lock().unwrap().night.as_ref().is_some_and(|night| since(night.since));
+        if night {
+            journal::note(format!("touched during the night ({})", display::last_touch()));
             let _ = watching.night(false);
+        } else if display::dark_since().is_some_and(since) && watching.state.lock().unwrap().night.is_none() {
+            journal::note(format!("touched while the screens were kept dark ({})", display::last_touch()));
+            watching.screens_on();
         }
     });
     for stream in listener.incoming().flatten() {

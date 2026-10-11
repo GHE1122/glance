@@ -419,6 +419,8 @@ enum Switch {
     Remote,
     /// Whether the remote sets the lights: the program that does, fetched or not.
     RemoteLights,
+    /// Whether the remote puts the screens out with their signal kept.
+    RemoteScreens,
 }
 
 /// What a QR code shown is for.
@@ -590,6 +592,8 @@ struct Ui {
     /// fetched or taken away just now (on another thread: it takes a
     /// while), and whether the last fetching failed.
     remote_lights: bool,
+    /// Whether the remote puts the screens out with their signal kept.
+    remote_screens: bool,
     fetching: Option<std::thread::JoinHandle<bool>>,
     fetch_failed: bool,
     code: Option<(crate::phone::Code, CodeFor)>,
@@ -727,6 +731,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             remote_there: crate::phone::helper().is_some(),
             remote: crate::phone::on(),
             remote_lights: crate::phone::lights(),
+            remote_screens: crate::phone::screens_kept(),
             fetching: None,
             fetch_failed: false,
             code: None,
@@ -1052,6 +1057,7 @@ impl Ui {
                 rows.push(Row::Switch(Switch::Remote));
                 if self.remote {
                     rows.push(Row::Switch(Switch::RemoteLights));
+                    rows.push(Row::Switch(Switch::RemoteScreens));
                     // A code shows under the row that asked for it.
                     let shown = self.code.as_ref().map(|(_, what)| *what);
                     rows.push(Row::GetApp);
@@ -1744,6 +1750,14 @@ impl Ui {
                 };
                 return (p("控制灯光", "Control the lights"), Some(Cow::Borrowed(hint)), self.remote_lights);
             }
+            Switch::RemoteScreens => (
+                p("关屏时保持显示器连接", "Keep monitors connected while off"),
+                Some(p(
+                    "显示器还接着别的电脑，或者关屏久了窗口会跑到别的屏幕时打开。能单独关闭的显示器照常关闭，其余的用黑色画面盖住并调到最暗，背光仍然亮着",
+                    "For a monitor that has another computer plugged in too, or windows that move to other screens after a long while dark. A monitor that can be turned off by itself still is; the others are covered in black and made as dim as they go, their backlight still on",
+                )),
+                self.remote_screens,
+            ),
             Switch::Remote => {
                 let hint = if self.remote_there {
                     p("用手机关屏、关灯、调音量和亮度。开启后会运行一个不提权的小程序，只对本地网络开放", "Screens, lights, volume and brightness from a phone. On, a small program runs (never elevated), open to the local network only")
@@ -1806,6 +1820,12 @@ impl Ui {
                     self.fetch_failed = false;
                     self.fetching = Some(std::thread::spawn(move || crate::phone::set_lights(wanted) == wanted));
                 }
+                self.next_frame = Instant::now();
+                return;
+            }
+            Switch::RemoteScreens => {
+                // What the remote then says, not what was asked.
+                self.remote_screens = crate::phone::keep_screens(!self.remote_screens);
                 self.next_frame = Instant::now();
                 return;
             }

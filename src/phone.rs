@@ -261,6 +261,18 @@ pub fn set_lights(on: bool) -> bool {
     ask(&["lights", if on { "fetch" } else { "forget" }]).is_some_and(|said| said.lines().last().is_some_and(|last| last.trim() == "there"))
 }
 
+/// Whether the remote puts the screens out with their signal kept (each
+/// monitor turned off by itself, or covered in black) rather than as
+/// Windows does, by stopping the signal to them all.
+pub fn screens_kept() -> bool {
+    ask(&["screens"]).is_some_and(|said| said.trim() == "kept")
+}
+
+/// Has the remote put the screens out that way, or Windows' own: which it then does.
+pub fn keep_screens(kept: bool) -> bool {
+    ask(&["screens", if kept { "kept" } else { "signal" }]).is_some_and(|said| said.trim() == "kept")
+}
+
 /// What the remote finds on this PC (its lights, its monitors, what else
 /// it can set), as lines for a report; none where this Glance has no remote.
 pub fn report() -> Option<String> {
