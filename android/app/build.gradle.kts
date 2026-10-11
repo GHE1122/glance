@@ -16,11 +16,29 @@ android {
         versionName = "0.3.0"
     }
 
+    // The key the app is published under is its owner's alone: kept outside
+    // this repository, said where by GLANCE_APK_KEYSTORE, its password by
+    // GLANCE_APK_PASSWORD (the key in it is named "glance"). Without them
+    // the release is built unsigned, as anyone can build it.
+    val keystore = System.getenv("GLANCE_APK_KEYSTORE")
+    val password = System.getenv("GLANCE_APK_PASSWORD")
+    val published = if (keystore != null && password != null) {
+        signingConfigs.create("published") {
+            storeFile = file(keystore)
+            storePassword = password
+            keyAlias = "glance"
+            keyPassword = password
+        }
+    } else {
+        null
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            signingConfig = published
         }
     }
     compileOptions {
