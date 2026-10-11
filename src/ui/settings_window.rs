@@ -604,9 +604,8 @@ struct Ui {
     /// last sending went: the name the site gave them, or none.
     sending: Option<std::thread::JoinHandle<Option<String>>>,
     sent: Option<Option<String>>,
-    /// The phone app as the phone shows it, for the phone remote's page:
-    /// a picture in the language the settings are in, once drawn.
-    phone_art: Option<(Lang, ID2D1Bitmap1, (f32, f32))>,
+    /// Since when the fans in the phone remote's picture have been turning.
+    phone_from: Instant,
     scroll: f32,
     scroll_target: f32,
     motion: HashMap<String, Transition>,
@@ -736,7 +735,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             copied_at: None,
             sending: None,
             sent: None,
-            phone_art: None,
+            phone_from: Instant::now(),
             uninstaller: std::env::current_exe().ok().and_then(|exe| elevation::trusted(&exe.with_file_name("uninstall.exe"))),
             scroll: 0.0,
             scroll_target: 0.0,
@@ -3201,51 +3200,24 @@ impl Ui {
     /// The overlay's preview: the whole screen, and the overlay where it was
     /// put, showing the readings chosen (an example game's frames, with none
     /// running).
-    /// The phone app, pictured (in the language of the settings), in the
+    /// The phone app as a phone would show it for this PC now, in the
     /// middle of `area`: as tall as the room, in a phone's dark outline.
-    fn paint_phone(&mut self, frame: &Frame, area: Rect) {
-        use windows::core::Interface;
-        use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT, D2D_SIZE_U};
-        use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_LAYER_OPTIONS1_NONE};
-        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-        let lang = self.lang;
-        if self.phone_art.as_ref().is_none_or(|(of, ..)| *of != lang) {
-            let file: &[u8] = match lang {
-                Lang::Zh => include_bytes!("../../resources/phone-zh.jpg"),
-                Lang::En => include_bytes!("../../resources/phone-en.jpg"),
-            };
-            self.phone_art = wallpaper::picture(file).and_then(|(width, height, pixels)| {
-                let properties = D2D1_BITMAP_PROPERTIES1 {
-                    pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
-                    dpiX: 96.0,
-                    dpiY: 96.0,
-                    bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
-                    ..Default::default()
-                };
-                let bitmap = unsafe { frame.dc.CreateBitmap(D2D_SIZE_U { width, height }, Some(pixels.as_ptr().cast()), width * 4, &properties) }.ok()?;
-                Some((lang, bitmap, (width as f32, height as f32)))
-            });
-        }
-        let Some((_, bitmap, (width, height))) = &self.phone_art else { return };
-        // The outline round it, a part of the picture's width; the whole no taller or wider than the room, nor larger than the picture is.
+    /// Whether anything in it moves.
+    fn paint_phone(&mut self, frame: &Frame, area: Rect) -> bool {
+        let app = crate::app();
+        let reads = app.controller.history.lock().unwrap().back().map_or(serde_json::Value::Null, |sample| crate::remote::figures(sample, &app.info));
+        // The outline round it; the whole no taller or wider than the room, nor larger than a phone is.
         let (bezel, margin) = (10.0, 24.0);
-        let k = ((area.h - 2.0 * margin - 2.0 * bezel) / height).min((area.w - 2.0 * margin - 2.0 * bezel) / width).min(0.75);
+        let (wide, tall) = super::phone_art::SCREEN;
+        let k = ((area.h - 2.0 * margin - 2.0 * bezel) / tall).min((area.w - 2.0 * margin - 2.0 * bezel) / wide).min(1.0);
         if k <= 0.0 {
-            return;
+            return false;
         }
-        let (w, h) = (width * k, height * k);
+        let (w, h) = (wide * k, tall * k);
         let (x, y) = (area.x + (area.w - w) / 2.0, area.y + (area.h - h) / 2.0);
-        fill(frame, Color::hex(0x15181D, 1.0), x - bezel, y - bezel, w + 2.0 * bezel, h + 2.0 * bezel, 30.0);
-        fill(frame, Color::hex(0x0E1116, 1.0), x, y, w, h, 22.0);
-        unsafe {
-            // (The picture's own corners square: cut to the screen's round ones.)
-            let Ok(round) = frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(Rect { x, y, w, h }, 22.0)) else { return };
-            let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: rect(x, y, w, h), geometricMask: std::mem::ManuallyDrop::new(Some(round.cast().unwrap())), maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, maskTransform: Matrix3x2::identity(), opacity: 1.0, opacityBrush: std::mem::ManuallyDrop::new(None), layerOptions: D2D1_LAYER_OPTIONS1_NONE };
-            frame.dc.PushLayer(&layer, None);
-            frame.dc.DrawBitmap(bitmap, Some(&rect(x, y, w, h)), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
-            frame.dc.PopLayer();
-            drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
-        }
+        fill(frame, Color::hex(0x15181D, 1.0), x - bezel, y - bezel, w + 2.0 * bezel, h + 2.0 * bezel, 26.0 * k + bezel);
+        let name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into());
+        super::phone_art::paint(frame, Rect { x, y, w, h }, self.lang, &name, &reads, self.phone_from.elapsed().as_secs_f32())
     }
 
     fn paint_overlay_preview(&mut self, frame: &Frame, area: Rect) {
@@ -3335,8 +3307,8 @@ impl Ui {
         }
         // The phone remote's page: the app as a phone shows it, in a phone's outline.
         if self.page == Page::Remote {
-            self.paint_phone(frame, area);
-            return None;
+            // (Its fans turn: drawn again some thirty times a second while they do.)
+            return self.paint_phone(frame, area).then_some(7.5);
         }
 
         // The panel laid out for the screen the window opened on, centred

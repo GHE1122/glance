@@ -91,7 +91,7 @@ fn fans(named: &[(String, f32)]) -> (Option<f32>, Option<f32>) {
 /// busy (%) the processor, the busiest graphics card, the memory and the
 /// disks are, the power the first two draw (watts), and how fast the fans
 /// turn; `null` where one is not known.
-fn figures(sample: &Sample, info: &StaticInfo) -> Value {
+pub fn figures(sample: &Sample, info: &StaticInfo) -> Value {
     let whole = |value: Option<f32>| value.map(|value| value.round() as i64);
     let hottest = |temps: &mut dyn Iterator<Item = f32>| temps.max_by(f32::total_cmp);
     let gpu = sample.gpus.iter().max_by(|a, b| a.usage.unwrap_or(0.0).total_cmp(&b.usage.unwrap_or(0.0)));
