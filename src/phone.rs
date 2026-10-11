@@ -52,6 +52,8 @@ pub fn helper() -> Option<PathBuf> {
 pub fn forget_fetched(folder: &Path) {
     let helper = folder.join("glance-remote.exe");
     if helper.is_file() {
+        // (And monitors it was keeping dark when it was ended, on again.)
+        let _ = asked(&helper, &["restore"]);
         let _ = asked(&helper, &["lights", "forget"]);
     }
 }
@@ -273,6 +275,12 @@ pub fn keep_screens(kept: bool) -> bool {
     ask(&["screens", if kept { "kept" } else { "signal" }]).is_some_and(|said| said.trim() == "kept")
 }
 
+/// Where the remote's page for a phone's browser is (a browser paired by
+/// it before opens it again there): none while this PC is on no network.
+pub fn web_address() -> Option<String> {
+    ask(&["address"]).map(|said| said.trim().to_string()).filter(|address| !address.is_empty())
+}
+
 /// What the remote finds on this PC (its lights, its monitors, what else
 /// it can set), as lines for a report; none where this Glance has no remote.
 pub fn report() -> Option<String> {
@@ -342,7 +350,12 @@ pub fn turn(on: bool) -> bool {
             firewall(&["add", "rule", &name, "dir=in", "action=allow", protocol, &format!("localport={PORT}"), "remoteip=localsubnet", "profile=any", &format!("program={}", helper.display())]);
         }
     }
-    elevation::set_remote(&helper, on)
+    let is_on = elevation::set_remote(&helper, on);
+    // Ended while it kept the screens dark its own way, it has not put them back: it is asked to now.
+    if !is_on {
+        let _ = asked(&helper, &["restore"]);
+    }
+    is_on
 }
 
 #[cfg(test)]

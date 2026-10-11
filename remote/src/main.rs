@@ -8,6 +8,8 @@
 //!     glance-remote lights     lists the lighting devices OpenRGB reaches
 //!     glance-remote monitors   lists the monitors and what they answer over DDC/CI
 //!     glance-remote screens    says how the screens are put out (signal, kept); with one of those, sets it
+//!     glance-remote address    says where the page for a phone's browser is
+//!     glance-remote restore    puts on again the monitors a helper since ended was keeping dark
 
 // No console of its own: it runs unseen for as long as the remote is on.
 // (Asked something from a terminal, it answers into that terminal: see `main`.)
@@ -560,12 +562,17 @@ fn unescaped(text: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Where the page for a phone's browser is: none while this PC is on no network.
+fn page(config: &Config) -> Option<String> {
+    Some(format!("http://{}:{}/", address()?, config.port))
+}
+
 /// What a phone needs to pair, as the link its QR code holds: where this
 /// PC is, and a key offered to the phone that takes it.
 /// The same for a phone's browser: the page's address, the key after the
 /// `#` (which a browser keeps to itself: it is never sent).
 fn pairing_web(config: &Config, key: &str) -> String {
-    format!("http://{}:{}/#k={key}", address().unwrap_or_default(), config.port)
+    format!("{}#k={key}", page(config).unwrap_or_default())
 }
 
 fn pairing(config: &Config, key: &str) -> String {
@@ -688,6 +695,21 @@ fn main() -> std::io::Result<()> {
         Some("power") => {
             for choice in power::choices() {
                 say!("{} {}{}", choice.id, choice.name, if choice.on { " *" } else { "" });
+            }
+            return Ok(());
+        }
+        // glance-remote address: where the page is that a phone's browser, paired by it before, opens again.
+        Some("address") => {
+            say!("{}", page(&config).unwrap_or_default());
+            return Ok(());
+        }
+        // glance-remote restore: the helper that listens has been ended (the remote turned off, Glance being
+        // removed); monitors it was keeping dark are put on again, as that helper would at its next start.
+        Some("restore") => {
+            if !config.darkened.is_empty() {
+                journal::note(format!("{} monitors were left dark by a helper that was ended: put on again", config.darkened.len()));
+                display::restore(&config.darkened);
+                Config::change(|config| config.darkened.clear())?;
             }
             return Ok(());
         }

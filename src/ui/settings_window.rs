@@ -473,6 +473,8 @@ enum Target {
     GetApp,
     /// Offers a pairing and shows its code: for the app, or (true) for a phone's browser.
     Pair(bool),
+    /// Copies where the remote's web page is.
+    CopyAddress,
     /// Unpairs the phone at that place among those shown.
     Unpair(usize),
     /// Sends the diagnostics to Glance's site, shown first in a window of
@@ -513,6 +515,8 @@ enum Row {
     GetApp,
     Pair,
     Code,
+    /// Where the remote's page for a phone's browser is.
+    WebPage,
     Phone(usize, String),
     /// What the rows under it are, said small above them: a group of their own.
     Group(&'static str),
@@ -606,6 +610,9 @@ struct Ui {
     uninstaller: Option<std::path::PathBuf>,
     /// When the diagnostics were last copied.
     copied_at: Option<Instant>,
+    /// Where the remote's page for a phone's browser is, and when that was last copied.
+    web_address: Option<String>,
+    address_copied_at: Option<Instant>,
     /// The diagnostics being sent (on a thread of its own), and how the
     /// last sending went: the name the site gave them, or none.
     sending: Option<std::thread::JoinHandle<Option<String>>>,
@@ -740,6 +747,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
             copied_at: None,
+            web_address: crate::phone::web_address(),
+            address_copied_at: None,
             sending: None,
             sent: None,
             phone_from: Instant::now(),
@@ -1067,6 +1076,9 @@ impl Ui {
                     rows.push(Row::Pair);
                     if matches!(shown, Some(CodeFor::Pairing | CodeFor::WebPairing)) {
                         rows.push(Row::Code);
+                    }
+                    if self.web_address.is_some() {
+                        rows.push(Row::WebPage);
                     }
                     // The phones paired, a group of their own.
                     if !self.phones.is_empty() {
@@ -1434,6 +1446,11 @@ impl Ui {
                 p("每个配对码只给一部手机用，10 分钟内有效", "Each code is for one phone, and lasts ten minutes"),
                 vec![(p("用 APP", "For the app"), Target::Pair(false), Button::Accent), (p("用网页", "For the web page"), Target::Pair(true), Button::Plain)],
             ),
+            Row::WebPage => (
+                p("网页遥控的地址", "The web page's address"),
+                format!("{}　{}", self.web_address.as_deref().unwrap_or_default(), p("用网页配对过的手机，在浏览器里打开它即可", "A phone paired by the web page opens it in its browser")),
+                vec![(if self.address_copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR) { p("已复制", "Copied") } else { p("复制", "Copy") }, Target::CopyAddress, Button::Plain)],
+            ),
             Row::Phone(at, name) => (
                 if name.is_empty() { p("一部手机", "A phone") } else { name.clone() },
                 p("已配对", "Paired"),
@@ -1753,8 +1770,8 @@ impl Ui {
             Switch::RemoteScreens => (
                 p("关屏时保持显示器连接", "Keep monitors connected while off"),
                 Some(p(
-                    "显示器还接着别的电脑，或者关屏久了窗口会跑到别的屏幕时打开。能单独关闭的显示器照常关闭，其余的用黑色画面盖住并调到最暗，背光仍然亮着",
-                    "For a monitor that has another computer plugged in too, or windows that move to other screens after a long while dark. A monitor that can be turned off by itself still is; the others are covered in black and made as dim as they go, their backlight still on",
+                    "显示器还接着别的电脑、鼠标键盘插在显示器上，或者关屏久了窗口会跑到别的屏幕时打开。能单独关闭的显示器照常关闭，其余的用黑色画面盖住并调到最暗，背光仍然亮着",
+                    "For a monitor that has another computer plugged in too, a mouse or keyboard plugged into a monitor, or windows that move to other screens after a long while dark. A monitor that can be turned off by itself still is; the others are covered in black and made as dim as they go, their backlight still on",
                 )),
                 self.remote_screens,
             ),
@@ -1833,6 +1850,7 @@ impl Ui {
                 // What the system then reports, not what was asked.
                 if self.remote_there {
                     self.remote = crate::phone::turn(!self.remote);
+                    self.web_address = crate::phone::web_address();
                     self.code = None;
                     self.phones = crate::phone::phones();
                 }
@@ -2242,6 +2260,11 @@ impl Ui {
             Target::GetApp if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) => self.code = None,
             Target::GetApp => self.code = crate::phone::app_code().map(|code| (code, CodeFor::App)),
             Target::Pair(web) => self.code = crate::phone::offer(web).map(|code| (code, if web { CodeFor::WebPairing } else { CodeFor::Pairing })),
+            Target::CopyAddress => {
+                if self.web_address.as_ref().is_some_and(|address| crate::diagnostics::copy(self.hwnd, address)) {
+                    self.address_copied_at = Some(Instant::now());
+                }
+            }
             Target::Unpair(at) => {
                 if let Some(phone) = self.phones.get(at) {
                     crate::phone::unpair(&phone.id);
@@ -2307,6 +2330,7 @@ impl Ui {
                 Row::Quit => vec![Target::Quit],
                 Row::GetApp => vec![Target::GetApp],
                 Row::Pair => vec![Target::Pair(false), Target::Pair(true)],
+                Row::WebPage => vec![Target::CopyAddress],
                 Row::Phone(at, _) => vec![Target::Unpair(at)],
                 Row::Code | Row::Group(_) => vec![],
                 Row::More(_) => vec![Target::More],
@@ -2441,7 +2465,7 @@ impl Ui {
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
-            (Row::GetApp, Target::GetApp) | (Row::Pair, Target::Pair(_)) => true,
+            (Row::GetApp, Target::GetApp) | (Row::Pair, Target::Pair(_)) | (Row::WebPage, Target::CopyAddress) => true,
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
@@ -2991,7 +3015,7 @@ impl Ui {
 
                     }
                 }
-                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit | Row::GetApp | Row::Pair | Row::Phone(..) => {
+                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit | Row::GetApp | Row::Pair | Row::WebPage | Row::Phone(..) => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;
