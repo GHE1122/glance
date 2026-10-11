@@ -1,5 +1,10 @@
 package dev.weiyi.glance.remote
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,7 +37,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
@@ -77,9 +84,12 @@ private val HUES = Brush.sweepGradient((0..6).map { Color.hsv(it * 60f % 360f, 1
 fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean, keep: (List<String>) -> Unit, preview: (String?) -> Unit, choose: (color: String?, effect: String?) -> Unit) {
     // The colour the lights had as the ring was opened, to go back to; none: the ring is shut.
     var was by remember { mutableStateOf<String?>(null) }
-    var deleting by remember { mutableStateOf<String?>(null) }
+    // One's own colours being taken away: each trembles under a minus, and one pressed is gone.
+    var removing by remember { mutableStateOf(false) }
+    if (own.isEmpty()) removing = false
+    val tremble by rememberInfiniteTransition(label = "tremble").animateFloat(-3.5f, 3.5f, infiniteRepeatable(tween(110), RepeatMode.Reverse), label = "tremble")
     Panel {
-        Heading(stringResource(R.string.show_lights))
+        Heading(stringResource(R.string.show_lights)) { if (removing) Words(stringResource(R.string.done), Accent, size = 13f, weight = FontWeight.SemiBold) { removing = false } }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             for ((effect, name) in EFFECTS) {
                 if (effect == "heat" && !heat) continue
@@ -90,31 +100,48 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             for (one in GIVEN + own) {
                 val chosen = was == null && light.color.equals(one, ignoreCase = true)
-                val named = stringResource(R.string.colour, "#$one")
                 val mine = one in own
+                val going = removing && mine
+                val named = stringResource(if (going) R.string.delete_colour else R.string.colour, "#$one")
                 Canvas(
-                    Modifier.size(36.dp).semantics { contentDescription = named; role = Role.Button }.pointerInput(one, mine, enabled) {
+                    Modifier.size(36.dp).graphicsLayer { rotationZ = if (going) tremble else 0f }.semantics { contentDescription = named; role = Role.Button }.pointerInput(one, mine, enabled, removing) {
                         if (!enabled) return@pointerInput
                         detectTapGestures(
-                            // One's own colour, held: asked whether to delete it.
-                            onLongPress = { if (mine) deleting = one },
-                            onTap = { was = null; preview(null); choose(one, null) },
+                            // One's own colour, held: they may be taken away.
+                            onLongPress = { if (mine) removing = true },
+                            onTap = {
+                                if (going) {
+                                    keep(own - one)
+                                } else {
+                                    removing = false
+                                    was = null
+                                    preview(null)
+                                    choose(one, null)
+                                }
+                            },
                         )
                     },
                 ) {
                     drawCircle(colour(one))
                     // The one chosen, ringed inside itself.
                     if (chosen) drawCircle(Card, size.minDimension / 2 - 4.5.dp.toPx(), style = Stroke(3.dp.toPx()))
+                    if (going) {
+                        // The minus, at its upper right corner.
+                        val at = Offset(size.width - 7.dp.toPx(), 7.dp.toPx())
+                        drawCircle(Card, 8.5.dp.toPx(), at)
+                        drawCircle(Ink, 7.dp.toPx(), at)
+                        drawLine(Color.Black, at - Offset(3.5.dp.toPx(), 0f), at + Offset(3.5.dp.toPx(), 0f), 1.8.dp.toPx(), StrokeCap.Round)
+                    }
                 }
             }
             val making = stringResource(R.string.pick_colour)
-            Canvas(Modifier.size(36.dp).clip(RoundedCornerShape(50)).clickable(enabled = enabled, role = Role.Button) { was = if (was == null) light.color else null }.semantics { contentDescription = making }) {
+            Canvas(Modifier.size(36.dp).clip(RoundedCornerShape(50)).clickable(enabled = enabled, role = Role.Button) { removing = false; was = if (was == null) light.color else null }.semantics { contentDescription = making }) {
                 drawCircle(HUES)
                 drawCircle(Card, size.minDimension / 2 - 10.dp.toPx())
                 if (was != null) drawCircle(Ink, size.minDimension / 2 - 1.25.dp.toPx(), style = Stroke(2.5.dp.toPx()))
             }
         }
-        if (was != null || own.isNotEmpty()) Text(stringResource(R.string.colours_hint), color = Faint, fontSize = 12.sp, lineHeight = 17.sp)
+        if (was != null || own.isNotEmpty()) Text(stringResource(if (removing) R.string.colours_removing else R.string.colours_hint), color = Faint, fontSize = 12.sp, lineHeight = 17.sp)
         was?.let { before ->
             Picker(
                 from = before,
@@ -124,9 +151,6 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
                 use = { made -> if ((GIVEN + own).none { it.equals(made, ignoreCase = true) }) keep(own + made); was = null },
             )
         }
-    }
-    deleting?.let { one ->
-        Ask(stringResource(R.string.delete_colour_title), listOf(stringResource(R.string.delete_colour_what)), stringResource(R.string.delete), stringResource(R.string.cancel), dismiss = { deleting = null }) { keep(own - one) }
     }
 }
 
