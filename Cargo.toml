@@ -58,6 +58,7 @@ features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_DirectComposition",
     "Win32_Graphics_DirectWrite",
+    "Win32_Devices_HumanInterfaceDevice",
     "Win32_Graphics_Imaging",
     "Win32_System_LibraryLoader",
     "Win32_System_Com",

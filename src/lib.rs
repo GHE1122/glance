@@ -38,6 +38,12 @@ mod os;
 mod reading;
 #[cfg(windows)]
 mod remote;
+// (What a touch of the PC said: read the same way by Glance and by its remote, of which this file is a part too.)
+#[cfg(windows)]
+#[path = "../remote/src/touch.rs"]
+mod touch;
+#[cfg(windows)]
+mod touches;
 #[cfg(windows)]
 mod screens;
 #[cfg(windows)]
@@ -356,6 +362,10 @@ pub fn run() {
     thread::spawn(phone::keep);
     // The frames programs present (for the game in front), while Glance runs.
     presents::start();
+    // What touches the PC while the phone remote has the screens out, heard for it.
+    if phone::helper().is_some() {
+        touches::start();
+    }
     thread::spawn(move || {
         let mut watch = watch::Watch::default();
         // What the remote-control helper is told of each sample.

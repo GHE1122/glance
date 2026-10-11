@@ -265,7 +265,8 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             id: "game".into(),
             module: "game",
             icon: Icon::Game,
-            label: lang.pick("帧率", "Frame rate").into(),
+            // Whose frames they are, by its name: what is taken for a game is then seen to be one or not.
+            label: game.map(|game| game.name.trim()).filter(|name| !name.is_empty()).unwrap_or(lang.pick("帧率", "Frame rate")).into(),
             share: Some(game.map_or(0.0, |g| if most > 0.0 { g.fps / most } else { 0.0 })),
             figure: game.map_or("—".into(), |game| format!("{:.0}", game.fps)),
             unit: "FPS".into(),
@@ -417,6 +418,21 @@ impl Painter<'_> {
     fn width_of(&self, draw: impl FnOnce(&Painter) -> f32) -> f32 {
         let nothing = Recorder::new(self.frame, 1.0, (0.0, 0.0));
         draw(&self.on(&nothing))
+    }
+
+    /// `text`, or as much of its start as is no wider than `room` with an ellipsis after it.
+    fn fitted<'t>(&self, text: &'t str, font: Font, room: f32) -> std::borrow::Cow<'t, str> {
+        if self.frame.measure(text, font) <= room {
+            return text.into();
+        }
+        let mut kept: Vec<char> = text.chars().collect();
+        loop {
+            kept.pop();
+            let cut = format!("{}…", kept.iter().collect::<String>().trim_end());
+            if kept.is_empty() || self.frame.measure(&cut, font) <= room {
+                return cut.into();
+            }
+        }
     }
 
     fn name(&self, reading: &Reading, part: &str) {
@@ -704,7 +720,9 @@ impl Painter<'_> {
             }
             self.ring(reading, Point { x: x + 22.0, y: y + 22.0 }, 11.0);
             self.name(reading, "label");
-            self.level(&reading.label, theme.small, theme.text2, x + 40.0, y + 22.0, Align::Start);
+            // (In the room there is before what is said at the tile's other end.)
+            let beyond = if reading.detail.is_empty() { 0.0 } else { self.frame.measure(&reading.detail, theme.small) + 10.0 };
+            self.level(&self.fitted(&reading.label, theme.small, tw - 40.0 - 12.0 - beyond), theme.small, theme.text2, x + 40.0, y + 22.0, Align::Start);
             if !reading.detail.is_empty() {
                 self.name(reading, "detail");
                 self.level(&reading.detail, theme.small, self.warmth(reading, theme.text3), x + tw - 12.0, y + 22.0, Align::End);

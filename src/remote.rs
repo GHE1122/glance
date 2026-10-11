@@ -29,22 +29,37 @@ const NAME: PCWSTR = w!("Local\\Glance.Readings.Debug");
 const SIZE: usize = 4096;
 const HEAD: usize = 8;
 
-/// The shared memory, as Glance holds it for as long as it runs.
-pub struct Told(*mut u8);
+/// A piece of memory shared by name, as Glance holds it for as long as it
+/// runs: whoever is signed in may read it, and only Glance write it.
+pub struct Shared(*mut u8);
 
 // Written by the one thread that holds it.
-unsafe impl Send for Told {}
+unsafe impl Send for Shared {}
+
+/// The memory Glance's readings are left in.
+pub struct Told(Shared);
 
 impl Told {
+    pub fn open() -> Option<Told> {
+        Shared::open(NAME).map(Told)
+    }
+
+    /// Leaves the figures of `sample` for the helper.
+    pub fn tell(&mut self, sample: &Sample, info: &StaticInfo) {
+        self.0.write(figures(sample, info).to_string().as_bytes());
+    }
+}
+
+impl Shared {
     /// Makes the memory; none where it cannot be made, or where something
     /// of that name is there already (not Glance's own: left alone).
-    pub fn open() -> Option<Told> {
+    pub fn open(name: PCWSTR) -> Option<Shared> {
         // Administrators and the system, everything; whoever is signed in
         // here, to read.
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w!("D:(A;;GA;;;BA)(A;;GA;;;SY)(A;;GR;;;IU)"), SDDL_REVISION_1, &mut descriptor, None) }.ok()?;
         let attributes = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor.0, bInheritHandle: false.into() };
-        let made = unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, Some(&attributes), PAGE_READWRITE, 0, SIZE as u32, NAME) };
+        let made = unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, Some(&attributes), PAGE_READWRITE, 0, SIZE as u32, name) };
         let there_already = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
         let mapping = made.ok()?;
@@ -54,13 +69,13 @@ impl Told {
         }
         // (The mapping stays open with the view of it.)
         let view = unsafe { MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, SIZE) };
-        (!view.Value.is_null()).then(|| Told(view.Value.cast()))
+        (!view.Value.is_null()).then(|| Shared(view.Value.cast()))
     }
 
-    /// Leaves the figures of `sample` for the helper.
-    pub fn tell(&mut self, sample: &Sample, info: &StaticInfo) {
+    /// Leaves `text` there, whole to whoever reads it.
+    pub fn write(&mut self, text: &[u8]) {
         let memory = unsafe { std::slice::from_raw_parts_mut(self.0, SIZE) };
-        write(memory, figures(sample, info).to_string().as_bytes());
+        write(memory, text);
     }
 }
 

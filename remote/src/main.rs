@@ -36,6 +36,7 @@ mod media;
 mod power;
 mod reads;
 mod sign;
+mod touch;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};

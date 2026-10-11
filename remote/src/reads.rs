@@ -35,7 +35,28 @@ fn text(memory: &[u8]) -> Option<Vec<u8>> {
 /// and `disk`, each with a `temp` and a `load`, and `cpu_fan` and
 /// `case_fan`; any of them null where Glance does not know it.
 pub fn read() -> Option<Value> {
-    let mapping = unsafe { OpenFileMappingW(FILE_MAP_READ.0, false, w!("Local\\Glance.Readings")) }.ok()?;
+    let figures = told(w!("Local\\Glance.Readings"))?;
+    let taken = figures.get("t")?.as_u64()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
+    (now.saturating_sub(taken) < FRESH).then_some(figures)
+}
+
+/// What Glance has heard touch the PC while this helper has the screens
+/// out (it hears what this helper cannot: see `touch`): the last touch,
+/// and the last report that said nothing, each by its device and when
+/// (Windows' clock of milliseconds). None of either, with no Glance.
+pub fn touches() -> (Option<(String, u32)>, Option<(String, u32)>) {
+    let told = told(w!("Local\\Glance.Touches"));
+    let heard = |name: &str| {
+        let heard = told.as_ref()?.get(name)?;
+        Some((heard.get(0)?.as_str()?.to_string(), heard.get(1)?.as_u64()? as u32))
+    };
+    (heard("touched"), heard("nothing"))
+}
+
+/// What Glance left in the memory of that name, whole.
+fn told(name: windows::core::PCWSTR) -> Option<Value> {
+    let mapping = unsafe { OpenFileMappingW(FILE_MAP_READ.0, false, name) }.ok()?;
     let view = unsafe { MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, SIZE) };
     let read = (!view.Value.is_null()).then(|| {
         let memory = unsafe { std::slice::from_raw_parts(view.Value as *const u8, SIZE) };
@@ -47,10 +68,7 @@ pub fn read() -> Option<Value> {
         read
     });
     let _ = unsafe { CloseHandle(mapping) };
-    let figures: Value = serde_json::from_slice(&read??).ok()?;
-    let taken = figures.get("t")?.as_u64()?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
-    (now.saturating_sub(taken) < FRESH).then_some(figures)
+    serde_json::from_slice(&read??).ok()
 }
 
 /// How warm the warmest of the processor and the graphics card is (°C).

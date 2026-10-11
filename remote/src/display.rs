@@ -25,9 +25,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, BOOL, GUID};
-use windows::Win32::Devices::HumanInterfaceDevice::{
-    HidP_GetButtonCaps, HidP_GetCaps, HidP_GetUsageValue, HidP_GetUsages, HidP_GetValueCaps, HidP_Input, HidP_MaxUsageListLength, HIDP_BUTTON_CAPS, HIDP_CAPS, HIDP_STATUS_SUCCESS, HIDP_VALUE_CAPS, PHIDP_PREPARSED_DATA,
-};
 use windows::Win32::Devices::Display::{
     DestroyPhysicalMonitors, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR,
     GetVCPFeatureAndVCPFeatureReply, QueryDisplayConfig, SetVCPFeature, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
@@ -38,11 +35,9 @@ use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHA
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, GetStockObject, BLACK_BRUSH, HBRUSH, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW};
 use windows::Win32::System::Power::{RegisterPowerSettingNotification, SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, POWERBROADCAST_SETTING};
-use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::Input::{
-    GetRawInputData, GetRawInputDeviceInfoW, RegisterRawInputDevices, HRAWINPUT, RAWHID, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME, RIDI_PREPARSEDDATA, RID_INPUT, RIM_TYPEKEYBOARD,
-    RIM_TYPEMOUSE,
-};
+use windows::Win32::System::Threading::{CreateEventW, GetCurrentThreadId, ResetEvent, SetEvent};
+
+use crate::touch::Heard;
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW, PostThreadMessageW, RegisterClassW, SetCursor, DEVICE_NOTIFY_WINDOW_HANDLE, MSG, PBT_POWERSETTINGCHANGE,
@@ -66,138 +61,42 @@ static LISTENER: AtomicIsize = AtomicIsize::new(0);
 /// Asks the listening window to hear of what is touched (1) or to stop (0).
 const HEAR_TOUCHES: u32 = WM_APP + 1;
 
-/// What is touched while the screens are out, as Windows hands it to a
-/// window that asks: which device it came from (not what was pressed).
-/// The kinds of device whose touch wakes the screens: the mouse, the
-/// keyboard, a remote's or a keyboard's media keys, a pen, a touch screen,
-/// a touch pad (each a usage page and a usage, as HID names them).
-const TOUCHED_BY: [(u16, u16); 6] = [(0x01, 0x02), (0x01, 0x06), (0x0C, 0x01), (0x0D, 0x02), (0x0D, 0x04), (0x0D, 0x05)];
-
-/// A device heard from while listening: its handle, what it is called, and
-/// when it was last heard from (see `actions::tick`).
-type Heard = Option<(isize, String, u32)>;
-/// The last touch heard of; and the last report that said nothing was
-/// moved and nothing pressed.
-static TOUCH: Mutex<Heard> = Mutex::new(None);
-static NOTHING: Mutex<Heard> = Mutex::new(None);
+/// What this helper has heard touch the PC while it listened.
+static HEARD: std::sync::LazyLock<Mutex<Heard>> = std::sync::LazyLock::new(Mutex::default);
+/// Set for as long as the screens are out at this helper's asking: Glance,
+/// which hears what this helper cannot (see `touch`), listens meanwhile.
+static OUT_SAID: AtomicIsize = AtomicIsize::new(0);
 
 fn hear_touches(window: HWND, hear: bool) {
-    let devices: Vec<RAWINPUTDEVICE> = TOUCHED_BY.iter().map(|(page, usage)| RAWINPUTDEVICE { usUsagePage: *page, usUsage: *usage, dwFlags: if hear { RIDEV_INPUTSINK } else { RIDEV_REMOVE }, hwndTarget: if hear { window } else { HWND::default() } }).collect();
     if hear {
-        *TOUCH.lock().unwrap() = None;
-        *NOTHING.lock().unwrap() = None;
+        *HEARD.lock().unwrap() = Heard::default();
     }
-    if let Err(error) = unsafe { RegisterRawInputDevices(&devices, size_of::<RAWINPUTDEVICE>() as u32) } {
+    if let Err(error) = crate::touch::hear(window, hear) {
         crate::journal::note(format!("what is touched cannot be {}: {error}", if hear { "heard of" } else { "left unheard" }));
     }
 }
 
-/// A device as it is named in the log: what kind it is and whose (its bus,
-/// maker and model), without the numbers that tell one unit from another.
-fn device(handle: HANDLE) -> String {
-    if handle.is_invalid() || handle.0.is_null() {
-        return "no device (a program made it)".into();
-    }
-    let mut name = [0u16; 512];
-    let mut length = name.len() as u32;
-    let got = unsafe { GetRawInputDeviceInfoW(Some(handle), RIDI_DEVICENAME, Some(name.as_mut_ptr().cast()), &mut length) };
-    if got == u32::MAX || got == 0 {
-        return "a device that does not say what it is".into();
-    }
-    let name = text(&name);
-    name.trim_start_matches(r"\\?\").split('#').take(2).collect::<Vec<_>>().join(" ")
-}
-
-/// Whether what a device that is neither mouse nor keyboard reported says
-/// anything is pressed or set: read as the device itself describes its
-/// reports. One whose description cannot be read is taken to say so.
-fn says_something(device: HANDLE, hid: &RAWHID) -> bool {
-    unsafe {
-        let mut length = 0u32;
-        GetRawInputDeviceInfoW(Some(device), RIDI_PREPARSEDDATA, None, &mut length);
-        // (Kept in words, for the description's alignment.)
-        let mut described = vec![0u64; (length as usize).div_ceil(8)];
-        if length == 0 || GetRawInputDeviceInfoW(Some(device), RIDI_PREPARSEDDATA, Some(described.as_mut_ptr().cast()), &mut length) == u32::MAX {
-            return true;
-        }
-        let described = PHIDP_PREPARSED_DATA(described.as_ptr() as isize);
-        let mut caps = HIDP_CAPS::default();
-        if HidP_GetCaps(described, &mut caps) != HIDP_STATUS_SUCCESS {
-            return true;
-        }
-        let mut count = caps.NumberInputButtonCaps;
-        let mut buttons = vec![HIDP_BUTTON_CAPS::default(); count as usize];
-        if count > 0 && HidP_GetButtonCaps(HidP_Input, buttons.as_mut_ptr(), &mut count, described) != HIDP_STATUS_SUCCESS {
-            return true;
-        }
-        buttons.truncate(count as usize);
-        let mut count = caps.NumberInputValueCaps;
-        let mut values = vec![HIDP_VALUE_CAPS::default(); count as usize];
-        if count > 0 && HidP_GetValueCaps(HidP_Input, values.as_mut_ptr(), &mut count, described) != HIDP_STATUS_SUCCESS {
-            return true;
-        }
-        values.truncate(count as usize);
-        let all = std::slice::from_raw_parts(hid.bRawData.as_ptr(), hid.dwSizeHid as usize * hid.dwCount as usize);
-        for report in all.chunks(hid.dwSizeHid.max(1) as usize) {
-            let mut report = report.to_vec();
-            for button in &buttons {
-                let mut pressed = HidP_MaxUsageListLength(HidP_Input, Some(button.UsagePage), described);
-                let mut usages = vec![0u16; pressed as usize];
-                // (How many are pressed comes back in the same count.)
-                let read = pressed > 0 && HidP_GetUsages(HidP_Input, button.UsagePage, Some(button.LinkCollection), usages.as_mut_ptr(), &mut pressed, described, &mut report) == HIDP_STATUS_SUCCESS;
-                if read && pressed > 0 {
-                    return true;
-                }
-            }
-            for value in &values {
-                let usages = if value.IsRange { value.Anonymous.Range.UsageMin..=value.Anonymous.Range.UsageMax } else { value.Anonymous.NotRange.Usage..=value.Anonymous.NotRange.Usage };
-                for usage in usages {
-                    let mut set = 0u32;
-                    if HidP_GetUsageValue(HidP_Input, value.UsagePage, Some(value.LinkCollection), usage, &mut set, described, &report) == HIDP_STATUS_SUCCESS && set != 0 {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-}
-
-fn touched(input: LPARAM) {
-    let input = HRAWINPUT(input.0 as *mut _);
-    let head = size_of::<RAWINPUTHEADER>() as u32;
-    let mut size = 0u32;
-    unsafe { GetRawInputData(input, RID_INPUT, None, &mut size, head) };
-    // (Kept in words, for the alignment of what it is read as.)
-    let mut data = vec![0u64; (size as usize).div_ceil(8).max(size_of::<RAWINPUT>().div_ceil(8))];
-    if size == 0 || unsafe { GetRawInputData(input, RID_INPUT, Some(data.as_mut_ptr().cast()), &mut size, head) } != size {
-        return;
-    }
-    let raw = unsafe { &*(data.as_ptr() as *const RAWINPUT) };
-    // A mouse that neither moved nor had a button or its wheel touched said nothing; a key is always a touch.
-    let (kind, said) = match raw.header.dwType {
-        kind if kind == RIM_TYPEMOUSE.0 => {
-            let mouse = unsafe { raw.data.mouse };
-            ("a mouse", mouse.lLastX != 0 || mouse.lLastY != 0 || unsafe { mouse.Anonymous.Anonymous.usButtonFlags } != 0)
-        }
-        kind if kind == RIM_TYPEKEYBOARD.0 => ("a keyboard", true),
-        _ => ("another kind of device", says_something(raw.header.hDevice, unsafe { &raw.data.hid })),
-    };
-    let mut heard = if said { TOUCH.lock().unwrap() } else { NOTHING.lock().unwrap() };
-    let handle = raw.header.hDevice.0 as isize;
+/// The last touch, and the last report that said nothing, each by its
+/// device and when: as this helper heard them or as Glance did, whichever
+/// is the later.
+fn heard() -> (Option<(String, u32)>, Option<(String, u32)>) {
     let now = crate::actions::tick();
-    match heard.as_mut().filter(|(last, _, _)| *last == handle) {
-        Some(same) => same.2 = now,
-        None => *heard = Some((handle, format!("{} ({kind})", device(raw.header.hDevice)), now)),
-    }
+    let later = |own: Option<(String, u32)>, told: Option<(String, u32)>| match (own, told) {
+        (Some(own), Some(told)) => Some(if now.wrapping_sub(own.1) <= now.wrapping_sub(told.1) { own } else { told }),
+        (own, told) => own.or(told),
+    };
+    let (touched, nothing) = crate::reads::touches();
+    let own = HEARD.lock().unwrap();
+    (later(own.touched.clone(), touched), later(own.nothing.clone(), nothing))
 }
 
 /// What was last heard from while the screens were out, and how long ago
 /// (ms): for the log, to say what woke them.
 pub fn last_touch() -> String {
     let ago = |at: u32| crate::actions::tick().wrapping_sub(at);
-    let touch = TOUCH.lock().unwrap().as_ref().map(|(_, device, at)| format!("last touched {} ms before, by {device}", ago(*at)));
-    let nothing = NOTHING.lock().unwrap().as_ref().map(|(_, device, at)| format!("a report that said nothing {} ms before, from {device}", ago(*at)));
+    let (touched, nothing) = heard();
+    let touch = touched.map(|(device, at)| format!("last touched {} ms before, by {device}", ago(at)));
+    let nothing = nothing.map(|(device, at)| format!("a report that said nothing {} ms before, from {device}", ago(at)));
     match (touch, nothing) {
         (None, None) => "nothing was heard from".into(),
         (touch, nothing) => [touch, nothing].into_iter().flatten().collect::<Vec<_>>().join("; "),
@@ -222,6 +121,14 @@ const HEARD_WITHIN: u32 = 300;
 
 fn out(since: u32) {
     *OUT.lock().unwrap() = Some(Out { since, nothing_at: None });
+    say_out(true);
+}
+
+fn say_out(out: bool) {
+    let said = HANDLE(OUT_SAID.load(Ordering::SeqCst) as *mut _);
+    if !said.0.is_null() {
+        let _ = unsafe { if out { SetEvent(said) } else { ResetEvent(said) } };
+    }
 }
 
 /// Whether the screens are out at this helper's asking.
@@ -258,9 +165,10 @@ pub fn woken() -> Woken {
         if after(now, input) < HEARD_WITHIN as i32 {
             return Woken::No;
         }
-        let heard_then = |heard: &Mutex<Heard>| heard.lock().unwrap().as_ref().is_some_and(|(_, _, at)| after(*at, input) >= -(HEARD_WITHIN as i32));
+        let (touched, nothing) = heard();
+        let then = |heard: &Option<(String, u32)>| heard.as_ref().is_some_and(|(_, at)| after(*at, input) >= -(HEARD_WITHIN as i32));
         // A touch: whatever was heard to say something, and whatever was not heard of at all.
-        if heard_then(&TOUCH) || !heard_then(&NOTHING) {
+        if then(&touched) || !then(&nothing) {
             return Woken::Touched;
         }
         out.nothing_at = Some(input);
@@ -305,7 +213,9 @@ unsafe extern "system" fn told(window: HWND, message: u32, wparam: WPARAM, lpara
         }
     }
     match message {
-        WM_INPUT => touched(lparam),
+        WM_INPUT => {
+            HEARD.lock().unwrap().take(lparam, crate::actions::tick());
+        }
         WM_DISPLAYCHANGE => crate::journal::note(format!("the monitors changed: {}", listed())),
         HEAR_TOUCHES => hear_touches(window, wparam.0 == 1),
         _ => {}
@@ -320,6 +230,10 @@ pub fn watch() {
         RegisterClassW(&class);
         let Ok(window) = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, None, None, None, None) else { return };
         LISTENER.store(window.0 as isize, Ordering::SeqCst);
+        // (Set by hand and cleared by hand; not set to begin with.)
+        if let Ok(said) = CreateEventW(None, true, false, w!("Local\\Glance.Remote.Out")) {
+            OUT_SAID.store(said.0 as isize, Ordering::SeqCst);
+        }
         // Told at once how it is now, then at every change.
         let _ = RegisterPowerSettingNotification(HANDLE(window.0), &DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
         let mut message = MSG::default();
@@ -555,6 +469,7 @@ fn lighten() -> bool {
 /// put on again.
 pub fn wake() {
     *OUT.lock().unwrap() = None;
+    say_out(false);
     lighten();
     // (Out to Windows too, what is touched is listened for till Windows says they are on.)
     let listener = LISTENER.load(Ordering::SeqCst);
