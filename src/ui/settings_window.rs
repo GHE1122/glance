@@ -1747,7 +1747,7 @@ impl Ui {
             ),
             Switch::OverlayFrosted => (
                 p("磨砂玻璃", "Frosted glass"),
-                Some(p("模糊悬浮窗背后的画面。模糊由系统完成，会占用游戏约 2%–3% 的帧率；关闭后改为不模糊的半透明底色", "Blurs what is behind the overlay. The system does the blurring, at a cost of some 2–3% of a game's frames; off, the glass is its tint alone, unblurred")),
+                Some(p("模糊悬浮窗背后的画面。模糊由系统完成，会占用游戏约 3%–4% 的帧率；关闭后改为不模糊的半透明底色", "Blurs what is behind the overlay. The system does the blurring, at a cost of some 3–4% of a game's frames; off, the glass is its tint alone, unblurred")),
                 self.settings.overlay.frosted,
             ),
             Switch::OverlayThrough => (
