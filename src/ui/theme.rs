@@ -38,6 +38,14 @@ pub struct Shadow {
     pub color: Color,
 }
 
+/// How far `shadows` reach past the box that casts them, on the side they
+/// reach furthest (DIPs): a shadow's blur radius is where it has all but
+/// faded (twice the Gaussian's deviation), past its spread, on the side it
+/// is offset to. A window with less room than this cuts its shadow off.
+fn room(shadows: &[Shadow]) -> f32 {
+    shadows.iter().map(|shadow| shadow.blur + shadow.spread + shadow.y.abs()).fold(0.0, f32::max).ceil()
+}
+
 /// How far the panel travels as it comes in.
 #[derive(Clone, Copy)]
 pub enum Entrance {
@@ -104,7 +112,8 @@ pub struct Theme {
     /// The panel's corner radius (paper, Windows 11) or each piece's (glass).
     pub radius: f32,
     pub shadows: Vec<Shadow>,
-    /// Room the shadow needs around the panel.
+    /// Room the shadows need around the panel: as far as the furthest of
+    /// them reaches (see `room`).
     pub margin: f32,
     /// Gap between the panel and the screen edge.
     pub inset: f32,
@@ -131,11 +140,13 @@ pub struct Theme {
 
 impl Theme {
     pub fn new(skin: Skin, dark: bool) -> Self {
-        match skin {
+        let mut theme = match skin {
             Skin::Paper => paper(dark),
             Skin::Fluent => fluent(dark),
             Skin::Glass => glass(dark),
-        }
+        };
+        theme.margin = room(&theme.shadows);
+        theme
     }
 
     /// The ink of the lane for module `id`.
@@ -209,7 +220,7 @@ fn paper(dark: bool) -> Theme {
             Shadow { y: 18.0, blur: 40.0, spread: -12.0, color: rgba(shadow.0, shadow.1) },
             Shadow { y: 2.0, blur: 6.0, spread: 0.0, color: rgba(shadow.0, shadow.2) },
         ],
-        margin: 40.0,
+        margin: 0.0,
         inset: 0.0,
         entrance: Entrance::Beyond(40.0),
         paper: rgba(sheet, 1.0),
@@ -287,7 +298,7 @@ fn fluent(dark: bool) -> Theme {
                 Shadow { y: 2.0, blur: 8.0, spread: 0.0, color: rgba(0, 0.08) },
             ]
         },
-        margin: 32.0,
+        margin: 0.0,
         inset: 12.0,
         entrance: Entrance::Slide(40.0),
         paper: Color::CLEAR,
@@ -369,7 +380,7 @@ fn glass(dark: bool) -> Theme {
                 Shadow { y: 1.0, blur: 3.0, spread: 0.0, color: rgba(0, 0.08) },
             ]
         },
-        margin: 24.0,
+        margin: 0.0,
         inset: 10.0,
         entrance: Entrance::Slide(36.0),
         paper: Color::CLEAR,
