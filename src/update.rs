@@ -439,6 +439,15 @@ impl Drop for Handle {
 /// The body of an HTTPS GET of `url`, if it answered 200 (redirects
 /// followed, never from HTTPS to HTTP).
 fn get(url: &str) -> Option<Vec<u8>> {
+    ask(url, None)
+}
+
+/// What `url` answers to JSON sent to it (an HTTPS POST), if it answered 200.
+pub fn post(url: &str, json: &[u8]) -> Option<Vec<u8>> {
+    ask(url, Some(json))
+}
+
+fn ask(url: &str, sent: Option<&[u8]>) -> Option<Vec<u8>> {
     let rest = url.strip_prefix("https://")?;
     let (host, path) = rest.split_at(rest.find('/')?);
     let agent = HSTRING::from(format!("Glance/{}", env!("CARGO_PKG_VERSION")));
@@ -457,12 +466,21 @@ fn get(url: &str) -> Option<Vec<u8>> {
         if connection.0.is_null() {
             return None;
         }
-        let request = Handle(WinHttpOpenRequest(connection.0, w!("GET"), &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), WINHTTP_FLAG_SECURE));
+        let method = if sent.is_some() { w!("POST") } else { w!("GET") };
+        let request = Handle(WinHttpOpenRequest(connection.0, method, &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), WINHTTP_FLAG_SECURE));
         if request.0.is_null() {
             return None;
         }
-        let headers: Vec<u16> = "Accept: application/vnd.github+json, application/octet-stream\r\n".encode_utf16().collect();
-        WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0).ok()?;
+        match sent {
+            None => {
+                let headers: Vec<u16> = "Accept: application/vnd.github+json, application/octet-stream\r\n".encode_utf16().collect();
+                WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0).ok()?;
+            }
+            Some(body) => {
+                let headers: Vec<u16> = "Content-Type: application/json\r\n".encode_utf16().collect();
+                WinHttpSendRequest(request.0, Some(&headers), Some(body.as_ptr().cast()), body.len() as u32, body.len() as u32, 0).ok()?;
+            }
+        }
         WinHttpReceiveResponse(request.0, std::ptr::null_mut()).ok()?;
         let mut status = 0u32;
         let mut size = size_of::<u32>() as u32;

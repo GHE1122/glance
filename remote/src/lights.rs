@@ -422,6 +422,11 @@ pub fn lit() -> Option<bool> {
     Some(Client::connect().ok()?.devices().ok()?.iter().any(Device::lit))
 }
 
+/// The lighting devices as an OpenRGB running already has them: none while none runs.
+pub fn known() -> Option<Vec<Device>> {
+    Client::connect().ok()?.devices().ok()
+}
+
 /// The lighting devices, for choosing how each is lit.
 pub fn devices(config: &Config) -> std::io::Result<Vec<Device>> {
     server(config)?.devices()

@@ -33,12 +33,29 @@ pub fn report() -> String {
     let log = crate::journal::recent(15);
     lines.push(format!("Recent log ({} lines):", log.len()));
     lines.extend(log.into_iter().map(|line| format!("  {line}")));
+    // What the phone remote finds, where it is there: the lights, the monitors, what else it sets.
+    if let Some(remote) = crate::phone::report() {
+        lines.push("Phone remote:".into());
+        lines.extend(remote.lines().map(|line| format!("  {line}")));
+    }
     lines.push("Latest readings:".into());
     match app.controller.history.lock().unwrap().back() {
         Some(sample) => lines.extend(readings(sample, info).into_iter().map(|line| format!("  {line}"))),
         None => lines.push("  none yet".into()),
     }
     lines.join("\n")
+}
+
+/// Where a report is sent: Glance's own site.
+const REPORTS: &str = "https://glancepc.com/api/report";
+
+/// Sends `text` (the report, as the user was shown it) to Glance's site:
+/// the short name it was given there, to quote when asking about it; none
+/// if it did not get there.
+pub fn send(text: &str) -> Option<String> {
+    let sent = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "text": text }).to_string();
+    let answer: serde_json::Value = serde_json::from_slice(&crate::update::post(REPORTS, sent.as_bytes())?).ok()?;
+    answer.get("id")?.as_str().map(str::to_string)
 }
 
 /// Windows' name, release and build. Windows 11 keeps "Windows 10" in its

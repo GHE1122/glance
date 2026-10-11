@@ -563,6 +563,28 @@ fn main() -> std::io::Result<()> {
             }
             return Ok(());
         }
+        // glance-remote report: what there is on this PC for the remote to
+        // set, for a report of what is not right (nothing of the phones paired).
+        Some("report") => {
+            println!("version {}", env!("CARGO_PKG_VERSION"));
+            println!("OpenRGB: {}", lights::program(&config).map_or("none".to_string(), |path| path.display().to_string()));
+            // (Only an OpenRGB running already is asked: one is not started for a report.)
+            match lights::known() {
+                Some(devices) => {
+                    for device in devices {
+                        println!("light: {} ({}), modes {}, zones {}", device.name, device.modes.get(device.active).map_or("?", |mode| mode.name.as_str()), device.modes.iter().map(|mode| mode.name.as_str()).collect::<Vec<_>>().join("/"), device.zones.iter().map(|zone| format!("{}:{}", zone.name, zone.leds)).collect::<Vec<_>>().join("/"));
+                    }
+                }
+                None => println!("lights: OpenRGB not running"),
+            }
+            for monitor in display::monitors() {
+                println!("monitor: {} {}x{} at {},{}; on {:?}; brightness {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on, monitor.brightness);
+            }
+            println!("cooler display: {}", if cooler::there() { "there" } else { "none" });
+            println!("keyboard light: {}", if keys::there() { "there" } else { "none" });
+            println!("power: {}", power::choices().iter().map(|choice| format!("{}{}", if choice.name.is_empty() { &choice.id } else { &choice.name }, if choice.on { "*" } else { "" })).collect::<Vec<_>>().join(", "));
+            return Ok(());
+        }
         // glance-remote keys LEVEL: the light under a laptop's keys.
         Some("keys") => {
             match std::env::args().nth(2).and_then(|text| text.parse::<u8>().ok()) {

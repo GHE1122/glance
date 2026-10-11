@@ -68,6 +68,12 @@ pub fn set_lights(on: bool) -> bool {
     ask(&["lights", if on { "fetch" } else { "forget" }]).is_some_and(|said| said.lines().last().is_some_and(|last| last.trim() == "there"))
 }
 
+/// What the remote finds on this PC (its lights, its monitors, what else
+/// it can set), as lines for a report; none where this Glance has no remote.
+pub fn report() -> Option<String> {
+    ask(&["report"])
+}
+
 /// A phone paired with: its place in the remote's own list, and what it calls itself.
 pub struct Phone {
     pub at: usize,

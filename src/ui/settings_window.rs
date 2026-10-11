@@ -38,7 +38,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, LoadCursorW, LoadImageW,
-    IsWindowVisible, MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
+    IsWindowVisible, MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, IDYES, MB_ICONINFORMATION, MB_OK, MB_YESNO, WM_CLOSE,
     WM_KEYDOWN, WM_SYSKEYDOWN, WM_ACTIVATE, WA_INACTIVE,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_CAPTURECHANGED, WM_DESTROY,
@@ -473,6 +473,8 @@ enum Target {
     Pair(bool),
     /// Unpairs the phone at that place in the remote's list.
     Unpair(usize),
+    /// Sends the diagnostics to Glance's site, shown first.
+    SendReport,
 }
 
 /// Modules for developers: listed under "More" while off, out of the way.
@@ -597,6 +599,10 @@ struct Ui {
     uninstaller: Option<std::path::PathBuf>,
     /// When the diagnostics were last copied.
     copied_at: Option<Instant>,
+    /// The diagnostics being sent (on a thread of its own), and how the
+    /// last sending went: the name the site gave them, or none.
+    sending: Option<std::thread::JoinHandle<Option<String>>>,
+    sent: Option<Option<String>>,
     scroll: f32,
     scroll_target: f32,
     motion: HashMap<String, Transition>,
@@ -724,6 +730,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
             copied_at: None,
+            sending: None,
+            sent: None,
             uninstaller: std::env::current_exe().ok().and_then(|exe| elevation::trusted(&exe.with_file_name("uninstall.exe"))),
             scroll: 0.0,
             scroll_target: 0.0,
@@ -1380,7 +1388,20 @@ impl Ui {
                 // "Copied" for a moment after the press.
                 let copied = self.copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR);
                 let action = if copied { p("已复制", "Copied") } else { p("复制", "Copy") };
-                (p("诊断信息", "Diagnostics"), p("反馈问题时复制附上", "To paste into a problem report"), vec![(action, Target::Diagnostics, Button::Plain)])
+                // What became of the last sending, once there was one.
+                let (detail, send) = match (&self.sending, &self.sent) {
+                    (Some(_), _) => (p("正在发送…", "Sending…"), (p("发送中", "Sending"), Target::SendReport, Button::Quiet)),
+                    (None, Some(Some(id))) => (
+                        match lang {
+                            Lang::Zh => format!("已发送，编号 {id}。向我们提问时附上这个编号"),
+                            Lang::En => format!("Sent, as {id}. Quote that when asking us about it"),
+                        },
+                        (p("再发一次", "Send again"), Target::SendReport, Button::Plain),
+                    ),
+                    (None, Some(None)) => (p("没有发出去，可以先复制", "It did not get there; copy it instead"), (p("重试", "Retry"), Target::SendReport, Button::Plain)),
+                    (None, None) => (p("硬件识别不对、灯光或显示器控制不了时，发给我们或复制附上", "When hardware is read wrongly or lights or monitors cannot be set: send it to us, or copy it into a report"), (p("发送", "Send"), Target::SendReport, Button::Plain)),
+                };
+                (p("诊断信息", "Diagnostics"), detail, vec![(action, Target::Diagnostics, Button::Plain), send])
             }
             Row::Uninstall => (
                 p("卸载 Glance", "Uninstall Glance"),
@@ -2174,6 +2195,19 @@ impl Ui {
                 }
             }
             Target::Quit => crate::quit(),
+            // Shown whole first: nothing leaves this PC that was not read and agreed to.
+            Target::SendReport if self.sending.is_none() => {
+                let report = crate::diagnostics::report();
+                let (title, asked) = match self.lang {
+                    Lang::Zh => ("发送这些信息？", format!("下面是将要发送给 Glance（glancepc.com）的全部内容：这台电脑的硬件、Glance 读到的数值和它最近的日志。不包含你的文件、账号或网络地址。\n\n{report}\n\n发送吗？")),
+                    Lang::En => ("Send this?", format!("This is all that would be sent to Glance (glancepc.com): this PC's hardware, what Glance reads of it, and Glance's recent log. Nothing of your files, accounts or network address.\n\n{report}\n\nSend it?")),
+                };
+                if unsafe { MessageBoxW(Some(self.hwnd), &HSTRING::from(asked), &HSTRING::from(title), MB_YESNO | MB_ICONINFORMATION) } == IDYES {
+                    self.sent = None;
+                    self.sending = Some(std::thread::spawn(move || crate::diagnostics::send(&report)));
+                }
+            }
+            Target::SendReport => {}
             // (Pressed again, its code is put away.)
             Target::GetApp if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) => self.code = None,
             Target::GetApp => self.code = crate::phone::app_code().map(|code| (code, CodeFor::App)),
@@ -2236,7 +2270,7 @@ impl Ui {
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::Update if update::available().is_some_and(|(_, state)| state == update::State::Downloading) => vec![],
                 Row::Update => vec![Target::Update],
-                Row::Diagnostics => vec![Target::Diagnostics],
+                Row::Diagnostics => vec![Target::SendReport, Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
                 Row::GetApp => vec![Target::GetApp],
@@ -2373,7 +2407,7 @@ impl Ui {
     fn reveal_focus(&mut self) {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
-            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
+            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
             (Row::GetApp, Target::GetApp) | (Row::Pair, Target::Pair(_)) => true,
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
@@ -2608,6 +2642,13 @@ impl Ui {
         let label = Font::new(Family::Segoe, 14.0, 400.0);
         let hint = Font::new(Family::Segoe, 12.0, 400.0);
         let mut dragged = None;
+        // The diagnostics sent: how that went, once it is over.
+        if self.sending.as_ref().is_some_and(|sending| sending.is_finished()) {
+            self.sent = Some(self.sending.take().unwrap().join().ok().flatten());
+        }
+        if self.sending.is_some() {
+            self.next_frame = now + Duration::from_millis(300);
+        }
         // The lights' program fetched (or taken away): how that went, once it is over.
         if self.fetching.as_ref().is_some_and(|fetching| fetching.is_finished()) {
             let done = self.fetching.take().unwrap().join().unwrap_or(false);
