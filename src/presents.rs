@@ -23,7 +23,7 @@ use windows::Win32::System::Diagnostics::Etw::{
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
+    EnumWindows, GetCursorPos, GetForegroundWindow, GetShellWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
 };
 
 use crate::frames::{FrameStats, Presents};
@@ -145,6 +145,7 @@ pub fn stop() {
 
 /// A program presenting frames, as one of its windows shows it: the
 /// topmost of its windows that is visible and not minimized.
+#[derive(Clone)]
 pub struct Presenting {
     pub pid: u32,
     pub stats: FrameStats,
@@ -242,6 +243,38 @@ pub fn presenting() -> Vec<Presenting> {
         });
     }
     found
+}
+
+/// The window in front, as a program that presents nothing just now: for
+/// a game taken by hand (see `GameMode::On`), whose frames are then none a
+/// second, not unknown. None where what is in front is Glance's own, or
+/// the desktop's and the taskbar's (no program's window).
+pub fn in_front() -> Option<Presenting> {
+    let front = unsafe { GetForegroundWindow() };
+    let pid_of = |window: HWND| {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+        pid
+    };
+    let pid = pid_of(front);
+    if front.is_invalid() || pid == 0 || pid == std::process::id() || pid == pid_of(unsafe { GetShellWindow() }) {
+        return None;
+    }
+    let (fills_screen, refresh_hz, monitor) = screen_of(front);
+    let mut cursor = POINT::default();
+    let pointer_screen = unsafe { GetCursorPos(&mut cursor) }.ok().map(|_| unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) });
+    let mut title = [0u16; 256];
+    let length = unsafe { GetWindowTextW(front, &mut title) };
+    Some(Presenting {
+        pid,
+        stats: FrameStats { fps: 0.0, low: None, longest_ms: 0.0 },
+        title: String::from_utf16_lossy(&title[..length.max(0) as usize]).trim().to_string(),
+        fills_screen,
+        under_pointer: monitor.is_some() && monitor.map(|(monitor, _)| monitor) == pointer_screen,
+        in_front: true,
+        refresh_hz,
+        screen: monitor.map(|(_, r)| [r.left, r.top, r.right, r.bottom]),
+    })
 }
 
 /// Whether `window` covers its monitor, not maximized, the monitor's

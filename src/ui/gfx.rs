@@ -529,7 +529,8 @@ impl Canvas for Frame<'_> {
 
     fn stroke(&self, points: &[Point], color: Color, width: f32) {
         if let Some(path) = self.path(points, false) {
-            unsafe { self.dc.DrawGeometry(&path, self.brush(color), width, None) };
+            // (Its corners round: a sharp one is drawn out to a point, which on a chart's line turning at nothing reaches below nothing.)
+            unsafe { self.dc.DrawGeometry(&path, self.brush(color), width, &self.gfx.round) };
         }
     }
 

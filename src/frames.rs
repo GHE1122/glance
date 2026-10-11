@@ -52,7 +52,11 @@ impl Presents {
         if recent.len() < 2 || last <= first {
             return None;
         }
-        let fps = (recent.len() - 1) as f64 / (last - first).as_secs_f64();
+        // The frame being waited for is as long as the wait for it already: counted with the rest once that is
+        // longer than they are (a few frames in a burst and then none are not that many a second).
+        let span = (last - first).as_secs_f64();
+        let waited = now.saturating_sub(last).as_secs_f64();
+        let fps = (recent.len() - 1) as f64 / (span + if waited > span / (recent.len() - 1) as f64 { waited } else { 0.0 });
         let longest_ms = recent.windows(2).map(|pair| (pair[1] - pair[0]).as_secs_f64() * 1000.0).fold(0.0, f64::max);
         // Every frame time kept, the slowest 1% from the 99th percentile on.
         let mut times: Vec<f64> = self.times.iter().collect::<Vec<_>>().windows(2).map(|pair| (*pair[1] - *pair[0]).as_secs_f64()).collect();

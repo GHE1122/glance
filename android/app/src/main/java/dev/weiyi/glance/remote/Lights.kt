@@ -183,7 +183,8 @@ fun LightsCard(light: Light, heat: Boolean, own: List<String>, enabled: Boolean,
 @Composable
 private fun Picker(from: String, changed: (String) -> Unit, settled: (String) -> Unit, cancel: () -> Unit, use: (String) -> Unit) {
     var hsv by remember {
-        mutableStateOf(FloatArray(3).also { android.graphics.Color.colorToHSV(colour(from).toArgb(), it) })
+        // A colour is its hue and how deep it is, at its brightest: how bright the lights are is set for them all, on the card.
+        mutableStateOf(FloatArray(3).also { android.graphics.Color.colorToHSV(colour(from).toArgb(), it); it[2] = 1f })
     }
     val now = hex(hsv[0], hsv[1], hsv[2])
     val set by rememberUpdatedState { next: FloatArray -> hsv = next; changed(hex(next[0], next[1], next[2])) }
@@ -228,8 +229,6 @@ private fun Picker(from: String, changed: (String) -> Unit, settled: (String) ->
             }
         }
         slide(stringResource(R.string.saturation), 1, 0f, Brush.horizontalGradient(listOf(Color.hsv(hsv[0], 0f, hsv[2]), Color.hsv(hsv[0], 1f, hsv[2]))))
-        // (Never quite dark: that is the lights off.)
-        slide(stringResource(R.string.brightness), 2, 0.05f, Brush.horizontalGradient(listOf(Color.Black, Color.hsv(hsv[0], hsv[1], 1f))))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Box(Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(14.dp)).background(Card2).clickable(role = Role.Button, onClick = cancel), contentAlignment = Alignment.Center) {
                 Text(stringResource(R.string.cancel), color = Ink, fontSize = 15.sp)

@@ -114,6 +114,9 @@ pub struct Sampler {
     /// The game being played: its program, when it was first seen, and when
     /// last.
     playing: Option<(String, Instant, Instant)>,
+    /// The program last taken for a game by hand, as one presenting
+    /// nothing: shown so while Glance's own window is the one in front.
+    by_hand: Option<crate::presents::Presenting>,
     buf: Vec<u64>,
     pub info: StaticInfo,
 }
@@ -208,6 +211,7 @@ impl Sampler {
             adapter_by_pid: HashMap::new(),
             gpu_process_memory,
             playing: None,
+            by_hand: None,
             buf: Vec::new(),
             info,
             started: Started::read(),
@@ -233,8 +237,19 @@ impl Sampler {
             .iter()
             .find(|p| front && p.in_front)
             .or_else(|| found.iter().find(|p| p.under_pointer))
-            .or_else(|| found.first());
-        let Some(presenting) = chosen else {
+            .or_else(|| found.first())
+            .cloned();
+        if !front {
+            self.by_hand = None;
+        }
+        // Taken for a game by hand, the window in front is one though it presents nothing just now: its frames are
+        // none a second, not unknown. With Glance's own window in front (or the desktop), the one taken last, while it runs.
+        let quiet = || crate::presents::in_front().or_else(|| self.by_hand.clone().filter(|last| self.processes.name_of(last.pid as usize).is_some()));
+        let chosen = chosen.or_else(|| front.then(quiet).flatten());
+        if let Some(taken) = chosen.as_ref().filter(|chosen| front && !chosen.fills_screen) {
+            self.by_hand = Some(crate::presents::Presenting { stats: crate::frames::FrameStats { fps: 0.0, low: None, longest_ms: 0.0 }, ..taken.clone() });
+        }
+        let Some(presenting) = chosen.as_ref() else {
             // The game turned off by hand has gone: the next is shown as found.
             if crate::presents::game_mode() == crate::presents::GameMode::Off {
                 crate::presents::set_game_mode(crate::presents::GameMode::Auto);
