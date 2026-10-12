@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Glance 网站统计</title>
-<link rel="stylesheet" href="stats.css?v=1">
+<title>Glance 统计</title>
+<link rel="stylesheet" href="stats.css?v=2">
 </head>
 <body>
 <div class="wrap">
   <div class="bar">
-    <h1>Glance 网站统计</h1>
+    <h1>Glance 统计</h1>
     <div class="seg" role="group" aria-label="时间范围" data-days>
       <button type="button" data-d="1">今天</button>
       <button type="button" data-d="7">7 天</button>
@@ -28,11 +28,32 @@
   </div>
 
   <div data-board hidden>
+    <h2 class="part">Glance 本身</h2>
+    <div class="tiles" data-glance-tiles></div>
+    <div class="card gap">
+      <h2>每天</h2>
+      <div class="legend"><span><i class="s1"></i>在运行的电脑</span><span><i class="s2"></i>新安装</span><span><i class="s3"></i>更新</span></div>
+      <div class="chart" data-glance-chart><svg role="img" aria-label="每天在运行的电脑、新安装和更新"></svg><div class="tip"></div></div>
+      <details class="gap-s"><summary>按天看数字</summary><table data-glance-daily></table></details>
+    </div>
+    <div class="cols gap">
+      <div class="card"><h2>在运行的版本</h2><table data-versions></table></div>
+      <div class="card"><h2>更新</h2><table data-updates></table></div>
+      <div class="card"><h2>装了多久</h2><table data-staying></table></div>
+    </div>
+    <p class="note">Glance 每天向官网问一次有没有新版本（0.3.3 起），这里数的就是这些询问。电脑按天计：同一天里同一个网络算一台，跨天不追踪，所以“在运行”是每天各自的数字，不能跨天相加成“总用户数”。“新安装”是装好后的第一次询问；“更新”是更新后的第一次询问，带着更新前的版本号。“装了多久”是每台电脑自己报的周数，按“电脑·天”累计。更早的版本不问官网，不在这里。</p>
+    <div class="card gap">
+      <h2>诊断报告</h2>
+      <table data-reports></table>
+      <pre class="report" data-report hidden></pre>
+    </div>
+
+    <h2 class="part gap-l">官网</h2>
     <div class="tiles" data-tiles></div>
     <div class="card gap">
       <h2>每天</h2>
       <div class="legend"><span><i class="s1"></i>独立访客</span><span><i class="s2"></i>点了下载的访客</span></div>
-      <div class="chart" data-chart><svg role="img" aria-label="每天的独立访客和点了下载的访客"></svg><div class="tip" data-tip></div></div>
+      <div class="chart" data-chart><svg role="img" aria-label="每天的独立访客和点了下载的访客"></svg><div class="tip"></div></div>
       <details class="gap-s"><summary>按天看数字</summary><table data-daily></table></details>
     </div>
     <div class="cols gap">
@@ -41,9 +62,9 @@
       <div class="card"><h2>从哪里来</h2><table data-refs></table></div>
     </div>
     <p class="note">“从哪里来”只列得出能知道来源的浏览：从小红书、微信这类 App 里点开的链接不带来源。发链接时加上 <code>?from=名字</code>（比如 glancepc.com/?from=xhs），这里就会按“标记：名字”单独统计。</p>
-    <p class="note">访客按天计：同一天里同一个网络、同一个浏览器算一个人，跨天不追踪。"点了下载"是点了下载按钮，不代表下载完成或已安装。自动更新不经过官网，不在这里。</p>
+    <p class="note">访客按天计：同一天里同一个网络、同一个浏览器算一个人，跨天不追踪。"点了下载"是点了下载按钮，不代表下载完成或已安装。自动更新在上面“Glance 本身”里。</p>
   </div>
 </div>
-<script src="stats.js?v=3" defer></script>
+<script src="stats.js?v=4" defer></script>
 </body>
 </html>

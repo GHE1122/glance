@@ -3,17 +3,17 @@
 :root {
   color-scheme: light;
   --page: #f4f3f0; --surface: #fcfcfb; --rule: #e4e2dc; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #8a8983;
-  --series-1: #2a78d6; --series-2: #eb6834; --hover: rgba(0, 0, 0, 0.04);
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #2f9e6b; --hover: rgba(0, 0, 0, 0.04);
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   color-scheme: dark;
   --page: #121211; --surface: #1a1a19; --rule: #2e2e2c; --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8a8983;
-  --series-1: #3987e5; --series-2: #d95926; --hover: rgba(255, 255, 255, 0.05);
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #45b583; --hover: rgba(255, 255, 255, 0.05);
 } }
 :root[data-theme="dark"] {
   color-scheme: dark;
   --page: #121211; --surface: #1a1a19; --rule: #2e2e2c; --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8a8983;
-  --series-1: #3987e5; --series-2: #d95926; --hover: rgba(255, 255, 255, 0.05);
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #45b583; --hover: rgba(255, 255, 255, 0.05);
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.5 "Segoe UI Variable Text", "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif; }
@@ -51,7 +51,12 @@ button.go { font: inherit; padding: 7px 14px; border-radius: 8px; border: 0; bac
 details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
 .legend i.s1, .chart .l1 { background: var(--series-1); stroke: var(--series-1); }
 .legend i.s2, .chart .l2 { background: var(--series-2); stroke: var(--series-2); }
-.chart .l1, .chart .l2 { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; background: none; }
+.legend i.s3, .chart .l3 { background: var(--series-3); stroke: var(--series-3); }
+.chart .l1, .chart .l2, .chart .l3 { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; background: none; }
 .chart .d1 { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; }
 .chart .d2 { fill: var(--series-2); stroke: var(--surface); stroke-width: 2; }
+.chart .d3 { fill: var(--series-3); stroke: var(--surface); stroke-width: 2; }
+h2.part { font-size: 17px; margin: 8px 0 0; }
+tr.pick { cursor: pointer; }
+.report { margin: 12px 0 0; padding: 12px; border-radius: 8px; background: var(--page); border: 1px solid var(--rule); font: 12px/1.5 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 520px; overflow: auto; }
 .gap { margin-top: 12px; } .gap-s { margin-top: 8px; } .gap-l { margin-top: 16px; }
