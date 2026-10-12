@@ -2295,20 +2295,31 @@ impl Ui {
                 }
             }
             Target::Quit => crate::quit(),
-            // Shown whole first, in a small window that scrolls: nothing leaves this PC that was not read and agreed to.
+            // Shown whole first, every part of it: nothing leaves this PC that was not read and agreed to.
             Target::SendReport if self.sending.is_none() => {
                 let report = crate::diagnostics::report();
-                let (title, intro, yes, no) = match self.lang {
-                    Lang::Zh => ("发送诊断信息", "下面是将要发送给 Glance（glancepc.com）的全部内容：这台电脑的硬件、Glance 读到的数值和它最近的日志。不包含你的文件、账号或网络地址。你写的话和添加的截图会一起发送。", "发送", "取消"),
-                    Lang::En => ("Send diagnostics", "Below is all that would be sent to Glance (glancepc.com): this PC's hardware, what Glance reads of it, and Glance's recent log. Nothing of your files, accounts or network address. What you write and the pictures you add go with it.", "Send", "Cancel"),
+                let lang = self.lang;
+                let asked = super::ask::Asked {
+                    title: pick(lang, "发送诊断信息", "Send diagnostics"),
+                    intro: pick(
+                        lang,
+                        "下面是将要发送给 Glance（glancepc.com）的全部内容：你写的话、你添加的截图，和最下面的诊断信息（这台电脑的硬件、Glance 读到的数值和它最近的日志）。不包含你的文件、账号或网络地址。",
+                        "Below is all that would be sent to Glance (glancepc.com): what you write, the pictures you add, and the diagnostics at the bottom (this PC's hardware, what Glance reads of it, and Glance's recent log). Nothing of your files, accounts or network address.",
+                    ),
+                    own: Some(super::ask::Own {
+                        words: pick(lang, "你想说的话（可不填）", "Your own words (may be left empty)"),
+                        hint: pick(lang, "比如：主板温度没有显示；风扇转速和别的软件里看到的不一样", "For instance: the board's temperature is missing; a fan's speed is not what another program shows"),
+                        pictures: pick(lang, "截图（可不添，最多 3 张；也可以直接按 Ctrl+V 粘贴）", "Pictures (if you like, up to 3; Ctrl+V pastes one)"),
+                        add: pick(lang, "添加截图…", "Add…"),
+                        paste: pick(lang, "粘贴截图", "Paste"),
+                        kinds: pick(lang, "图片", "Pictures"),
+                    }),
+                    sent: Some((pick(lang, "诊断信息", "Diagnostics"), &report)),
+                    yes: pick(lang, "发送", "Send"),
+                    no: pick(lang, "取消", "Cancel"),
+                    dark: self.dark,
                 };
-                let own = super::ask::Own {
-                    words: pick(self.lang, "想告诉我们什么？比如哪里显示得不对、哪个读数没有（可以不填）", "Anything to tell us? What shows wrongly, which reading is missing (may be left empty)"),
-                    add: pick(self.lang, "添加截图…", "Add a picture…"),
-                    paste: pick(self.lang, "粘贴截图", "Paste one"),
-                    kinds: pick(self.lang, "图片", "Pictures"),
-                };
-                if let Some(said) = super::ask::read_and_say(self.hwnd, title, intro, Some(&own), &report, yes, no) {
+                if let Some(said) = super::ask::show(self.hwnd, &asked) {
                     // (Their words first, set off from what Glance says of the PC.)
                     let report = if said.words.is_empty() { report } else { format!("The user says: {}
 
@@ -3516,14 +3527,20 @@ impl Ui {
             // Sleep is asked about first: everything on the PC stops.
             Part::Sleep => {
                 let lang = self.lang;
-                let agreed = super::ask::read_and_agree(
-                    self.hwnd,
-                    pick(lang, "让电脑睡眠？", "Put the PC to sleep?"),
-                    pick(lang, "电脑上的一切都会停下：下载、远程连接、正在运行的程序。", "Everything on the PC stops: downloads, remote connections, programs at work."),
-                    pick(lang, "只想关屏关灯、让电脑继续运行，请用夜间模式。", "To turn off only the screens and the lights and leave the PC running, use night mode."),
-                    pick(lang, "睡眠", "Sleep"),
-                    pick(lang, "取消", "Cancel"),
-                );
+                let asked = super::ask::Asked {
+                    title: pick(lang, "让电脑睡眠？", "Put the PC to sleep?"),
+                    intro: pick(
+                        lang,
+                        "电脑上的一切都会停下：下载、远程连接、正在运行的程序。只想关屏关灯、让电脑继续运行，请用夜间模式。",
+                        "Everything on the PC stops: downloads, remote connections, programs at work. To turn off only the screens and the lights and leave the PC running, use night mode.",
+                    ),
+                    own: None,
+                    sent: None,
+                    yes: pick(lang, "睡眠", "Sleep"),
+                    no: pick(lang, "取消", "Cancel"),
+                    dark: self.dark,
+                };
+                let agreed = super::ask::show(self.hwnd, &asked).is_some();
                 if !agreed {
                     return true;
                 }

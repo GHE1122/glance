@@ -3,8 +3,8 @@
 //! what is sent may be, each with a small likeness to show in a window.
 
 use windows::core::{Interface, Result, HSTRING};
-use windows::Win32::Foundation::{GENERIC_READ, HANDLE, HGLOBAL, HWND};
-use windows::Win32::Graphics::Gdi::{CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP};
+use windows::Win32::Foundation::{GENERIC_READ, HGLOBAL, HWND};
+use windows::Win32::Graphics::Gdi::HBITMAP;
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR, GUID_WICPixelFormat32bppBGRA, IWICBitmapSource, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapEncoderNoCache,
     WICBitmapIgnoreAlpha, WICBitmapInterpolationModeFant, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
@@ -23,19 +23,13 @@ const SIDE_MOST: u32 = 2560;
 /// The most one picture may weigh as it is sent (the site keeps none heavier).
 pub const BYTES_MOST: usize = 1_400_000;
 
-/// One picture: as it is sent, and its likeness (of the size asked for, or
-/// smaller: its own shape kept).
+/// One picture: as it is sent, and its likeness (within the size asked
+/// for, its own shape kept): its pixels (BGRA, opaque) and how many across
+/// and down.
 pub struct Picture {
     pub jpeg: Vec<u8>,
-    pub small: HBITMAP,
-}
-
-impl Drop for Picture {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = DeleteObject(self.small.into());
-        }
-    }
+    pub small: Vec<u8>,
+    pub size: (u32, u32),
 }
 
 /// The picture in the file at `path`, if it is one Windows reads.
@@ -87,17 +81,15 @@ pub fn from_clipboard(owner: HWND, small: (u32, u32)) -> Vec<Picture> {
 mod tests {
     #[test]
     fn a_file_becomes_a_jpeg_and_a_likeness_within_its_room() {
-        use windows::Win32::Graphics::Gdi::{GetObjectW, BITMAP};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         let picture = super::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/website/apple-touch-icon.png"), (84, 52)).expect("read");
         assert_eq!(picture.jpeg[..3], [0xFF, 0xD8, 0xFF]);
         assert!(picture.jpeg.len() <= super::BYTES_MOST);
-        let mut small = BITMAP::default();
-        unsafe { GetObjectW(picture.small.into(), size_of::<BITMAP>() as i32, Some((&mut small as *mut BITMAP).cast())) };
         // (A square picture: as tall as its room, and as wide as it is tall.)
-        assert_eq!((small.bmWidth, small.bmHeight), (52, 52));
+        assert_eq!(picture.size, (52, 52));
+        assert_eq!(picture.small.len(), 52 * 52 * 4);
         assert!(super::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"), (84, 52)).is_none());
     }
 }
@@ -119,13 +111,9 @@ unsafe fn made(factory: &IWICImagingFactory, image: &IWICBitmapSource, small: (u
         let (likeness, (w, h)) = within(factory, image, (width, height), small)?;
         let converter = factory.CreateFormatConverter()?;
         converter.Initialize(&likeness, &GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
-        // (Its rows from the top down, as the pixels are read.)
-        let described = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: w as i32, biHeight: -(h as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() }, ..Default::default() };
-        let mut pixels = std::ptr::null_mut();
-        let small = CreateDIBSection(None, &described, DIB_RGB_COLORS, &mut pixels, Some(HANDLE::default()), 0)?;
-        let picture = Picture { jpeg, small };
-        converter.CopyPixels(std::ptr::null(), w * 4, std::slice::from_raw_parts_mut(pixels.cast::<u8>(), (w * h * 4) as usize))?;
-        Ok(picture)
+        let mut small = vec![0u8; (w * h * 4) as usize];
+        converter.CopyPixels(std::ptr::null(), w * 4, &mut small)?;
+        Ok(Picture { jpeg, small, size: (w, h) })
     }
 }
 
