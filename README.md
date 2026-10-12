@@ -129,7 +129,8 @@ DirectComposition. About 55 MB of memory and well under 1% of a CPU core
 while the panel is hidden. No account, no ads, and no network access but
 one daily question about a newer version (to Glance's own site, and to
 GitHub and Gitee), which the settings can turn off; the diagnostics you choose to send from the
-settings (shown to you whole first); and the phone remote, if you turn it
+settings (shown to you whole first, with a few words of your own and
+screenshots if you like); and the phone remote, if you turn it
 on.
 
 ## Install

@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "glance-remote"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "getrandom",
  "hmac",
