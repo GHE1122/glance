@@ -228,6 +228,9 @@ pub struct GpuSample {
     pub mem_used: Option<u64>,
     pub shared_used: Option<u64>,
     pub temp: Option<f32>,
+    /// How warm the warmest point of its chip is (°C), where its driver
+    /// says that apart from its temperature.
+    pub hot_spot: Option<f32>,
     pub clock_mhz: Option<f32>,
     pub fan_rpm: Option<u32>,
     /// Watts, as a discrete card's driver reports them.

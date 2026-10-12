@@ -83,9 +83,10 @@ fn readings(sample: &Sample, info: &StaticInfo) -> Vec<String> {
     ];
     for (reading, gpu) in sample.gpus.iter().zip(&info.gpus) {
         lines.push(format!(
-            "{}: temperature {}, clock {}, fan {}, power {}",
+            "{}: temperature {}, hot spot {}, clock {}, fan {}, power {}",
             gpu.name,
             value(reading.temp, "°C"),
+            value(reading.hot_spot, "°C"),
             value(reading.clock_mhz, "MHz"),
             reading.fan_rpm.map_or("not read".into(), |rpm| format!("{rpm} RPM")),
             value(reading.power, "W"),

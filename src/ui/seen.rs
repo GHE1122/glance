@@ -50,6 +50,7 @@ pub struct Seen {
 pub struct GpuSeen {
     pub present: bool,
     pub temp: bool,
+    pub hot_spot: bool,
     pub clock: bool,
     pub power: bool,
     pub fan: bool,
@@ -86,6 +87,7 @@ impl Seen {
         for (seen, gpu) in self.gpus.iter_mut().zip(&s.gpus) {
             seen.present = true;
             seen.temp |= gpu.temp.is_some();
+            seen.hot_spot |= gpu.hot_spot.is_some();
             seen.clock |= gpu.clock_mhz.is_some();
             seen.power |= gpu.power.is_some();
             seen.fan |= gpu.fan_rpm.is_some();
@@ -164,6 +166,7 @@ impl Seen {
                 let (ours, theirs) = (self.gpus.get(index).cloned().unwrap_or_default(), other.gpus.get(index).cloned().unwrap_or_default());
                 flag(ours.present, theirs.present, Item::Gpu(index, GpuItem::Present));
                 flag(ours.temp, theirs.temp, Item::Gpu(index, GpuItem::Temp));
+                flag(ours.hot_spot, theirs.hot_spot, Item::Gpu(index, GpuItem::HotSpot));
                 flag(ours.clock, theirs.clock, Item::Gpu(index, GpuItem::Clock));
                 flag(ours.power, theirs.power, Item::Gpu(index, GpuItem::Power));
                 flag(ours.fan, theirs.fan, Item::Gpu(index, GpuItem::Fan));
@@ -241,6 +244,7 @@ impl Seen {
                 match gpu {
                     GpuItem::Present => ours.present = true,
                     GpuItem::Temp => ours.temp = true,
+                    GpuItem::HotSpot => ours.hot_spot = true,
                     GpuItem::Clock => ours.clock = true,
                     GpuItem::Power => ours.power = true,
                     GpuItem::Fan => ours.fan = true,
@@ -288,6 +292,7 @@ pub enum Item {
 pub enum GpuItem {
     Present,
     Temp,
+    HotSpot,
     Clock,
     Power,
     Fan,

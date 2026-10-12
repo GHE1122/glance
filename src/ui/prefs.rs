@@ -56,9 +56,10 @@ const fn item(name: &'static str, on: bool) -> Item {
 
 // The items of each kind of module, in the order the settings list them.
 const CPU: [Item; 6] = [item("chart", true), item("temp", true), item("clock", true), item("power", true), item("ccds", true), item("threads", true)];
-const GPU: [Item; 8] = [
+const GPU: [Item; 9] = [
     item("chart", true),
     item("temp", true),
+    item("hotspot", true),
     item("vram", true),
     item("clock", true),
     item("power", true),

@@ -787,6 +787,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
                 mem_used: Some(((0.12 + 0.55 * g) * gpu.mem_total as f32) as u64),
                 shared_used: Some((0.2 * gb as f32) as u64),
                 temp: Some(36.0 + 34.0 * g + 1.5 * noise()),
+                hot_spot: None,
                 clock_mhz: Some(if g > 0.05 { 2400.0 + 300.0 * g + 30.0 * noise() } else { 210.0 + 40.0 * noise() }),
                 // A card whose fans turn even at rest, so that its lane
                 // keeps its rows through a shot.

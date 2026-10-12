@@ -34,6 +34,8 @@ pub enum Reader {
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct More {
     pub temp: Option<f32>,
+    /// The warmest point of the chip, where the library says it apart.
+    pub hot_spot: Option<f32>,
     pub clock_mhz: Option<f32>,
     pub fan_rpm: Option<u32>,
 }
@@ -52,6 +54,7 @@ impl Reader {
 /// The vendors' libraries, those the machine has.
 pub struct GpuPower {
     nvml: Option<Nvml>,
+    nvapi: Option<Nvapi>,
     adl: Option<Adl>,
     igcl: Option<Igcl>,
 }
@@ -61,7 +64,7 @@ unsafe impl Send for GpuPower {}
 
 impl GpuPower {
     pub fn open() -> Self {
-        GpuPower { nvml: Nvml::open(), adl: Adl::open(), igcl: Igcl::open() }
+        GpuPower { nvml: Nvml::open(), nvapi: Nvapi::open(), adl: Adl::open(), igcl: Igcl::open() }
     }
 
     /// How to read the discrete card at `address`, if its driver says.
@@ -72,11 +75,17 @@ impl GpuPower {
         nvidia.map(Reader::Nvidia).or_else(|| amd().map(Reader::Amd)).or_else(|| intel().map(Reader::Intel))
     }
 
-    /// What else the card's maker's library says of it now (only Intel's is asked).
+    /// What else the card's maker's library says of it now: Intel's, all
+    /// that Windows does not have of its graphics; NVIDIA's and AMD's, the
+    /// warmest point of the chip, on the cards that say it.
     pub fn more(&self, reader: Reader) -> Option<More> {
         match reader {
             Reader::Intel(index) => self.igcl.as_ref()?.more(index),
-            _ => None,
+            Reader::Nvidia(index) => {
+                let at = self.nvml.as_ref()?.devices.get(index)?.0;
+                Some(More { hot_spot: self.nvapi.as_ref()?.hot_spot(at), ..More::default() })
+            }
+            Reader::Amd(index) => Some(More { hot_spot: self.adl.as_ref()?.hot_spot(index), ..More::default() }),
         }
     }
 
@@ -227,6 +236,100 @@ impl Drop for Nvml {
     }
 }
 
+// ---- NVIDIA: NVAPI, for what NVML does not have ----
+//
+// The warmest point of a card's chip is not in NVML, nor in what NVIDIA
+// documents of NVAPI: it is asked for as other monitors ask for it, by the
+// call that reads all of the card's thermal sensors, of which the second is
+// that point on the cards before the RTX 50 series. From that series on the
+// driver no longer tells it (the second sensor there is the chip's
+// temperature again: seen on an RTX 5070 Ti, driver 617.14), so those cards
+// are not asked.
+
+const NVAPI_OK: i32 = 0;
+/// The first architecture whose cards do not tell their hot spot (the RTX 50 series').
+const NV_ARCHITECTURE_UNTOLD_FROM: u32 = 0x1B0;
+/// Which of the thermal sensors the hot spot is, and what a sensor with nothing to say reads.
+const NV_HOT_SPOT: usize = 1;
+const NV_NOTHING: i32 = 255 * 256;
+
+#[repr(C)]
+struct NvThermalSensors {
+    version: u32,
+    mask: u32,
+    reserved: [i32; 8],
+    /// In 1/256 °C.
+    temperatures: [i32; 32],
+}
+
+#[repr(C)]
+struct NvArchitecture {
+    version: u32,
+    architecture: u32,
+    implementation: u32,
+    revision: u32,
+}
+
+struct Nvapi {
+    sensors: unsafe extern "C" fn(*mut c_void, *mut NvThermalSensors) -> i32,
+    /// The cards that tell their hot spot, by where each sits.
+    devices: Vec<(PciAddress, *mut c_void)>,
+}
+
+impl Nvapi {
+    fn open() -> Option<Self> {
+        let library = system_library(windows::core::w!("nvapi64.dll"))?;
+        let opened = unsafe { Self::start(library) };
+        if opened.is_none() {
+            let _ = unsafe { FreeLibrary(library) };
+        }
+        opened
+    }
+
+    unsafe fn start(library: HMODULE) -> Option<Self> {
+        // Every function is had from the one the library exports, by a number of its own.
+        let query: unsafe extern "C" fn(u32) -> *const c_void = unsafe { export(library, s!("nvapi_QueryInterface")) }?;
+        unsafe fn had<F>(query: unsafe extern "C" fn(u32) -> *const c_void, number: u32) -> Option<F> {
+            let address = unsafe { query(number) };
+            (!address.is_null()).then(|| unsafe { std::mem::transmute_copy(&address) })
+        }
+        let initialize: unsafe extern "C" fn() -> i32 = unsafe { had(query, 0x0150_E828) }?;
+        let enumerate: unsafe extern "C" fn(*mut [*mut c_void; 64], *mut u32) -> i32 = unsafe { had(query, 0xE5AC_921F) }?;
+        let bus: unsafe extern "C" fn(*mut c_void, *mut u32) -> i32 = unsafe { had(query, 0x1BE0_B8E5) }?;
+        let slot: unsafe extern "C" fn(*mut c_void, *mut u32) -> i32 = unsafe { had(query, 0x2A0A_350F) }?;
+        let architecture: unsafe extern "C" fn(*mut c_void, *mut NvArchitecture) -> i32 = unsafe { had(query, 0xD826_5D24) }?;
+        let sensors = unsafe { had(query, 0x65FE_3AAD) }?;
+        if unsafe { initialize() } != NVAPI_OK {
+            return None;
+        }
+        let mut found = Nvapi { sensors, devices: Vec::new() };
+        let (mut cards, mut count) = ([std::ptr::null_mut(); 64], 0u32);
+        if unsafe { enumerate(&mut cards, &mut count) } != NVAPI_OK {
+            return Some(found);
+        }
+        for card in cards.into_iter().take(count as usize) {
+            let mut about = NvArchitecture { version: size_of::<NvArchitecture>() as u32 | 2 << 16, architecture: 0, implementation: 0, revision: 0 };
+            let (mut on_bus, mut in_slot) = (0u32, 0u32);
+            let known = unsafe { architecture(card, &mut about) == NVAPI_OK && bus(card, &mut on_bus) == NVAPI_OK && slot(card, &mut in_slot) == NVAPI_OK };
+            if known && about.architecture < NV_ARCHITECTURE_UNTOLD_FROM {
+                found.devices.push(((on_bus, in_slot, 0), card));
+            }
+        }
+        Some(found)
+    }
+
+    /// The warmest point of the chip of the card at `at` (°C), if it is one that tells it.
+    fn hot_spot(&self, at: PciAddress) -> Option<f32> {
+        let card = self.devices.iter().find(|(theirs, _)| *theirs == at)?.1;
+        let mut read = NvThermalSensors { version: size_of::<NvThermalSensors>() as u32 | 2 << 16, mask: 1 << NV_HOT_SPOT, reserved: [0; 8], temperatures: [0; 32] };
+        let told = unsafe { (self.sensors)(card, &mut read) } == NVAPI_OK;
+        let raw = read.temperatures[NV_HOT_SPOT];
+        (told && raw > 0 && raw < NV_NOTHING).then(|| raw as f32 / 256.0)
+    }
+}
+
+// (The library is left loaded: it has no call to close what `initialize` opened that every driver has.)
+
 // ---- AMD: ADL (adl_sdk.h, adl_structures.h, adl_defines.h) ----
 
 const ADL_OK: i32 = 0;
@@ -236,6 +339,7 @@ const ADL_PMLOG_MAX_SENSORS: usize = 256;
 /// The whole board's power, on newer cards; the chip's alone, on the rest.
 const PMLOG_BOARD_POWER: usize = 73;
 const PMLOG_ASIC_POWER: usize = 23;
+const PMLOG_TEMPERATURE_HOTSPOT: usize = 27;
 /// AMD's PCI vendor id 1002h, as ADL writes it: the hex digits read as a
 /// decimal number (AMD's sample compares with 1002; ADL also lists other
 /// makers' cards, an NVIDIA one as 10).
@@ -344,6 +448,17 @@ impl Adl {
             .map(|sensor| data.sensors[sensor])
             .find(|(supported, _)| *supported != 0)
             .map(|(_, watts)| watts as f32)
+    }
+
+    /// The warmest point of the card's chip (°C), where its driver logs it.
+    fn hot_spot(&self, index: usize) -> Option<f32> {
+        let adapter = self.adapters.get(index)?.1;
+        let mut data = PmLogData { size: size_of::<PmLogData>() as i32, sensors: [(0, 0); ADL_PMLOG_MAX_SENSORS] };
+        if unsafe { (self.query)(self.context, adapter, &mut data) } != ADL_OK {
+            return None;
+        }
+        let (supported, celsius) = data.sensors[PMLOG_TEMPERATURE_HOTSPOT];
+        (supported != 0 && celsius > 0).then_some(celsius as f32)
     }
 }
 
@@ -560,6 +675,8 @@ impl Igcl {
     fn more(&self, index: usize) -> Option<More> {
         let read = self.read(index)?;
         Some(More {
+            // (The temperature it gives is its warmest sensor's: no other to tell apart from it.)
+            hot_spot: None,
             temp: read.gpu_temperature.number().filter(|celsius| *celsius > 0.0).map(|celsius| celsius as f32),
             clock_mhz: read.gpu_clock.number().filter(|mhz| *mhz > 0.0).map(|mhz| mhz as f32),
             fan_rpm: read.fans.iter().filter_map(CtlItem::number).find(|rpm| *rpm > 0.0).map(|rpm| rpm as u32),
@@ -595,6 +712,7 @@ mod tests {
         assert_eq!(size_of::<CtlTelemetry>(), 8 + 8 * 24 + 8 + 7 * 24 + 8 + 24 + 5 * 56 + 5 * 24 + 9 * 24);
         assert_eq!(std::mem::offset_of!(CtlAdapterProperties, pci_vendor_id), 8 + 8 + 4 + 4 + 4 + 4 + 8 + 24);
         assert_eq!(std::mem::offset_of!(CtlAdapterProperties, bdf), 64 + 6 * 4 + 100 + 4 + 4 + 2 + 2);
+        assert_eq!((size_of::<NvThermalSensors>(), size_of::<NvArchitecture>()), (168, 16));
         // (And as a program compiled against the header itself says they are.)
         assert_eq!((size_of::<CtlTelemetry>(), size_of::<CtlAdapterProperties>()), (1024, 320));
         assert_eq!(std::mem::offset_of!(CtlTelemetry, time_stamp), 8);
@@ -639,6 +757,10 @@ mod tests {
             for (index, (at, _)) in nvml.devices.iter().enumerate() {
                 println!("NVIDIA at {at:?}: {:?} W, held back by {:?}", nvml.power(index), nvml.limit(index));
             }
+        }
+        match &power.nvapi {
+            Some(nvapi) => println!("NVIDIA cards that tell their hot spot: {:?}", nvapi.devices.iter().map(|(at, _)| (at, nvapi.hot_spot(*at))).collect::<Vec<_>>()),
+            None => println!("NVAPI: not there"),
         }
         if let Some(adl) = &power.adl {
             println!("AMD discrete cards: {:?}", adl.adapters.iter().map(|(at, _)| at).collect::<Vec<_>>());

@@ -442,6 +442,11 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 }
             }
             let mut facts = Vec::new();
+            // (The warmest point of the chip, on the cards that say it apart: red as the temperature is.)
+            if on("hotspot") && had.hot_spot {
+                let hot_spot = reading.and_then(|g| g.hot_spot);
+                facts.push((lang.pick("热点温度", "Hot spot").into(), shown(hot_spot, celsius), hot_spot.is_some_and(|t| t > scene.prefs.hot_temp)));
+            }
             if on("clock") && had.clock {
                 facts.push((lang.pick("频率", "Clock").into(), shown(reading.and_then(|g| g.clock_mhz), |clock| format!("{clock:.0} MHz")), false));
             }
@@ -1689,7 +1694,7 @@ mod tests {
             kinds_ghz: Vec::new(),
             threads_ghz: Vec::new(),
             memory: MemorySample { used: 1 << 30, committed: 1 << 30, commit_limit: 1 << 31, cached: 0 },
-            gpus: vec![GpuSample { usage: Some(5.0), engines: Some(Vec::new()), mem_used: Some(0), shared_used: Some(0), temp: Some(50.0), clock_mhz: clock, fan_rpm: None, power: None }],
+            gpus: vec![GpuSample { usage: Some(5.0), engines: Some(Vec::new()), mem_used: Some(0), shared_used: Some(0), temp: Some(50.0), hot_spot: None, clock_mhz: clock, fan_rpm: None, power: None }],
             net_down: Some(0.0),
             net_up: Some(0.0),
             net_total_down: 0,

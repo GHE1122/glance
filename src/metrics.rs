@@ -501,6 +501,7 @@ impl Sampler {
                     mem_used: dedicated.as_ref().and_then(|used| used.get(&adapter.luid).copied().unwrap_or(Some(0))),
                     shared_used: shared.as_ref().and_then(|used| used.get(&adapter.luid).copied().unwrap_or(Some(0))),
                     temp: None,
+                    hot_spot: None,
                     fan_rpm: None,
                     clock_mhz: None,
                     power: None,
@@ -561,6 +562,7 @@ impl Sampler {
         let more = adapter.power.and_then(|reader| self.gpu_power.more(reader)).unwrap_or_default();
         GpuSample {
             temp: perf.and_then(|p| (p.Temperature != 0).then(|| p.Temperature as f32 / 10.0)).or(more.temp),
+            hot_spot: more.hot_spot,
             fan_rpm: perf.and_then(|p| (p.FanRPM != 0).then_some(p.FanRPM)).or(more.fan_rpm),
             clock_mhz: graphics_clock(adapter.kmt_handle).or(more.clock_mhz),
             power: adapter.power.and_then(|reader| self.gpu_power.read(reader)),

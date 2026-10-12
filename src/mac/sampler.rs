@@ -502,6 +502,7 @@ fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
                 mem_used: iokit::number(&statistics, "In use system memory").map(|used| used.max(0) as u64),
                 shared_used: Some(0),
                 temp: None,
+                hot_spot: None,
                 clock_mhz: None,
                 fan_rpm: None,
                 power: None,
@@ -515,7 +516,7 @@ fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
 
 /// The readings of a GPU that is not there to read: none.
 fn unread_gpu() -> GpuSample {
-    GpuSample { usage: None, engines: None, mem_used: None, shared_used: None, temp: None, clock_mhz: None, fan_rpm: None, power: None }
+    GpuSample { usage: None, engines: None, mem_used: None, shared_used: None, temp: None, hot_spot: None, clock_mhz: None, fan_rpm: None, power: None }
 }
 
 /// Bytes read and written by every drive, from their drivers' statistics;
