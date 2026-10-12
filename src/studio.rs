@@ -938,3 +938,136 @@ fn save_png(path: &PathBuf, width: u32, height: u32, pixels: &[u8]) -> windows::
     }
     Ok(())
 }
+
+/// Times a widget's frames on a window of its own, over the picture at
+/// `wallpaper` as the desktop: each form on glass, left alone, with a new
+/// sample every frame, and moved; each frame's time part by part (the
+/// surface given, the ground, the readings, the surface handed back), the
+/// middle one of them and the slowest twentieth's. Once as the widget
+/// draws, and once with what was drawn sent to the graphics card after each
+/// part, so that each part's time is its own.
+pub fn frames(wallpaper: &str) -> Result<(), String> {
+    use std::time::{Duration, Instant};
+    use windows::core::w;
+    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE};
+    let (width, height, px) = (2560u32, 1440u32, 1.5f32);
+    let info = crate::metrics::Sampler::new().info;
+    let gfx = Gfx::new().map_err(|e| e.to_string())?;
+    let desktop = wallpaper::picture(wallpaper, width, height).map_err(|e| format!("{wallpaper}: {e}"))?;
+    let mut known = vec!["game".to_string(), "cpu".to_string()];
+    known.extend(info.gpu_modules());
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "wsl", "docker"].map(String::from));
+    let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
+    let history: Vec<Sample> = (0..400).map(|i| made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None)).collect();
+    let theme = Theme::new(Skin::Glass, true);
+    let work = (width as f32 / px, height as f32 / px);
+    let window = unsafe { CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, w!("STATIC"), None, WS_POPUP | WS_VISIBLE, 200, 200, 1400, 1200, None, None, None, None) }.map_err(|e| e.to_string())?;
+    let mut surface = crate::ui::gfx::Surface::new(&gfx, window).map_err(|e| e.to_string())?;
+    let forms = [
+        ("strip", Form::Small(Small::Strip { rich: true })),
+        ("corner", Form::Small(Small::Corner)),
+        ("tiles", Form::Small(Small::Tiles { across: 3, down: 2 })),
+        ("compact-2", Form::Lanes { detail: view::Detail::Compact, columns: 2 }),
+    ];
+    println!("{:<10} {:<7} {:<6} {:>7} {:>7} {:>7} {:>7} {:>7}   (ms: middle / slowest twentieth)", "form", "frames", "sent", "given", "ground", "reads", "handed", "all");
+    for (name, form) in forms {
+        for sent in [false, true] {
+            for case in ["still", "sample", "moved", "rough", "second"] {
+                let mut filming = Filming::new(Choice { form, scale: 0.79, extra: (0.0, 0.0) }, (40.0, 40.0));
+                let mut bitmap = None;
+                let mut times: Vec<[Duration; 5]> = Vec::new();
+                // (A sample a second, as a widget on the desktop has them: the frames a second apart.)
+                let paced = matches!(case, "second" | "cleared" | "trimmed");
+                let rounds = if paced { 14 } else { 150 };
+                for round in 0..rounds {
+                    if paced {
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                    // (As the panel does once its ground is drawn, and as it does shut.)
+                    match case {
+                        "cleared" => gfx.clear_caches(),
+                        "trimmed" => gfx.trim(),
+                        _ => {}
+                    }
+                    let read = if case == "sample" || paced { 200 + round } else { 200 };
+                    let seen = Seen::of(&history[..read]);
+                    let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history[..read], seen: &seen, pen_ms: history[read - 1].t as f64 - 1000.0 - PEN_LAG_MS, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: false, newer: false };
+                    let shown = filming.lay_out(0.0, &scene, &theme, &seen, work, None);
+                    let zoom = shown.zoom;
+                    let at = if case == "moved" || case == "rough" { (40.0 + round as f32 * 2.0, 40.0 + round as f32) } else { (40.0, 40.0) };
+                    let lanes = view::lanes_at(&scene, |_| shown.detail);
+                    let (mut ground, mut reads) = (Duration::ZERO, Duration::ZERO);
+                    let began = Instant::now();
+                    let layers = &mut filming.layers;
+                    let size = filming.surface;
+                    let drawn = surface.draw(&gfx, (1400, 1200), px, |frame| {
+                        if bitmap.is_none() {
+                            bitmap = desktop.bitmap(&frame.dc, px * zoom).ok();
+                        }
+                        let backdrop = bitmap.as_ref().map(|bitmap| (bitmap, Vector2 { X: at.0 / zoom, Y: at.1 / zoom }, desktop.digest, px * zoom));
+                        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &shown.layout, small: shown.small.map(|small| (small, shown.size)), size, at: (0.0, 0.0), edge: None, backdrop, frost: 0.5, rough: case == "rough" };
+                        let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(at.0, at.1);
+                        let from = Instant::now();
+                        let _ = layers.draw_ground(frame, &picture, local, px * zoom);
+                        if sent {
+                            let _ = unsafe { frame.dc.Flush(None, None) };
+                        }
+                        ground = from.elapsed();
+                        let from = Instant::now();
+                        let _ = layers.draw(frame, &picture, local, px * zoom);
+                        if sent {
+                            let _ = unsafe { frame.dc.Flush(None, None) };
+                        }
+                        reads = from.elapsed();
+                    });
+                    drawn.map_err(|e| e.to_string())?;
+                    gfx.sweep();
+                    // (The first frames make what the later ones keep.)
+                    if round >= 10 || (paced && round >= 2) {
+                        times.push([surface.took.given, ground, reads, surface.took.handed, began.elapsed()]);
+                    }
+                }
+                let of = |part: usize| {
+                    let mut all: Vec<f64> = times.iter().map(|time| time[part].as_secs_f64() * 1000.0).collect();
+                    all.sort_by(f64::total_cmp);
+                    format!("{:.1}/{:.1}", all[all.len() / 2], all[all.len() * 19 / 20])
+                };
+                println!("{:<10} {:<7} {:<6} {:>7} {:>7} {:>7} {:>7} {:>7}", name, case, if sent { "each" } else { "-" }, of(0), of(1), of(2), of(3), of(4));
+            }
+        }
+    }
+    unsafe {
+        let _ = DestroyWindow(window);
+    }
+    Ok(())
+}
+
+/// The phone's page as the settings draw it, for a PC whose lights are on,
+/// with the ring a colour is made on open: one picture of each stretch of
+/// the page, in `out`.
+pub fn phone_page(out: &Path) -> Result<(), String> {
+    use crate::ui::phone_art::{self, Making, SCREEN};
+    let info = crate::metrics::Sampler::new().info;
+    let gfx = Gfx::new().map_err(|e| e.to_string())?;
+    let sample = made_up(&info, 1_760_000_000_000.0, 7, 0.4, None);
+    let reads = crate::remote::figures(&sample, &info);
+    let state = serde_json::json!({
+        "night": false, "screen": true, "lights": true, "lights_there": true, "colours_there": true,
+        "light": { "color": "3CE0A0", "effect": "steady", "brightness": 80 },
+        "power": [{ "id": "efficiency", "name": "", "on": false }, { "id": "balanced", "name": "", "on": true }, { "id": "performance", "name": "", "on": false }],
+        "monitors": [], "volume": 40, "muted": false, "media": null, "keys": null,
+    });
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let px = 2.0;
+    let (w, h) = ((SCREEN.0 * px) as u32, (SCREEN.1 * px) as u32);
+    let making = Making { was: "3CE0A0".into(), hue: 210.0, depth: 0.6 };
+    for (name, making, scroll) in [("shut", None, 0.0), ("ring", Some(&making), 330.0), ("ring-top", Some(&making), 0.0)] {
+        let pixels = gfx
+            .draw_offscreen((w, h), px, |frame| {
+                phone_art::paint(frame, view::Rect { x: 0.0, y: 0.0, w: SCREEN.0, h: SCREEN.1 }, Lang::Zh, "DESKTOP", &reads, Some(&state), false, 3.0, scroll, None, making);
+            })
+            .map_err(|e| e.to_string())?;
+        save_png(&out.join(format!("{name}.png")), w, h, &pixels).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}

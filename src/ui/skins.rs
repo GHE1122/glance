@@ -80,12 +80,32 @@ pub struct Ground<'a> {
     pub frost: f32,
 }
 
-/// Draws the surface with the panel's corner at the frame's origin.
-pub fn draw(frame: &Frame, ground: &Ground) -> Result<()> {
+/// The parts a surface is drawn in, one over the other: what lies under
+/// the desktop it shows (its shadows), the desktop as it shows it, and
+/// what lies over that (its tint, the light on its edges). Only the middle
+/// one changes as the surface is moved over the desktop: the others are
+/// drawn once for a shape and kept.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Part {
+    Under,
+    Desktop,
+    Over,
+}
+
+/// The parts a skin's surface has, from the lowest.
+pub fn parts(skin: Skin) -> &'static [Part] {
+    match skin {
+        Skin::Paper => &[Part::Under],
+        Skin::Fluent | Skin::Glass => &[Part::Under, Part::Desktop, Part::Over],
+    }
+}
+
+/// Draws `part` of the surface with the panel's corner at the frame's origin.
+pub fn draw(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
     match ground.theme.skin {
         Skin::Paper => paper(frame, ground),
-        Skin::Fluent => fluent(frame, ground),
-        Skin::Glass => glass(frame, ground),
+        Skin::Fluent => fluent(frame, ground, part),
+        Skin::Glass => glass(frame, ground, part),
     }
 }
 
@@ -298,14 +318,17 @@ fn paper(frame: &Frame, ground: &Ground) -> Result<()> {
 /// little more saturated; a luminosity layer that evens out how bright it
 /// is; and a thin tint. (Windows adds a faint grain; on a dark sheet it
 /// read as noise, so the sheet goes without.)
-fn fluent(frame: &Frame, ground: &Ground) -> Result<()> {
+fn fluent(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
     let theme = ground.theme;
     let sheet = Rect { x: 0.0, y: 0.0, w: ground.size.0, h: ground.size.1 };
-    shadows(frame, &[(sheet, theme.radius)], &theme.shadows)?;
-    unsafe { frame.dc.FillRoundedRectangle(&rounded(grow(sheet, 1.0), theme.radius + 1.0), frame.brush(theme.stroke)) };
-    within(frame, sheet, theme.radius, || {
-        let area = D2D_RECT_F { left: 0.0, top: 0.0, right: sheet.w, bottom: sheet.h };
-        match ground.backdrop.map(|backdrop| acrylic(frame, backdrop, sheet, theme.luminosity)) {
+    let area = D2D_RECT_F { left: 0.0, top: 0.0, right: sheet.w, bottom: sheet.h };
+    match part {
+        Part::Under => {
+            shadows(frame, &[(sheet, theme.radius)], &theme.shadows)?;
+            unsafe { frame.dc.FillRoundedRectangle(&rounded(grow(sheet, 1.0), theme.radius + 1.0), frame.brush(theme.stroke)) };
+            Ok(())
+        }
+        Part::Desktop => within(frame, sheet, theme.radius, || match ground.backdrop.map(|backdrop| acrylic(frame, backdrop, sheet, theme.luminosity)) {
             Some(Ok((acrylic, luminous))) => {
                 draw_image(frame, &acrylic, Vector2::zero());
                 // The luminosity layer, at its own opacity, over the acrylic:
@@ -320,20 +343,22 @@ fn fluent(frame: &Frame, ground: &Ground) -> Result<()> {
             // Nothing captured: the luminosity layer alone, as if over a
             // backdrop of its own colour.
             _ => unsafe { frame.dc.FillRectangle(&area, frame.brush(Color { a: 1.0, ..theme.luminosity })) },
-        }
-        unsafe { frame.dc.FillRectangle(&area, frame.brush(theme.tint)) };
-        // Each lane on its card (not a small layout's one piece: the sheet
-        // is its card).
-        if theme.card.a > 0.0 {
-            for lane in ground.lanes.iter().filter(|lane| lane.w < sheet.w || lane.h < sheet.h) {
-                let card = rounded(*lane, CARD_RADIUS);
-                unsafe {
-                    frame.dc.FillRoundedRectangle(&card, frame.brush(theme.card));
-                    frame.dc.DrawRoundedRectangle(&rounded(grow(*lane, -0.5), CARD_RADIUS), frame.brush(theme.card_stroke), 1.0, None);
+        }),
+        Part::Over => within(frame, sheet, theme.radius, || {
+            unsafe { frame.dc.FillRectangle(&area, frame.brush(theme.tint)) };
+            // Each lane on its card (not a small layout's one piece: the sheet
+            // is its card).
+            if theme.card.a > 0.0 {
+                for lane in ground.lanes.iter().filter(|lane| lane.w < sheet.w || lane.h < sheet.h) {
+                    let card = rounded(*lane, CARD_RADIUS);
+                    unsafe {
+                        frame.dc.FillRoundedRectangle(&card, frame.brush(theme.card));
+                        frame.dc.DrawRoundedRectangle(&rounded(grow(*lane, -0.5), CARD_RADIUS), frame.brush(theme.card_stroke), 1.0, None);
+                    }
                 }
             }
-        }
-    })
+        }),
+    }
 }
 
 /// Windows 11's cards' corners.
@@ -367,15 +392,20 @@ fn acrylic(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2, f32), sheet: Rect, 
 /// 磨砂玻璃: every lane and the bar a piece of glass. Each bends the desktop
 /// at its rim, frosts it as much as legibility needs, takes the theme's
 /// tint, glows faintly inside its edge and catches light along it.
-fn glass(frame: &Frame, ground: &Ground) -> Result<()> {
+fn glass(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
     let theme = ground.theme;
     let pieces: Vec<(Rect, f32)> = ground.lanes.iter().chain([&ground.bar]).filter(|r| r.w > 0.0 && r.h > 0.0).map(|r| (*r, theme.radius)).collect();
-    shadows(frame, &pieces, &theme.shadows)?;
+    if part == Part::Under {
+        return shadows(frame, &pieces, &theme.shadows);
+    }
     let tint = theme.glass.alpha(theme.glass_clear + theme.glass_frosted * ground.frost);
     for (piece, radius) in &pieces {
-        if let Some(backdrop) = ground.backdrop {
-            let lens = lens(frame, backdrop, *piece, *radius, ground.frost * FROST_BLUR)?;
-            within(frame, *piece, *radius, || draw_image(frame, &lens, Vector2::zero()))?;
+        if part == Part::Desktop {
+            if let Some(backdrop) = ground.backdrop {
+                let lens = lens(frame, backdrop, *piece, *radius, ground.frost * FROST_BLUR)?;
+                within(frame, *piece, *radius, || draw_image(frame, &lens, Vector2::zero()))?;
+            }
+            continue;
         }
         unsafe { frame.dc.FillRoundedRectangle(&rounded(*piece, *radius), frame.brush(tint)) };
         // Light caught just inside the edge: strongest from above.

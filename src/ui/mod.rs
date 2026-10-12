@@ -17,7 +17,7 @@ pub mod menu;
 pub mod morph;
 pub mod motion;
 pub mod overlay;
-mod phone_art;
+pub mod phone_art;
 pub mod prefs;
 pub mod seen;
 #[cfg(windows)]

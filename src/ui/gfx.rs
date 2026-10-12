@@ -674,7 +674,7 @@ impl<'a> Frame<'a> {
     }
 
     /// A brush fading from `from` at `start` to `to` at `end`.
-    fn gradient(&self, start: Vector2, from: Color, end: Vector2, to: Color) -> Option<windows::Win32::Graphics::Direct2D::ID2D1Brush> {
+    pub(super) fn gradient(&self, start: Vector2, from: Color, end: Vector2, to: Color) -> Option<windows::Win32::Graphics::Direct2D::ID2D1Brush> {
         let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: from.d2d() }, D2D1_GRADIENT_STOP { position: 1.0, color: to.d2d() }];
         unsafe {
             let collection = ID2D1RenderTarget::CreateGradientStopCollection(&self.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()?;
@@ -810,6 +810,18 @@ pub struct Surface {
     visual: IDCompositionVisual2,
     surface: Option<IDCompositionSurface>,
     size: (u32, u32),
+    /// How long the last frame drawn on it took, part by part.
+    pub took: Took,
+}
+
+/// A frame's time on a surface: till the compositor gave the surface to
+/// draw on, what was drawn on it, and till it was handed back and the
+/// compositor told.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Took {
+    pub given: std::time::Duration,
+    pub painted: std::time::Duration,
+    pub handed: std::time::Duration,
 }
 
 impl Surface {
@@ -817,7 +829,7 @@ impl Surface {
         let target = unsafe { gfx.dcomp.CreateTargetForHwnd(hwnd, true)? };
         let visual: IDCompositionVisual2 = unsafe { gfx.dcomp.CreateVisual()? };
         unsafe { target.SetRoot(&visual)? };
-        Ok(Surface { _target: target, visual, surface: None, size: (0, 0) })
+        Ok(Surface { _target: target, visual, surface: None, size: (0, 0), took: Default::default() })
     }
 
     /// Draws one frame, at `scale` physical pixels per DIP, on a surface
@@ -838,12 +850,17 @@ impl Surface {
         }
         let surface = self.surface.as_ref().unwrap();
         let mut offset = POINT::default();
+        let began = std::time::Instant::now();
         let dc: ID2D1DeviceContext = unsafe { surface.BeginDraw(None, &mut offset)? };
-        paint(&Frame::begun(gfx, dc, offset, scale)?);
+        let frame = Frame::begun(gfx, dc, offset, scale)?;
+        let given = began.elapsed();
+        paint(&frame);
+        let painted = began.elapsed();
         unsafe {
             surface.EndDraw()?;
             gfx.dcomp.Commit()?;
         }
+        self.took = Took { given, painted: painted - given, handed: began.elapsed() - painted };
         Ok(())
     }
 

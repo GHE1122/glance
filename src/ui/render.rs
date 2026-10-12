@@ -48,21 +48,22 @@ pub struct Drawn {
     pub grounded: bool,
 }
 
-/// The panel's two cached layers: what the skin puts behind the readings,
-/// and the readings but for the charts, which alone move between samples.
+/// The panel's cached layers: what the skin puts behind the readings, in
+/// the parts it has (see `skins::Part`: only the desktop it shows is drawn
+/// again as it moves over the desktop), and the readings but for the
+/// charts, which alone move between samples.
 #[derive(Default)]
 pub struct PanelLayers {
-    ground: Layer,
+    ground: [Layer; 3],
     content: Layer,
 }
 
 impl PanelLayers {
     /// Draws what the skin puts behind the panel's readings (see `draw`);
-    /// whether it was drawn afresh. What hashes it is left in `key`.
-    fn ground(&mut self, frame: &Frame, picture: &Picture, local: Matrix3x2, scale: f32, key: &mut DefaultHasher) -> Result<bool> {
+    /// whether any of it was drawn afresh.
+    fn ground(&mut self, frame: &Frame, picture: &Picture, local: Matrix3x2, scale: f32) -> Result<bool> {
         let theme = picture.scene.theme;
         let (width, height) = picture.size;
-        let scale = if picture.rough { scale / 2.0 } else { scale };
         let (ax, ay) = picture.at;
         let shifted = |r: Rect| Rect { x: r.x + ax, y: r.y + ay, ..r };
         // A small layout is one piece; lanes, a piece each and the bar.
@@ -70,11 +71,10 @@ impl PanelLayers {
             Some(_) => (vec![Rect { x: 0.0, y: 0.0, w: width, h: height }], Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
             None => (picture.layout.lanes().into_iter().map(shifted).collect(), shifted(picture.layout.bar())),
         };
-        // When none of it changed, the one drawn for an earlier frame serves
-        // again.
-        (theme.skin, theme.dark, picture.edge, scale.to_bits(), picture.frost.to_bits(), width.to_bits(), height.to_bits()).hash(key);
-        boxes.iter().chain([&bar]).for_each(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits).hash(key));
-        picture.backdrop.map(|(_, at, digest, covers)| (digest, at.X.to_bits(), at.Y.to_bits(), covers.to_bits())).hash(key);
+        // What every part of it shows: its shape, as the theme has it.
+        let mut shape = DefaultHasher::new();
+        (theme.skin, theme.dark, picture.edge, width.to_bits(), height.to_bits()).hash(&mut shape);
+        boxes.iter().chain([&bar]).for_each(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits).hash(&mut shape));
         let mut grounded = false;
         let margin = theme.margin;
         let below = skins::Ground {
@@ -86,17 +86,34 @@ impl PanelLayers {
             backdrop: picture.backdrop.map(|(bitmap, at, _, covers)| (bitmap, at, covers)),
             frost: picture.frost,
         };
-        self.ground.draw(frame, key.finish(), local, (-margin, -margin, width + 2.0 * margin, height + 2.0 * margin), scale, None, |frame| {
-            grounded = true;
-            skins::draw(frame, &below)
-        })?;
+        for (layer, part) in self.ground.iter_mut().zip(skins::parts(theme.skin)) {
+            // When none of what a part shows changed, the one drawn for an
+            // earlier frame serves again: the desktop, and how frosted it
+            // is, for the part that shows it; how tinted, for what is over
+            // it; under it, nothing more.
+            let mut key = shape.clone();
+            let scale = match part {
+                skins::Part::Desktop if picture.rough => scale / 2.0,
+                _ => scale,
+            };
+            (part, scale.to_bits()).hash(&mut key);
+            match part {
+                skins::Part::Under => {}
+                skins::Part::Desktop => (picture.frost.to_bits(), picture.backdrop.map(|(_, at, digest, covers)| (digest, at.X.to_bits(), at.Y.to_bits(), covers.to_bits()))).hash(&mut key),
+                skins::Part::Over => picture.frost.to_bits().hash(&mut key),
+            }
+            layer.draw(frame, key.finish(), local, (-margin, -margin, width + 2.0 * margin, height + 2.0 * margin), scale, None, |frame| {
+                grounded = true;
+                skins::draw(frame, &below, *part)
+            })?;
+        }
         Ok(grounded)
     }
 
     /// Draws only what the skin puts behind the readings, for readings
     /// drawn otherwise (as one layout turns into another, see `morph`).
     pub fn draw_ground(&mut self, frame: &Frame, picture: &Picture, local: Matrix3x2, scale: f32) -> Result<bool> {
-        self.ground(frame, picture, local, scale, &mut DefaultHasher::new())
+        self.ground(frame, picture, local, scale)
     }
 
     /// Draws the panel with its corner placed by `local` within the frame's
@@ -107,7 +124,7 @@ impl PanelLayers {
         let (ax, ay) = picture.at;
         // What each layer shows: when none of it changed, the one drawn for
         // an earlier frame serves again.
-        let grounded = self.ground(frame, picture, local, scale, &mut DefaultHasher::new())?;
+        let grounded = self.ground(frame, picture, local, scale)?;
         // The readings' own: not the desktop behind them, which moves under
         // a widget moved over it while the readings stay as they were.
         let mut key = DefaultHasher::new();
@@ -152,7 +169,7 @@ impl PanelLayers {
     }
 
     pub fn release(&mut self) {
-        self.ground.release();
+        self.ground.iter_mut().for_each(Layer::release);
         self.content.release();
     }
 }

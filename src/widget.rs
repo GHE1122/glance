@@ -430,7 +430,7 @@ struct Widget {
     /// `retone`).
     tone_due: bool,
     /// How long the last frame's painting took, and how long handing it to the compositor then did.
-    frame_took: (Duration, Duration),
+    frame_took: gfx::Took,
     /// The form it shows and the room it was taken in while sized: a form
     /// showing more comes back only with room to spare.
     taken: Option<arrange::Shown>,
@@ -925,7 +925,7 @@ impl Widget {
             shown_once: false,
             frost_at: None,
             tone_due: false,
-            frame_took: (Duration::ZERO, Duration::ZERO),
+            frame_took: gfx::Took::default(),
             taken: None,
             hover: false,
             behind: None,
@@ -1694,9 +1694,9 @@ impl Widget {
         if whole > SLOW_FRAME {
             let ms = |d: Duration| d.as_secs_f32() * 1000.0;
             let form = self.choice.form.key();
-            let (painted, handed) = self.frame_took;
+            let took = self.frame_took;
             note_sparingly("slow", || {
-                format!("widget: a frame took {:.1} ms: laid out {:.1}, the desktop taken {:.1}, drawn {:.1} (painted {:.1}, handed to the compositor {:.1}; {form})", ms(whole), ms(laid_out), ms(taken - laid_out), ms(whole - taken), ms(painted), ms(handed))
+                format!("widget: a frame took {:.1} ms: laid out {:.1}, the desktop taken {:.1}, drawn {:.1} (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1}; {form})", ms(whole), ms(laid_out), ms(taken - laid_out), ms(whole - taken), ms(took.given), ms(took.painted), ms(took.handed))
             });
         }
         if moving { Frame::Moving } else { Frame::Rest }
@@ -1768,7 +1768,6 @@ impl Widget {
         let pixels = ((window.right - window.left) as u32, (window.bottom - window.top) as u32);
         // Every layer of it drawn (see below).
         let mut whole = true;
-        let (began, painted) = (Instant::now(), std::cell::Cell::new(Duration::ZERO));
         let drawn = surface.draw(&gfx, pixels, px, |frame| {
             frame.origin(0.0, 0.0);
             if opacity < 1.0 {
@@ -1859,9 +1858,8 @@ impl Widget {
             if opacity < 1.0 {
                 unsafe { frame.dc.PopLayer() };
             }
-            painted.set(began.elapsed());
         });
-        self.frame_took = (painted.get(), began.elapsed().saturating_sub(painted.get()));
+        self.frame_took = surface.took;
         if let Err(error) = &drawn {
             note(format!("widget: its surface not drawn: {error}"));
             gfx::lost();

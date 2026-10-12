@@ -307,6 +307,24 @@ pub fn run() {
             }
             std::process::exit(0);
         }
+        // And draws the phone's page of the settings, the ring a colour is made on open.
+        #[cfg(feature = "studio")]
+        [_, flag, out] if flag == "--phone-page" => {
+            if let Err(error) = studio::phone_page(std::path::Path::new(out)) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
+        // And times a widget's frames, part by part, on this PC's own graphics.
+        #[cfg(feature = "studio")]
+        [_, flag, wallpaper] if flag == "--widget-frames" => {
+            if let Err(error) = studio::frames(wallpaper) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
         [_, flag, folder, payload] if flag == "--install" || flag == "--install-anyway" => {
             // "anyway": the user chose an unprotected place all the same.
             let anyway = flag == "--install-anyway";
