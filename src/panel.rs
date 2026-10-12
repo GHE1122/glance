@@ -730,7 +730,7 @@ impl Controller {
                 // The desktop widgets: pressed, let go, their menu.
                 WM_LBUTTONDOWN if widgets.owns(msg.hwnd) => widgets.press(msg.hwnd, lparam_point(msg.lParam)),
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if widgets.owns(msg.hwnd) => widgets.release(msg.hwnd, now),
-                WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam)),
+                WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam), panel.lang),
                 WM_RBUTTONUP if widgets.owns(msg.hwnd) => {
                     // (What comes for this thread while the menu is up waits:
                     // see `menu::show`.)
@@ -777,10 +777,12 @@ impl Controller {
                         std::thread::spawn(move || crate::app().place_overlay(placed));
                     }
                 }
-                WM_RBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
+                WM_MOUSEMOVE if overlay.as_ref().is_some_and(|o| o.owns_bar(msg.hwnd)) => overlay.as_mut().unwrap().bar_hover(),
+                // Its menu, or one of its buttons: the same is done.
+                WM_RBUTTONUP | WM_LBUTTONUP if overlay.as_ref().is_some_and(|o| if msg.message == WM_RBUTTONUP { msg.hwnd == o.window.hwnd } else { o.owns_bar(msg.hwnd) }) => {
                     // (What comes for this thread while the menu is up waits:
                     // see `menu::show`.)
-                    let choice = overlay.as_ref().unwrap().menu();
+                    let choice = if msg.message == WM_RBUTTONUP { overlay.as_ref().unwrap().menu() } else { overlay.as_mut().unwrap().bar_press() };
                     match choice {
                         Some(OverlayChoice::Settings) => {
                             if !panel.stays() {
@@ -839,7 +841,7 @@ impl Controller {
                 // screen) the pointer cannot be read, and is left alone.
                 WM_TIMER if msg.wParam.0 == WATCH_TIMER => {
                     if let Some(overlay) = &mut overlay {
-                        overlay.take_clicks();
+                        overlay.watch();
                     }
                     let Some(cursor) = cursor_position() else { continue };
                     if !panel.is_open() {

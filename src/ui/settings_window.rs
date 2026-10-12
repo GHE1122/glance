@@ -1773,7 +1773,7 @@ impl Ui {
             ),
             Switch::OverlayThrough => (
                 p("鼠标穿透", "Let clicks through"),
-                Some(p("点击会落到悬浮窗后面的游戏或窗口上；按住 Ctrl 才能拖动它或打开右键菜单", "Clicks go to the game or window behind it; hold Ctrl to move it or for its menu")),
+                Some(p("点击会落到悬浮窗后面的游戏或窗口上。要关闭穿透，把鼠标在悬浮窗上停留片刻，点出现的按钮", "Clicks go to the game or window behind it. To end it, rest the pointer on the overlay a moment and press the button that shows")),
                 self.settings.overlay.click_through,
             ),
             Switch::OverlayInGame => (
@@ -1911,7 +1911,7 @@ impl Ui {
                 "memory" => (p("内存", "Memory"), None),
                 "vram" => (p("显存", "Video memory"), None),
                 "network" => (p("网速", "Network"), None),
-                "clock" => (p("时间", "Time"), Some(p("现在几点（24 小时制）", "The time of day (24-hour)"))),
+                "clock" => (p("时间", "Time"), Some(p("现在几点", "The time of day"))),
                 _ => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音，静音时标红", "Whether the default microphone is muted: red while it is"))),
             };
         }
@@ -1934,7 +1934,7 @@ impl Ui {
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间和它占用的资源", "A fullscreen game's frame rate, frame times and what it uses"))),
             "docker" => ("Docker".into(), Some(p("运行中的容器各占多少处理器、内存、网络和磁盘，问的是 Docker 当前连接的引擎", "What each container running uses, as the engine Docker's current context points at says"))),
             "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器和内存占用，只从 Windows 读取，不会启动或唤醒发行版", "WSL 2's processors and memory, read from Windows alone: no distribution is started or kept up"))),
-            "time" => (p("时间", "Time"), Some(p("现在几点和今天的日期（24 小时制）", "The time of day and the date (24-hour)"))),
+            "time" => (p("时间", "Time"), Some(p("现在几点和今天的日期", "The time of day and the date"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
         }
     }
@@ -2055,6 +2055,8 @@ impl Ui {
         let p = |zh, en| pick(self.lang, zh, en);
         match (id.split(':').next().unwrap_or(id), name) {
             ("overlay", "fps") => (p("帧率", "Frame rate"), None),
+            ("overlay", "time") => (p("时间", "Time"), None),
+            ("overlay" | "time", "twelve") => (p("12 小时制", "12-hour clock"), Some(p("关闭时为 24 小时制", "Off, a 24-hour clock"))),
             ("overlay", "low") => (p("1% low", "1% low"), Some(p("最慢 1% 的帧换算成的帧率", "The slowest 1% of frames, as frames a second"))),
             ("overlay", "frametime") => (p("帧时间", "Frame time"), Some(p("最近一秒里最慢的一帧", "The slowest frame of the last second"))),
             ("overlay", "cpu" | "gpu") => (p("占用", "Use"), None),

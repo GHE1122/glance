@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_LAYER_PARAMETERS1};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_CONTROL};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WM_APP};
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -48,6 +48,7 @@ fn note_sparingly(kind: &'static str, what: impl FnOnce() -> String) {
 }
 use crate::panel::{cursor_position, monitor_at, Contact};
 use crate::settings::{WidgetAt, WidgetSide};
+use crate::ui::buttons::{self, Button};
 use crate::ui::arrange::{self, Choice, Form, Want};
 use crate::ui::backdrop::Capture;
 use crate::ui::canvas::{Canvas, Color, Fill, Point};
@@ -244,10 +245,15 @@ fn windows_changed() -> Option<Instant> {
 /// How long one layout takes to turn into the next: as long as the frame
 /// takes to settle, on the same ease.
 pub(crate) const MORPH: Duration = SETTLE;
-/// The buttons shown above a widget the pointer is on, clear of what it
-/// shows: their size, and how far above it (DIPs).
-const BUTTON: f32 = 22.0;
+/// The buttons shown above a widget the pointer is on (under it, where its
+/// screen has no room above), clear of what it shows: their size, and how
+/// far from it (DIPs).
+const BUTTON: f32 = buttons::SIZE;
 const BUTTON_INSET: f32 = 6.0;
+/// How often a widget that lets clicks through looks for the pointer while
+/// it is over it (it hears nothing of it): for its one button to show, and
+/// to take the click on it.
+const WATCHED: Duration = Duration::from_millis(40);
 /// How near the edge of its screen a widget moved shows where it would
 /// stick (DIPs).
 const HINT_SEEN: f32 = 64.0;
@@ -436,6 +442,13 @@ struct Widget {
     taken: Option<arrange::Shown>,
     /// The pointer is over it (its buttons show).
     hover: bool,
+    /// Letting clicks through: since when the pointer has been over it, and
+    /// whether it is on the button that ends that (the window then takes
+    /// the click).
+    lingered: Option<Instant>,
+    reached: bool,
+    /// The button the pointer is on, said under it.
+    tip: Option<Button>,
     behind: Option<Behind>,
     /// When it is next drawn: at once while it moves, else after a rest (as
     /// its charts step), or sooner as the pointer comes or it is pressed.
@@ -459,7 +472,6 @@ pub struct Widgets {
     put_away: Vec<WidgetAt>,
     /// The settings window, while it is in front: the widgets give way to it.
     settings: Option<HWND>,
-    ctrl: bool,
     /// Restored from the settings once a graphics device is there.
     restored: bool,
     /// Widgets to add as they are (see `adopt`).
@@ -645,7 +657,7 @@ impl Widgets {
 
     /// The pointer over a widget's window at `client` (physical px in it):
     /// the shape of what a press there does.
-    pub fn hover(&mut self, hwnd: HWND, client: POINT) {
+    pub fn hover(&mut self, hwnd: HWND, client: POINT, lang: Lang) {
         let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
         // Its buttons show as the pointer comes: drawn at once (moving over
         // it after, nothing that shows changes).
@@ -659,7 +671,24 @@ impl Widgets {
         let margin = widget.margin_px();
         let (x, y) = ((client.x - margin) as f32 / px, (client.y - margin) as f32 / px);
         let (w, h) = widget.surface_size;
-        let shape = if widget.button_at(x, y).is_some() {
+        // What the button under the pointer does, said under it.
+        let over = widget.button_at(x, y);
+        if over != widget.tip {
+            widget.tip = over;
+            match (over, cursor_position()) {
+                (Some(button), Some(at)) => {
+                    let lit = match button {
+                        Button::Pin => widget.pinned,
+                        Button::Through => widget.click_through,
+                        Button::Game => game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
+                        _ => false,
+                    };
+                    crate::ui::tip::show(button.says(lit, lang, false), at, crate::os::apps_dark());
+                }
+                _ => crate::ui::tip::hide(),
+            }
+        }
+        let shape = if over.is_some() {
             windows::Win32::UI::WindowsAndMessaging::IDC_HAND
         } else {
             let (left, right, top, bottom) = edges_at(x, y, w, h);
@@ -772,16 +801,12 @@ impl Widgets {
         }
         self.areas = areas;
         SHOWN.store(self.list.len(), std::sync::atomic::Ordering::Relaxed);
-        // Ctrl held: widgets letting clicks through take them again.
-        let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0;
-        let ctrl_changed = ctrl != self.ctrl;
-        self.ctrl = ctrl;
         let mut due = REST_FRAME;
         let mut gone = Vec::new();
         let mut dropped = Vec::new();
-        let mut changed = false;
         for (index, widget) in self.list.iter_mut().enumerate() {
-            let through = widget.click_through && !ctrl;
+            // (Letting clicks through, but for the one on its button.)
+            let through = widget.click_through && !widget.reached;
             widget.window.set_click_through(through);
             let hidden = widget.game_only && !playing;
             if hidden {
@@ -793,7 +818,7 @@ impl Widgets {
             }
             // Drawn when it is due: in hand, flung or turning, at once; else
             // after its rest, not each time the panel draws a frame.
-            let due_now = widget.drag.is_some() || widget.fling.is_some() || now >= widget.next_frame || (ctrl_changed && widget.click_through);
+            let due_now = widget.drag.is_some() || widget.fling.is_some() || now >= widget.next_frame;
             if !due_now {
                 due = due.min(widget.next_frame.saturating_duration_since(now));
                 continue;
@@ -807,22 +832,19 @@ impl Widgets {
             if widget.drag.is_some() {
                 widget.follow(now);
             }
-            match widget.frame(now, look, history, seen, controller, ctrl) {
+            match widget.frame(now, look, history, seen, controller) {
                 Frame::Gone => gone.push(index),
                 Frame::Moving => {
                     widget.next_frame = now;
                     due = Duration::ZERO;
                 }
                 Frame::Rest | Frame::Waiting => {
-                    widget.next_frame = now + REST_FRAME;
-                    due = due.min(REST_FRAME);
+                    let rest = if widget.lingered.is_some() { WATCHED } else { REST_FRAME };
+                    widget.next_frame = now + rest;
+                    due = due.min(rest);
                 }
             }
-            if ctrl_changed && widget.click_through {
-                changed = true;
-            }
         }
-        let _ = changed;
         for hwnd in dropped {
             self.release(hwnd, now);
         }
@@ -928,6 +950,9 @@ impl Widget {
             frame_took: gfx::Took::default(),
             taken: None,
             hover: false,
+            lingered: None,
+            reached: false,
+            tip: None,
             behind: None,
             next_frame: Instant::now(),
             hint_size: None,
@@ -1056,20 +1081,37 @@ impl Widget {
 
     /// Its buttons' centres, from its surface's corner (DIPs, its own): in
     /// a row above its right end, close last.
-    fn buttons(&self) -> [(Point, Button); 4] {
-        let (w, _) = self.surface_size;
+    /// Whether its buttons are under it: where its screen has no room for them above it.
+    fn buttons_under(&self) -> bool {
+        let reach = ((BUTTON + 2.0 * BUTTON_INSET) * self.contact.scale * self.zoom) as i32;
+        self.at.y - reach < self.contact.work.top
+    }
+
+    /// Where each of its buttons is, whether it shows or not: in a row
+    /// ending at its right edge.
+    fn buttons(&self) -> [(Point, Button); 5] {
+        let (w, h) = self.surface_size;
         let r = BUTTON / 2.0;
-        [Button::Game, Button::Settings, Button::Pin, Button::Close].map(|button| {
-            let from_end = [Button::Close, Button::Pin, Button::Settings, Button::Game].iter().position(|b| *b == button).unwrap() as f32;
-            (Point { x: w - r - from_end * (BUTTON + 4.0), y: -BUTTON_INSET - r }, button)
-        })
+        let y = if self.buttons_under() { h + BUTTON_INSET + r } else { -BUTTON_INSET - r };
+        let count = buttons::ALL.len();
+        std::array::from_fn(|place| (Point { x: w - r - (count - 1 - place) as f32 * (BUTTON + buttons::GAP), y }, buttons::ALL[place]))
+    }
+
+    /// The buttons that show now: all of them, the pointer over it; while
+    /// it lets clicks through, the one that ends that, once the pointer has
+    /// stayed over it a while.
+    fn offered(&self) -> Vec<(Point, Button)> {
+        let all = self.buttons();
+        match (self.hover, self.click_through) {
+            (false, _) => Vec::new(),
+            (true, false) => all.to_vec(),
+            (true, true) if self.lingered.is_some_and(|since| since.elapsed() >= buttons::LINGER) => all.into_iter().filter(|(_, button)| *button == Button::Through).collect(),
+            (true, true) => Vec::new(),
+        }
     }
 
     fn button_at(&self, x: f32, y: f32) -> Option<Button> {
-        if !self.hover {
-            return None;
-        }
-        self.buttons().into_iter().find(|(c, _)| (c.x - x).hypot(c.y - y) <= BUTTON / 2.0 + 2.0).map(|(_, b)| b)
+        self.offered().into_iter().find(|(c, _)| (c.x - x).hypot(c.y - y) <= BUTTON / 2.0 + 2.0).map(|(_, b)| b)
     }
 
     fn press(&mut self, client: POINT) {
@@ -1226,6 +1268,11 @@ impl Widget {
                     return match self.button_at(x, y) {
                         Some(Button::Pin) => {
                             self.pinned ^= true;
+                            Released::Changed
+                        }
+                        Some(Button::Through) => {
+                            self.click_through ^= true;
+                            (self.lingered, self.reached) = (None, false);
                             Released::Changed
                         }
                         Some(Button::Close) => Released::Closed,
@@ -1401,7 +1448,7 @@ impl Widget {
     }
 
     /// Lays it out, places its window and draws it.
-    fn frame(&mut self, now: Instant, look: &Look, history: &[Sample], seen: &Seen, controller: &crate::panel::Controller, ctrl: bool) -> Frame {
+    fn frame(&mut self, now: Instant, look: &Look, history: &[Sample], seen: &Seen, controller: &crate::panel::Controller) -> Frame {
         let dt = now.duration_since(self.last_frame).as_secs_f32() * 1000.0;
         self.last_frame = now;
         // Each part of a frame timed, and a slow one noted.
@@ -1549,9 +1596,11 @@ impl Widget {
         }
         // The pointer over it, or (its buttons showing) over them.
         let reach = if self.hover { ((BUTTON + 2.0 * BUTTON_INSET) * px) as i32 } else { 0 };
-        let hovered = cursor_position().is_some_and(|c| {
+        let (above, under) = if self.buttons_under() { (0, reach) } else { (reach, 0) };
+        let cursor = cursor_position();
+        let hovered = cursor.is_some_and(|c| {
             let r = self.rect();
-            (r.left..r.right).contains(&c.x) && (r.top - reach..r.bottom).contains(&c.y)
+            (r.left..r.right).contains(&c.x) && (r.top - above..r.bottom + under).contains(&c.y)
         });
         // Its buttons come or go: a widget that took the desktop with them
         // there takes it again.
@@ -1560,6 +1609,14 @@ impl Widget {
             own_window_changed(RECT { left: r.left - m, top: r.top - m, right: r.right + m, bottom: r.bottom + m });
         }
         self.hover = hovered;
+        // Letting clicks through, it hears nothing of the pointer, which is
+        // looked for here: over it a while, the button that ends it shows,
+        // and with the pointer on that the window takes the click.
+        self.lingered = if hovered && self.click_through { self.lingered.or(Some(now)) } else { None };
+        self.reached = self.click_through && cursor.is_some_and(|c| self.button_at((c.x - self.at.x) as f32 / px, (c.y - self.at.y) as f32 / px) == Some(Button::Through));
+        if !hovered && self.tip.take().is_some() {
+            crate::ui::tip::hide();
+        }
         // Moved near an edge, not stuck: where it would stick, as it would
         // be there, nearer and firmer the nearer it is.
         let near = match (&self.drag, self.stuck) {
@@ -1689,7 +1746,7 @@ impl Widget {
         let theme = if dark == theme.dark { theme } else { Theme::new(look.skin, dark) };
         let scene = crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen);
         let taken = started.elapsed();
-        self.draw(&theme, &scene, ctrl, now);
+        self.draw(&theme, &scene, now);
         let whole = started.elapsed();
         if whole > SLOW_FRAME {
             let ms = |d: Duration| d.as_secs_f32() * 1000.0;
@@ -1702,7 +1759,7 @@ impl Widget {
         if moving { Frame::Moving } else { Frame::Rest }
     }
 
-    fn draw(&mut self, theme: &Theme, scene: &Scene, ctrl: bool, now: Instant) {
+    fn draw(&mut self, theme: &Theme, scene: &Scene, now: Instant) {
         let Some(shown) = self.last.clone() else { return };
         let Ok(current) = gfx::current() else { return };
         if !Rc::ptr_eq(&current, &self.gfx) || self.surface.is_none() {
@@ -1743,10 +1800,10 @@ impl Widget {
             _ => None,
         };
         let halo = (theme.skin == Skin::Glass).then_some(theme.legibility);
-        let (opacity, hover, pinned, through, gfx) = (self.opacity, self.hover, self.pinned, self.click_through, self.gfx.clone());
+        let (opacity, pinned, through, gfx) = (self.opacity, self.pinned, self.click_through, self.gfx.clone());
         let rough = matches!(self.drag, Some(Drag::Move { moved: true, .. })) || self.fling.is_some();
         let contact_scale = self.contact.scale;
-        let buttons = self.buttons();
+        let offered = self.offered();
         // Frosted as the desktop where it is now asks (its theme holds, as
         // the panel's does): measured again as it moves a step.
         let here = self.rect();
@@ -1827,32 +1884,12 @@ impl Widget {
                 }
             }
             frame.place(Matrix3x2::translation(margin, margin));
-            // Letting clicks through, and in hand with Ctrl: its outline says
-            // it takes them now.
-            if through && ctrl {
-                frame.stroke_rounded(Fill::Solid(theme.text3), -2.0, -2.0, size.0 + 4.0, size.1 + 4.0, theme.radius + 2.0, 1.5);
-            }
-            // The pointer over it: its pin and close buttons.
-            if hover && (!through || ctrl) {
-                let front_is_game = game_shown(scene.history);
-                for (centre, button) in buttons {
-                    // Lit while on: pinned, the window in front a game.
-                    let lit = (button == Button::Pin && pinned) || (button == Button::Game && front_is_game);
-                    // A plate of its own over whatever is under it: light on a
-                    // light theme, dark on a dark one; the pin, lit, inverted.
-                    let (light, dark) = (Color::hex(0xFFFFFF, 0.94), Color::hex(0x1E1E1E, 0.94));
-                    let (plate, mark) = if theme.dark { (dark, Color::hex(0xFFFFFF, 1.0)) } else { (light, Color::hex(0x1A1A1A, 1.0)) };
-                    let (ground, ink) = if lit { (mark, plate) } else { (plate, mark) };
-                    frame.fill_circle(ground, centre, BUTTON / 2.0);
-                    frame.stroke_rounded(Fill::Solid(theme.text3.alpha(0.5)), centre.x - BUTTON / 2.0, centre.y - BUTTON / 2.0, BUTTON, BUTTON, BUTTON / 2.0, 1.0);
-                    let icon = match button {
-                        Button::Game => Icon::Game,
-                        Button::Settings => Icon::Settings,
-                        Button::Pin => Icon::Pin,
-                        Button::Close => Icon::Close,
-                    };
-                    frame.icon(icon, centre, 13.0, ink);
-                }
+            // The pointer over it: its buttons (letting clicks through, the one that ends that).
+            let front_is_game = game_shown(scene.history);
+            for (centre, button) in offered {
+                // Lit while on: pinned, letting clicks through, the window in front a game.
+                let lit = (button == Button::Pin && pinned) || (button == Button::Through && through) || (button == Button::Game && front_is_game);
+                buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5));
             }
             frame.origin(0.0, 0.0);
             if opacity < 1.0 {
@@ -1925,7 +1962,7 @@ pub(crate) fn menu_items(lang: Lang, pinned: bool, through: bool, above: bool) -
     let item = |zh, en, icon, checked, rule_before| Item { label: lang.pick(zh, en), icon: Some(icon), checked, rule_before };
     [
         item("固定位置和大小", "Pin where it is", Icon::Pin, pinned, false),
-        item("鼠标穿透（按住 Ctrl 再操作）", "Let clicks through (hold Ctrl to use it)", Icon::Pointer, through, false),
+        item("鼠标穿透", "Let clicks through", Icon::Pointer, through, false),
         item("置于其他窗口之上", "Keep above other windows", Icon::Layers, above, false),
         item("收起", "Put away", Icon::Close, false, false),
         item("设置…", "Settings…", Icon::Settings, false, true),
@@ -1954,7 +1991,7 @@ fn clip(r: RECT, bounds: RECT) -> RECT {
 
 /// Whether a game shows (its button lit): one found and not turned off, or
 /// one asked for by hand.
-fn game_shown(history: &[Sample]) -> bool {
+pub(crate) fn game_shown(history: &[Sample]) -> bool {
     use crate::presents::{game_mode, GameMode};
     match game_mode() {
         GameMode::On => true,
@@ -1983,15 +2020,6 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
 /// What a widget's buttons do: the window in front taken for a game (one
 /// played in a window, that would not be found), the settings, pinned,
 /// put away.
-#[derive(Clone, Copy, PartialEq)]
-enum Button {
-    Game,
-    Settings,
-    Pin,
-    Close,
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

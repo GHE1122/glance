@@ -5,6 +5,7 @@
 pub mod arrange;
 #[cfg(windows)]
 pub mod backdrop;
+pub mod buttons;
 pub mod canvas;
 #[cfg(windows)]
 pub mod gfx;
@@ -30,6 +31,8 @@ pub mod settings_window;
 pub mod skins;
 pub mod text;
 pub mod theme;
+#[cfg(windows)]
+pub mod tip;
 pub mod view;
 #[cfg(windows)]
 pub mod wallpaper;

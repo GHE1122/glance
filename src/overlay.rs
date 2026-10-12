@@ -1,15 +1,19 @@
 //! The overlay's window: never taking the focus. Unlocked, it is dragged
 //! where it is to stay; locked, it stays. Either way a right click on it
 //! offers the lock, turning it off and the settings (so it takes the clicks that
-//! land on it: a game holding the pointer is not one of them). Drawn by the
-//! panel's thread at every sample.
+//! land on it: a game holding the pointer is not one of them), and the
+//! pointer over it brings a row of buttons for the same, as a widget's are.
+//! Letting clicks through, it takes none: the pointer staying over it a
+//! while brings the one button that ends that. Drawn by the panel's thread
+//! at every sample.
 
 use std::rc::Rc;
+use std::time::Instant;
 
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_LBUTTON, VK_RBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, KillTimer, SetTimer, SM_SWAPBUTTON, IDC_ARROW};
 
 use std::collections::VecDeque;
@@ -17,9 +21,11 @@ use std::collections::VecDeque;
 use crate::reading::Sample;
 use crate::settings::OverlaySettings;
 use crate::ui::backdrop::Capture;
+use crate::ui::buttons::{self, Button};
+use crate::ui::canvas::{Color, Point};
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::glass::Frosted;
-use crate::ui::overlay::{self, Glass, Hand, Layout, Metrics, Shape, INSET, MARGIN};
+use crate::ui::overlay::{self, Glass, Hand, Layout, Metrics, Shape, Tone, INSET, MARGIN};
 use crate::ui::text::Lang;
 use crate::ui::window::Window;
 
@@ -50,8 +56,17 @@ pub struct Overlay {
     /// clicks pass through it.
     clear: f32,
     through: bool,
-    /// Letting clicks through, and Ctrl held: it takes them now.
-    taken: bool,
+    /// Its buttons, in a window of their own beside it: those that show
+    /// now (none: the window is away), and its content.
+    bar: Window,
+    bar_surface: Option<(Rc<Gfx>, Surface)>,
+    bar_shows: Vec<Button>,
+    /// Since when the pointer has been over it or its buttons.
+    over: Option<Instant>,
+    /// Where its buttons' window was last put (none: away).
+    bar_at: Option<RECT>,
+    /// The button the pointer is on, said under it.
+    tip: Option<Button>,
     /// How clear its glass was just made: said on it until it has been
     /// left so for a moment (see `SAID_MS`).
     said: Option<f32>,
@@ -159,9 +174,9 @@ const SAID_MS: u32 = 600;
 /// nearer than half its shorter side lets.
 const CORNER: f32 = 16.0;
 
-fn ctrl_down() -> bool {
-    (unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) }) < 0
-}
+/// The room round the buttons in their window, and between it and the glass (DIPs).
+const BAR_PAD: f32 = 3.0;
+const BAR_GAP: f32 = 3.0;
 
 fn cursor() -> Option<POINT> {
     let mut cursor = POINT::default();
@@ -180,12 +195,21 @@ impl Overlay {
             }
         };
         shade.set_click_through(true);
+        let bar = match Window::new() {
+            Ok(bar) => bar,
+            Err(error) => {
+                window.destroy();
+                shade.destroy();
+                return Err(error);
+            }
+        };
         let surface = match Frosted::new(&gfx, window.hwnd) {
             Ok(surface) => surface,
             Err(error) => {
                 // Tried again at the next sample, with windows of its own.
                 window.destroy();
                 shade.destroy();
+                bar.destroy();
                 return Err(error);
             }
         };
@@ -200,7 +224,12 @@ impl Overlay {
             locked: false,
             clear: 0.0,
             through: false,
-            taken: false,
+            bar,
+            bar_surface: None,
+            bar_shows: Vec::new(),
+            over: None,
+            bar_at: None,
+            tip: None,
             said: None,
             lang: Lang::En,
             rect: RECT::default(),
@@ -229,8 +258,7 @@ impl Overlay {
         }
         self.clear = clear;
         self.through = settings.click_through;
-        self.taken = self.through && (ctrl_down() || self.grab.is_some());
-        self.window.set_click_through(self.through && !self.taken);
+        self.window.set_click_through(self.through);
         self.beneath = beneath;
         self.lang = lang;
         let sample = history.back();
@@ -354,13 +382,7 @@ impl Overlay {
         let (width, height, radius) = self.measures();
         let (readings, frames, shape) = (&self.drawn.0, &self.drawn.1, self.drawn.2);
         let dragged = self.grab.is_some();
-        let hand = if dragged {
-            Hand::Dragged
-        } else if self.taken {
-            Hand::Taken
-        } else {
-            Hand::Free
-        };
+        let hand = if dragged { Hand::Dragged } else { Hand::Free };
         // Its glass is its tint alone: what is behind it is not blurred (the system's compositor would then draw
         // the game behind into it every frame, some frames in a hundred of the game's).
         self.surface.set_frost(0.0);
@@ -401,6 +423,159 @@ impl Overlay {
             self.place();
             self.shown = true;
         }
+        // Its buttons, lit as it is now.
+        self.draw_bar();
+    }
+
+    /// Where each of its buttons' middles is on the screen, whether it
+    /// shows or not (physical pixels): a row ending at the glass's right
+    /// edge, above it, or under it where its screen has no room above.
+    fn bar_middles(&self) -> [POINT; 5] {
+        let px = |dips: f32| (dips * self.dpi).round() as i32;
+        let (tall, r) = (px(buttons::SIZE + 2.0 * BAR_PAD), self.rect);
+        let top = if r.top - px(BAR_GAP) - tall < self.screen.top { r.bottom + px(BAR_GAP) } else { r.top - px(BAR_GAP) - tall };
+        let count = buttons::ALL.len();
+        std::array::from_fn(|place| POINT { x: r.right - px(BAR_PAD + buttons::SIZE / 2.0 + (count - 1 - place) as f32 * (buttons::SIZE + buttons::GAP)), y: top + tall / 2 })
+    }
+
+    /// The buttons' window: round those that show.
+    fn bar_rect(&self) -> RECT {
+        let half = ((buttons::SIZE / 2.0 + BAR_PAD) * self.dpi).round() as i32;
+        let middles = self.bar_middles();
+        let shown = |button: &Button| middles[buttons::ALL.iter().position(|one| one == button).unwrap()];
+        let (first, last) = (self.bar_shows.first().map_or(middles[0], shown), self.bar_shows.last().map_or(middles[4], shown));
+        RECT { left: first.x - half, top: first.y - half, right: last.x + half, bottom: last.y + half }
+    }
+
+    /// The button of those showing that a point of the screen is on.
+    fn bar_button_at(&self, at: POINT) -> Option<Button> {
+        let reach = (buttons::SIZE / 2.0 + 2.0) * self.dpi;
+        let middles = self.bar_middles();
+        self.bar_shows.iter().copied().find(|button| {
+            let middle = middles[buttons::ALL.iter().position(|one| one == button).unwrap()];
+            ((middle.x - at.x) as f32).hypot((middle.y - at.y) as f32) <= reach
+        })
+    }
+
+    /// Whether `hwnd` is its buttons' window.
+    pub fn owns_bar(&self, hwnd: HWND) -> bool {
+        self.bar.hwnd == hwnd
+    }
+
+    /// Draws the buttons that show, in their window where it belongs; none, puts it away.
+    fn draw_bar(&mut self) {
+        if self.bar_shows.is_empty() || !self.shown {
+            if let Some((gfx, surface)) = &mut self.bar_surface {
+                surface.release(gfx);
+            }
+            self.bar.hide();
+            // (A widget that took the desktop with them there takes it again.)
+            if let Some(was) = self.bar_at.take() {
+                crate::widget::own_window_changed(was);
+            }
+            return;
+        }
+        let rect = self.bar_rect();
+        let surface = match self.bar_surface.take() {
+            Some((made_on, surface)) if Rc::ptr_eq(&made_on, &self.gfx) => Ok(surface),
+            _ => Surface::new(&self.gfx, self.bar.hwnd),
+        };
+        let Ok(mut surface) = surface else { return };
+        let dark = self.glass.is_none_or(|glass| glass.tone == Tone::Dark);
+        let rim = if dark { Color::hex(0xFFFFFF, 0.3) } else { Color::hex(0x000000, 0.3) };
+        let game = crate::widget::game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default());
+        let (shows, locked, through) = (&self.bar_shows, self.locked, self.through);
+        let drawn = surface.draw(&self.gfx, ((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32), self.dpi, |frame| {
+            for (place, button) in shows.iter().enumerate() {
+                let lit = (*button == Button::Pin && locked) || (*button == Button::Through && through) || (*button == Button::Game && game);
+                let centre = Point { x: BAR_PAD + buttons::SIZE / 2.0 + place as f32 * (buttons::SIZE + buttons::GAP), y: BAR_PAD + buttons::SIZE / 2.0 };
+                buttons::paint(frame, centre, *button, lit, dark, rim);
+            }
+        });
+        self.bar_surface = Some((self.gfx.clone(), surface));
+        if drawn.is_err() {
+            gfx::lost();
+            return;
+        }
+        self.bar.place_under(rect, self.beneath);
+        self.bar.show();
+        if self.bar_at.replace(rect) != Some(rect) {
+            crate::widget::own_window_changed(rect);
+        }
+    }
+
+    /// Looks for the pointer (letting clicks through, it hears nothing of
+    /// it): over it or its buttons, they show; while it lets clicks
+    /// through, only the one that ends that, and once the pointer has
+    /// stayed a while. Called as often as the pointer is looked at.
+    pub fn watch(&mut self) {
+        let now = Instant::now();
+        // (The glass, the whole row and what lies between them.)
+        let reach = {
+            let half = ((buttons::SIZE / 2.0 + BAR_PAD) * self.dpi).round() as i32;
+            let (middles, r) = (self.bar_middles(), self.rect);
+            RECT { left: r.left.min(middles[0].x - half), top: r.top.min(middles[0].y - half), right: r.right, bottom: r.bottom.max(middles[0].y + half) }
+        };
+        let inside = self.shown && self.grab.is_none() && cursor().is_some_and(|c| (reach.left..reach.right).contains(&c.x) && (reach.top..reach.bottom).contains(&c.y));
+        self.over = if inside { self.over.or(Some(now)) } else { None };
+        let shows = match (self.over, self.through) {
+            (None, _) => Vec::new(),
+            (Some(_), false) => buttons::ALL.to_vec(),
+            (Some(since), true) if now.duration_since(since) >= buttons::LINGER => vec![Button::Through],
+            (Some(_), true) => Vec::new(),
+        };
+        if shows != self.bar_shows {
+            self.bar_shows = shows;
+            self.draw_bar();
+        }
+        if !inside && self.tip.take().is_some() {
+            crate::ui::tip::hide();
+        }
+    }
+
+    /// The pointer moved over its buttons: what the one under it does, said under it.
+    pub fn bar_hover(&mut self) {
+        let Some(at) = cursor() else { return };
+        let over = self.bar_button_at(at);
+        self.bar.point(if over.is_some() { windows::Win32::UI::WindowsAndMessaging::IDC_HAND } else { IDC_ARROW });
+        if over == self.tip {
+            return;
+        }
+        self.tip = over;
+        match over {
+            Some(button) => {
+                let lit = match button {
+                    Button::Pin => self.locked,
+                    Button::Through => self.through,
+                    Button::Game => crate::widget::game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
+                    _ => false,
+                };
+                crate::ui::tip::show(button.says(lit, self.lang, true), at, crate::os::apps_dark());
+            }
+            None => crate::ui::tip::hide(),
+        }
+    }
+
+    /// One of its buttons pressed: what is asked for, where it is another's to do.
+    pub fn bar_press(&mut self) -> Option<Choice> {
+        let button = self.bar_button_at(cursor()?)?;
+        if self.tip.take().is_some() {
+            crate::ui::tip::hide();
+        }
+        // (Its buttons come again as the pointer stays: at once, or, letting clicks through, after a while.)
+        self.over = None;
+        match button {
+            Button::Game => {
+                // Showing a game (found or asked for): off; else on.
+                let shown = crate::widget::game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default());
+                crate::presents::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
+                None
+            }
+            Button::Settings => Some(Choice::Settings),
+            Button::Pin => Some(Choice::Lock(!self.locked)),
+            Button::Through => Some(Choice::Through(!self.through)),
+            Button::Close => Some(Choice::Close),
+        }
     }
 
     /// The edges of it the pointer at `at` is on, if it is near them.
@@ -426,6 +601,8 @@ impl Overlay {
         let Some(from) = cursor().filter(|_| !self.locked) else { return };
         let edges = self.edges_at(from);
         self.grab = Some(Grab { from, glass: self.rect, size: self.size, edges });
+        // (Its buttons are away while it is in hand.)
+        self.watch();
         unsafe {
             SetCapture(self.window.hwnd);
             SetTimer(Some(self.window.hwnd), FOLLOW_TIMER, FOLLOW_MS, None);
@@ -442,6 +619,7 @@ impl Overlay {
     /// and shrinks as a whole from the corner opposite the edges held (its
     /// shape is its readings').
     pub fn moved(&mut self) {
+        self.watch();
         let Some(at) = cursor() else { return };
         let Some(grab) = self.grab else {
             if self.locked {
@@ -504,21 +682,6 @@ impl Overlay {
         Some(Placed { at: (share(glass.left - left, across), share(glass.top - top, down)), point: (centre.x, centre.y), size: self.size })
     }
 
-    /// Letting clicks through, it takes them while Ctrl is held (to be
-    /// moved, or for its menu): called as often as the key is looked at.
-    pub fn take_clicks(&mut self) {
-        // In hand until let go of, Ctrl still held or not.
-        let taken = self.through && (ctrl_down() || self.grab.is_some());
-        if taken == self.taken {
-            return;
-        }
-        self.taken = taken;
-        self.window.set_click_through(self.through && !taken);
-        if self.shown {
-            self.draw();
-        }
-    }
-
     /// Its glass left as clear as it was made for a moment: no longer said.
     pub fn hush(&mut self) {
         unsafe {
@@ -545,7 +708,7 @@ impl Overlay {
         use crate::ui::menu::{self, Item};
         let items = [
             Item { label: if zh { "锁定位置" } else { "Lock position" }, icon: Some(Icon::Pin), checked: self.locked, rule_before: false },
-            Item { label: if zh { "鼠标穿透（按住 Ctrl 再操作）" } else { "Let clicks through (hold Ctrl to use it)" }, icon: Some(Icon::Pointer), checked: self.through, rule_before: false },
+            Item { label: if zh { "鼠标穿透" } else { "Let clicks through" }, icon: Some(Icon::Pointer), checked: self.through, rule_before: false },
             Item { label: if zh { "关闭悬浮窗" } else { "Close the overlay" }, icon: Some(Icon::Close), checked: false, rule_before: false },
             Item { label: if zh { "设置…" } else { "Settings…" }, icon: Some(Icon::Settings), checked: false, rule_before: true },
         ];
@@ -576,6 +739,12 @@ impl Overlay {
         self.shown = false;
         self.window.hide();
         self.shade.hide();
+        self.bar_shows.clear();
+        self.over = None;
+        self.draw_bar();
+        if self.tip.take().is_some() {
+            crate::ui::tip::hide();
+        }
         crate::widget::own_window_changed(self.shadow_rect());
         self.placed.set(RECT::default());
         // The drawing memory is given back while it is away.
