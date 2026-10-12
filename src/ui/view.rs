@@ -1345,19 +1345,37 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 // What is filled, its knob, and the rest of the track: each beside the next, none over another
                 // (their colours are not solid: where two lay over each other, it would show).
                 let filled = track * (*level as f32 / 100.0).clamp(0.0, 1.0);
-                let (knob, reach) = (5.0, 4.5);
+                let knob = 5.0;
                 let colour = if *muted { theme.text3 } else { ink.trace };
-                if filled > reach {
-                    frame.clip(plot_left, middle - tall / 2.0, filled - reach, tall);
-                    frame.fill_rounded(colour, plot_left, middle - tall / 2.0, track, tall, radius);
-                    frame.unclip();
+                // What is filled and its knob are one shape, drawn once: from the track's rounded end along it,
+                // round the knob, and back.
+                let centre = Point { x: plot_left + filled, y: middle };
+                let half = tall / 2.0;
+                // (Where the track's edges meet the knob.)
+                let meets = (knob * knob - half * half).sqrt();
+                let mut shape: Vec<Point> = Vec::new();
+                if filled > meets + half {
+                    // Its end at the left, rounded: from its lower corner up round to its upper one.
+                    shape.extend((0..=8).map(|turn| {
+                        let angle = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * turn as f32 / 8.0;
+                        Point { x: plot_left + half + half * angle.cos(), y: middle + half * angle.sin() }
+                    }));
+                    // Round the knob, from where the upper edge meets it, over, to where the lower one does.
+                    let from = (-half).atan2(-meets);
+                    let round = 2.0 * std::f32::consts::PI - 2.0 * (half / knob).asin();
+                    shape.extend((0..=32).map(|turn| {
+                        let angle = from + round * turn as f32 / 32.0;
+                        Point { x: centre.x + knob * angle.cos(), y: centre.y + knob * angle.sin() }
+                    }));
+                    frame.fill_shape(&shape, Fill::Solid(colour));
+                } else {
+                    frame.fill_circle(colour, centre, knob);
                 }
-                if track - filled > reach {
-                    frame.clip(plot_left + filled + reach, middle - tall / 2.0, track - filled - reach, tall);
+                if track - filled > knob {
+                    frame.clip(plot_left + filled + knob, middle - tall / 2.0, track - filled - knob, tall);
                     frame.fill_rounded(theme.track, plot_left, middle - tall / 2.0, track, tall, radius);
                     frame.unclip();
                 }
-                frame.fill_circle(colour, Point { x: plot_left + filled, y: middle }, knob);
                 hits.push((plot_left, row, track, MEDIA_ROW, Hit::Volume));
                 part("level");
                 frame.text(&said, theme.small, if *muted { theme.text3 } else { theme.text2 }, mute - 6.0 - said_width, middle - LINE / 2.0, said_width, Align::End);

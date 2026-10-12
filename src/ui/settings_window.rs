@@ -1703,8 +1703,13 @@ impl Ui {
     /// show it at once, with the settings as they are held (it is kept by
     /// `keep_slider`).
     fn set_slider(&mut self, field: Field, value: f32) {
-        let (_, min, max, step, _) = self.slider(field);
+        let (_, min, max, step, now) = self.slider(field);
         let value = (min + ((value - min) / step).round() * step).clamp(min, max);
+        // (Slid within a step, nothing changes: the panel and the overlay are not made to draw themselves anew
+        // at every move of the pointer.)
+        if value == now {
+            return;
+        }
         put_slider(&mut self.settings, field, value);
         let app = crate::app();
         let mut live = app.settings.lock().unwrap().clone();
