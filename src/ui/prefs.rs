@@ -219,7 +219,7 @@ impl Default for ProcessPrefs {
 }
 
 /// Modules off until chosen.
-const DEFAULT_OFF: [&str; 4] = ["system", "time", "wsl", "docker"];
+const DEFAULT_OFF: [&str; 5] = ["system", "time", "media", "wsl", "docker"];
 
 /// Whether module `id` is on in the stored preferences `stored` (as kept,
 /// before they are resolved: off unless listed on).

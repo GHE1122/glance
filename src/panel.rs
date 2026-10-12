@@ -372,7 +372,7 @@ impl Controller {
         // The game in front first, while there is one.
         let mut known = vec!["game".to_string(), "cpu".to_string()];
         known.extend(self.info.gpu_modules());
-        known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
+        known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "media", "wsl", "docker"].map(String::from));
         known
     }
 
@@ -2098,6 +2098,13 @@ impl<'a> Panel<'a> {
         self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
     }
 
+    /// How far along what is under `client` it is (0 at its left, 1 at its right).
+    fn along(&self, client: POINT) -> Option<f32> {
+        let px = self.placement.as_ref()?.px;
+        let (x, y) = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
+        self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|(hx, _, w, ..)| ((x - hx) / w).clamp(0.0, 1.0))
+    }
+
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
         // Unpinned, its edges and its bar show what a drag there does (the
@@ -2135,6 +2142,12 @@ impl<'a> Panel<'a> {
             Some(Hit::Overlay) => {
                 // As it is on screen now: shown, it closes; not, it opens.
                 self.controller.set_overlay(!self.controller.overlay_wanted());
+            }
+            Some(Hit::Media(key)) => crate::playing::act(crate::playing::Act::Key(key)),
+            Some(Hit::Volume) => {
+                if let Some(along) = self.along(client) {
+                    crate::playing::act(crate::playing::Act::Volume((along * 100.0).round() as u8));
+                }
             }
             Some(Hit::Sort(sort)) if sort != self.prefs.processes.sort => {
                 self.prefs.processes.sort = sort;

@@ -137,6 +137,8 @@ impl PanelLayers {
         // changes.
         (scene.history.len(), scene.history.last().map(|sample| sample.t)).hash(&mut key);
         scene.prefs.hash_drawn(&mut key);
+        // (What plays and how loud change between samples: as they are pressed.)
+        crate::playing::stamp().hash(&mut key);
         if let Some((small, drawn)) = picture.small {
             (small, drawn.0.to_bits(), drawn.1.to_bits()).hash(&mut key);
         }

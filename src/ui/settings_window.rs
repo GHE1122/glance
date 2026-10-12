@@ -1939,6 +1939,7 @@ impl Ui {
             "docker" => ("Docker".into(), Some(p("运行中的容器各占多少处理器、内存、网络和磁盘，问的是 Docker 当前连接的引擎", "What each container running uses, as the engine Docker's current context points at says"))),
             "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器和内存占用，只从 Windows 读取，不会启动或唤醒发行版", "WSL 2's processors and memory, read from Windows alone: no distribution is started or kept up"))),
             "time" => (p("时间", "Time"), Some(p("现在几点和今天的日期", "The time of day and the date"))),
+            "media" => (p("媒体", "Media"), Some(p("正在播放的内容，可暂停、切换曲目、调节音量和静音", "What is playing: paused, skipped, the sound turned up, down and muted"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
         }
     }

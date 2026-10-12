@@ -449,6 +449,10 @@ struct Widget {
     reached: bool,
     /// The button the pointer is on, said under it.
     tip: Option<Button>,
+    /// What of its lanes takes a press (what plays, the sound), where each
+    /// is from the corner of what it shows (its own DIPs), as last drawn.
+    hits: Vec<view::HitBox>,
+    hits_from: (f32, f32),
     behind: Option<Behind>,
     /// When it is next drawn: at once while it moves, else after a rest (as
     /// its charts step), or sooner as the pointer comes or it is pressed.
@@ -953,6 +957,8 @@ impl Widget {
             lingered: None,
             reached: false,
             tip: None,
+            hits: Vec::new(),
+            hits_from: (0.0, 0.0),
             behind: None,
             next_frame: Instant::now(),
             hint_size: None,
@@ -1285,7 +1291,16 @@ impl Widget {
                             crate::presents::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
                             Released::Nothing
                         }
-                        None => Released::Nothing,
+                        // No button: what of its lanes is there (what plays, the sound).
+                        None => {
+                            let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
+                            match self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h) {
+                                Some((.., view::Hit::Media(key))) => crate::playing::act(crate::playing::Act::Key(*key)),
+                                Some((hx, _, w, _, view::Hit::Volume)) => crate::playing::act(crate::playing::Act::Volume((((lx - hx) / w).clamp(0.0, 1.0) * 100.0).round() as u8)),
+                                _ => {}
+                            }
+                            Released::Nothing
+                        }
                     };
                 }
                 // A fling: fast enough as it was let go (a tear is put down).
@@ -1825,6 +1840,7 @@ impl Widget {
         let pixels = ((window.right - window.left) as u32, (window.bottom - window.top) as u32);
         // Every layer of it drawn (see below).
         let mut whole = true;
+        let mut pressed: Option<(Vec<view::HitBox>, (f32, f32))> = None;
         let drawn = surface.draw(&gfx, pixels, px, |frame| {
             frame.origin(0.0, 0.0);
             if opacity < 1.0 {
@@ -1877,9 +1893,13 @@ impl Widget {
                     *drawn = parts;
                 }
                 _ => {
-                    if let Err(error) = layers.draw(frame, &picture, local, px) {
-                        note(format!("widget: not drawn: {error}"));
-                        whole = false;
+                    match layers.draw(frame, &picture, local, px) {
+                        // (Its readings drawn again: where each thing to press now is.)
+                        Ok(drawn) => pressed = drawn.hits.map(|hits| (hits, at)).or(pressed.take()),
+                        Err(error) => {
+                            note(format!("widget: not drawn: {error}"));
+                            whole = false;
+                        }
                     }
                 }
             }
@@ -1897,6 +1917,9 @@ impl Widget {
             }
         });
         self.frame_took = surface.took;
+        if let Some((hits, from)) = pressed {
+            (self.hits, self.hits_from) = (hits, from);
+        }
         if let Err(error) = &drawn {
             note(format!("widget: its surface not drawn: {error}"));
             gfx::lost();

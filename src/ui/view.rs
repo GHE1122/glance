@@ -22,6 +22,9 @@ const RATE_PLOT: f32 = 36.0;
 /// Rate charts start this much further right, past the rates beside them.
 const RATE_INDENT: f32 = 26.0;
 const LINE: f32 = 16.0;
+/// What plays: the room under its name, and how tall its buttons' row is.
+const MEDIA_GAP: f32 = 8.0;
+const MEDIA_ROW: f32 = 26.0;
 const FACT_GAP: f32 = 3.0;
 pub const TABLE_ROW: f32 = 22.0;
 /// The most processes a lane past `Detail::Full` lists.
@@ -48,6 +51,10 @@ pub enum Hit {
     /// A thread's cell in the CPU's grid: its clock and load shown while the
     /// pointer is on it.
     Thread(u16),
+    /// What plays, paused, played or skipped, or the sound muted; and the
+    /// sound's track, pressed where along it the sound is to be.
+    Media(crate::playing::Key),
+    Volume,
 }
 
 impl Hit {
@@ -136,6 +143,9 @@ enum Block {
     Threads(Vec<(Option<f32>, bool, String)>),
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32 },
     Facts { rows: Vec<(String, String, bool)>, gap: f32 },
+    /// What plays, with what is pressed to pause, play and skip it, and the
+    /// sound's level on a track, pressed to set it.
+    Media { title: String, playing: bool, volume: Option<u8>, muted: bool },
     /// A list in five columns: headings that sort it (the processes'), or
     /// not; scrolled through past `visible` rows, or not.
     Table { headings: Vec<(String, Option<ProcessSort>)>, sort: Option<ProcessSort>, rows: Vec<[String; 5]>, visible: usize, scrolls: bool, widths: [f32; 4] },
@@ -152,6 +162,7 @@ impl Block {
             Block::Meter { gap, .. } => gap + LINE,
             Block::Facts { rows, gap } if !rows.is_empty() => gap + rows.len() as f32 * LINE + (rows.len() - 1) as f32 * FACT_GAP,
             Block::Facts { .. } => 0.0,
+            Block::Media { .. } => LINE + MEDIA_GAP + MEDIA_ROW,
             Block::Table { visible, .. } => *visible as f32 * TABLE_ROW,
         }
     }
@@ -170,6 +181,7 @@ impl Hash for Block {
             Block::Threads(cells) => cells.iter().for_each(|(load, hot, tag)| (load.map(f32::to_bits), hot, tag).hash(state)),
             Block::Meter { label, fraction, value, hot, gap } => (label, fraction.to_bits(), value, hot, gap.to_bits()).hash(state),
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
+            Block::Media { title, playing, volume, muted } => (title, playing, volume, muted).hash(state),
             Block::Table { headings, sort, rows, visible, scrolls, widths } => {
                 headings.iter().for_each(|(label, key)| (label, key.map(|key| key as u8)).hash(state));
                 (sort.map(|sort| sort as u8), rows, visible, scrolls, widths.map(f32::to_bits)).hash(state);
@@ -874,6 +886,19 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             blocks
         }
+        // What plays and how loud, as last looked at (see `playing`).
+        "media" => {
+            let now = crate::playing::now().unwrap_or_default();
+            let title = match (now.title.is_empty(), now.artist.is_empty()) {
+                (true, _) if now.app.is_empty() => lang.pick("没有正在播放的内容", "Nothing is playing").to_string(),
+                (true, _) => now.app.clone(),
+                (false, true) => now.title.clone(),
+                (false, false) => format!("{} · {}", now.title, now.artist),
+            };
+            let app = if now.title.is_empty() { String::new() } else { now.app.clone() };
+            let state = if now.title.is_empty() && now.app.is_empty() { "" } else if now.playing { lang.pick("正在播放", "Playing") } else { lang.pick("已暂停", "Paused") };
+            vec![head(lang.pick("媒体", "Media"), app, state, false), Block::Media { title, playing: now.playing, volume: now.volume, muted: now.muted }]
+        }
         // The time of day, and the day under its name, as the sample has them.
         "time" => {
             let now = text::Local::at(s.t);
@@ -1182,6 +1207,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Threads(_) => "threads",
             Block::Meter { .. } => "meter",
             Block::Facts { .. } => "facts",
+            Block::Media { .. } => "media",
             Block::Table { .. } => "table",
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
@@ -1290,6 +1316,64 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                         frame.fill_rounded(ground, tag_left, tag_top, width_of, tag_height, theme.control_radius.min(tag_height / 2.0));
                         frame.text(tag, theme.small, ink_on, tag_left + 8.0, tag_top + 3.0, width_of - 16.0, Align::Start);
                     }
+                }
+            }
+            (Block::Media { title, playing, volume, muted }, Pass::Content) => {
+                use crate::playing::Key;
+                part("title");
+                frame.text(title, theme.body, theme.text, left, y, width, Align::Start);
+                // Back, play or pause, on: each a mark of its own, the middle one on a plate.
+                let (row, middle) = (y + LINE + MEDIA_GAP, y + LINE + MEDIA_GAP + MEDIA_ROW / 2.0);
+                for (place, key) in [Key::Previous, Key::Toggle, Key::Next].into_iter().enumerate() {
+                    let centre = left + MEDIA_ROW / 2.0 + place as f32 * (MEDIA_ROW + 6.0);
+                    let lit = scene.hover == Some(Hit::Media(key));
+                    part(match key {
+                        Key::Previous => "previous",
+                        Key::Next => "next",
+                        _ => "toggle",
+                    });
+                    if key == Key::Toggle || lit {
+                        frame.fill_circle(if lit { theme.text3.alpha(0.35) } else { theme.track }, Point { x: centre, y: middle }, MEDIA_ROW / 2.0);
+                    }
+                    let mark = |points: &[(f32, f32)]| {
+                        let points: Vec<Point> = points.iter().map(|(x, y)| Point { x: centre + x, y: middle + y }).collect();
+                        frame.fill_shape(&points, Fill::Solid(theme.text));
+                    };
+                    match key {
+                        Key::Previous => {
+                            mark(&[(5.0, -6.0), (5.0, 6.0), (-3.5, 0.0)]);
+                            frame.fill_rounded(theme.text, centre - 6.0, middle - 6.0, 2.0, 12.0, 1.0);
+                        }
+                        Key::Next => {
+                            mark(&[(-5.0, -6.0), (-5.0, 6.0), (3.5, 0.0)]);
+                            frame.fill_rounded(theme.text, centre + 4.0, middle - 6.0, 2.0, 12.0, 1.0);
+                        }
+                        _ if *playing => {
+                            frame.fill_rounded(theme.text, centre - 5.0, middle - 6.0, 3.5, 12.0, 1.0);
+                            frame.fill_rounded(theme.text, centre + 1.5, middle - 6.0, 3.5, 12.0, 1.0);
+                        }
+                        _ => mark(&[(-3.5, -6.5), (-3.5, 6.5), (6.5, 0.0)]),
+                    }
+                    hits.push((centre - MEDIA_ROW / 2.0, row, MEDIA_ROW, MEDIA_ROW, Hit::Media(key)));
+                }
+                // How loud: its level on a track (pressed where it is to be), then said; pressed, muted or not.
+                if let Some(level) = volume {
+                    let said = if *muted { scene.lang.pick("静音", "Muted").to_string() } else { format!("{level}%") };
+                    let said_width = frame.measure("100%", theme.small).max(frame.measure(&said, theme.small));
+                    let from = left + 3.0 * (MEDIA_ROW + 6.0) + 8.0;
+                    let track = (left + width - said_width - 10.0 - from).max(0.0);
+                    part("volume");
+                    frame.fill_rounded(theme.track, from, middle - 2.0, track, 4.0, 2.0);
+                    let filled = track * (*level as f32 / 100.0).clamp(0.0, 1.0);
+                    if filled > 0.0 {
+                        frame.fill_rounded(if *muted { theme.text3 } else { ink.trace }, from, middle - 2.0, filled, 4.0, 2.0);
+                    }
+                    frame.fill_circle(theme.text, Point { x: from + filled, y: middle }, 5.0);
+                    hits.push((from, row, track, MEDIA_ROW, Hit::Volume));
+                    part("level");
+                    let lit = scene.hover == Some(Hit::Media(Key::Mute));
+                    frame.text(&said, theme.small, if *muted || lit { theme.text } else { theme.text2 }, left, middle - theme.small.size * 0.62, width, Align::End);
+                    hits.push((left + width - said_width - 4.0, row, said_width + 4.0, MEDIA_ROW, Hit::Media(Key::Mute)));
                 }
             }
             (Block::Meter { label, fraction, value, hot, gap }, Pass::Content) => {

@@ -58,6 +58,16 @@ mod superio;
 #[cfg(windows)]
 mod tray;
 mod ui;
+mod playing;
+// What plays and how loud, read and changed as the phone remote does: its own code for it.
+#[cfg(windows)]
+#[allow(dead_code)]
+#[path = "../remote/src/actions.rs"]
+mod actions;
+#[cfg(windows)]
+#[allow(dead_code)]
+#[path = "../remote/src/media.rs"]
+mod media;
 #[cfg(windows)]
 mod update;
 #[cfg(windows)]
@@ -385,6 +395,8 @@ pub fn run() {
         touches::start();
     }
     thread::spawn(move || {
+        // What plays and how loud, while the module that shows them is on.
+        playing::watch(|| ui::prefs::module_on(&app().settings.lock().unwrap().view, "media"));
         let mut watch = watch::Watch::default();
         // What the remote-control helper is told of each sample.
         let mut told = remote::Told::open();
