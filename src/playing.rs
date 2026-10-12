@@ -61,11 +61,25 @@ fn keep(now: Option<Now>) {
     }
 }
 
+/// Just asked to pause or to play: whether it is taken to be playing till
+/// when. (A program says that it has paused a little after it was asked
+/// to, and some say the other thing once in between: what was asked for
+/// shows meanwhile, and what the program says after.)
+#[cfg(windows)]
+static ASKED: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
+/// How long what was asked for stands for what is said.
+#[cfg(windows)]
+const SETTLES: std::time::Duration = std::time::Duration::from_millis(1500);
+
 #[cfg(windows)]
 fn look() {
     let playing = crate::media::playing();
     let sound = crate::actions::volume();
     let (title, artist, app, is_playing) = playing.map_or_else(Default::default, |playing| (playing.title, playing.artist, playing.app, playing.playing));
+    let is_playing = match *ASKED.lock().unwrap() {
+        Some((till, asked)) if std::time::Instant::now() < till => asked,
+        _ => is_playing,
+    };
     keep(Some(Now { title, artist, app, playing: is_playing, volume: sound.map(|(level, _)| level), muted: sound.is_some_and(|(_, muted)| muted) }));
 }
 
@@ -89,16 +103,28 @@ pub fn watch(wanted: impl Fn() -> bool + Send + 'static) {
 pub fn act(act: Act) {
     std::thread::spawn(move || {
         match act {
-            Act::Key(Key::Previous) => drop(crate::media::ask("previous")),
-            Act::Key(Key::Toggle) => drop(crate::media::ask("toggle")),
-            Act::Key(Key::Next) => drop(crate::media::ask("next")),
+            Act::Key(Key::Previous) => {
+                let _ = crate::media::ask("previous");
+            }
+            Act::Key(Key::Toggle) => {
+                // Shown as asked for at once.
+                if let Some(now) = now() {
+                    *ASKED.lock().unwrap() = Some((std::time::Instant::now() + SETTLES, !now.playing));
+                    keep(Some(Now { playing: !now.playing, ..now }));
+                }
+                let _ = crate::media::ask("toggle");
+            }
+            Act::Key(Key::Next) => {
+                let _ = crate::media::ask("next");
+            }
             Act::Key(Key::Mute) => {
                 let muted = crate::actions::volume().is_some_and(|(_, muted)| muted);
                 let _ = crate::actions::set_volume(None, Some(!muted));
             }
             Act::Volume(level) => drop(crate::actions::set_volume(Some(level), None)),
         }
-        for wait in [0, 150, 500] {
+        // (The last, once what was asked for no longer stands for what is said.)
+        for wait in [0, 150, 500, 900] {
             std::thread::sleep(std::time::Duration::from_millis(wait));
             look();
         }
