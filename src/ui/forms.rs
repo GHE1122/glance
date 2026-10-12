@@ -151,7 +151,7 @@ impl Small {
 /// What a reading is of.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
-    /// The time of day: its ring, how much of the day has gone.
+    /// The time of day.
     Time,
     Game,
     Cpu,
@@ -266,7 +266,8 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             icon: Icon::Clock,
             // (Named by its day: a tile says the time under it.)
             label: now.date(lang),
-            share: Some(now.of_day()),
+            // (No ring round its mark: the time is no share of anything.)
+            share: None,
             figure,
             unit: half.into(),
             beside: String::new(),

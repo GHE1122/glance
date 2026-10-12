@@ -170,11 +170,6 @@ impl Local {
         (format!("{}:{:02}", (self.hour + 11) % 12 + 1, self.minute), half)
     }
 
-    /// How much of its day has gone (0 to 1).
-    pub fn of_day(self) -> f32 {
-        (self.hour * 60 + self.minute) as f32 / 1440.0
-    }
-
     /// The day: "10月11日 周日", "Sun, Oct 11".
     pub fn date(self, lang: Lang) -> String {
         let (weekday, month) = (self.weekday as usize % 7, (self.month as usize).clamp(1, 12) - 1);
@@ -209,6 +204,5 @@ mod tests {
         assert_eq!(noon.time(true, Lang::En), ("9:05".to_string(), "AM"));
         assert_eq!(Local { hour: 0, ..noon }.time(true, Lang::Zh), ("12:05".to_string(), "上午"));
         assert_eq!(Local { hour: 15, ..noon }.time(true, Lang::En), ("3:05".to_string(), "PM"));
-        assert_eq!(Local { hour: 12, minute: 0, ..noon }.of_day(), 0.5);
     }
 }
