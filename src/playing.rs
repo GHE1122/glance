@@ -35,9 +35,22 @@ pub enum Sung {
     Asking,
     /// None were found.
     Unknown,
-    /// Its lyrics, and the line sung now (none before the first).
-    Lines { lines: Lyrics, now: Option<usize> },
+    /// Its lyrics, the line sung now (none before the first), and since when it is the one (what is drawn of
+    /// them glides to it for `GLIDE` after).
+    Lines { lines: Lyrics, now: Option<usize>, since: std::time::Instant },
 }
+
+/// How long the lyrics take to glide from one line to the next.
+pub const GLIDE: std::time::Duration = std::time::Duration::from_millis(420);
+
+/// Whether the lyrics are gliding to the line sung now: what shows them is drawn every frame meanwhile.
+pub fn gliding() -> bool {
+    NOW.lock().unwrap().as_ref().and_then(|now| now.sung.as_ref()).is_some_and(|sung| matches!(sung, Sung::Lines { since, .. } if since.elapsed() < GLIDE))
+}
+
+/// What is told that the line sung has changed (the windows that show it are drawn at once then).
+#[cfg(windows)]
+static TOLD: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
 
 #[cfg(windows)]
 use crate::lyrics::Lyrics;
@@ -133,7 +146,22 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
             let now = crate::lyrics::sung_at(&lines, position);
             let next = now.map_or(0, |now| now + 1);
             let due = lines.get(next).filter(|_| playing.playing).map(|line| std::time::Duration::from_secs_f64((line.at - crate::lyrics::EARLY - position).max(0.0)));
-            (Some(Sung::Lines { lines, now }), due)
+            // The same line as before keeps its time; another is the one from when it became due (from now, if
+            // that was longer ago than a glide: come to by a jump in the track, it glides all the same).
+            let before = NOW.lock().unwrap().as_ref().and_then(|kept| match &kept.sung {
+                Some(Sung::Lines { lines: had, now: was, since }) if std::sync::Arc::ptr_eq(had, &lines) && *was == now => Some(*since),
+                _ => None,
+            });
+            let since = before.unwrap_or_else(|| {
+                let late = now.map_or(0.0, |now| (position + crate::lyrics::EARLY - lines[now].at).clamp(0.0, GLIDE.as_secs_f64()));
+                std::time::Instant::now() - std::time::Duration::from_secs_f64(late)
+            });
+            if before.is_none() {
+                if let Some(told) = TOLD.get() {
+                    told();
+                }
+            }
+            (Some(Sung::Lines { lines, now, since }), due)
         }
     }
 }
@@ -141,7 +169,8 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
 /// Looks every second while `wanted` says the module is on (and whether lyrics are shown), and as each line
 /// of the lyrics is due; forgets what it saw while it is off.
 #[cfg(windows)]
-pub fn watch(wanted: impl Fn() -> (bool, bool) + Send + 'static) {
+pub fn watch(wanted: impl Fn() -> (bool, bool) + Send + 'static, changed: impl Fn() + Send + Sync + 'static) {
+    let _ = TOLD.set(Box::new(changed));
     std::thread::spawn(move || loop {
         let (on, lyrics) = wanted();
         LYRICS.store(lyrics, Ordering::Relaxed);

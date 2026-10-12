@@ -403,7 +403,7 @@ pub fn run() {
             let view = &app().settings.lock().unwrap().view;
             let lyrics = ui::prefs::module_on(view, "lyrics") || (ui::prefs::module_on(view, "time") && ui::prefs::item_on(view, "time", "lyrics"));
             (ui::prefs::module_on(view, "time") || lyrics, lyrics)
-        });
+        }, || app().controller.lyric_changed());
         let mut watch = watch::Watch::default();
         // What the remote-control helper is told of each sample.
         let mut told = remote::Told::open();

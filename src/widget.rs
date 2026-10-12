@@ -756,6 +756,14 @@ impl Widgets {
     }
 
     /// Follows the pointer, draws what is due, and says when next to.
+    /// Each drawn at its next turn, not after its rest (what it shows has changed).
+    pub fn draw_soon(&mut self) {
+        let now = Instant::now();
+        for widget in &mut self.list {
+            widget.next_frame = now;
+        }
+    }
+
     pub fn tick(&mut self, now: Instant, look: &Look, kept: &[WidgetAt], history: &[Sample], seen: &Seen, controller: &crate::panel::Controller) -> Option<Duration> {
         if !self.restored {
             if gfx::current().is_err() {
@@ -1804,7 +1812,8 @@ impl Widget {
                 format!("widget: a frame took {:.1} ms: laid out {:.1}, the desktop taken {:.1}, drawn {:.1} (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1}; {form})", ms(whole), ms(laid_out), ms(taken - laid_out), ms(whole - taken), ms(took.given), ms(took.painted), ms(took.handed))
             });
         }
-        if moving { Frame::Moving } else { Frame::Rest }
+        // (The lyrics gliding to the next line are drawn every frame too.)
+        if moving || crate::playing::gliding() { Frame::Moving } else { Frame::Rest }
     }
 
     fn draw(&mut self, theme: &Theme, scene: &Scene, now: Instant) {

@@ -126,6 +126,8 @@ const RECALL_WIDGET: u32 = WM_APP + 10;
 /// The tray icon's menu, opening up from the point in LPARAM (x low, y
 /// high, physical px).
 const TRAY_MENU: u32 = WM_APP + 11;
+/// The line of the lyrics sung has changed: what shows them is drawn at once (it glides to the next).
+const LYRIC: u32 = WM_APP + 13;
 /// The panel thread's own hotkey: Escape, while the panel is open.
 const ESCAPE_HOTKEY: i32 = 1;
 
@@ -233,6 +235,11 @@ impl Controller {
             let at = ((y as u16 as u32) << 16 | x as u16 as u32) as isize;
             let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), TRAY_MENU, WPARAM(0), LPARAM(at)) };
         }
+    }
+
+    /// The line of the lyrics sung has changed (from any thread).
+    pub fn lyric_changed(&self) {
+        self.post(LYRIC);
     }
 
     fn post(&self, message: u32) {
@@ -677,6 +684,10 @@ impl Controller {
                 }
                 RECALL_WIDGET => {
                     widgets.recall();
+                }
+                LYRIC => {
+                    panel.next_frame = now;
+                    widgets.draw_soon();
                 }
                 SETTINGS_FRONT => {
                     let front = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
@@ -2126,7 +2137,7 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel.
-        let moving = !self.shift.done(now) || !self.opacity.done(now) || (self.scroll_target - self.scroll).abs() > 0.05;
+        let moving = !self.shift.done(now) || !self.opacity.done(now) || (self.scroll_target - self.scroll).abs() > 0.05 || crate::playing::gliding();
         self.next_frame = if moving {
             now
         } else {

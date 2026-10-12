@@ -29,6 +29,37 @@ const MEDIA_ROW: f32 = 24.0;
 const LYRIC_ROWS: usize = 7;
 const LYRIC_ROW: f32 = 22.0;
 
+/// How far the lyrics have glid to the line sung now (0 just come to it, 1 there), and what they glide from:
+/// the line sung before, and the row above the first shown (gone up out of sight as it ends).
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Glide {
+    pub done: f32,
+    pub was: String,
+    pub above: String,
+}
+
+impl Hash for Glide {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.done.to_bits(), &self.was, &self.above).hash(state);
+    }
+}
+
+/// The glide to the line sung now, as far as it has gone (eased: quick, then settling).
+fn glide_of(heard: Option<&crate::playing::Now>) -> Glide {
+    use crate::playing::Sung;
+    let Some(Sung::Lines { lines, now: Some(now), since }) = heard.and_then(|heard| heard.sung.as_ref()) else {
+        return Glide { done: 1.0, ..Default::default() };
+    };
+    let t = (since.elapsed().as_secs_f32() / crate::playing::GLIDE.as_secs_f32()).min(1.0);
+    let text = |at: Option<usize>| at.and_then(|at| lines.get(at)).map_or(String::new(), |line| line.text.clone());
+    Glide { done: 1.0 - (1.0 - t).powi(3), was: text(now.checked_sub(1)), above: text(now.checked_sub(3)) }
+}
+
+/// `a` turned toward `b` by `t` (0 to 1).
+fn toward(a: Color, b: Color, t: f32) -> Color {
+    Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
+}
+
 /// What a row of the lyrics module is: a line sung before, the line sung now, its translation, a line to come,
 /// or what is said of why there are none.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -53,7 +84,7 @@ fn sung_now(heard: Option<&crate::playing::Now>, lang: Lang, translated: bool) -
         Sung::Untimed { netease: false } => said(lang.pick("这个播放器没有提供播放进度", "This player does not say how far in it is"), lang.pick("无法跟着播放显示歌词", "so no line can be shown as it is sung")),
         Sung::Asking => said(lang.pick("正在查找歌词…", "Finding the lyrics…"), ""),
         Sung::Unknown => said(lang.pick("没有找到这首歌的歌词", "No lyrics were found for this track"), ""),
-        Sung::Lines { lines, now } => {
+        Sung::Lines { lines, now, .. } => {
             let line = now.map_or(String::new(), |now| sung_line(&lines[now].text));
             let translation = now.and_then(|now| lines[now].translation.clone()).filter(|_| translated);
             let next = lines.get(now.map_or(0, |now| now + 1)).map(|line| line.text.clone()).unwrap_or_default();
@@ -73,7 +104,7 @@ fn lyric_rows(heard: Option<&crate::playing::Now>, lang: Lang, translated: bool)
     use crate::playing::Sung;
     let mut rows = Vec::with_capacity(LYRIC_ROWS);
     match heard.and_then(|heard| heard.sung.as_ref()) {
-        Some(Sung::Lines { lines, now }) => {
+        Some(Sung::Lines { lines, now, .. }) => {
             let text = |at: Option<usize>| at.and_then(|at| lines.get(at)).map_or(String::new(), |line| line.text.clone());
             let at = now.map(|now| now as isize).unwrap_or(-1);
             for before in [2, 1] {
@@ -223,9 +254,9 @@ enum Block {
     Playing { title: String, about: String, playing: bool },
     /// The line sung now, and under it its translation (or the next line); `said`, where they say why there are
     /// none instead.
-    Lyric { line: String, under: String, said: bool },
+    Lyric { line: String, under: String, said: bool, glide: Glide },
     /// Lyrics as they are sung: a row each (see `Sing`), as many as `LYRIC_ROWS`.
-    Lyrics { rows: Vec<(String, Sing)> },
+    Lyrics { rows: Vec<(String, Sing)>, glide: Glide },
     /// A list in five columns: headings that sort it (the processes'), or
     /// not; scrolled through past `visible` rows, or not.
     Table { headings: Vec<(String, Option<ProcessSort>)>, sort: Option<ProcessSort>, rows: Vec<[String; 5]>, visible: usize, scrolls: bool, widths: [f32; 4] },
@@ -266,8 +297,8 @@ impl Hash for Block {
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
             Block::Sound { level, muted } => (level, muted).hash(state),
             Block::Playing { title, about, playing } => (title, about, playing).hash(state),
-            Block::Lyric { line, under, said } => (line, under, said).hash(state),
-            Block::Lyrics { rows } => rows.hash(state),
+            Block::Lyric { line, under, said, glide } => (line, under, said, glide).hash(state),
+            Block::Lyrics { rows, glide } => (rows, glide).hash(state),
             Block::Table { headings, sort, rows, visible, scrolls, widths } => {
                 headings.iter().for_each(|(label, key)| (label, key.map(|key| key as u8)).hash(state));
                 (sort.map(|sort| sort as u8), rows, visible, scrolls, widths.map(f32::to_bits)).hash(state);
@@ -1004,8 +1035,9 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 }
             }
             if on("lyrics") {
-                let (line, under, said) = sung_now(crate::playing::now().as_ref(), lang, prefs.shows("lyrics", "translation"));
-                blocks.push(Block::Lyric { line, under, said });
+                let heard = crate::playing::now();
+                let (line, under, said) = sung_now(heard.as_ref(), lang, prefs.shows("lyrics", "translation"));
+                blocks.push(Block::Lyric { line, under, said, glide: glide_of(heard.as_ref()) });
             }
             blocks
         }
@@ -1013,7 +1045,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         "lyrics" => {
             let heard = crate::playing::now();
             let about = heard.as_ref().filter(|heard| !heard.title.is_empty()).map_or(String::new(), |heard| [heard.title.as_str(), heard.artist.as_str()].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · "));
-            vec![head(lang.pick("歌词", "Lyrics"), about, "", false), Block::Lyrics { rows: lyric_rows(heard.as_ref(), lang, on("translation")) }]
+            vec![head(lang.pick("歌词", "Lyrics"), about, "", false), Block::Lyrics { rows: lyric_rows(heard.as_ref(), lang, on("translation")), glide: glide_of(heard.as_ref()) }]
         }
         "system" => {
             let rows = [
@@ -1497,26 +1529,63 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     pressed(frame, scene, hits, Hit::Media(key), glyph, pressed_from + place as f32 * (MEDIA_ROW + 2.0), row, false);
                 }
             }
-            (Block::Lyric { line, under, said }, Pass::Content) => {
+            (Block::Lyric { line, under, said, glide }, Pass::Content) => {
+                // The line sung now rises into its place as the one before rises away, each fading as it goes.
                 let top = y + MEDIA_GAP;
-                part("line");
-                frame.text(line, if *said { theme.small } else { theme.body }, if *said { theme.text2 } else { theme.text }, left, top, width, Align::Start);
-                part("under");
-                frame.text(under, theme.small, theme.text3, left, top + LINE, width, Align::Start);
-            }
-            (Block::Lyrics { rows }, Pass::Content) => {
-                for (index, (text, sing)) in rows.iter().enumerate() {
-                    let row = y + MEDIA_GAP + index as f32 * LYRIC_ROW;
-                    let (font, colour) = match sing {
-                        Sing::Now => (theme.body, theme.text),
-                        Sing::Under | Sing::Said => (theme.small, theme.text2),
-                        Sing::Past | Sing::Next => (theme.small, theme.text3),
-                    };
-                    // Each on the middle of its row, whatever its size.
-                    let (ascent, descent) = frame.baseline(font);
-                    part(&index.to_string());
-                    frame.text(text, font, colour, left, row + (LYRIC_ROW - ascent - descent) / 2.0, width, Align::Start);
+                let rise = (1.0 - glide.done) * LINE;
+                frame.clip(left - 2.0, top, width + 4.0, 2.0 * LINE);
+                if glide.done < 1.0 && !glide.was.is_empty() {
+                    part("was");
+                    frame.text(&glide.was, theme.body, theme.text.alpha(1.0 - glide.done), left, top + rise - LINE, width, Align::Start);
                 }
+                part("line");
+                let fade = if glide.was.is_empty() { 1.0 } else { glide.done };
+                frame.text(line, if *said { theme.small } else { theme.body }, (if *said { theme.text2 } else { theme.text }).alpha(fade), left, top + rise, width, Align::Start);
+                part("under");
+                frame.text(under, theme.small, theme.text3.alpha(fade), left, top + LINE + rise, width, Align::Start);
+                frame.unclip();
+            }
+            (Block::Lyrics { rows, glide }, Pass::Content) => {
+                // Every row a row lower than its place, gliding up into it: the line sung now growing to its size
+                // and brightening, the one sung before shrinking and dimming, the one above the first rising out
+                // of sight.
+                let top = y + MEDIA_GAP;
+                let e = glide.done;
+                let rise = (1.0 - e) * LYRIC_ROW;
+                let middle = |font: Font| {
+                    let (ascent, descent) = frame.baseline(font);
+                    (LYRIC_ROW - ascent - descent) / 2.0
+                };
+                frame.clip(left - 2.0, top, width + 4.0, LYRIC_ROWS as f32 * LYRIC_ROW);
+                if e < 1.0 && !glide.above.is_empty() {
+                    part("above");
+                    frame.text(&glide.above, theme.small, theme.text3.alpha(1.0 - e), left, top - LYRIC_ROW + rise + middle(theme.small), width, Align::Start);
+                }
+                let grown = theme.small.size / theme.body.size;
+                for (index, (text, sing)) in rows.iter().enumerate() {
+                    let row = top + index as f32 * LYRIC_ROW + rise;
+                    part(&index.to_string());
+                    match sing {
+                        Sing::Now => {
+                            let scale = grown + (1.0 - grown) * e;
+                            frame.text_scaled(text, theme.body, toward(theme.text3, theme.text, e), left, row + middle(Font { size: theme.body.size * scale, ..theme.body }), width / scale, Align::Start, scale);
+                        }
+                        // The line sung just before: as it was sung, going.
+                        Sing::Past if index == 1 && !glide.was.is_empty() && e < 1.0 => {
+                            let scale = 1.0 / grown + (1.0 - 1.0 / grown) * e;
+                            frame.text_scaled(text, theme.small, toward(theme.text, theme.text3, e), left, row + middle(Font { size: theme.small.size * scale, ..theme.small }), width / scale, Align::Start, scale);
+                        }
+                        _ => {
+                            let (font, colour) = match sing {
+                                Sing::Under => (theme.small, theme.text2.alpha(e)),
+                                Sing::Said => (theme.small, theme.text2),
+                                _ => (theme.small, theme.text3),
+                            };
+                            frame.text(text, font, colour, left, row + middle(font), width, Align::Start);
+                        }
+                    }
+                }
+                frame.unclip();
             }
             (Block::Meter { label, fraction, value, hot, gap }, Pass::Content) => {
                 let row_y = y + gap;
