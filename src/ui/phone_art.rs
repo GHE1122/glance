@@ -1,8 +1,8 @@
 //! The phone app's first screen, drawn for the settings' phone remote page:
 //! this PC as the phone pictures it (its case, every part a block in it,
 //! seen from one corner), with what the phone would be told of it now, and
-//! the first of what the phone may ask. A picture only: nothing in it is
-//! pressed.
+//! what the phone may ask of it, to be asked from here too: every tile,
+//! switch and slider is pressed and slid as on the phone (see `Part`).
 //!
 //! The case is drawn as the app and the remote's web page draw it (see
 //! `remote/src/web.html`): the same blocks, the same corner.
@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows_numerics::{Matrix3x2, Vector2};
 
-use super::canvas::{Align, Color, Family, Font};
+use super::canvas::{Align, Canvas, Color, Family, Font};
 use super::gfx::{rect, Frame};
 use super::text::Lang;
 use super::view::Rect;
@@ -304,18 +304,74 @@ impl Picture<'_> {
     }
 }
 
-/// Draws the app's first screen in `at` (a phone's screen: `SCREEN`, to
-/// whatever size), for the PC called `name` and what the phone would be
-/// told of it now (`reads`: see `remote::figures`), `seconds` into the
-/// fans' turning. Whether anything in it turns: it is then to be drawn
-/// again soon.
-pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, seconds: f32) -> bool {
+/// What on the phone's page takes a press or a slide.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Part {
+    Night,
+    Screen,
+    Lights,
+    /// One of the PC's power modes, by its id.
+    Power(String),
+    /// A colour for the lights (RRGGBB).
+    Colour(String),
+    /// What the lights do.
+    Effect(&'static str),
+    /// How bright the lights are: slid.
+    Brightness,
+    /// A monitor by itself, on or off; and how bright it is: slid.
+    Monitor(usize),
+    MonitorBrightness(usize),
+    /// How bright the light under a laptop's keys is: one of its steps.
+    Keys(u8),
+    Mute,
+    /// How loud: slid.
+    Volume,
+    /// What is playing: "previous", "toggle" or "next".
+    Media(&'static str),
+    Sleep,
+}
+
+impl Part {
+    /// Whether it is slid (its value from 0 to 1 along it) rather than pressed.
+    pub fn slides(&self) -> bool {
+        matches!(self, Part::Brightness | Part::MonitorBrightness(_) | Part::Volume)
+    }
+}
+
+/// What was drawn: where each thing to press or slide is (in the window's
+/// measure; a slider's is its track), and how tall the page is (the
+/// screen's measure), for scrolling it.
+pub struct Painted {
+    pub parts: Vec<(Rect, Part)>,
+    pub tall: f32,
+}
+
+/// The colours the app starts with.
+const GIVEN: [&str; 6] = ["FF7B4A", "FFFFFF", "70B3FF", "59C98A", "C68CFF", "FF5E7E"];
+/// Where the page under its head begins (the screen's measure).
+pub const HEAD: f32 = 60.0;
+
+fn colour(hex: &str) -> Color {
+    Color::hex(u32::from_str_radix(hex, 16).unwrap_or(0xFFFFFF), 1.0)
+}
+
+/// Draws the app's page in `at` (a phone's screen: `SCREEN`, to whatever
+/// size), for the PC called `name`: what the phone would be told of it now
+/// (`reads`: see `remote::figures`), and how the remote says it is
+/// (`state`: what a phone is answered; none, while the remote has not
+/// answered: the page is then a picture, with nothing to press), `seconds`
+/// into the fans' turning, the page under its head moved up by `scroll`,
+/// and a slider in hand shown where it is held (`held`: which, and how far
+/// along).
+#[allow(clippy::too_many_arguments)]
+pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, state: Option<&Value>, seconds: f32, scroll: f32, held: Option<(&Part, f32)>) -> Painted {
+    let nothing = Painted { parts: Vec::new(), tall: 0.0 };
     let k = at.w / SCREEN.0;
     let screen = Matrix3x2::scale(k, k) * Matrix3x2::translation(at.x, at.y);
-    let Ok(round) = (unsafe { frame.gfx.factory.CreateStrokeStyle(&D2D1_STROKE_STYLE_PROPERTIES1 { startCap: D2D1_CAP_STYLE_ROUND, endCap: D2D1_CAP_STYLE_ROUND, lineJoin: D2D1_LINE_JOIN_ROUND, ..Default::default() }, None) }) else { return false };
+    let Ok(round) = (unsafe { frame.gfx.factory.CreateStrokeStyle(&D2D1_STROKE_STYLE_PROPERTIES1 { startCap: D2D1_CAP_STYLE_ROUND, endCap: D2D1_CAP_STYLE_ROUND, lineJoin: D2D1_LINE_JOIN_ROUND, ..Default::default() }, None) }) else { return nothing };
     let mut picture = Picture { frame, screen, room: Matrix3x2::identity(), round: round.into() };
     // Whatever runs past the screen's end is not drawn: a page that goes on below.
-    let Ok(glass) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(0.0, 0.0, SCREEN.0, at.h / k), radiusX: 26.0, radiusY: 26.0 }) }) else { return false };
+    let Ok(glass) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(0.0, 0.0, SCREEN.0, at.h / k), radiusX: 26.0, radiusY: 26.0 }) }) else { return nothing };
     frame.place(screen);
     let layer = D2D1_LAYER_PARAMETERS1 {
         contentBounds: rect(0.0, 0.0, SCREEN.0, at.h / k),
@@ -330,21 +386,32 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sec
     picture.plate(Rect { x: 0.0, y: 0.0, w: SCREEN.0, h: at.h / k }, 0.0, PAGE);
 
     let (side, wide) = (16.0, SCREEN.0 - 32.0);
-    // Whose it is, and that it answers.
+    // Whose it is, and whether it answers.
     picture.words(name, Font::new(Family::Segoe, 21.0, 600.0), INK, side, 50.0, false);
-    let connected = lang.pick("已连接", "Connected");
+    let answering = if state.is_some() { lang.pick("已连接", "Connected") } else { lang.pick("正在连接…", "Connecting…") };
     let small = Font::new(Family::Segoe, 12.5, 400.0);
-    picture.words(connected, small, DIM, SCREEN.0 - side, 48.0, true);
-    unsafe { frame.dc.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: SCREEN.0 - side - frame.gfx.measure(connected, small) - 11.0, Y: 43.5 }, radiusX: 4.0, radiusY: 4.0 }, frame.brush(GOOD)) };
+    picture.words(answering, small, DIM, SCREEN.0 - side, 48.0, true);
+    unsafe { frame.dc.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: SCREEN.0 - side - frame.gfx.measure(answering, small) - 11.0, Y: 43.5 }, radiusX: 4.0, radiusY: 4.0 }, frame.brush(if state.is_some() { GOOD } else { FAINT })) };
+
+    // Under its head the page moves: what is there is in the page's own measure from here on.
+    unsafe { frame.dc.PushAxisAlignedClip(&rect(0.0, HEAD, SCREEN.0, at.h / k - HEAD), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+    picture.screen = Matrix3x2::translation(0.0, -scroll) * screen;
+    frame.place(picture.screen);
+    let mut parts: Vec<(Rect, Part)> = Vec::new();
+    // Where a part of the page is in the window, as much of it as shows under the head.
+    let shown = |r: Rect| {
+        let (top, bottom) = ((r.y - scroll).max(HEAD), (r.y + r.h - scroll).min(at.h / k));
+        (bottom > top).then(|| Rect { x: at.x + r.x * k, y: at.y + top * k, w: r.w * k, h: (bottom - top) * k })
+    };
 
     // The PC drawn, and its four parts under it.
     let top = 68.0;
     let drawing = (wide - 16.0) * ROOM.3 / ROOM.2;
     picture.plate(Rect { x: side, y: top, w: wide, h: 8.0 + drawing + 8.0 + 52.0 + 12.0 }, 20.0, CARD);
     picture.rig(side + 8.0, top + 8.0, wide - 16.0, reads, lang, seconds);
-    let parts = [("cpu", "CPU"), ("gpu", lang.pick("显卡", "Graphics")), ("ram", lang.pick("内存", "Memory")), ("disk", lang.pick("硬盘", "Disk"))];
+    let named = [("cpu", "CPU"), ("gpu", lang.pick("显卡", "Graphics")), ("ram", lang.pick("内存", "Memory")), ("disk", lang.pick("硬盘", "Disk"))];
     let each = (wide - 24.0 - 3.0 * 8.0) / 4.0;
-    for (place, (part, called)) in parts.into_iter().enumerate() {
+    for (place, (part, called)) in named.into_iter().enumerate() {
         let (x, y) = (side + 12.0 + place as f32 * (each + 8.0), top + 8.0 + drawing + 8.0);
         picture.plate(Rect { x, y, w: each, h: 52.0 }, 12.0, TILE);
         picture.words(&figure(read(reads, part)), Font::new(Family::Segoe, 15.0, 600.0), INK, x + 10.0, y + 23.0, false);
@@ -354,42 +421,258 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sec
         };
         picture.words(&under, Font::new(Family::Segoe, 10.0, 400.0), DIM, x + 10.0, y + 40.0, false);
     }
-
-    // The first of what the phone may ask: night, the screens, the lights.
     let mut y = top + 8.0 + drawing + 8.0 + 52.0 + 12.0 + 12.0;
-    let (title, under) = (Font::new(Family::Segoe, 16.0, 600.0), Font::new(Family::Segoe, 12.0, 400.0));
-    picture.plate(Rect { x: side, y, w: wide, h: 72.0 }, 20.0, CARD);
-    picture.words(lang.pick("夜间模式", "Night mode"), title, INK, side + 16.0, y + 31.0, false);
-    picture.words(lang.pick("电脑继续运行：关屏、关灯、切到节能", "The PC runs on: screens and lights off, saving power"), under, DIM, side + 16.0, y + 53.0, false);
-    y += 72.0 + 12.0;
-    let half = (wide - 12.0) / 2.0;
-    let tiles = [(lang.pick("屏幕", "Screens"), lang.pick("亮着，点一下全部关闭", "On: press to turn all off")), (lang.pick("灯光", "Lights"), lang.pick("开着", "On"))];
-    for (place, (called, how)) in tiles.into_iter().enumerate() {
-        let x = side + place as f32 * (half + 12.0);
-        picture.plate(Rect { x, y, w: half, h: 84.0 }, 20.0, LIT);
-        picture.words(called, title, ACCENT, x + 16.0, y + 36.0, false);
-        picture.words(how, under, DIM, x + 16.0, y + 58.0, false);
-    }
-    // The power modes, the middle one chosen; and the page goes on below.
-    y += 84.0 + 12.0;
-    let label = Font::new(Family::Segoe, 12.5, 400.0);
-    picture.plate(Rect { x: side, y, w: wide, h: 92.0 }, 20.0, CARD);
-    picture.words(lang.pick("电源模式", "Power mode"), label, DIM, side + 16.0, y + 27.0, false);
-    let chip = Font::new(Family::Segoe, 12.5, 600.0);
-    let mut x = side + 16.0;
-    for (place, mode) in [lang.pick("最佳能效", "Efficiency"), lang.pick("平衡", "Balanced"), lang.pick("最佳性能", "Performance")].into_iter().enumerate() {
-        let across = frame.gfx.measure(mode, chip) + 28.0;
-        let chosen = place == 1;
-        picture.plate(Rect { x, y: y + 42.0, w: across, h: 34.0 }, 17.0, if chosen { INK } else { TILE });
-        picture.words(mode, chip, if chosen { PAGE } else { INK }, x + 14.0, y + 63.5, false);
-        x += across + 8.0;
-    }
-    y += 92.0 + 12.0;
-    picture.plate(Rect { x: side, y, w: wide, h: 160.0 }, 20.0, CARD);
-    picture.words(lang.pick("显示器", "Monitors"), label, DIM, side + 16.0, y + 27.0, false);
 
+    // How the remote says the PC is (as a phone is answered); before it has answered, as a PC with everything on.
+    let none = Value::Null;
+    let said = state.unwrap_or(&none);
+    let flag = |name: &str| said.get(name).and_then(Value::as_bool);
+    let night = flag("night") == Some(true);
+    let (screens, lights) = (flag("screen"), flag("lights"));
+    let (lights_there, colours_there) = (flag("lights_there").unwrap_or(true), flag("colours_there").unwrap_or(true));
+    let text = |value: &Value, name: &str| value.get(name).and_then(Value::as_str).unwrap_or_default().to_string();
+    let effect = said.get("light").map_or("steady".to_string(), |light| text(light, "effect"));
+    let effects = [("steady", lang.pick("常亮", "Steady")), ("breathing", lang.pick("呼吸", "Breathing")), ("rainbow", lang.pick("彩虹", "Rainbow")), ("heat", lang.pick("跟随温度", "By heat"))];
+    let effect_name = effects.iter().find(|(id, _)| *id == effect).map_or(effects[0].1, |(_, name)| *name);
+    // A slider's place along its track: as it is held, else as the PC says.
+    let along = |part: &Part, said: f32| held.filter(|(held, _)| *held == part).map_or(said, |(_, at)| at).clamp(0.0, 1.0);
+    let (title, under, label, chip) = (Font::new(Family::Segoe, 16.0, 600.0), Font::new(Family::Segoe, 12.0, 400.0), Font::new(Family::Segoe, 12.5, 400.0), Font::new(Family::Segoe, 12.5, 600.0));
+    let live = state.is_some();
+    // A tile: lit or not, its name and what it says of itself; pressed, where the remote answers.
+    let tile = |picture: &Picture, parts: &mut Vec<(Rect, Part)>, r: Rect, lit: bool, called: &str, how: &str, part: Part| {
+        picture.plate(r, 20.0, if lit { LIT } else { CARD });
+        picture.words(called, title, if lit { ACCENT } else { INK }, r.x + 16.0, r.y + r.h / 2.0 - 5.0, false);
+        frame.text_wrapped(how, under, DIM, r.x + 16.0, r.y + r.h / 2.0 + 4.0, r.w - 32.0);
+        if live {
+            parts.extend(shown(r).map(|shown| (shown, part)));
+        }
+    };
+    // A slider: its track, filled as far as it is along, and its knob.
+    let slider = |picture: &Picture, parts: &mut Vec<(Rect, Part)>, x: f32, middle: f32, width: f32, at: f32, part: Part, enabled: bool| {
+        picture.plate(Rect { x, y: middle - 2.5, w: width, h: 5.0 }, 2.5, TILE);
+        picture.plate(Rect { x, y: middle - 2.5, w: width * at, h: 5.0 }, 2.5, if enabled { ACCENT } else { FAINT });
+        unsafe { frame.dc.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: x + width * at, Y: middle }, radiusX: 8.0, radiusY: 8.0 }, frame.brush(if enabled { INK } else { FAINT })) };
+        if live && enabled {
+            parts.extend(shown(Rect { x, y: middle - 14.0, w: width, h: 28.0 }).map(|shown| (shown, part)));
+        }
+    };
+
+    // Night, the screens, the lights.
+    tile(&picture, &mut parts, Rect { x: side, y, w: wide, h: 76.0 }, night, lang.pick("夜间模式", "Night mode"), if night { lang.pick("已开启，电脑还在运行。再点一次结束", "On; the PC is still running. Press again to end it") } else { lang.pick("电脑继续运行：关屏、关灯、切到节能", "The PC keeps running: screens off, lights off, power saver") }, Part::Night);
+    y += 76.0 + 12.0;
+    let half = if lights_there { (wide - 12.0) / 2.0 } else { wide };
+    tile(&picture, &mut parts, Rect { x: side, y, w: half, h: 88.0 }, screens != Some(false), lang.pick("屏幕", "Screens"), if screens == Some(false) { lang.pick("已关闭，点一下打开", "Off. Press to turn them on") } else { lang.pick("亮着，点一下全部关闭", "On. Press to turn them all off") }, Part::Screen);
+    if lights_there {
+        let how = match lights {
+            Some(true) if colours_there => format!("{} · {effect_name}", lang.pick("开着", "On")),
+            Some(true) => lang.pick("开着", "On").to_string(),
+            Some(false) => lang.pick("关着，点一下打开", "Off. Press to turn them on").to_string(),
+            None => lang.pick("点一下关灯", "Press to turn them off").to_string(),
+        };
+        tile(&picture, &mut parts, Rect { x: side + half + 12.0, y, w: half, h: 88.0 }, lights != Some(false), lang.pick("灯光", "Lights"), &how, Part::Lights);
+    }
+    y += 88.0 + 12.0;
+
+    // The power modes, the one in use chosen.
+    let modes: Vec<(String, String, bool)> = match said.get("power").and_then(Value::as_array) {
+        Some(modes) => modes.iter().map(|mode| (text(mode, "id"), text(mode, "name"), mode.get("on").and_then(Value::as_bool) == Some(true))).collect(),
+        None => vec![("efficiency".into(), String::new(), false), ("balanced".into(), String::new(), true), ("performance".into(), String::new(), false)],
+    };
+    if modes.len() > 1 {
+        picture.plate(Rect { x: side, y, w: wide, h: 92.0 }, 20.0, CARD);
+        picture.words(lang.pick("电源模式", "Power plan"), label, DIM, side + 16.0, y + 27.0, false);
+        let mut x = side + 16.0;
+        for (id, called, chosen) in &modes {
+            let called = match id.as_str() {
+                "efficiency" => lang.pick("最佳能效", "Best efficiency"),
+                "balanced" => lang.pick("平衡", "Balanced"),
+                "performance" => lang.pick("最佳性能", "Best performance"),
+                _ => called.as_str(),
+            };
+            let across = frame.gfx.measure(called, chip) + 28.0;
+            let r = Rect { x, y: y + 42.0, w: across, h: 34.0 };
+            picture.plate(r, 17.0, if *chosen { INK } else { TILE });
+            picture.words(called, chip, if *chosen { PAGE } else { INK }, x + 14.0, y + 63.5, false);
+            if live && !chosen {
+                parts.extend(shown(r).map(|shown| (shown, Part::Power(id.clone()))));
+            }
+            x += across + 8.0;
+        }
+        y += 92.0 + 12.0;
+    }
+
+    // The lights' colour, what they do, and how bright they are: while they are on.
+    if colours_there && lights == Some(true) && !night {
+        let light = said.get("light").cloned().unwrap_or(Value::Null);
+        let now = text(&light, "color").to_uppercase();
+        picture.plate(Rect { x: side, y, w: wide, h: 196.0 }, 20.0, CARD);
+        picture.words(lang.pick("灯光的效果和颜色", "Lighting effect and colour"), label, DIM, side + 16.0, y + 27.0, false);
+        // The colours it starts with, and the one in use where it is another.
+        let mut colours: Vec<String> = GIVEN.iter().map(|given| given.to_string()).collect();
+        if now.len() == 6 && !colours.contains(&now) {
+            colours.insert(0, now.clone());
+        }
+        let step = ((wide - 32.0 - 36.0) / (colours.len() - 1).max(1) as f32).min(46.0);
+        for (place, one) in colours.iter().enumerate() {
+            let centre = Vector2 { X: side + 16.0 + 18.0 + place as f32 * step, Y: y + 62.0 };
+            unsafe {
+                if *one == now && effect != "rainbow" {
+                    frame.dc.DrawEllipse(&D2D1_ELLIPSE { point: centre, radiusX: 17.0, radiusY: 17.0 }, frame.brush(INK), 2.0, None);
+                }
+                frame.dc.FillEllipse(&D2D1_ELLIPSE { point: centre, radiusX: 13.0, radiusY: 13.0 }, frame.brush(colour(one)));
+            }
+            if live {
+                parts.extend(shown(Rect { x: centre.X - 18.0, y: centre.Y - 18.0, w: 36.0, h: 36.0 }).map(|shown| (shown, Part::Colour(one.clone()))));
+            }
+        }
+        let mut x = side + 16.0;
+        for (id, called) in effects {
+            let across = frame.gfx.measure(called, chip) + 24.0;
+            let r = Rect { x, y: y + 96.0, w: across, h: 34.0 };
+            picture.plate(r, 17.0, if id == effect { INK } else { TILE });
+            picture.words(called, chip, if id == effect { PAGE } else { INK }, x + 12.0, y + 117.5, false);
+            if live && id != effect {
+                parts.extend(shown(r).map(|shown| (shown, Part::Effect(id))));
+            }
+            x += across + 8.0;
+        }
+        // (Every colour in turn has its own brightness: not slid.)
+        let bright = light.get("brightness").and_then(Value::as_f64).unwrap_or(100.0) as f32;
+        let at = along(&Part::Brightness, (bright - 5.0) / 95.0);
+        picture.words(lang.pick("亮度", "Light"), label, DIM, side + 16.0, y + 168.0, false);
+        slider(&picture, &mut parts, side + 64.0, y + 164.0, wide - 64.0 - 16.0 - 44.0, at, Part::Brightness, effect != "rainbow");
+        picture.words(&format!("{:.0}%", 5.0 + at * 95.0), label, DIM, side + wide - 16.0, y + 168.0, true);
+        y += 196.0 + 12.0;
+    }
+
+    // A laptop's keys: how bright the light under them is, with the lights.
+    if let Some(keys) = said.get("keys").filter(|keys| !keys.is_null() && lights != Some(false) && !night) {
+        let (level, most) = (keys.get("level").and_then(Value::as_u64), keys.get("most").and_then(Value::as_u64).unwrap_or(3));
+        picture.plate(Rect { x: side, y, w: wide, h: 92.0 }, 20.0, CARD);
+        picture.words(lang.pick("键盘背光", "Keyboard light"), label, DIM, side + 16.0, y + 27.0, false);
+        // Out, then each step up to the brightest: named where there are the usual three, numbered otherwise.
+        let names: Vec<String> = if most == 3 {
+            [lang.pick("关", "Off"), lang.pick("低", "Low"), lang.pick("中", "Medium"), lang.pick("高", "High")].iter().map(|name| name.to_string()).collect()
+        } else {
+            std::iter::once(lang.pick("关", "Off").to_string()).chain((1..=most).map(|step| step.to_string())).collect()
+        };
+        let mut x = side + 16.0;
+        for (step, called) in names.iter().enumerate() {
+            let across = frame.gfx.measure(called, chip) + 28.0;
+            let r = Rect { x, y: y + 42.0, w: across, h: 34.0 };
+            let chosen = level == Some(step as u64);
+            picture.plate(r, 17.0, if chosen { INK } else { TILE });
+            picture.words(called, chip, if chosen { PAGE } else { INK }, x + 14.0, y + 63.5, false);
+            if live && !chosen {
+                parts.extend(shown(r).map(|shown| (shown, Part::Keys(step as u8))));
+            }
+            x += across + 8.0;
+        }
+        y += 92.0 + 12.0;
+    }
+
+    // Each monitor by itself, where there are several.
+    let monitors = said.get("monitors").and_then(Value::as_array).cloned().unwrap_or_default();
+    if monitors.len() > 1 {
+        let rows: f32 = monitors.iter().map(|monitor| if monitor.get("brightness").is_some_and(|b| !b.is_null()) { 82.0 } else { 52.0 }).sum();
+        picture.plate(Rect { x: side, y, w: wide, h: 40.0 + rows + 8.0 }, 20.0, CARD);
+        picture.words(lang.pick("显示器", "Monitors"), label, DIM, side + 16.0, y + 27.0, false);
+        let mut row = y + 40.0;
+        for (index, monitor) in monitors.iter().enumerate() {
+            let is_on = monitor.get("on").and_then(Value::as_bool) != Some(false) && screens != Some(false);
+            let brightness = monitor.get("brightness").and_then(Value::as_f64);
+            picture.plate(Rect { x: side + 16.0, y: row + 6.0, w: 24.0, h: 24.0 }, 7.0, TILE);
+            picture.words(&(index + 1).to_string(), Font::new(Family::Segoe, 12.0, 600.0), DIM, side + 28.0 - frame.gfx.measure(&(index + 1).to_string(), Font::new(Family::Segoe, 12.0, 600.0)) / 2.0, row + 22.5, false);
+            picture.words(&text(monitor, "name"), Font::new(Family::Segoe, 14.0, 500.0), INK, side + 50.0, row + 17.0, false);
+            let size = format!("{} × {}", monitor.get("width").and_then(Value::as_i64).unwrap_or(0), monitor.get("height").and_then(Value::as_i64).unwrap_or(0));
+            let part = Part::MonitorBrightness(index);
+            let at = along(&part, brightness.unwrap_or(0.0) as f32 / 100.0);
+            let detail = if brightness.is_some() { format!("{size} · {} {:.0}%", lang.pick("亮度", "light"), at * 100.0) } else { size };
+            picture.words(&detail, under, DIM, side + 50.0, row + 36.0, false);
+            // Its switch.
+            let switch = Rect { x: side + wide - 16.0 - 44.0, y: row + 7.0, w: 44.0, h: 26.0 };
+            picture.plate(switch, 13.0, if is_on { ACCENT } else { TILE });
+            unsafe { frame.dc.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: if is_on { switch.x + 31.0 } else { switch.x + 13.0 }, Y: switch.y + 13.0 }, radiusX: 9.0, radiusY: 9.0 }, frame.brush(INK)) };
+            if live && screens != Some(false) {
+                parts.extend(shown(Rect { x: switch.x - 6.0, y: switch.y - 6.0, w: 56.0, h: 38.0 }).map(|shown| (shown, Part::Monitor(index))));
+            }
+            row += 52.0;
+            if brightness.is_some() {
+                slider(&picture, &mut parts, side + 50.0, row + 8.0, wide - 50.0 - 16.0 - 8.0, at, part, is_on);
+                row += 30.0;
+            }
+        }
+        y += 40.0 + rows + 8.0 + 12.0;
+    }
+
+    // The sound: how loud, and what is playing.
+    if let Some(volume) = said.get("volume").and_then(Value::as_f64) {
+        let muted = flag("muted") == Some(true);
+        let media = said.get("media").filter(|media| !media.is_null());
+        let tall = if media.is_some() { 152.0 } else { 92.0 };
+        picture.plate(Rect { x: side, y, w: wide, h: tall }, 20.0, CARD);
+        picture.words(lang.pick("声音", "Sound"), label, DIM, side + 16.0, y + 27.0, false);
+        let word = if muted { lang.pick("取消静音", "Unmute") } else { lang.pick("静音", "Mute") };
+        picture.words(word, label, if muted { ACCENT } else { DIM }, side + wide - 16.0, y + 27.0, true);
+        if live {
+            let across = frame.gfx.measure(word, label);
+            parts.extend(shown(Rect { x: side + wide - 16.0 - across - 8.0, y: y + 8.0, w: across + 16.0, h: 30.0 }).map(|shown| (shown, Part::Mute)));
+        }
+        let at = along(&Part::Volume, volume as f32 / 100.0);
+        slider(&picture, &mut parts, side + 16.0, y + 62.0, wide - 32.0 - 52.0, at, Part::Volume, true);
+        picture.words(&if muted { lang.pick("静音", "Muted").to_string() } else { format!("{:.0}%", at * 100.0) }, Font::new(Family::Segoe, 14.0, 600.0), INK, side + wide - 16.0, y + 67.0, true);
+        if let Some(media) = media {
+            picture.plate(Rect { x: side + 16.0, y: y + 88.0, w: wide - 32.0, h: 1.0 }, 0.0, TILE);
+            let playing = media.get("playing").and_then(Value::as_bool) == Some(true);
+            let (title_said, app) = (text(media, "title"), text(media, "app"));
+            let about = [if playing { lang.pick("正在播放", "Playing") } else { lang.pick("已暂停", "Paused") }.to_string(), text(media, "artist"), if title_said.is_empty() { String::new() } else { app.clone() }];
+            // (As wide as the room before the three buttons.)
+            unsafe { frame.dc.PushAxisAlignedClip(&rect(side + 16.0, y + 92.0, wide - 32.0 - 124.0, 56.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+            picture.words(if title_said.is_empty() { &app } else { &title_said }, Font::new(Family::Segoe, 14.0, 500.0), INK, side + 16.0, y + 116.0, false);
+            picture.words(&about.iter().filter(|one| !one.is_empty()).cloned().collect::<Vec<_>>().join(" · "), under, DIM, side + 16.0, y + 135.0, false);
+            unsafe { frame.dc.PopAxisAlignedClip() };
+            // Before, play or pause, after: each a mark of its own.
+            let middle = y + 120.0;
+            for (place, what) in ["previous", "toggle", "next"].into_iter().enumerate() {
+                let centre = side + wide - 16.0 - 100.0 + place as f32 * 40.0 + 10.0;
+                let mark = |points: &[(f32, f32)]| {
+                    let points: Vec<super::canvas::Point> = points.iter().map(|(x, y)| super::canvas::Point { x: centre + x, y: middle + y }).collect();
+                    frame.fill_shape(&points, super::canvas::Fill::Solid(INK));
+                };
+                match what {
+                    "previous" => {
+                        mark(&[(6.0, -7.0), (6.0, 7.0), (-4.0, 0.0)]);
+                        picture.plate(Rect { x: centre - 7.0, y: middle - 7.0, w: 2.5, h: 14.0 }, 1.0, INK);
+                    }
+                    "next" => {
+                        mark(&[(-6.0, -7.0), (-6.0, 7.0), (4.0, 0.0)]);
+                        picture.plate(Rect { x: centre + 4.5, y: middle - 7.0, w: 2.5, h: 14.0 }, 1.0, INK);
+                    }
+                    _ => {
+                        picture.plate(Rect { x: centre - 17.0, y: middle - 17.0, w: 34.0, h: 34.0 }, 17.0, TILE);
+                        if playing {
+                            picture.plate(Rect { x: centre - 6.0, y: middle - 7.0, w: 4.0, h: 14.0 }, 1.0, INK);
+                            picture.plate(Rect { x: centre + 2.0, y: middle - 7.0, w: 4.0, h: 14.0 }, 1.0, INK);
+                        } else {
+                            mark(&[(-4.0, -8.0), (-4.0, 8.0), (8.0, 0.0)]);
+                        }
+                    }
+                }
+                if live {
+                    parts.extend(shown(Rect { x: centre - 19.0, y: middle - 19.0, w: 38.0, h: 38.0 }).map(|shown| (shown, Part::Media(what))));
+                }
+            }
+        }
+        y += tall + 12.0;
+    }
+
+    // Sleep says what it means where it is pressed (and is asked about again before it is done).
+    tile(&picture, &mut parts, Rect { x: side, y, w: wide, h: 96.0 }, false, lang.pick("睡眠", "Sleep"), lang.pick("整台电脑停下来，最省电。不能从手机唤醒，要在电脑上按键盘或电源键", "The whole PC stops: the least power. A phone cannot wake it; press a key or the power button on the PC"), Part::Sleep);
+    y += 96.0 + 24.0;
+
+    unsafe { frame.dc.PopAxisAlignedClip() };
     unsafe { frame.dc.PopLayer() };
     drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
     frame.origin(0.0, 0.0);
-    [reads.get("cpu_fan"), reads.get("case_fan")].into_iter().flatten().any(|rpm| rpm.as_i64().is_some_and(|rpm| rpm > 0))
+    Painted { parts, tall: y }
 }

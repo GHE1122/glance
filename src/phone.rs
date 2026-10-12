@@ -280,6 +280,16 @@ pub fn keep_screens(kept: bool) -> bool {
     ask(&["screens", if kept { "kept" } else { "signal" }]).is_some_and(|said| said.trim() == "kept")
 }
 
+/// Asks the remote that listens on this PC what a phone would (`method`
+/// and `path`, with `body` where it sends one): how the PC is then, as a
+/// phone is answered; none where the remote did not do it or does not
+/// answer.
+pub fn said(method: &str, path: &str, body: &str) -> Option<serde_json::Value> {
+    let answer = ask(&["ask", method, path, body])?;
+    let mut lines = answer.lines();
+    (lines.next()?.trim() == "200").then(|| serde_json::from_str(lines.next()?).ok()).flatten()
+}
+
 /// Where the remote's page for a phone's browser is (a browser paired by
 /// it before opens it again there): none while this PC is on no network.
 pub fn web_address() -> Option<String> {

@@ -572,6 +572,30 @@ struct Stage {
     bitmap: Option<(u32, ID2D1Bitmap1)>,
 }
 
+/// The phone's page as it is used from here: how the remote last said the
+/// PC is, what of the page can be pressed and where, how far the page is
+/// moved up, what is in hand, and the thread the remote is asked on (what
+/// to ask goes to it; how the PC then is comes back).
+struct PhonePage {
+    state: Option<serde_json::Value>,
+    parts: Vec<(Rect, super::phone_art::Part)>,
+    /// The phone's screen in the window, and how many of the window's DIPs one of its own is.
+    at: Option<(Rect, f32)>,
+    scroll: f32,
+    /// How far the page can be moved up at most.
+    most: f32,
+    /// A slider in hand: its track in the window and how far along it is; or what else was pressed.
+    slid: Option<(super::phone_art::Part, Rect, f32)>,
+    pressed: Option<super::phone_art::Part>,
+    link: Option<(std::sync::mpsc::Sender<(String, String, String)>, std::sync::mpsc::Receiver<Option<serde_json::Value>>)>,
+    /// When the remote was last asked how the PC is, and how many askings are unanswered.
+    asked: Instant,
+    waiting: usize,
+}
+
+/// How often the remote is asked how the PC is, while its page shows.
+const PHONE_ASKED_EVERY: Duration = Duration::from_millis(1500);
+
 struct Ui {
     hwnd: HWND,
     gfx: Rc<Gfx>,
@@ -622,6 +646,7 @@ struct Ui {
     sent: Option<Option<String>>,
     /// Since when the fans in the phone remote's picture have been turning.
     phone_from: Instant,
+    phone: PhonePage,
     scroll: f32,
     scroll_target: f32,
     motion: HashMap<String, Transition>,
@@ -754,6 +779,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             sending: None,
             sent: None,
             phone_from: Instant::now(),
+            phone: PhonePage { state: None, parts: Vec::new(), at: None, scroll: 0.0, most: 0.0, slid: None, pressed: None, link: None, asked: Instant::now(), waiting: 0 },
             uninstaller: std::env::current_exe().ok().and_then(|exe| elevation::trusted(&exe.with_file_name("uninstall.exe"))),
             scroll: 0.0,
             scroll_target: 0.0,
@@ -2096,6 +2122,9 @@ impl Ui {
 
     fn moved(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        if let Some((_, track, at)) = &mut self.phone.slid {
+            *at = ((x - track.x) / track.w).clamp(0.0, 1.0);
+        }
         if let Some((field, track)) = self.sliding {
             self.slide(field, track, x);
         }
@@ -2108,6 +2137,9 @@ impl Ui {
 
     fn press(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        if self.page == Page::Remote && self.press_phone(x, y) {
+            return;
+        }
         self.pressed = self.hovered();
         // A press anywhere else gives up taking a new shortcut.
         if self.recording && !matches!(self.pressed, Some(Target::Shortcut | Target::ClearShortcut)) {
@@ -2162,6 +2194,9 @@ impl Ui {
 
     fn release(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        if self.release_phone(x, y) {
+            return;
+        }
         if self.sliding.is_some() || self.drag.is_some() {
             unsafe {
                 let _ = ReleaseCapture();
@@ -2500,7 +2535,13 @@ impl Ui {
     }
 
     fn wheel(&mut self, delta: i16) {
-        let Some((x, _)) = self.pointer else { return };
+        let Some((x, y)) = self.pointer else { return };
+        // Over the phone's screen, its page is what moves.
+        if let Some((_, k)) = self.phone.at.filter(|(at, _)| self.page == Page::Remote && x >= at.x && x < at.x + at.w && y >= at.y && y < at.y + at.h) {
+            self.phone.scroll = (self.phone.scroll - delta as f32 / 120.0 * WHEEL / k).clamp(0.0, self.phone.most);
+            self.next_frame = Instant::now();
+            return;
+        }
         if !(NAV..NAV + PANE).contains(&x) {
             return;
         }
@@ -3277,7 +3318,139 @@ impl Ui {
         let (x, y) = (area.x + (area.w - w) / 2.0, area.y + (area.h - h) / 2.0);
         fill(frame, Color::hex(0x15181D, 1.0), x - bezel, y - bezel, w + 2.0 * bezel, h + 2.0 * bezel, 26.0 * k + bezel);
         let name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into());
-        super::phone_art::paint(frame, Rect { x, y, w, h }, self.lang, &name, &reads, self.phone_from.elapsed().as_secs_f32())
+        self.hear_phone();
+        let held = self.phone.slid.as_ref().map(|(part, _, at)| (part, *at));
+        let state = self.phone.state.as_ref().filter(|_| self.remote);
+        let painted = super::phone_art::paint(frame, Rect { x, y, w, h }, self.lang, &name, &reads, state, self.phone_from.elapsed().as_secs_f32(), self.phone.scroll, held);
+        self.phone.at = Some((Rect { x, y, w, h }, k));
+        self.phone.most = (painted.tall - tall).max(0.0);
+        self.phone.scroll = self.phone.scroll.min(self.phone.most);
+        self.phone.parts = painted.parts;
+        // (Drawn again soon whether or not its fans turn: how the PC is, is asked meanwhile.)
+        true
+    }
+
+    /// Asks the remote, on a thread of its own (it answers when it has done it: the window goes on meanwhile).
+    fn ask_phone(&mut self, method: &str, path: &str, body: String) {
+        let link = self.phone.link.get_or_insert_with(|| {
+            let (ask, asked) = std::sync::mpsc::channel::<(String, String, String)>();
+            let (answer, answered) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for (method, path, body) in asked {
+                    if answer.send(crate::phone::said(&method, &path, &body)).is_err() {
+                        break;
+                    }
+                }
+            });
+            (ask, answered)
+        });
+        if link.0.send((method.to_string(), path.to_string(), body)).is_ok() {
+            self.phone.waiting += 1;
+            self.phone.asked = Instant::now();
+        }
+    }
+
+    /// Takes what the remote has answered, and asks it again how the PC is once that is due.
+    fn hear_phone(&mut self) {
+        if !self.remote {
+            self.phone.state = None;
+            return;
+        }
+        while let Some(answer) = self.phone.link.as_ref().and_then(|(_, answered)| answered.try_recv().ok()) {
+            self.phone.waiting = self.phone.waiting.saturating_sub(1);
+            // (What a look answers while something else was asked since is not how it is now: the last answer stands.)
+            if self.phone.waiting == 0 && self.phone.slid.is_none() {
+                if let Some(state) = answer {
+                    self.phone.state = Some(state);
+                }
+            }
+        }
+        if self.phone.waiting == 0 && (self.phone.state.is_none() || self.phone.asked.elapsed() >= PHONE_ASKED_EVERY) {
+            self.ask_phone("GET", "/v1/state", String::new());
+        }
+    }
+
+    /// What of the phone's page is at a point of the window.
+    fn phone_part(&self, x: f32, y: f32) -> Option<(Rect, super::phone_art::Part)> {
+        self.phone.parts.iter().find(|(r, _)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).cloned()
+    }
+
+    /// A press on the phone's page: a slider follows the pointer from there; anything else is done when it is let go on it.
+    fn press_phone(&mut self, x: f32, y: f32) -> bool {
+        let Some((track, part)) = self.phone_part(x, y) else { return false };
+        if part.slides() {
+            self.phone.slid = Some((part, track, ((x - track.x) / track.w).clamp(0.0, 1.0)));
+            unsafe { SetCapture(self.hwnd) };
+        } else {
+            self.phone.pressed = Some(part);
+        }
+        self.next_frame = Instant::now();
+        true
+    }
+
+    /// The phone's page let go of at a point: what was slid is asked for as it was left, what was pressed is done.
+    fn release_phone(&mut self, x: f32, y: f32) -> bool {
+        use super::phone_art::Part;
+        use serde_json::json;
+        let state = self.phone.state.clone().unwrap_or(serde_json::Value::Null);
+        let flag = |name: &str| state.get(name).and_then(serde_json::Value::as_bool);
+        if let Some((part, _, at)) = self.phone.slid.take() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            let (path, body) = match part {
+                Part::Brightness => ("/v1/lights", json!({ "on": true, "brightness": (5.0 + at * 95.0).round() as u32 })),
+                Part::MonitorBrightness(index) => ("/v1/monitor", json!({ "index": index, "brightness": (at * 100.0).round() as u32 })),
+                _ => ("/v1/volume", json!({ "level": (at * 100.0).round() as u32 })),
+            };
+            // (Shown as asked for till the remote says how it is.)
+            if let Some(state) = self.phone.state.as_mut() {
+                match &part {
+                    Part::Brightness => state["light"]["brightness"] = json!((5.0 + at * 95.0).round()),
+                    Part::MonitorBrightness(index) => state["monitors"][*index]["brightness"] = json!((at * 100.0).round()),
+                    _ => state["volume"] = json!((at * 100.0).round()),
+                }
+            }
+            self.ask_phone("POST", path, body.to_string());
+            self.next_frame = Instant::now();
+            return true;
+        }
+        let Some(part) = self.phone.pressed.take() else { return false };
+        if self.phone_part(x, y).map(|(_, part)| part) != Some(part.clone()) {
+            return true;
+        }
+        let (path, body) = match &part {
+            Part::Night => ("/v1/night", json!({ "on": flag("night") != Some(true) })),
+            Part::Screen => ("/v1/screen", json!({ "on": flag("screen") == Some(false) })),
+            Part::Lights => ("/v1/lights", json!({ "on": flag("lights") == Some(false) })),
+            Part::Power(id) => ("/v1/power", json!({ "plan": id })),
+            Part::Colour(colour) => ("/v1/lights", json!({ "on": true, "color": colour })),
+            Part::Effect(effect) => ("/v1/lights", json!({ "on": true, "effect": effect })),
+            Part::Monitor(index) => ("/v1/monitor", json!({ "index": index, "on": state["monitors"][*index]["on"].as_bool() == Some(false) })),
+            Part::Keys(level) => ("/v1/keys", json!({ "level": level })),
+            Part::Mute => ("/v1/volume", json!({ "muted": flag("muted") != Some(true) })),
+            Part::Media(what) => ("/v1/media", json!({ "do": what })),
+            // Sleep is asked about first: everything on the PC stops.
+            Part::Sleep => {
+                let lang = self.lang;
+                let agreed = super::ask::read_and_agree(
+                    self.hwnd,
+                    pick(lang, "让电脑睡眠？", "Put the PC to sleep?"),
+                    pick(lang, "电脑上的一切都会停下：下载、远程连接、正在运行的程序。", "Everything on the PC stops: downloads, remote connections, programs at work."),
+                    pick(lang, "只想关屏关灯、让电脑继续运行，请用夜间模式。", "To turn off only the screens and the lights and leave the PC running, use night mode."),
+                    pick(lang, "睡眠", "Sleep"),
+                    pick(lang, "取消", "Cancel"),
+                );
+                if !agreed {
+                    return true;
+                }
+                ("/v1/sleep", json!({}))
+            }
+            Part::Brightness | Part::MonitorBrightness(_) | Part::Volume => return true,
+        };
+        self.ask_phone("POST", path, body.to_string());
+        self.next_frame = Instant::now();
+        true
     }
 
     fn paint_overlay_preview(&mut self, frame: &Frame, area: Rect) {
