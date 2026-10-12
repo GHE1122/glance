@@ -18,7 +18,7 @@ pub const RECENT: Duration = Duration::from_secs(1);
 const LOW_FRAMES: usize = 20;
 
 /// What a game's frames tell.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrameStats {
     pub fps: f32,
     /// None until enough frames have come.

@@ -151,7 +151,7 @@ pub fn stop() {
 
 /// A program presenting frames, as one of its windows shows it: the
 /// topmost of its windows that is visible and not minimized.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Presenting {
     pub pid: u32,
     pub stats: FrameStats,

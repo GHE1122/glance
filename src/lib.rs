@@ -75,6 +75,8 @@ mod actions;
 #[path = "../remote/src/media.rs"]
 mod media;
 #[cfg(windows)]
+mod link;
+#[cfg(windows)]
 mod update;
 #[cfg(windows)]
 mod watch;

@@ -2,9 +2,9 @@
 //! the hardware that does not change while Glance runs, and each sample.
 //! The same on every platform; how each platform fills them in is its own.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StaticInfo {
     pub cpu_name: String,
     /// The memory modules, as "2 × 32 GB DDR5-6000", when the firmware says.
@@ -40,7 +40,7 @@ impl StaticInfo {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GpuInfo {
     /// Its number in the module that shows it ("gpu:N"). Numbers stay with
     /// the GPUs they were given to, adapters since left out (display-only
@@ -52,7 +52,7 @@ pub struct GpuInfo {
     pub shared_total: u64,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Sample {
     /// Milliseconds since the Unix epoch.
     pub t: u64,
@@ -108,7 +108,7 @@ pub struct Sample {
 }
 
 /// Docker's engine, as the CLI's current context reaches it.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DockerSample {
     /// Not answering (Docker not running).
     Stopped { context: String },
@@ -121,7 +121,7 @@ pub enum DockerSample {
 /// (percent of all of them), memory in use and its limit (bytes), and the
 /// network and disk traffic it makes (bytes a second, both ways together);
 /// rates none the first time it is seen.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ContainerSample {
     pub name: String,
     pub status: String,
@@ -133,7 +133,7 @@ pub struct ContainerSample {
 }
 
 /// WSL 2 as Windows sees it.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum WslSample {
     /// No distribution registered.
     Missing,
@@ -155,7 +155,7 @@ pub enum WslSample {
 }
 
 /// A game and its frames.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GameSample {
     /// What it calls itself (its window's title), or its program's name.
     pub name: String,
@@ -196,7 +196,7 @@ pub struct GameSample {
 }
 
 /// What holds a GPU's clock below what it could run at.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum GpuLimit {
     /// Nothing: it runs as fast as it is asked to.
     Free,
@@ -209,7 +209,7 @@ pub enum GpuLimit {
     Hardware,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MemorySample {
     pub used: u64,
     pub committed: u64,
@@ -217,7 +217,7 @@ pub struct MemorySample {
     pub cached: u64,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GpuSample {
     /// Percent, as busy as its busiest engine; `None` (as the memory's)
     /// where the counters could not be read this time.
@@ -238,7 +238,7 @@ pub struct GpuSample {
 }
 
 /// One program: every process sharing an executable name, added together.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProcessSample {
     pub name: String,
     /// Percent of the whole machine.
@@ -253,7 +253,7 @@ pub struct ProcessSample {
     pub gpu: Option<f32>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VolumeSample {
     pub name: String,
     pub used: u64,
@@ -261,7 +261,7 @@ pub struct VolumeSample {
 }
 
 /// The interface the default route goes through.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NetworkInfo {
     /// The connection's name ("WLAN", "Ethernet"), and the adapter's model.
     pub name: String,
@@ -274,7 +274,7 @@ pub struct NetworkInfo {
     pub wifi: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SystemSample {
     pub uptime_s: u64,
     pub processes: u32,
@@ -282,7 +282,7 @@ pub struct SystemSample {
     pub handles: u32,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BatterySample {
     pub percent: u8,
     pub charging: bool,
@@ -295,7 +295,7 @@ pub struct BatterySample {
     pub health: Option<f32>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CpuSensors {
     pub temp: Option<f32>,
     /// Each chiplet's temperature, by its number from 0, on CPUs that have
@@ -304,7 +304,7 @@ pub struct CpuSensors {
     pub power: Option<f32>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BoardSensors {
     /// Temperatures by what they measure: a name from the board's layout
     /// (see `layout`), the chip's name for the input, or its number.
@@ -313,7 +313,7 @@ pub struct BoardSensors {
     pub fans: Vec<(String, f32)>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DriveTemperature {
     /// Which physical drive it is: drives of one model have one name.
     pub id: u32,

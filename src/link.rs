@@ -1,0 +1,298 @@
+//! Glance in two processes: the sensors, read with administrator rights in a
+//! process of their own (started elevated by Glance's task), and all the
+//! rest, running as the user. They speak over two named pipes, one each way,
+//! that only the user (and the system) may open, and that the sensors make:
+//! the sensors tell what they read and what is presented, and are asked only
+//! a few things that need their rights, each of a fixed kind with its fields
+//! checked. The rest checks, before it believes a word, that what answers is
+//! this very program, elevated.
+
+use std::fs::File;
+use std::io::{Read, Write};
+use std::os::windows::io::FromRawHandle;
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use windows::core::{HSTRING, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
+use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND};
+use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId, WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
+use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+
+use crate::presents::GameMode;
+use crate::reading::{Sample, StaticInfo};
+
+/// What the sensors tell.
+#[derive(Serialize, Deserialize)]
+pub enum Told {
+    /// As they start: their version, what the machine is, and what they found to read it with (for a report).
+    Hello { version: String, info: StaticInfo, found: Vec<String> },
+    /// What they read, each time they read.
+    Sample(Box<Sample>),
+    /// The games presenting frames, as they are seen now.
+    Presenting(Vec<crate::presents::Presenting>),
+    /// The mouse moved by so much (raw counts), while a window the rest cannot hear the mouse over (an elevated
+    /// one) is in front.
+    Mouse { dx: i32, dy: i32 },
+    /// What they have to say for a report, asked for.
+    Report(Vec<String>),
+}
+
+/// What the sensors are asked.
+#[derive(Serialize, Deserialize)]
+pub enum Asked {
+    /// How often to read, and what besides the plain readings.
+    Want(Want),
+    /// Whether a game shows, as the user set it.
+    GameMode(GameModeSent),
+    /// What they have to say for a report.
+    Report,
+}
+
+/// How often the sensors read (milliseconds), whether what changes slowly is read afresh each time (something
+/// shows it), and whether WSL's and Docker's are read.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Want {
+    pub interval_ms: u32,
+    pub refresh_slow: bool,
+    pub wsl: bool,
+    pub docker: bool,
+}
+
+impl Want {
+    /// Within what the settings offer (a sample from a quarter of a second to ten seconds apart).
+    pub fn checked(self) -> Self {
+        Want { interval_ms: self.interval_ms.clamp(250, 10_000), ..self }
+    }
+}
+
+/// A game mode as it travels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum GameModeSent {
+    Auto,
+    On,
+    Off,
+}
+
+impl From<GameMode> for GameModeSent {
+    fn from(mode: GameMode) -> Self {
+        match mode {
+            GameMode::Auto => GameModeSent::Auto,
+            GameMode::On => GameModeSent::On,
+            GameMode::Off => GameModeSent::Off,
+        }
+    }
+}
+
+impl From<GameModeSent> for GameMode {
+    fn from(mode: GameModeSent) -> Self {
+        match mode {
+            GameModeSent::Auto => GameMode::Auto,
+            GameModeSent::On => GameMode::On,
+            GameModeSent::Off => GameMode::Off,
+        }
+    }
+}
+
+/// The most one message may be (bytes): a sample of a busy machine is some tens of kilobytes.
+const MOST: usize = 8 << 20;
+
+/// The pipes' names, this user's: what the sensors tell, and what they are asked.
+fn names() -> Option<(String, String)> {
+    let sid = crate::elevation::user_sid()?;
+    Some((format!(r"\\.\pipe\glance-told-{sid}"), format!(r"\\.\pipe\glance-asked-{sid}")))
+}
+
+/// Writes `message`, its length first.
+fn send<T: Serialize>(to: &mut File, message: &T) -> bool {
+    let Ok(body) = serde_json::to_vec(message) else { return false };
+    to.write_all(&(body.len() as u32).to_le_bytes()).and_then(|_| to.write_all(&body)).is_ok()
+}
+
+/// Reads a message, its length first; none when the other end has gone (or sent what is no message).
+fn receive<T: for<'a> Deserialize<'a>>(from: &mut File) -> Option<T> {
+    let mut length = [0u8; 4];
+    from.read_exact(&mut length).ok()?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length > MOST {
+        return None;
+    }
+    let mut body = vec![0u8; length];
+    from.read_exact(&mut body).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+// ---- The sensors' side ----
+
+/// The sensors' ends of the two pipes, made for this user alone (and the system), the first of their names (so
+/// that nothing else made them first), and open to the rest running unelevated.
+pub struct Sensors {
+    told: HANDLE,
+    asked: HANDLE,
+}
+
+impl Sensors {
+    pub fn open() -> Option<Self> {
+        let (told, asked) = names()?;
+        let sid = crate::elevation::user_sid()?;
+        // This user and the system, and the user's ordinary (medium integrity) processes as well as its elevated ones.
+        let sddl = HSTRING::from(format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})S:(ML;;NW;;;ME)"));
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&sddl, SDDL_REVISION_1, &mut descriptor, None) }.ok()?;
+        let attributes = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor.0, bInheritHandle: false.into() };
+        let make = |name: &str, access| unsafe {
+            CreateNamedPipeW(&HSTRING::from(name), access | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 1 << 20, 1 << 16, 0, Some(&attributes))
+        };
+        let (told, asked) = (make(&told, PIPE_ACCESS_OUTBOUND), make(&asked, PIPE_ACCESS_INBOUND));
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        }
+        if told == INVALID_HANDLE_VALUE || asked == INVALID_HANDLE_VALUE {
+            unsafe {
+                let _ = CloseHandle(told);
+                let _ = CloseHandle(asked);
+            }
+            return None;
+        }
+        Some(Sensors { told, asked })
+    }
+
+    /// Waits for the rest to come (both its ends); its ends to write to and read from, once it has.
+    pub fn accept(&self) -> Option<(File, File)> {
+        unsafe {
+            for pipe in [self.told, self.asked] {
+                // (One that came between the pipe's making and this wait is there already: ERROR_PIPE_CONNECTED.)
+                if let Err(error) = ConnectNamedPipe(pipe, None) {
+                    if error.code() != windows::Win32::Foundation::ERROR_PIPE_CONNECTED.to_hresult() {
+                        return None;
+                    }
+                }
+            }
+            // (The handles stay the pipes': these Files are lent, and forgotten rather than closed.)
+            Some((File::from_raw_handle(self.told.0), File::from_raw_handle(self.asked.0)))
+        }
+    }
+
+    /// The rest gone: its ends let go, for it to come again.
+    pub fn let_go(&self, ends: (File, File)) {
+        std::mem::forget(ends);
+        unsafe {
+            let _ = DisconnectNamedPipe(self.told);
+            let _ = DisconnectNamedPipe(self.asked);
+        }
+    }
+}
+
+pub fn tell(to: &mut File, told: &Told) -> bool {
+    send(to, told)
+}
+
+pub fn heard(from: &mut File) -> Option<Asked> {
+    receive(from)
+}
+
+// ---- The rest's side ----
+
+/// The rest's ends: what it is told, and what it asks with.
+pub struct Link {
+    pub told: File,
+    pub asked: File,
+}
+
+impl Link {
+    /// Connects to the sensors, waiting up to `patience` for them; none if they are not there, or what answers is
+    /// not this very program, elevated.
+    pub fn connect(patience: Duration) -> Option<Link> {
+        let (told, asked) = names()?;
+        let until = Instant::now() + patience;
+        let open = |name: &str, access: u32| -> Option<HANDLE> {
+            loop {
+                let opened = unsafe { CreateFileW(&HSTRING::from(name), access, FILE_SHARE_NONE, None, OPEN_EXISTING, Default::default(), None) };
+                if let Ok(handle) = opened {
+                    return Some(handle);
+                }
+                if Instant::now() >= until {
+                    return None;
+                }
+                // (Not made yet, or busy with another: waited for a moment.)
+                unsafe {
+                    let _ = WaitNamedPipeW(&HSTRING::from(name), 200);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        let told = open(&told, GENERIC_READ.0)?;
+        let Some(asked) = open(&asked, GENERIC_WRITE.0) else {
+            unsafe {
+                let _ = CloseHandle(told);
+            }
+            return None;
+        };
+        let link = unsafe { Link { told: File::from_raw_handle(told.0), asked: File::from_raw_handle(asked.0) } };
+        // Believed only from this very program, elevated.
+        let mut server = 0u32;
+        unsafe { GetNamedPipeServerProcessId(told, &mut server) }.ok()?;
+        is_us_elevated(server).then_some(link)
+    }
+
+    pub fn receive(&mut self) -> Option<Told> {
+        receive(&mut self.told)
+    }
+
+    pub fn ask(&mut self, asked: &Asked) -> bool {
+        send(&mut self.asked, asked)
+    }
+}
+
+/// Whether the process `pid` runs this very program, elevated.
+fn is_us_elevated(pid: u32) -> bool {
+    unsafe {
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        let mut path = vec![0u16; 1024];
+        let mut length = path.len() as u32;
+        let named = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(path.as_mut_ptr()), &mut length).is_ok();
+        let mut token = HANDLE::default();
+        let mut elevated = TOKEN_ELEVATION::default();
+        let mut size = 0u32;
+        let raised = OpenProcessToken(process, TOKEN_QUERY, &mut token).is_ok()
+            && GetTokenInformation(token, TokenElevation, Some((&mut elevated as *mut TOKEN_ELEVATION).cast()), size_of::<TOKEN_ELEVATION>() as u32, &mut size).is_ok()
+            && elevated.TokenIsElevated != 0;
+        if !token.is_invalid() {
+            let _ = CloseHandle(token);
+        }
+        let _ = CloseHandle(process);
+        let theirs = std::path::PathBuf::from(String::from_utf16_lossy(&path[..length as usize]));
+        let ours = std::env::current_exe().ok();
+        named && raised && ours.is_some_and(|ours| std::fs::canonicalize(&ours).ok() == std::fs::canonicalize(&theirs).ok())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_want_is_kept_within_what_is_offered() {
+        let want = Want { interval_ms: 5, refresh_slow: true, wsl: false, docker: true }.checked();
+        assert_eq!(want.interval_ms, 250);
+        assert_eq!(Want { interval_ms: 60_000, ..want }.checked().interval_ms, 10_000);
+    }
+
+    #[test]
+    fn messages_travel_whole() {
+        // Through a file standing for the pipe: what is sent is what is received.
+        let path = std::env::temp_dir().join(format!("glance-link-{}", std::process::id()));
+        {
+            let mut out = File::create(&path).unwrap();
+            assert!(send(&mut out, &Asked::Want(Want { interval_ms: 1000, refresh_slow: false, wsl: true, docker: false })));
+            assert!(send(&mut out, &Asked::GameMode(GameModeSent::On)));
+        }
+        let mut back = File::open(&path).unwrap();
+        assert!(matches!(receive::<Asked>(&mut back), Some(Asked::Want(Want { interval_ms: 1000, wsl: true, .. }))));
+        assert!(matches!(receive::<Asked>(&mut back), Some(Asked::GameMode(GameModeSent::On))));
+        assert!(receive::<Asked>(&mut back).is_none());
+        let _ = std::fs::remove_file(path);
+    }
+}
