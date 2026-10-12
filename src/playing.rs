@@ -110,10 +110,22 @@ const SETTLES: std::time::Duration = std::time::Duration::from_millis(1500);
 #[cfg(windows)]
 static LYRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// How far into the track it was as last looked at (seconds), when that was, and whether it was playing.
+#[cfg(windows)]
+static POSITION: Mutex<Option<(f64, std::time::Instant, bool)>> = Mutex::new(None);
+
+/// How far into the track it is now (seconds), from the last look on by the time since while it plays; none where
+/// its player does not say.
+#[cfg(windows)]
+pub fn position() -> Option<f64> {
+    POSITION.lock().unwrap().map(|(at, when, playing)| if playing { at + when.elapsed().as_secs_f64() } else { at })
+}
+
 /// Looks at how it is; how long till the next line of the lyrics is due, where one is.
 #[cfg(windows)]
 fn look() -> Option<std::time::Duration> {
     let playing = crate::media::playing();
+    *POSITION.lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, std::time::Instant::now(), playing.playing)));
     let sound = crate::actions::volume();
     let (sung, next) = match playing.as_ref().filter(|playing| LYRICS.load(Ordering::Relaxed) && !playing.title.is_empty()) {
         Some(playing) => sung(playing),

@@ -26,6 +26,7 @@ pub mod render;
 #[cfg(windows)]
 mod ask;
 pub(crate) mod picture;
+pub mod lyric_window;
 #[cfg(windows)]
 pub mod settings_window;
 #[cfg(windows)]

@@ -734,6 +734,33 @@ impl<'a> Frame<'a> {
         &self.brush
     }
 
+    /// A glow of `color` round what `paint` draws (which is not itself drawn): its shape blurred by a deviation
+    /// of `blur` DIPs. Nothing, where the device is going.
+    pub fn glow(&self, color: Color, blur: f32, paint: impl FnOnce(&Frame)) {
+        let dc = &self.dc;
+        let _ = (|| -> Result<()> {
+            unsafe {
+                // What is drawn as a picture of its own, in the frame's DIPs (drawn back through its transform).
+                let list = dc.CreateCommandList()?;
+                let (target, mut transform) = (dc.GetTarget()?, Matrix3x2::default());
+                dc.GetTransform(&mut transform);
+                dc.SetTarget(&list);
+                dc.SetTransform(&Matrix3x2::identity());
+                paint(self);
+                dc.SetTarget(&target);
+                dc.SetTransform(&transform);
+                list.Close()?;
+                let cast = dc.CreateEffect(&CLSID_D2D1Shadow)?;
+                cast.SetInput(0, &list.cast::<ID2D1Image>()?, true);
+                cast.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &blur.to_ne_bytes())?;
+                let rgba = [color.r, color.g, color.b, color.a];
+                cast.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+                dc.DrawImage(&cast.GetOutput()?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            }
+            Ok(())
+        })();
+    }
+
     /// The outline of the rounded rectangle, dashed, a line `width` DIPs wide centred on it.
     #[allow(clippy::too_many_arguments)]
     pub fn stroke_rounded_dashed(&self, color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32, width: f32) {

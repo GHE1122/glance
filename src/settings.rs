@@ -407,6 +407,11 @@ pub struct Settings {
     pub panel_pinned: Option<(i32, i32)>,
     /// The desktop widgets torn off the panel.
     pub widgets: Vec<WidgetAt>,
+    /// Where the lyrics' own windows were put, the card and the subtitles (their corners, physical px).
+    #[serde(default)]
+    pub lyric_card: Option<(i32, i32)>,
+    #[serde(default)]
+    pub lyric_subtitle: Option<(i32, i32)>,
     pub view: serde_json::Value,
 }
 
@@ -437,6 +442,8 @@ impl Default for Settings {
             panel_at: None,
             panel_pinned: None,
             widgets: Vec::new(),
+            lyric_card: None,
+            lyric_subtitle: None,
             view: serde_json::Value::Null,
         }
     }

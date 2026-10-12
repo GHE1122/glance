@@ -516,6 +516,10 @@ impl Controller {
                 if let Some(due) = settings_window::tick(now) {
                     wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
                 }
+                // The lyrics' own windows, while they are wanted.
+                if let Some(due) = crate::ui::lyric_window::tick(now) {
+                    wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
+                }
                 {
                     let kept = self.config.lock().unwrap().widgets.clone();
                     let seen = self.seen.lock().unwrap().clone();

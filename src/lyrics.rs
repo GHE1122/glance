@@ -92,7 +92,7 @@ fn find(track: &Track) -> Option<Vec<Line>> {
 
 /// The AMLL TTML collection's lyrics of NetEase's track `id`, timed word by word (through a CDN that is reached
 /// from mainland China too); where it gives no translation, NetEase's own, to the line nearest in time.
-fn amll(id: u64) -> Option<Vec<Line>> {
+pub(crate) fn amll(id: u64) -> Option<Vec<Line>> {
     let file = crate::update::get_json(&format!("https://cdn.jsdelivr.net/gh/Steve-xmh/amll-ttml-db@main/ncm-lyrics/{id}.ttml"))?;
     let mut lines = ttml(&String::from_utf8(file).ok()?);
     if !lines.iter().any(|line| !line.words.is_empty()) {

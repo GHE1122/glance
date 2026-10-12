@@ -51,7 +51,7 @@ pub fn of(title: &str, artist: &str) -> Option<Arc<Cover>> {
 }
 
 /// The cover of what plays now, as its player gives it.
-fn read() -> Option<Cover> {
+pub(crate) fn read() -> Option<Cover> {
     let session = Manager::RequestAsync().ok()?.join().ok()?.GetCurrentSession().ok()?;
     let thumbnail = session.TryGetMediaPropertiesAsync().ok()?.join().ok()?.Thumbnail().ok()?;
     let stream = thumbnail.OpenReadAsync().ok()?.join().ok()?;
