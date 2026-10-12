@@ -27,10 +27,34 @@ pub struct Playing {
     pub playing: bool,
 }
 
-/// What Windows would act on were a media key pressed now.
+/// What Windows would act on were a media key pressed now. (Asked of the
+/// one manager, got the first time: it is looked at every second where
+/// what plays is shown.)
 fn session() -> Result<Session> {
+    static MANAGER: Mutex<Option<Manager>> = Mutex::new(None);
     crate::actions::com();
-    Manager::RequestAsync()?.join()?.GetCurrentSession()
+    let mut kept = MANAGER.lock().unwrap();
+    let manager = match kept.as_ref() {
+        Some(manager) => manager.clone(),
+        None => kept.insert(Manager::RequestAsync()?.join()?).clone(),
+    };
+    manager.GetCurrentSession()
+}
+
+/// What `find` finds for `key`, found once: a program's name does not
+/// change while it runs. (What is not found is looked for again.)
+fn once(kept: &Mutex<Vec<(String, String)>>, key: &str, find: impl FnOnce() -> Option<String>) -> Option<String> {
+    if let Some((_, found)) = kept.lock().unwrap().iter().find(|(of, _)| of == key) {
+        return Some(found.clone());
+    }
+    let found = find()?;
+    let mut kept = kept.lock().unwrap();
+    // (No more than a session's worth of programs.)
+    if kept.len() >= 64 {
+        kept.clear();
+    }
+    kept.push((key.to_string(), found.clone()));
+    Some(found)
 }
 
 /// The name Windows shows a program by (as in the Start menu), for one it
@@ -111,6 +135,11 @@ fn named(session: &str) -> Option<(String, String)> {
 /// the first language it says it in. `path` as a sound's session has it:
 /// from the device up.
 fn described(path: &str) -> Option<String> {
+    static DESCRIBED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+    once(&DESCRIBED, path, || read_description(path))
+}
+
+fn read_description(path: &str) -> Option<String> {
     let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let file = wide(&format!(r"\\?\GLOBALROOT{path}"));
     unsafe {
@@ -136,10 +165,13 @@ fn described(path: &str) -> Option<String> {
 /// Start menu), else as its file describes it, where its file is known by
 /// the sound it has open; `id` as Windows identifies it.
 fn shown(id: &str) -> Option<String> {
-    shown_as(id).or_else(|| {
-        let file = id.strip_suffix(".exe").or_else(|| id.strip_suffix(".EXE")).unwrap_or(id);
-        let sounds = sounds().ok()?;
-        sounds.iter().find(|(name, _, _)| name.eq_ignore_ascii_case(file)).and_then(|(_, path, _)| described(path))
+    static SHOWN: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+    once(&SHOWN, id, || {
+        shown_as(id).or_else(|| {
+            let file = id.strip_suffix(".exe").or_else(|| id.strip_suffix(".EXE")).unwrap_or(id);
+            let sounds = sounds().ok()?;
+            sounds.iter().find(|(name, _, _)| name.eq_ignore_ascii_case(file)).and_then(|(_, path, _)| described(path))
+        })
     })
 }
 

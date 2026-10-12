@@ -152,3 +152,18 @@ pub fn act(_: Act) {}
 pub fn pretend(now: Now) {
     keep(Some(now));
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    /// On a desktop: how long one look takes, and what it sees.
+    #[test]
+    #[ignore]
+    fn times_a_look() {
+        super::look();
+        let from = std::time::Instant::now();
+        for _ in 0..20 {
+            super::look();
+        }
+        println!("a look takes {:.2} ms; it sees {:?}", from.elapsed().as_secs_f64() * 1000.0 / 20.0, super::now());
+    }
+}
