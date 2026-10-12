@@ -559,12 +559,11 @@ impl Shown {
         };
         unsafe { frame.dc.PushLayer(&layer, None) };
         frame.fill(Color::hex(0x101014, 1.0), 0.0, 0.0, w, h);
-        let pulse = moment.sound.beat;
-        // The cover, blurred, larger than the card (and a little larger at a beat); the one before fading out.
+        // The cover, blurred, larger than the card ; the one before fading out.
         if let Some(cover) = &moment.cover {
             self.backdrop(frame, cover);
         }
-        let grown = 1.35 + 0.025 * pulse;
+        let grown = 1.35;
         let (bw, bh) = (w.max(h) * grown, w.max(h) * grown);
         let place = rect((w - bw) / 2.0, (h - bh) / 2.0, bw, bh);
         if let Some((_, bitmap)) = &self.backdrop {
@@ -578,8 +577,8 @@ impl Shown {
             }
         }
         // Darkened for the words to be read on, the cover's colour washed from a corner, brighter at a beat.
-        frame.fill(Color::hex(0x000000, 0.42 - 0.06 * pulse), 0.0, 0.0, w, h);
-        frame.fill_shape(&[Point { x: 0.0, y: 0.0 }, Point { x: w, y: 0.0 }, Point { x: w, y: h }, Point { x: 0.0, y: h }], Fill::Down { top: 0.0, from: colour(self.accent, 0.10 + 0.08 * pulse), bottom: h, to: colour(self.tint, 0.0) });
+        frame.fill(Color::hex(0x000000, 0.42), 0.0, 0.0, w, h);
+        frame.fill_shape(&[Point { x: 0.0, y: 0.0 }, Point { x: w, y: 0.0 }, Point { x: w, y: h }, Point { x: 0.0, y: h }], Fill::Down { top: 0.0, from: colour(self.accent, 0.12), bottom: h, to: colour(self.tint, 0.0) });
         let pad = 26.0;
         // What plays, along the top.
         let about = [moment.title.as_str(), moment.artist.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("  ·  ");
@@ -679,14 +678,10 @@ impl Shown {
                 let text = if text.trim().is_empty() { "♪".to_string() } else { text };
                 let layout = frame.gfx.wrapped(&text, font, width);
                 let sung = sung_to(&parts, moment.position);
-                // (A beat lifts it a little.)
-                let lift = 1.0 + 0.02 * moment.sound.beat;
-                let font = Font { size: font.size * lift, ..font };
-                let layout = if lift > 1.001 { frame.gfx.wrapped(&text, font, width) } else { layout };
                 let soft = (font.size * 0.45).clamp(6.0, 16.0);
                 let bright = colour(toward([1.0, 1.0, 1.0], self.tint, 0.35), alpha);
-                // What is sung glows in the cover's colour, more at a beat.
-                frame.glow(colour(self.tint, (0.45 + 0.3 * moment.sound.beat) * alpha), 6.0 + 4.0 * moment.sound.beat, |frame| sung_part(frame, &layout, &text, font, x, y, width, sung, bright, soft));
+                // What is sung glows in the cover's colour.
+                frame.glow(colour(self.tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, font, x, y, width, sung, bright, soft));
                 filled(frame, &layout, &text, font, x, y, width, sung, Color::hex(0xFFFFFF, 0.34 * alpha), bright, soft);
                 if let Some(translation) = line.translation.as_ref().filter(|_| moment.translated) {
                     let under = frame.gfx.wrapped_height(&text, font, width);
@@ -717,17 +712,15 @@ impl Shown {
         // It rises in over a quarter of a second as it comes.
         let came = moment.since.map_or(1.0, |since| (since.elapsed().as_secs_f32() / 0.28).min(1.0));
         let eased = 1.0 - (1.0 - came).powi(3);
-        let pulse = moment.sound.beat;
-        let font = Font { size: FLOAT_FONT.size * (1.0 + 0.03 * pulse), ..FLOAT_FONT };
+        let font = FLOAT_FONT;
         let wide = frame.measure(&text, font).min(w - 20.0);
         let (x, y) = ((w - wide) / 2.0, 14.0 + (1.0 - eased) * 18.0);
         let layout = frame.gfx.wrapped(&text, font, wide + 2.0);
         let sung = sung_to(&parts, moment.position);
         let room = wide + 2.0;
-        // A dark haze for it to be read on anything; a glow in the cover's colour round what is sung, stronger and
-        // wider at a beat.
+        // A dark haze for it to be read on anything; a glow in the cover's colour round what is sung.
         frame.glow(Color::hex(0x000000, 0.55 * eased), 3.0, |frame| frame.text_wrapped(&text, font, Color::hex(0xFFFFFF, 1.0), x, y + 1.0, room));
-        frame.glow(colour(self.accent, (0.65 + 0.35 * pulse) * eased), 9.0 + 7.0 * pulse, |frame| sung_part(frame, &layout, &text, font, x, y, room, sung, Color::hex(0xFFFFFF, 1.0), 14.0));
+        frame.glow(colour(self.accent, 0.75 * eased), 10.0, |frame| sung_part(frame, &layout, &text, font, x, y, room, sung, Color::hex(0xFFFFFF, 1.0), 14.0));
         filled(frame, &layout, &text, font, x, y, room, sung, Color::hex(0xFFFFFF, 0.6 * eased), colour(self.tint, eased), 14.0);
         let under = line.translation.clone().filter(|_| moment.translated).or_else(|| lines.get(now + 1).map(|line| line.text.clone())).unwrap_or_default();
         if !under.is_empty() {
