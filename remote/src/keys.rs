@@ -31,7 +31,9 @@ const AURA: u8 = 0x5D;
 /// as Windows names what a part is for.
 pub const STEADY: u8 = 0;
 pub const BREATHING: u8 = 1;
-pub const RAINBOW: u8 = 3;
+/// (Every colour in turn, the whole keyboard at once: what a keyboard lit as one piece can do of a rainbow.
+/// The keyboard's own "rainbow", 3, runs across keys lit one by one, and is left as it was by one that is not.)
+pub const RAINBOW: u8 = 2;
 const AURA_PART: (u16, u16) = (0xFF31, 0x0079);
 
 /// Whether the keys' light can be given a colour: whether the keyboard has the part that takes one.
