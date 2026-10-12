@@ -657,7 +657,8 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     });
     // (A laptop is drawn as one; its light is the one under its keys, which has no colour to say: the lights' own.)
     if state.is_some_and(|state| state["laptop"].as_bool() == Some(true)) {
-        let keys = state.filter(|state| state["lights"].as_bool() == Some(true) && state["night"].as_bool() != Some(true)).map(|_| INK);
+        // (In its colour where it takes one, else white.)
+        let keys = state.filter(|state| state["lights"].as_bool() == Some(true) && state["night"].as_bool() != Some(true)).map(|_| light.unwrap_or(INK));
         picture.laptop(side + 8.0, top + 8.0, wide - 16.0, reads, lang, seconds, keys);
     } else {
         picture.rig(side + 8.0, top + 8.0, wide - 16.0, reads, lang, seconds, light);
@@ -684,7 +685,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     let (screens, lights) = (flag("screen"), flag("lights"));
     let (lights_there, colours_there) = (flag("lights_there").unwrap_or(true), flag("colours_there").unwrap_or(true));
     // A laptop whose lights are the one under its keys: called that.
-    let keys_alone = flag("laptop") == Some(true) && !colours_there && said.get("keys").is_some_and(|keys| !keys.is_null());
+    let keys_alone = flag("laptop") == Some(true) && said.get("keys").is_some_and(|keys| !keys.is_null());
     let text = |value: &Value, name: &str| value.get(name).and_then(Value::as_str).unwrap_or_default().to_string();
     let effect = said.get("light").map_or("steady".to_string(), |light| text(light, "effect"));
     let effects = [("steady", lang.pick("常亮", "Steady")), ("breathing", lang.pick("呼吸", "Breathing")), ("rainbow", lang.pick("彩虹", "Rainbow")), ("heat", lang.pick("跟随温度", "By heat"))];

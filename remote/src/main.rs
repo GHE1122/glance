@@ -92,6 +92,12 @@ struct State {
     night: Option<Night>,
 }
 
+/// A light's colour as it shows: its own, as bright as the light is (see `Light`).
+fn shown(light: &Light) -> [u8; 3] {
+    let rgb = u32::from_str_radix(&light.color, 16).unwrap_or(0xFFFFFF);
+    [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8].map(|part| (part as u32 * light.brightness.min(100) as u32 / 100) as u8)
+}
+
 /// Whether this PC's lights are the light under its keys: a laptop whose
 /// keyboard's light can be set here.
 fn lights_are_keys() -> bool {
@@ -169,6 +175,14 @@ impl Helper {
         // And the light under a laptop's keys: out, and on again as bright as it was chosen (not chosen yet, the
         // brightest).
         let keyed = keys::there() && keys::light(if on { self.keys.lock().unwrap().unwrap_or(keys::MOST) } else { 0 });
+        // (In the lights' colour, doing what they do, where the keyboard takes a colour and its light is this PC's lights.)
+        if on && keyed && lights_are_keys() && keys::coloured() {
+            keys::colour(shown(&light), match light.effect {
+                Effect::Breathing => keys::BREATHING,
+                Effect::Rainbow => keys::RAINBOW,
+                _ => keys::STEADY,
+            });
+        }
         // A laptop whose keys' light is set here has that for its lights: OpenRGB is not asked there (it knows
         // few laptops, and not starting on one must not stand for the keys' light not having been set). With no
         // OpenRGB on this PC, the lights it would set are left to their makers' programs: there is still the rest.
@@ -206,7 +220,12 @@ impl Helper {
         }
         let Some(color) = reads::read().as_ref().and_then(reads::hottest).map(heat) else { return };
         self.refresh();
-        if last.as_ref() != Some(&color) && lights::set(&self.config, true, &Light { color: color.clone(), effect: Effect::Steady, brightness: self.light.lock().unwrap().brightness }).is_ok() {
+        let warm = Light { color: color.clone(), effect: Effect::Steady, brightness: self.light.lock().unwrap().brightness };
+        if last.as_ref() == Some(&color) {
+            return;
+        }
+        let set = if lights_are_keys() { keys::colour(shown(&warm), keys::STEADY) } else { lights::set(&self.config, true, &warm).is_ok() };
+        if set {
             *last = Some(color);
         }
     }
@@ -374,7 +393,7 @@ impl Helper {
             "lights_there": lights::program(&self.config).is_some() || cooler::there() || keys::there(),
             // And whether, of those, there is the program that sets a board's and a card's lights and their colours
             // (not asked on a laptop whose lights are its keys': see `lights`).
-            "colours_there": lights::program(&self.config).is_some() && !lights_are_keys(),
+            "colours_there": if lights_are_keys() { keys::coloured() } else { lights::program(&self.config).is_some() },
             // A laptop is drawn as one, and its lights are called what they are.
             "laptop": actions::laptop(),
             "light": light,
@@ -887,9 +906,20 @@ fn main() -> std::io::Result<()> {
         }
         // glance-remote keys LEVEL: the light under a laptop's keys.
         Some("keys") => {
-            match std::env::args().nth(2).and_then(|text| text.parse::<u8>().ok()) {
-                Some(level) => say!("{}", if keys::light(level) { "taken" } else { "not taken" }),
-                None => say!("{}", if keys::there() { "a keyboard whose light can be set" } else { "none" }),
+            // glance-remote keys [LEVEL | colour RRGGBB | parts]: the light under the keys, set or said.
+            let colour = |text: String| u32::from_str_radix(&text, 16).ok().filter(|_| text.len() == 6).map(|rgb| [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
+            match (std::env::args().nth(2).as_deref(), std::env::args().nth(3)) {
+                // (And what it does, by the keyboard's own number for it: steady, unless said.)
+                (Some("colour"), Some(text)) => match colour(text) {
+                    Some(rgb) => say!("{}", if keys::colour(rgb, std::env::args().nth(4).and_then(|does| does.parse().ok()).unwrap_or(keys::STEADY)) { "taken" } else { "not taken" }),
+                    None => say!("a colour is RRGGBB"),
+                },
+                (Some("parts"), _) => {
+                    keys::parts().iter().for_each(|part| say!("{part}"));
+                    say!("its light takes a colour: {}", keys::coloured());
+                }
+                (Some(level), _) if level.parse::<u8>().is_ok() => say!("{}", if keys::light(level.parse().unwrap_or(0)) { "taken" } else { "not taken" }),
+                _ => say!("{}", if keys::there() { "a keyboard whose light can be set" } else { "none" }),
             }
             return Ok(());
         }

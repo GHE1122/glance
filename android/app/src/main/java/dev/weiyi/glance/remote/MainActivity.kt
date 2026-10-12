@@ -460,10 +460,10 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                     reads.caseFan?.let { Note(it.toString(), stringResource(R.string.case_fans), stringResource(R.string.rpm)) },
                 )
             }
-            // (A laptop's light is the one under its keys, which has no colour to say: the lights' own, white.)
-            val keysAlone = now?.laptop == true && now.keys != null && !now.coloursThere
+            // (A laptop's light is the one under its keys: in its colour where it takes one, else white.)
+            val keysAlone = now?.laptop == true && now.keys != null
             Rig(
-                reads, notes, light?.takeIf { now?.lights == true && !asleep }?.let { if (keysAlone) Ink else colour(it.color) }, night || asleep, part,
+                reads, notes, light?.takeIf { now?.lights == true && !asleep }?.let { if (keysAlone && now?.coloursThere != true) Ink else colour(it.color) }, night || asleep, part,
                 (if (fill) Modifier.weight(1f).fillMaxWidth() else Modifier.fillMaxWidth().aspectRatio(320f / 254f)).graphicsLayer { alpha = 1f - away.value * (1f - breath.value) },
                 laptop = now?.laptop == true,
             ) { part = it }
@@ -503,7 +503,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
             val lights = now.lights
             // (A PC with no lights to set has no such tile: the screens' then has the row.)
             if (now.lightsThere) Tile(
-                Sign.LIGHTS, stringResource(if (now.laptop && now.keys != null && !now.coloursThere) R.string.keys else R.string.lights),
+                Sign.LIGHTS, stringResource(if (now.laptop && now.keys != null) R.string.keys else R.string.lights),
                 if (busy == "lights") working else when (lights) { true -> if (now.coloursThere) stringResource(R.string.lights_on, effectName(now.light.effect)) else stringResource(R.string.lights_plain_on); false -> stringResource(R.string.lights_off); null -> stringResource(R.string.lights_unknown) },
                 lit = lights != false, enabled = reached, modifier = Modifier.weight(1f).fillMaxHeight(),
             ) { act("lights", "/v1/lights", on(lights == false)) { it.copy(lights = lights == false) } }
@@ -548,7 +548,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         val keys = now.keys
         if (shown["lights"] != false && now.lights != false && !night && keys != null) {
             Panel {
-                Heading(stringResource(if (now.laptop && !now.coloursThere) R.string.keys_level else R.string.keys))
+                Heading(stringResource(if (now.laptop) R.string.keys_level else R.string.keys))
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     // Out, then each step up to the brightest: named where there are the usual three, numbered otherwise.
                     val names = if (keys.most == 3) listOf(R.string.keys_off, R.string.keys_low, R.string.keys_medium, R.string.keys_high).map { stringResource(it) } else listOf(stringResource(R.string.keys_off)) + (1..keys.most).map { it.toString() }
