@@ -215,17 +215,23 @@ impl Picture<'_> {
     /// The case and what is in it, with what is said of each part out
     /// beside it, on a line to it: in a room `width` wide whose corner is
     /// at `(x, y)`.
-    fn rig(&mut self, x: f32, y: f32, width: f32, reads: &Value, lang: Lang, seconds: f32) {
+    /// `light` is the lights' colour while they are on, which the whole
+    /// inside takes a little of: the walls, the fans, the card's edge.
+    #[allow(clippy::too_many_arguments)]
+    fn rig(&mut self, x: f32, y: f32, width: f32, reads: &Value, lang: Lang, seconds: f32, light: Option<Color>) {
         let k = width / ROOM.2;
         self.room = Matrix3x2::scale(k, k) * Matrix3x2::translation(x - ROOM.0 * k, y - ROOM.1 * k);
         let (w, d, h) = CASE;
         let at = |x: f32, y: f32| Vector2 { X: x, Y: y };
         let turn = |rpm: Option<i64>| seconds * rpm.unwrap_or(0).max(0) as f32 / 60.0 / SLOWED * std::f32::consts::TAU;
         let (cpu_fan, case_fan) = (reads.get("cpu_fan").and_then(Value::as_i64), reads.get("case_fan").and_then(Value::as_i64));
-        let fans = Color::hex(0x59636F, 1.0);
+        // So much of the lights' colour in `color`; none of it while they are out.
+        let lit = |color: Color, much: f32| light.map_or(color, |light| Color { r: color.r + (light.r - color.r) * much, g: color.g + (light.g - color.g) * much, b: color.b + (light.b - color.b) * much, a: color.a });
+        // The fans are lit as the lights are; out, they are the case's grey.
+        let fans = lit(Color::hex(0x59636F, 1.0), 1.0);
         // The walls behind: the floor, the back and the far side.
         for wall in [[[0.0, 0.0, 0.0], [w, 0.0, 0.0], [w, d, 0.0], [0.0, d, 0.0]], [[0.0, 0.0, 0.0], [0.0, d, 0.0], [0.0, d, h], [0.0, 0.0, h]], [[0.0, 0.0, 0.0], [w, 0.0, 0.0], [w, 0.0, h], [0.0, 0.0, h]]] {
-            self.draw(self.ring(&wall, ROUND), Some(Color::hex(0x12161B, 1.0)), Some((Color::hex(0x3A424D, 1.0), 1.0)));
+            self.draw(self.ring(&wall, ROUND), Some(lit(Color::hex(0x12161B, 1.0), 0.09)), Some((Color::hex(0x3A424D, 1.0), 1.0)));
         }
         // The board on the far side.
         let board = face([0.5, 10.0, 32.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
@@ -242,7 +248,7 @@ impl Picture<'_> {
         let colour = |part: &str| match read(reads, part).0 {
             Some(temp) if temp >= HOT => Color::hex(0xFF6B5E, 1.0),
             Some(temp) if temp >= WARM => Color::hex(0xFFB057, 1.0),
-            _ => STEEL,
+            _ => lit(STEEL, 0.42),
         };
         let disk = colour("disk");
         self.block([16.0, 86.0, 24.0], [46.0, 114.0, 28.0], 1.6, disk);
@@ -250,6 +256,10 @@ impl Picture<'_> {
         let gpu = colour("gpu");
         self.block([0.5, 10.0, 58.0], [42.0, 102.0, 72.0], 2.4, gpu);
         self.draw(self.sheet((30.0, 76.0), 3.0, face([6.0, 18.0, 72.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])), None, Some((gpu.alpha(0.5), 1.0)));
+        // (Its light along the edge towards the glass.)
+        if let Some(light) = light {
+            self.lines(&[(seen([42.0, 20.0, 65.0]), seen([42.0, 92.0, 65.0]))], Matrix3x2::identity(), light, 2.5);
+        }
         let cpu = colour("cpu");
         self.block([0.5, 28.0, 86.0], [22.0, 52.0, 110.0], 2.4, cpu);
         self.fan([11.5, 40.0, 110.3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 8.5, cpu, turn(cpu_fan));
@@ -270,7 +280,7 @@ impl Picture<'_> {
         }
         // The case's own shell, over all: its top, its near side and its front.
         for panel in [[[0.0, 0.0, h], [w, 0.0, h], [w, d, h], [0.0, d, h]], [[w, 0.0, 0.0], [w, d, 0.0], [w, d, h], [w, 0.0, h]], [[0.0, d, 0.0], [w, d, 0.0], [w, d, h], [0.0, d, h]]] {
-            self.draw(self.ring(&panel, ROUND), None, Some((Color::hex(0x8F99A6, 1.0), 1.4)));
+            self.draw(self.ring(&panel, ROUND), None, Some((lit(Color::hex(0x8F99A6, 1.0), 0.22), 1.4)));
         }
 
         // What is said of each part. (In the room's own measure, as the case is.)
@@ -318,6 +328,14 @@ pub enum Part {
     Effect(&'static str),
     /// How bright the lights are: slid.
     Brightness,
+    /// The ring a colour is made on, opened or shut; on it, the hue (slid
+    /// round its middle) and how much colour (slid); and the colour made
+    /// given up, or kept.
+    Make,
+    Hue,
+    Depth,
+    GiveUp,
+    Use,
     /// A monitor by itself, on or off; and how bright it is: slid.
     Monitor(usize),
     MonitorBrightness(usize),
@@ -334,8 +352,64 @@ pub enum Part {
 impl Part {
     /// Whether it is slid (its value from 0 to 1 along it) rather than pressed.
     pub fn slides(&self) -> bool {
-        matches!(self, Part::Brightness | Part::MonitorBrightness(_) | Part::Volume)
+        matches!(self, Part::Brightness | Part::MonitorBrightness(_) | Part::Volume | Part::Hue | Part::Depth)
     }
+
+    /// How far along it (0 to 1) a point is, the part being at `track`:
+    /// round the ring's middle from three o'clock for the hue, across the
+    /// track for every other.
+    pub fn along(&self, track: Rect, x: f32, y: f32) -> f32 {
+        match self {
+            Part::Hue => (y - track.y - track.h / 2.0).atan2(x - track.x - track.w / 2.0).to_degrees().rem_euclid(360.0) / 360.0,
+            _ => ((x - track.x) / track.w).clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// A colour being made on the ring: the one the lights had as the ring was
+/// opened (to go back to), its hue (degrees) and how much colour it has
+/// (0 to 1). It is the colour at its brightest: how bright the lights are
+/// is set for them all, by their own slider.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Making {
+    pub was: String,
+    pub hue: f32,
+    pub depth: f32,
+}
+
+impl Making {
+    /// Begun from the colour in use (RRGGBB).
+    pub fn from(was: &str) -> Making {
+        let Color { r, g, b, .. } = colour(was);
+        let (most, least) = (r.max(g).max(b), r.min(g).min(b));
+        let spread = most - least;
+        let hue = if spread == 0.0 {
+            0.0
+        } else if most == r {
+            60.0 * ((g - b) / spread).rem_euclid(6.0)
+        } else if most == g {
+            60.0 * ((b - r) / spread + 2.0)
+        } else {
+            60.0 * ((r - g) / spread + 4.0)
+        };
+        Making { was: was.to_uppercase(), hue, depth: if most == 0.0 { 0.0 } else { spread / most } }
+    }
+
+    /// The colour as made so far (RRGGBB).
+    pub fn hex(&self) -> String {
+        let Color { r, g, b, .. } = hued(self.hue, self.depth);
+        let part = |of: f32| (of * 255.0).round() as u32;
+        format!("{:06X}", part(r) << 16 | part(g) << 8 | part(b))
+    }
+}
+
+/// The colour of a hue (degrees) with so much colour in it (0 to 1), at its brightest.
+fn hued(hue: f32, depth: f32) -> Color {
+    let part = |shift: f32| {
+        let k = (shift + hue / 60.0).rem_euclid(6.0);
+        1.0 - depth * k.min(4.0 - k).clamp(0.0, 1.0)
+    };
+    Color { r: part(5.0), g: part(3.0), b: part(1.0), a: 1.0 }
 }
 
 /// What was drawn: where each thing to press or slide is (in the window's
@@ -348,6 +422,8 @@ pub struct Painted {
 
 /// The colours the app starts with.
 const GIVEN: [&str; 6] = ["FF7B4A", "FFFFFF", "70B3FF", "59C98A", "C68CFF", "FF5E7E"];
+/// How much taller the lights' card is with the ring open: the ring, how much colour, and the two buttons.
+const RING: f32 = 4.0 + 196.0 + 16.0 + 28.0 + 16.0 + 44.0 + 16.0;
 /// Where the page under its head begins (the screen's measure).
 pub const HEAD: f32 = 60.0;
 
@@ -363,9 +439,9 @@ fn colour(hex: &str) -> Color {
 /// where the remote is not turned on at all), `seconds` into the fans'
 /// turning, the page under its head moved up by `scroll`,
 /// and a slider in hand shown where it is held (`held`: which, and how far
-/// along).
+/// along); the ring a colour is made on is open while one is `making`.
 #[allow(clippy::too_many_arguments)]
-pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, state: Option<&Value>, off: bool, seconds: f32, scroll: f32, held: Option<(&Part, f32)>) -> Painted {
+pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, state: Option<&Value>, off: bool, seconds: f32, scroll: f32, held: Option<(&Part, f32)>, making: Option<&Making>) -> Painted {
     let nothing = Painted { parts: Vec::new(), tall: 0.0 };
     let k = at.w / SCREEN.0;
     let screen = Matrix3x2::scale(k, k) * Matrix3x2::translation(at.x, at.y);
@@ -413,7 +489,13 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     let top = 68.0;
     let drawing = (wide - 16.0) * ROOM.3 / ROOM.2;
     picture.plate(Rect { x: side, y: top, w: wide, h: 8.0 + drawing + 8.0 + 52.0 + 12.0 }, 20.0, CARD);
-    picture.rig(side + 8.0, top + 8.0, wide - 16.0, reads, lang, seconds);
+    // (Lit as the lights are: in their colour while they are on; in the one being made, while one is.)
+    let lit = state.filter(|state| state["lights"].as_bool() == Some(true) && state["night"].as_bool() != Some(true) && state["colours_there"].as_bool() != Some(false));
+    let light = lit.and_then(|state| match making {
+        Some(making) => Some(hued(held.filter(|(held, _)| **held == Part::Hue).map_or(making.hue, |(_, at)| at * 360.0), held.filter(|(held, _)| **held == Part::Depth).map_or(making.depth, |(_, at)| at))),
+        None => state["light"]["color"].as_str().filter(|color| color.len() == 6).map(colour),
+    });
+    picture.rig(side + 8.0, top + 8.0, wide - 16.0, reads, lang, seconds, light);
     let named = [("cpu", "CPU"), ("gpu", lang.pick("显卡", "Graphics")), ("ram", lang.pick("内存", "Memory")), ("disk", lang.pick("硬盘", "Disk"))];
     let each = (wide - 24.0 - 3.0 * 8.0) / 4.0;
     for (place, (part, called)) in named.into_iter().enumerate() {
@@ -510,18 +592,33 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     if colours_there && lights == Some(true) && !night {
         let light = said.get("light").cloned().unwrap_or(Value::Null);
         let now = text(&light, "color").to_uppercase();
-        picture.plate(Rect { x: side, y, w: wide, h: 196.0 }, 20.0, CARD);
+        let tall = if making.is_some() { 196.0 + RING } else { 196.0 };
+        picture.plate(Rect { x: side, y, w: wide, h: tall }, 20.0, CARD);
         picture.words(lang.pick("灯光的效果和颜色", "Lighting effect and colour"), label, DIM, side + 16.0, y + 27.0, false);
-        // The colours it starts with, and the one in use where it is another.
+        // The colours it starts with, and the one in use where it is another (while one is made, the one in use before).
         let mut colours: Vec<String> = GIVEN.iter().map(|given| given.to_string()).collect();
-        if now.len() == 6 && !colours.contains(&now) {
-            colours.insert(0, now.clone());
+        let own = making.map_or(&now, |making| &making.was);
+        if own.len() == 6 && !colours.contains(own) {
+            colours.insert(0, own.clone());
         }
-        let step = ((wide - 32.0 - 36.0) / (colours.len() - 1).max(1) as f32).min(46.0);
+        // (After them, what opens the ring to make another.)
+        let step = ((wide - 32.0 - 36.0) / colours.len() as f32).min(46.0);
+        let opens = Vector2 { X: side + 16.0 + 18.0 + colours.len() as f32 * step, Y: y + 62.0 };
+        for turn in 0..60 {
+            let (from, to) = ((turn as f32 * 6.0 - 0.5).to_radians(), (turn as f32 * 6.0 + 6.5).to_radians());
+            let on = |angle: f32| Vector2 { X: opens.X + 9.0 * angle.cos(), Y: opens.Y + 9.0 * angle.sin() };
+            unsafe { frame.dc.DrawLine(on(from), on(to), frame.brush(hued(turn as f32 * 6.0 + 3.0, 1.0)), 8.0, None) };
+        }
+        if making.is_some() {
+            unsafe { frame.dc.DrawEllipse(&D2D1_ELLIPSE { point: opens, radiusX: 16.75, radiusY: 16.75 }, frame.brush(INK), 2.5, None) };
+        }
+        if live {
+            parts.extend(shown(Rect { x: opens.X - 18.0, y: opens.Y - 18.0, w: 36.0, h: 36.0 }).map(|shown| (shown, Part::Make)));
+        }
         for (place, one) in colours.iter().enumerate() {
             let centre = Vector2 { X: side + 16.0 + 18.0 + place as f32 * step, Y: y + 62.0 };
             unsafe {
-                if *one == now && effect != "rainbow" {
+                if making.is_none() && *one == now && effect != "rainbow" {
                     frame.dc.DrawEllipse(&D2D1_ELLIPSE { point: centre, radiusX: 17.0, radiusY: 17.0 }, frame.brush(INK), 2.0, None);
                 }
                 frame.dc.FillEllipse(&D2D1_ELLIPSE { point: centre, radiusX: 13.0, radiusY: 13.0 }, frame.brush(colour(one)));
@@ -547,7 +644,57 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
         picture.words(lang.pick("亮度", "Light"), label, DIM, side + 16.0, y + 168.0, false);
         slider(&picture, &mut parts, side + 64.0, y + 164.0, wide - 64.0 - 16.0 - 44.0, at, Part::Brightness, effect != "rainbow");
         picture.words(&format!("{:.0}%", 5.0 + at * 95.0), label, DIM, side + wide - 16.0, y + 168.0, true);
-        y += 196.0 + 12.0;
+        // The ring: every hue round it, the colour itself in its middle; under it how much colour, then given up or kept.
+        if let Some(making) = making {
+            let (band, across) = (26.0, 196.0);
+            let centre = Vector2 { X: side + wide / 2.0, Y: y + 196.0 + 4.0 + across / 2.0 };
+            let middle = across / 2.0 - band / 2.0;
+            let on = |angle: f32, r: f32| Vector2 { X: centre.X + r * angle.cos(), Y: centre.Y + r * angle.sin() };
+            // (Each two degrees of it a straight piece, long enough to meet the next at the ring's outside.)
+            for turn in 0..180 {
+                let (from, to) = ((turn as f32 * 2.0 - 0.4).to_radians(), (turn as f32 * 2.0 + 2.4).to_radians());
+                unsafe { frame.dc.DrawLine(on(from, middle), on(to, middle), frame.brush(hued(turn as f32 * 2.0 + 1.0, 1.0)), band, None) };
+            }
+            let hue = held.filter(|(held, _)| **held == Part::Hue).map_or(making.hue, |(_, at)| at * 360.0);
+            let depth = along(&Part::Depth, making.depth);
+            let made = Making { was: String::new(), hue, depth };
+            let knob = on(hue.to_radians(), middle);
+            unsafe {
+                frame.dc.FillEllipse(&D2D1_ELLIPSE { point: centre, radiusX: across / 2.0 - 42.0, radiusY: across / 2.0 - 42.0 }, frame.brush(hued(hue, depth)));
+                frame.dc.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: knob.X, Y: knob.Y + 1.0 }, radiusX: 17.0, radiusY: 17.0 }, frame.brush(Color::hex(0x000000, 0.6)));
+                frame.dc.FillEllipse(&D2D1_ELLIPSE { point: knob, radiusX: 16.0, radiusY: 16.0 }, frame.brush(Color::hex(0xFFFFFF, 1.0)));
+                frame.dc.FillEllipse(&D2D1_ELLIPSE { point: knob, radiusX: 13.0, radiusY: 13.0 }, frame.brush(hued(hue, 1.0)));
+            }
+            let ink = if depth < 0.75 { Color::hex(0x000000, 1.0) } else { Color::hex(0xFFFFFF, 1.0) };
+            picture.middled(&format!("#{}", made.hex()), Font::new(Family::Segoe, 15.0, 600.0), ink, centre.X, centre.Y + 1.0);
+            picture.middled(lang.pick("当前颜色", "This colour"), Font::new(Family::Segoe, 11.0, 400.0), Color { a: 0.75, ..ink }, centre.X, centre.Y + 18.0);
+            if live {
+                parts.extend(shown(Rect { x: centre.X - across / 2.0, y: centre.Y - across / 2.0, w: across, h: across }).map(|shown| (shown, Part::Hue)));
+            }
+            // How much colour: from none of it to all of it.
+            let row = centre.Y + across / 2.0 + 16.0 + 14.0;
+            let (x, width) = (side + 64.0, wide - 64.0 - 16.0 - 44.0);
+            picture.words(lang.pick("浓度", "Depth"), label, DIM, side + 16.0, row + 4.0, false);
+            if let Some(fading) = frame.gradient(Vector2 { X: x, Y: 0.0 }, hued(hue, 0.0), Vector2 { X: x + width, Y: 0.0 }, hued(hue, 1.0)) {
+                unsafe { frame.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(x, row - 4.0, width, 8.0), radiusX: 4.0, radiusY: 4.0 }, &fading) };
+            }
+            unsafe { frame.dc.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: x + width * depth, Y: row }, radiusX: 8.0, radiusY: 8.0 }, frame.brush(INK)) };
+            if live {
+                parts.extend(shown(Rect { x, y: row - 14.0, w: width, h: 28.0 }).map(|shown| (shown, Part::Depth)));
+            }
+            picture.words(&format!("{:.0}%", depth * 100.0), label, INK, side + wide - 16.0, row + 4.0, true);
+            let (top, each) = (row + 14.0 + 16.0, (wide - 32.0 - 12.0) / 2.0);
+            for (place, (word, part)) in [(lang.pick("取消", "Cancel"), Part::GiveUp), (lang.pick("用这个颜色", "Use this colour"), Part::Use)].into_iter().enumerate() {
+                let r = Rect { x: side + 16.0 + place as f32 * (each + 12.0), y: top, w: each, h: 44.0 };
+                let kept = part == Part::Use;
+                picture.plate(r, 14.0, if kept { INK } else { TILE });
+                picture.middled(word, Font::new(Family::Segoe, 15.0, if kept { 600.0 } else { 400.0 }), if kept { PAGE } else { INK }, r.x + r.w / 2.0, r.y + 27.0);
+                if live {
+                    parts.extend(shown(r).map(|shown| (shown, part)));
+                }
+            }
+        }
+        y += tall + 12.0;
     }
 
     // A laptop's keys: how bright the light under them is, with the lights.

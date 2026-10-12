@@ -587,6 +587,8 @@ struct PhonePage {
     /// A slider in hand: its track in the window and how far along it is; or what else was pressed.
     slid: Option<(super::phone_art::Part, Rect, f32)>,
     pressed: Option<super::phone_art::Part>,
+    /// A colour being made for the lights, while the ring it is made on is open.
+    making: Option<super::phone_art::Making>,
     link: Option<(std::sync::mpsc::Sender<(String, String, String)>, std::sync::mpsc::Receiver<Option<serde_json::Value>>)>,
     /// When the remote was last asked how the PC is, and how many askings are unanswered.
     asked: Instant,
@@ -779,7 +781,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             sending: None,
             sent: None,
             phone_from: Instant::now(),
-            phone: PhonePage { state: None, parts: Vec::new(), at: None, scroll: 0.0, most: 0.0, slid: None, pressed: None, link: None, asked: Instant::now(), waiting: 0 },
+            phone: PhonePage { state: None, parts: Vec::new(), at: None, scroll: 0.0, most: 0.0, slid: None, pressed: None, making: None, link: None, asked: Instant::now(), waiting: 0 },
             uninstaller: std::env::current_exe().ok().and_then(|exe| elevation::trusted(&exe.with_file_name("uninstall.exe"))),
             scroll: 0.0,
             scroll_target: 0.0,
@@ -1917,6 +1919,7 @@ impl Ui {
                 "memory" => (p("内存", "Memory"), None),
                 "vram" => (p("显存", "Video memory"), None),
                 "network" => (p("网速", "Network"), None),
+                "clock" => (p("时间", "Time"), Some(p("现在几点（24 小时制）", "The time of day (24-hour)"))),
                 _ => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音，静音时标红", "Whether the default microphone is muted: red while it is"))),
             };
         }
@@ -2122,8 +2125,8 @@ impl Ui {
 
     fn moved(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
-        if let Some((_, track, at)) = &mut self.phone.slid {
-            *at = ((x - track.x) / track.w).clamp(0.0, 1.0);
+        if let Some((part, track, at)) = &mut self.phone.slid {
+            *at = part.along(*track, x, y);
         }
         if let Some((field, track)) = self.sliding {
             self.slide(field, track, x);
@@ -3321,7 +3324,11 @@ impl Ui {
         self.hear_phone();
         let held = self.phone.slid.as_ref().map(|(part, _, at)| (part, *at));
         let state = self.phone.state.as_ref().filter(|_| self.remote);
-        let painted = super::phone_art::paint(frame, Rect { x, y, w, h }, self.lang, &name, &reads, state, !self.remote, self.phone_from.elapsed().as_secs_f32(), self.phone.scroll, held);
+        // (The ring is shut with the lights' card: where they are off, or the remote does not answer.)
+        if !state.is_some_and(|state| state["lights"].as_bool() == Some(true) && state["night"].as_bool() != Some(true)) {
+            self.phone.making = None;
+        }
+        let painted = super::phone_art::paint(frame, Rect { x, y, w, h }, self.lang, &name, &reads, state, !self.remote, self.phone_from.elapsed().as_secs_f32(), self.phone.scroll, held, self.phone.making.as_ref());
         self.phone.at = Some((Rect { x, y, w, h }, k));
         self.phone.most = (painted.tall - tall).max(0.0);
         self.phone.scroll = self.phone.scroll.min(self.phone.most);
@@ -3379,7 +3386,8 @@ impl Ui {
     fn press_phone(&mut self, x: f32, y: f32) -> bool {
         let Some((track, part)) = self.phone_part(x, y) else { return false };
         if part.slides() {
-            self.phone.slid = Some((part, track, ((x - track.x) / track.w).clamp(0.0, 1.0)));
+            let at = part.along(track, x, y);
+            self.phone.slid = Some((part, track, at));
             unsafe { SetCapture(self.hwnd) };
         } else {
             self.phone.pressed = Some(part);
@@ -3397,6 +3405,20 @@ impl Ui {
         if let Some((part, _, at)) = self.phone.slid.take() {
             unsafe {
                 let _ = ReleaseCapture();
+            }
+            // A colour being made: the lights take it as it is left.
+            if let (Part::Hue | Part::Depth, Some(making)) = (&part, self.phone.making.as_mut()) {
+                match part {
+                    Part::Hue => making.hue = at * 360.0,
+                    _ => making.depth = at,
+                }
+                let made = making.hex();
+                if let Some(state) = self.phone.state.as_mut() {
+                    state["light"]["color"] = json!(made);
+                }
+                self.ask_phone("POST", "/v1/lights", json!({ "on": true, "color": made }).to_string());
+                self.next_frame = Instant::now();
+                return true;
             }
             let (path, body) = match part {
                 Part::Brightness => ("/v1/lights", json!({ "on": true, "brightness": (5.0 + at * 95.0).round() as u32 })),
@@ -3424,7 +3446,33 @@ impl Ui {
             Part::Screen => ("/v1/screen", json!({ "on": flag("screen") == Some(false) })),
             Part::Lights => ("/v1/lights", json!({ "on": flag("lights") == Some(false) })),
             Part::Power(id) => ("/v1/power", json!({ "plan": id })),
-            Part::Colour(colour) => ("/v1/lights", json!({ "on": true, "color": colour })),
+            Part::Colour(colour) => {
+                self.phone.making = None;
+                ("/v1/lights", json!({ "on": true, "color": colour }))
+            }
+            // The ring opened from the colour in use, or shut as it is.
+            Part::Make => {
+                self.phone.making = match self.phone.making {
+                    Some(_) => None,
+                    None => Some(super::phone_art::Making::from(state["light"]["color"].as_str().unwrap_or("FFFFFF"))),
+                };
+                self.next_frame = Instant::now();
+                return true;
+            }
+            Part::Use => {
+                self.phone.making = None;
+                self.next_frame = Instant::now();
+                return true;
+            }
+            // Given up: the lights go back to the colour they had.
+            Part::GiveUp => {
+                let Some(making) = self.phone.making.take() else { return true };
+                self.next_frame = Instant::now();
+                if state["light"]["color"].as_str().is_some_and(|now| now.eq_ignore_ascii_case(&making.was)) {
+                    return true;
+                }
+                ("/v1/lights", json!({ "on": true, "color": making.was }))
+            }
             Part::Effect(effect) => ("/v1/lights", json!({ "on": true, "effect": effect })),
             Part::Monitor(index) => ("/v1/monitor", json!({ "index": index, "on": state["monitors"][*index]["on"].as_bool() == Some(false) })),
             Part::Keys(level) => ("/v1/keys", json!({ "level": level })),
@@ -3446,8 +3494,28 @@ impl Ui {
                 }
                 ("/v1/sleep", json!({}))
             }
-            Part::Brightness | Part::MonitorBrightness(_) | Part::Volume => return true,
+            Part::Brightness | Part::MonitorBrightness(_) | Part::Volume | Part::Hue | Part::Depth => return true,
         };
+        // Shown as asked for at once, till the remote says how it is: it takes a moment to do it and answer.
+        if let Some(state) = self.phone.state.as_mut() {
+            match &part {
+                Part::Night => state["night"] = body["on"].clone(),
+                Part::Screen => state["screen"] = body["on"].clone(),
+                Part::Lights => state["lights"] = body["on"].clone(),
+                Part::Power(id) => {
+                    for mode in state["power"].as_array_mut().into_iter().flatten() {
+                        mode["on"] = json!(mode["id"].as_str() == Some(id));
+                    }
+                }
+                Part::Colour(_) | Part::GiveUp => state["light"]["color"] = body["color"].clone(),
+                Part::Effect(effect) => state["light"]["effect"] = json!(effect),
+                Part::Monitor(index) => state["monitors"][*index]["on"] = body["on"].clone(),
+                Part::Keys(level) => state["keys"]["level"] = json!(level),
+                Part::Mute => state["muted"] = body["muted"].clone(),
+                Part::Media("toggle") => state["media"]["playing"] = json!(state["media"]["playing"].as_bool() == Some(false)),
+                _ => {}
+            }
+        }
         self.ask_phone("POST", path, body.to_string());
         self.next_frame = Instant::now();
         true

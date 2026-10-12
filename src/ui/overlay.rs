@@ -16,7 +16,7 @@ use crate::reading::{GameSample, Sample};
 /// tile on the card), in the order it shows them unless they are moved: a
 /// group's id, and its items, each with whether it is shown by default. The
 /// first item chosen of a group is its main figure; the rest follow it.
-pub const GROUPS: [(&str, &[(&str, bool)]); 7] = [
+pub const GROUPS: [(&str, &[(&str, bool)]); 8] = [
     ("frames", &[("fps", true), ("low", true), ("frametime", false)]),
     ("cpu", &[("cpu", true), ("cpu_temp", true), ("cpu_power", false)]),
     ("gpu", &[("gpu", true), ("gpu_temp", true), ("gpu_power", false)]),
@@ -24,6 +24,7 @@ pub const GROUPS: [(&str, &[(&str, bool)]); 7] = [
     ("vram", &[("vram", true)]),
     ("network", &[("down", true), ("up", true)]),
     ("mic", &[("mic", true)]),
+    ("clock", &[("time", true)]),
 ];
 
 /// The groups shown at first.
@@ -173,7 +174,7 @@ struct Palette {
     /// blur, drop).
     shadows: [(Color, f32, f32); 2],
     /// What each kind of reading is marked with.
-    marks: [Color; 6],
+    marks: [Color; 7],
 }
 
 const DARK: Palette = Palette {
@@ -191,6 +192,7 @@ const DARK: Palette = Palette {
         Color::hex(0xC99BFF, 1.0),
         Color::hex(0x6FE0D2, 1.0),
         Color::hex(0xC8CDD5, 1.0),
+        Color::hex(0xF2D478, 1.0),
     ],
 };
 
@@ -209,6 +211,7 @@ const LIGHT: Palette = Palette {
         Color::hex(0x8240D8, 1.0),
         Color::hex(0x0F8577, 1.0),
         Color::hex(0x5A6270, 1.0),
+        Color::hex(0x8F6B00, 1.0),
     ],
 };
 
@@ -249,6 +252,7 @@ enum Kind {
     Memory,
     Network,
     Mic,
+    Clock,
 }
 
 impl Kind {
@@ -278,6 +282,7 @@ const RATE: Form = Form {
     whole: &["999 B/s", "99.9 KB/s", "999 KB/s", "99.9 MB/s", "999 MB/s", "99.9 GB/s"],
     split: &[("999", "B/s"), ("99.9", "KB/s"), ("999", "KB/s"), ("99.9", "MB/s"), ("999", "MB/s"), ("99.9", "GB/s")],
 };
+const TIME: Form = Form { whole: &["00:00"], split: &[("00:00", "")] };
 const MIC_ZH: Form = Form { whole: &["已静音", "开启"], split: &[("已静音", ""), ("开启", "")] };
 const MIC_EN: Form = Form { whole: &["Muted", "On"], split: &[("Muted", ""), ("On", "")] };
 /// Between the parts that follow the main figure.
@@ -388,6 +393,8 @@ pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&
                 reading(Kind::Network, lang.pick("下载", "Down"), vec![chosen("down", rate(s.net_down), &RATE)]),
                 reading(Kind::Network, lang.pick("上传", "Up"), vec![chosen("up", rate(s.net_up), &RATE)]),
             ],
+            // The time of day, as the sample has it: a game played over the whole screen hides the taskbar's.
+            "clock" => vec![reading(Kind::Clock, lang.pick("时间", "Time"), vec![chosen("time", Some(text::time_of_day(s.t)), &TIME)])],
             _ => vec![s.mic_muted.filter(|_| on("mic")).and_then(|muted| {
                 let value = if muted { lang.pick("已静音", "Muted") } else { lang.pick("开启", "On") };
                 let form = if lang == Lang::Zh { &MIC_ZH } else { &MIC_EN };
@@ -1034,6 +1041,11 @@ mod tests {
         // A muted microphone, to be heeded.
         let mic = readings(&s, None, false, &items(&["mic"]), Lang::En);
         assert_eq!((mic[0].figure.as_str(), mic[0].hot), ("Muted", true));
+        // The time of day: hours and minutes, of a 24-hour clock.
+        let time = readings(&s, None, false, &items(&["time"]), Lang::En);
+        let figure = time[0].figure.as_bytes();
+        assert_eq!((time[0].name.as_str(), figure.len(), figure[2]), ("Time", 5, b':'));
+        assert!([0, 1, 3, 4].iter().all(|at| figure[*at].is_ascii_digit()) && time[0].unit.is_empty());
         // Network: each way a reading of its own.
         let mut s = sample(false);
         s.net_down = Some(2048.0);

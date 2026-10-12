@@ -119,6 +119,31 @@ pub fn link_speed(bits_per_second: u64) -> String {
     }
 }
 
+/// The time of day where this PC is, at `t` (milliseconds since the Unix
+/// epoch), as hours and minutes of a 24-hour clock.
+#[cfg(windows)]
+pub fn time_of_day(t: u64) -> String {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    // (A file time counts hundreds of nanoseconds from 1601.)
+    let ticks = (t + 11_644_473_600_000) * 10_000;
+    let file = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+    unsafe {
+        let _ = FileTimeToSystemTime(&file, &mut utc);
+        let _ = SystemTimeToTzSpecificLocalTime(None, &utc, &mut local);
+    }
+    format!("{:02}:{:02}", local.wHour, local.wMinute)
+}
+
+#[cfg(target_os = "macos")]
+pub fn time_of_day(t: u64) -> String {
+    let seconds = (t / 1000) as libc::time_t;
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&seconds, &mut local) };
+    format!("{:02}:{:02}", local.tm_hour, local.tm_min)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
