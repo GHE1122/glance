@@ -8,6 +8,7 @@
 //!     glance-remote lights     lists the lighting devices OpenRGB reaches
 //!     glance-remote monitors   lists the monitors and what they answer over DDC/CI
 //!     glance-remote screens    says how the screens are put out (signal, kept); with one of those, sets it
+//!     glance-remote ask METHOD PATH [JSON]   asks the helper that listens, from this PC, as a phone would
 //!     glance-remote address    says where the page for a phone's browser is
 //!     glance-remote restore    puts on again the monitors a helper since ended was keeping dark
 
@@ -228,7 +229,20 @@ impl Helper {
     /// not sent before. A key not used before becomes that phone's.
     /// Refused, the key it was signed with comes too where there was one
     /// (the answer can then be signed).
-    fn admit(&self, request: &sign::Request) -> Result<Admitted, (sign::Refused, Option<[u8; 32]>)> {
+    /// One asked from this PC itself (`here`), as this PC, is taken by
+    /// this PC's own key (see `Config::local`), which no other address may
+    /// use.
+    fn admit(&self, request: &sign::Request, here: bool) -> Result<Admitted, (sign::Refused, Option<[u8; 32]>)> {
+        if request.phone == LOCAL {
+            let secret = Config::load().local.as_deref().and_then(sign::key).filter(|_| here).ok_or((sign::Refused::Forged, None))?;
+            let at = sign::verify(&secret, request).map_err(|refused| (refused, None))?;
+            let now = sign::now();
+            if request.session != self.session || !sign::timely(at, now) {
+                return Err((sign::Refused::Stale, Some(secret)));
+            }
+            self.state.lock().unwrap().seen.take(&secret, at, request.nonce, now).map_err(|why| (why, Some(secret)))?;
+            return Ok(Admitted { key: String::new(), secret });
+        }
         let mut phones = self.phones.lock().unwrap();
         let kept = Config::kept_at();
         if phones.0 != kept {
@@ -498,7 +512,8 @@ impl Helper {
         }
         let nonce = header("x-glance-nonce");
         let request = sign::Request { method, path, time: header("x-glance-time"), nonce, sign: header("x-glance-sign"), phone: header("x-glance-phone"), name: header("x-glance-name"), session: header("x-glance-session"), body: &body };
-        let (status, answer, secret) = match self.admit(&request) {
+        let here = stream.peer_addr().is_ok_and(|from| from.ip().is_loopback());
+        let (status, answer, secret) = match self.admit(&request, here) {
             // (With which run this is, and what time it has: a phone that had them wrong asks again by them.)
             Err((refused, secret)) => {
                 // (Not of now is how every phone's first asking of a run is refused: nothing to note.)
@@ -586,6 +601,46 @@ fn pairing_web(config: &Config, key: &str) -> String {
 
 fn pairing(config: &Config, key: &str) -> String {
     format!("glance://pair?h={}&p={}&k={key}&n={}", address().unwrap_or_default(), config.port, escaped(&config.name))
+}
+
+/// What this PC calls itself, asking its own helper (see `Helper::admit`).
+const LOCAL: &str = "this-pc";
+
+/// Asks the helper that listens on this PC, as this PC: its answer's
+/// status and what it said. Asked again once, for the run the helper says
+/// it is, where it says the asking was not of now (as every first asking
+/// of a run is).
+fn ask_here(config: &Config, method: &str, path: &str, body: &[u8]) -> std::io::Result<(u16, String)> {
+    let other = |what: &str| std::io::Error::other(what.to_string());
+    let secret = sign::key(&Config::local()?).ok_or_else(|| other("no key of this PC's own"))?;
+    let mut session = String::new();
+    for _ in 0..2 {
+        let mut nonce = [0u8; 8];
+        getrandom::getrandom(&mut nonce).map_err(|error| other(&error.to_string()))?;
+        let (nonce, time) = (sign::hex(&nonce), sign::now().to_string());
+        let sign = sign::sign(&secret, &sign::Request { method, path, time: &time, nonce: &nonce, sign: "", phone: LOCAL, name: "", session: &session, body });
+        let mut stream = TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], config.port)), Duration::from_secs(3))?;
+        stream.set_read_timeout(Some(Duration::from_secs(90)))?;
+        write!(stream, "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Glance-Time: {time}\r\nX-Glance-Nonce: {nonce}\r\nX-Glance-Sign: {sign}\r\nX-Glance-Session: {session}\r\nX-Glance-Phone: {LOCAL}\r\nX-Glance-Name: \r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())?;
+        stream.write_all(body)?;
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer)?;
+        let end = answer.windows(4).position(|four| four == b"\r\n\r\n").ok_or_else(|| other("no answer"))?;
+        let head = String::from_utf8_lossy(&answer[..end]).into_owned();
+        let said = &answer[end + 4..];
+        let status: u16 = head.split(' ').nth(1).and_then(|status| status.parse().ok()).ok_or_else(|| other("no answer"))?;
+        let signed = head.split("\r\n").filter_map(|line| line.split_once(':')).find(|(name, _)| name.eq_ignore_ascii_case("x-glance-sign")).map_or("", |(_, value)| value.trim());
+        // Only what the holder of the key signed is its answer.
+        if signed != sign::answer(&secret, &nonce, status, said) {
+            return Err(other("an answer not signed by this PC's helper"));
+        }
+        let stale = status == 401 && serde_json::from_slice::<Value>(said).ok().is_some_and(|said| said["error"] == "stale");
+        match serde_json::from_slice::<Value>(said).ok().and_then(|said| said["session"].as_str().map(str::to_string)).filter(|_| stale && session.is_empty()) {
+            Some(told) => session = told,
+            None => return Ok((status, String::from_utf8_lossy(said).into_owned())),
+        }
+    }
+    Err(other("the helper would not say which run it is"))
 }
 
 /// What this says goes to whoever started it and gave it somewhere to say
@@ -704,6 +759,22 @@ fn main() -> std::io::Result<()> {
         Some("power") => {
             for choice in power::choices() {
                 say!("{} {}{}", choice.id, choice.name, if choice.on { " *" } else { "" });
+            }
+            return Ok(());
+        }
+        // glance-remote ask METHOD PATH [JSON]: the helper that listens asked from this PC, as a phone asks it;
+        // its answer's status, then what it said (0 and why, where it could not be asked).
+        Some("ask") => {
+            let argument = |at: usize| std::env::args().nth(at).unwrap_or_default();
+            match ask_here(&config, &argument(2), &argument(3), argument(4).as_bytes()) {
+                Ok((status, said)) => {
+                    say!("{status}");
+                    say!("{said}");
+                }
+                Err(error) => {
+                    say!("0");
+                    say!("{error}");
+                }
             }
             return Ok(());
         }

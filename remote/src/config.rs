@@ -81,6 +81,9 @@ pub struct Config {
     /// The OpenRGB this helper started, by its program's number: its own
     /// to stop and start afresh (one the user started is not).
     pub openrgb_started: Option<u32>,
+    /// The key this PC's own Glance asks by (its settings show the phone's
+    /// page, to be used there as on a phone): taken from this PC alone.
+    pub local: Option<String>,
     /// How the screens are put out.
     pub screens: Screens,
     /// The monitors this helper is keeping dark with their signal kept,
@@ -102,6 +105,7 @@ impl Default for Config {
             keys: None,
             lights_left_alone: false,
             openrgb_started: None,
+            local: None,
             screens: Screens::default(),
             darkened: Vec::new(),
         }
@@ -222,6 +226,21 @@ impl Config {
         let key = crate::sign::hex(&key);
         Config::change(|config| config.phones.push(Phone { key: key.clone(), offered_till: Some(crate::sign::now() + OFFERED_FOR), ..Phone::default() }))?;
         Ok(key)
+    }
+
+    /// The key this PC itself asks by: made the first time it is wanted.
+    pub fn local() -> std::io::Result<String> {
+        if let Some(key) = Config::read()?.local {
+            return Ok(key);
+        }
+        let mut key = [0u8; 32];
+        getrandom::getrandom(&mut key).map_err(|error| std::io::Error::other(error.to_string()))?;
+        let key = crate::sign::hex(&key);
+        Ok(Config::change(|config| {
+            config.local.get_or_insert(key);
+        })?
+        .local
+        .unwrap_or_default())
     }
 
     /// When the configuration was last kept.

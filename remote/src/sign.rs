@@ -82,6 +82,11 @@ fn signing(key: &[u8; 32], request: &Request) -> Hmac<Sha256> {
     mac(key, &[request.method, request.path, request.time, request.nonce, request.phone, request.name, request.session], request.body)
 }
 
+/// A request's signature, in hex: what goes in its `sign`.
+pub fn sign(key: &[u8; 32], request: &Request) -> String {
+    hex(&signing(key, request).finalize().into_bytes())
+}
+
 /// The signature of an answer: by the key of the request it answers, over
 /// that request's number, so that it is this PC's and for that asking.
 pub fn answer(key: &[u8; 32], nonce: &str, status: u16, body: &[u8]) -> String {
