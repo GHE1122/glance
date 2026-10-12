@@ -11,7 +11,7 @@ use std::rc::Rc;
 use windows::core::{w, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_U};
-use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_INTERPOLATION_MODE_LINEAR};
+use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_PARAMETERS1, D2D1_ROUNDED_RECT};
 use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS, DWRITE_TEXT_METRICS};
 use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -20,6 +20,7 @@ use windows::Win32::System::DataExchange::{AddClipboardFormatListener, CloseClip
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::Ime::{
     ImmAssociateContextEx, ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM, HIMC, IACE_DEFAULT,
@@ -32,7 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCaretBlinkTime, GetClientRect, GetMessageW, GetWindowRect, IsWindow, KillTimer, LoadCursorW, PostQuitMessage, RegisterClassExW, SetCursor,
     SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, HTCAPTION, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE,
     WM_DPICHANGED, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
-    WS_CAPTION, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP, WS_SYSMENU,
+    WS_CAPTION, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP, WS_SYSMENU, ChangeWindowMessageFilterEx, MSGFLT_ALLOW, WM_COPYDATA, WM_DROPFILES,
 };
 
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
@@ -56,15 +57,65 @@ pub struct Asked<'a> {
 
 /// What the reader's own part is called: the heading over the box for
 /// their words and what the box says while it is empty; the heading over
-/// their pictures and the two tiles that add one (from files, from the
-/// clipboard); and pictures, as the file chooser lists them.
+/// their pictures; the place that adds one (what it is, and the ways it is
+/// done), its button that pastes the clipboard's picture and what it says
+/// of that picture where there is no room for the button; and pictures, as
+/// the file chooser lists them.
 pub struct Own<'a> {
     pub words: &'a str,
     pub hint: &'a str,
     pub pictures: &'a str,
     pub add: &'a str,
+    pub ways: &'a str,
     pub paste: &'a str,
+    pub waiting: &'a str,
     pub kinds: &'a str,
+}
+
+/// The same, kept by the window while it is up.
+#[derive(Clone)]
+struct OwnText {
+    words: String,
+    hint: String,
+    pictures: String,
+    add: String,
+    ways: String,
+    paste: String,
+    waiting: String,
+    kinds: String,
+}
+
+/// `picture`'s likeness covering `tile`, its middle kept, the corners rounded by `radius`.
+fn covering(frame: &Frame, picture: &Picture, tile: Rect, radius: f32, scale: f32) {
+    let properties = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+        dpiX: 96.0 * scale,
+        dpiY: 96.0 * scale,
+        bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+        ..Default::default()
+    };
+    let (width, height) = picture.size;
+    let Ok(bitmap) = (unsafe { frame.dc.CreateBitmap(D2D_SIZE_U { width, height }, Some(picture.small.as_ptr().cast()), width * 4, &properties) }) else { return };
+    // The part of it (in DIPs, as the bitmap is laid out at this scale) of the tile's shape, about its middle.
+    let (w, h) = (width as f32 / scale, height as f32 / scale);
+    let fit = (w / tile.w).min(h / tile.h);
+    let (cut_w, cut_h) = (tile.w * fit, tile.h * fit);
+    let source = rect((w - cut_w) / 2.0, (h - cut_h) / 2.0, cut_w, cut_h);
+    let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(tile.x, tile.y, tile.w, tile.h), radiusX: radius, radiusY: radius }) }) else { return };
+    let layer = D2D1_LAYER_PARAMETERS1 {
+        contentBounds: rect(tile.x, tile.y, tile.w, tile.h),
+        geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
+        maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        maskTransform: windows_numerics::Matrix3x2::identity(),
+        opacity: 1.0,
+        ..Default::default()
+    };
+    unsafe {
+        frame.dc.PushLayer(&layer, None);
+        frame.dc.DrawBitmap(&bitmap, Some(&rect(tile.x, tile.y, tile.w, tile.h)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, Some(&source), None);
+        frame.dc.PopLayer();
+    }
+    drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
 }
 
 /// What the reader gave of their own: their words (none, perhaps) and
@@ -102,6 +153,9 @@ const BODY: Font = Font::new(Family::Segoe, 14.0, 400.0);
 const HEADING: Font = Font::new(Family::Segoe, 14.0, 600.0);
 const SMALL: Font = Font::new(Family::Segoe, 12.0, 400.0);
 
+/// What Windows sends a window that files are dropped on, besides WM_DROPFILES (WM_COPYGLOBALDATA).
+const COPY_GLOBAL_DATA: u32 = 0x0049;
+
 /// The clipboard's name for text (CF_UNICODETEXT).
 const TEXT: u32 = 13;
 
@@ -111,6 +165,7 @@ enum Hit {
     Words,
     Add,
     Paste,
+    Picture(usize),
     Remove(usize),
     Sent,
     Thumb,
@@ -162,7 +217,7 @@ impl Colours {
                 selection,
                 scroll: white(0.5),
                 ring: white(1.0),
-                shade: black(0.45),
+                shade: black(0.2),
             }
         } else {
             Colours {
@@ -182,7 +237,7 @@ impl Colours {
                 selection,
                 scroll: black(0.45),
                 ring: black(0.9),
-                shade: black(0.4),
+                shade: black(0.12),
             }
         }
     }
@@ -355,7 +410,9 @@ struct Dialog {
     dark: bool,
     title: String,
     intro: String,
-    own: Option<(String, String, String, String, String, String)>,
+    own: Option<OwnText>,
+    /// Whether the button that pastes the clipboard's picture was drawn (there was room for it).
+    chip_shown: bool,
     sent: Option<(String, String)>,
     yes: String,
     no: String,
@@ -376,6 +433,9 @@ struct Dialog {
     keyboard: bool,
     caret_on: bool,
     hits: Vec<(Rect, Hit)>,
+    /// Those of the frame being drawn: they become `hits` once it is drawn whole (what is pointed at, while it is
+    /// drawn, is what was under the pointer in the frame before).
+    drawn: Vec<(Rect, Hit)>,
     /// The box the words are written in (inside its border), and where the caret was drawn.
     words_inside: Rect,
     caret: Option<Rect>,
@@ -386,6 +446,14 @@ struct Dialog {
 
 thread_local! {
     static DIALOG: RefCell<Option<Dialog>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Pictures a test has the window hold as it comes up (their files).
+    static GIVEN_FOR_TEST: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Where a test has the pointer be, whatever the real one does (DIPs).
+    static POINTER_FOR_TEST: std::cell::Cell<Option<(f32, f32)>> = const { std::cell::Cell::new(None) };
 }
 
 fn with<R>(act: impl FnOnce(&mut Dialog) -> R) -> Option<R> {
@@ -417,6 +485,10 @@ impl Dialog {
     }
 
     fn hovered(&self) -> Option<Hit> {
+        #[cfg(test)]
+        if let Some((x, y)) = POINTER_FOR_TEST.get() {
+            return self.hit_at(x, y);
+        }
         self.pointer.and_then(|(x, y)| self.hit_at(x, y))
     }
 
@@ -437,7 +509,7 @@ impl Dialog {
             stops.extend((0..self.pictures.len()).map(Hit::Remove));
             if self.pictures.len() < PICTURES_MOST {
                 stops.push(Hit::Add);
-                if picture::on_clipboard() {
+                if self.chip_shown {
                     stops.push(Hit::Paste);
                 }
             }
@@ -496,7 +568,7 @@ impl Dialog {
     }
 
     fn likeness(&self) -> (u32, u32) {
-        (((TILE.0 - 2.0) * self.scale) as u32, ((TILE.1 - 2.0) * self.scale) as u32)
+        ((TILE.0 * self.scale).ceil() as u32, (TILE.1 * self.scale).ceil() as u32)
     }
 
     fn paste_pictures(&mut self) {
@@ -710,7 +782,7 @@ impl Dialog {
     }
 
     fn paint(&mut self, frame: &Frame, (width, height): (f32, f32)) {
-        self.hits.clear();
+        self.drawn.clear();
         let colours = Colours::new(self.dark);
         let c = &colours;
         let inner = width - 2.0 * PAD;
@@ -722,14 +794,14 @@ impl Dialog {
         y += frame.gfx.wrapped_height(&self.title, TITLE_FONT, inner) + 12.0;
         frame.text_wrapped(&self.intro, BODY, c.text, PAD, y, inner);
         y += frame.gfx.wrapped_height(&self.intro, BODY, inner) + GAP;
-        if let Some((words, hint, pictures, add, paste, _)) = self.own.clone() {
-            frame.text(&words, HEADING, c.text, PAD, y, inner, Align::Start);
+        if let Some(own) = self.own.clone() {
+            frame.text(&own.words, HEADING, c.text, PAD, y, inner, Align::Start);
             y += HEAD;
-            self.paint_words(frame, c, Rect { x: PAD, y, w: inner, h: WORDS_HEIGHT }, &hint);
+            self.paint_words(frame, c, Rect { x: PAD, y, w: inner, h: WORDS_HEIGHT }, &own.hint);
             y += WORDS_HEIGHT + GAP;
-            frame.text(&pictures, HEADING, c.text, PAD, y, inner, Align::Start);
+            frame.text(&own.pictures, HEADING, c.text, PAD, y, inner, Align::Start);
             y += HEAD;
-            self.paint_pictures(frame, c, PAD, y, &add, &paste);
+            self.paint_pictures(frame, c, PAD, y, inner, &own);
             y += TILE.1 + GAP;
         }
         if let Some((name, sent)) = self.sent.clone() {
@@ -743,6 +815,13 @@ impl Dialog {
         let (yes, no) = (self.yes.clone(), self.no.clone());
         self.button(frame, c, Rect { x: PAD, y: top, w: across, h: BUTTON }, &yes, Hit::Yes, true, true);
         self.button(frame, c, Rect { x: PAD + across + 8.0, y: top, w: across, h: BUTTON }, &no, Hit::No, false, true);
+        // The frame's own places from now; and drawn again where what is pointed at is another among them (a
+        // picture's button, shown as the picture was pointed at, now under the pointer).
+        let before = self.hovered();
+        self.hits = std::mem::take(&mut self.drawn);
+        if self.hovered() != before {
+            self.redraw();
+        }
     }
 
     /// The ring round what the keyboard is on, once the keyboard has moved it.
@@ -773,7 +852,7 @@ impl Dialog {
         }
         self.ring(frame, c, r, 6.0, hit);
         if enabled {
-            self.hits.push((r, hit));
+            self.drawn.push((r, hit));
         }
     }
 
@@ -826,43 +905,60 @@ impl Dialog {
             let at = inside.y + (inside.h - thumb) * self.typing.top / (whole - inside.h);
             frame.fill_rounded(c.scroll, r.x + r.w - 6.0, at, 3.0, thumb, 1.5);
         }
-        self.hits.push((r, Hit::Words));
+        self.drawn.push((r, Hit::Words));
     }
 
-    fn paint_pictures(&mut self, frame: &Frame, c: &Colours, left: f32, top: f32, add: &str, paste: &str) {
+    /// The pictures given (pointed at, a button on each takes it away again), and the place to add more, as
+    /// wide as is left of `width`.
+    fn paint_pictures(&mut self, frame: &Frame, c: &Colours, left: f32, top: f32, width: f32, own: &OwnText) {
         let hovered = self.hovered();
+        let white = Color::hex(0xFFFFFF, 1.0);
         let mut x = left;
         for (index, picture) in self.pictures.iter().enumerate() {
             let tile = Rect { x, y: top, w: TILE.0, h: TILE.1 };
-            frame.fill_rounded(c.sent, tile.x, tile.y, tile.w, tile.h, 4.0);
-            // Its likeness whole, in the middle of the tile.
-            let (w, h) = (picture.size.0 as f32 / self.scale, picture.size.1 as f32 / self.scale);
-            let shown = Rect { x: tile.x + (tile.w - w) / 2.0, y: tile.y + (tile.h - h) / 2.0, w, h };
-            let properties = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
-                ..Default::default()
-            };
-            let made = unsafe { frame.dc.CreateBitmap(D2D_SIZE_U { width: picture.size.0, height: picture.size.1 }, Some(picture.small.as_ptr().cast()), picture.size.0 * 4, &properties) };
-            if let Ok(bitmap) = made {
-                unsafe { frame.dc.DrawBitmap(&bitmap, Some(&rect(shown.x, shown.y, shown.w, shown.h)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+            frame.fill_rounded(c.sent, tile.x, tile.y, tile.w, tile.h, 6.0);
+            covering(frame, picture, tile, 6.0, self.scale);
+            frame.stroke_rounded(Fill::Solid(c.field_stroke), tile.x + 0.5, tile.y + 0.5, tile.w - 1.0, tile.h - 1.0, 5.5, 1.0);
+            self.drawn.push((tile, Hit::Picture(index)));
+            let keyed = self.keyboard && self.focus == Hit::Remove(index);
+            if keyed || matches!(hovered, Some(Hit::Picture(at) | Hit::Remove(at)) if at == index) {
+                frame.fill_rounded(c.shade, tile.x, tile.y, tile.w, tile.h, 6.0);
+                // Its button to take it away, in the corner.
+                let centre = Point { x: tile.x + tile.w - 15.0, y: tile.y + 15.0 };
+                let on = hovered == Some(Hit::Remove(index));
+                frame.fill_circle(Color::hex(0x000000, if on { 0.82 } else { 0.6 }), centre, 11.0);
+                frame.icon(Icon::Close, centre, 13.0, white);
+                let badge = Rect { x: centre.x - 13.0, y: centre.y - 13.0, w: 26.0, h: 26.0 };
+                self.ring(frame, c, badge, 13.0, Hit::Remove(index));
+                self.drawn.push((badge, Hit::Remove(index)));
             }
-            frame.stroke_rounded(Fill::Solid(c.field_stroke), tile.x + 0.5, tile.y + 0.5, tile.w - 1.0, tile.h - 1.0, 3.5, 1.0);
-            // Pointed at (or the keyboard on it): pressed, it is taken away again.
-            if hovered == Some(Hit::Remove(index)) || (self.keyboard && self.focus == Hit::Remove(index)) {
-                frame.fill_rounded(c.shade, tile.x, tile.y, tile.w, tile.h, 4.0);
-                frame.icon(Icon::Close, Point { x: tile.x + tile.w / 2.0, y: tile.y + tile.h / 2.0 }, 20.0, Color::hex(0xFFFFFF, 1.0));
-            }
-            self.ring(frame, c, tile, 4.0, Hit::Remove(index));
-            self.hits.push((tile, Hit::Remove(index)));
             x += TILE.0 + TILE_GAP;
         }
-        if self.pictures.len() < PICTURES_MOST {
-            self.button(frame, c, Rect { x, y: top, w: TILE.0, h: TILE.1 }, add, Hit::Add, false, true);
-            x += TILE.0 + TILE_GAP;
-            self.button(frame, c, Rect { x, y: top, w: TILE.0, h: TILE.1 }, paste, Hit::Paste, false, picture::on_clipboard());
+        self.chip_shown = false;
+        if self.pictures.len() >= PICTURES_MOST {
+            return;
+        }
+        // The place to add one: pressed, the file chooser; it says the other ways (dropping a file on the window,
+        // Ctrl+V), and, with a picture on the clipboard, offers it.
+        let zone = Rect { x, y: top, w: left + width - x, h: TILE.1 };
+        let over = hovered == Some(Hit::Add);
+        frame.fill_rounded(if over { c.button_hover } else { c.field }, zone.x, zone.y, zone.w, zone.h, 6.0);
+        frame.stroke_rounded_dashed(if over { c.accent } else { c.field_bottom.alpha(0.6) }, zone.x + 0.5, zone.y + 0.5, zone.w - 1.0, zone.h - 1.0, 5.5, 1.0);
+        self.ring(frame, c, zone, 6.0, Hit::Add);
+        self.drawn.push((zone, Hit::Add));
+        let middle = zone.y + zone.h / 2.0;
+        frame.icon(Icon::ImagePlus, Point { x: zone.x + 26.0, y: middle }, 22.0, if over { c.accent } else { c.text2 });
+        let words = zone.x + 50.0;
+        let pasting = picture::on_clipboard();
+        let chip = frame.gfx.measure(&own.paste, BODY) + 28.0;
+        let said = frame.gfx.measure(&own.add, BODY).max(frame.gfx.measure(&own.ways, SMALL));
+        self.chip_shown = pasting && words + said + 16.0 + chip + 12.0 <= zone.x + zone.w;
+        let room = zone.x + zone.w - words - if self.chip_shown { chip + 24.0 } else { 12.0 };
+        frame.text(&own.add, BODY, c.text, words, middle - 20.0, room, Align::Start);
+        frame.text(if pasting && !self.chip_shown { &own.waiting } else { &own.ways }, SMALL, c.text3, words, middle + 2.0, room, Align::Start);
+        if self.chip_shown {
+            let paste = own.paste.clone();
+            self.button(frame, c, Rect { x: zone.x + zone.w - 12.0 - chip, y: middle - 15.0, w: chip, h: 30.0 }, &paste, Hit::Paste, false, true);
         }
     }
 
@@ -877,7 +973,7 @@ impl Dialog {
         frame.text_wrapped(sent, SMALL, c.text2, inside.x, inside.y - self.scroll, inside.w);
         frame.unclip();
         self.ring(frame, c, r, 4.0, Hit::Sent);
-        self.hits.push((r, Hit::Sent));
+        self.drawn.push((r, Hit::Sent));
         if self.scroll_most > 0.0 {
             let thumb = (inside.h * inside.h / whole).max(24.0);
             let at = inside.y + (inside.h - thumb) * self.scroll / self.scroll_most;
@@ -885,7 +981,7 @@ impl Dialog {
             let wide = matches!(self.hovered(), Some(Hit::Thumb)) || self.held.is_some();
             let across = if wide { 6.0 } else { 3.0 };
             frame.fill_rounded(c.scroll, r.x + r.w - 5.0 - across, at, across, thumb, across / 2.0);
-            self.hits.push((Rect { x: r.x + r.w - 16.0, y: at, w: 16.0, h: thumb }, Hit::Thumb));
+            self.drawn.push((Rect { x: r.x + r.w - 16.0, y: at, w: 16.0, h: thumb }, Hit::Thumb));
         } else {
             self.track = (inside.y, inside.h, inside.h);
         }
@@ -1008,6 +1104,26 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             });
             LRESULT(0)
         }
+        // Files dropped on the window: those that are pictures are added.
+        WM_DROPFILES => {
+            let files = HDROP(wparam.0 as *mut _);
+            let paths: Vec<String> = (0..unsafe { DragQueryFileW(files, u32::MAX, None) })
+                .map(|index| {
+                    let mut path = vec![0u16; unsafe { DragQueryFileW(files, index, None) } as usize + 1];
+                    let length = unsafe { DragQueryFileW(files, index, Some(&mut path)) } as usize;
+                    String::from_utf16_lossy(&path[..length])
+                })
+                .collect();
+            unsafe { DragFinish(files) };
+            with(|dialog| {
+                if dialog.own.is_some() {
+                    let small = dialog.likeness();
+                    let more = paths.iter().filter_map(|path| picture::from_file(path, small)).collect();
+                    dialog.add(more);
+                }
+            });
+            LRESULT(0)
+        }
         // (Whether a picture may be pasted.)
         WM_CLIPBOARDUPDATE => {
             with(|dialog| dialog.redraw());
@@ -1045,7 +1161,16 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
         // (Registered once; again is refused, which is as well.)
         RegisterClassExW(&WNDCLASSEXW { cbSize: size_of::<WNDCLASSEXW>() as u32, lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: class, ..Default::default() });
         let scale = GetDpiForWindow(owner).max(96) as f32 / 96.0;
-        let own = asked.own.as_ref().map(|own| (own.words.into(), own.hint.into(), own.pictures.into(), own.add.into(), own.paste.into(), own.kinds.into()));
+        let own = asked.own.as_ref().map(|own| OwnText {
+            words: own.words.into(),
+            hint: own.hint.into(),
+            pictures: own.pictures.into(),
+            add: own.add.into(),
+            ways: own.ways.into(),
+            paste: own.paste.into(),
+            waiting: own.waiting.into(),
+            kinds: own.kinds.into(),
+        });
         let mut dialog = Dialog {
             hwnd: HWND::default(),
             gfx,
@@ -1055,6 +1180,7 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
             title: asked.title.into(),
             intro: asked.intro.into(),
             own,
+            chip_shown: false,
             sent: asked.sent.map(|(name, text)| (name.into(), text.into())),
             yes: asked.yes.into(),
             no: asked.no.into(),
@@ -1071,6 +1197,7 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
             keyboard: false,
             caret_on: true,
             hits: Vec::new(),
+            drawn: Vec::new(),
             words_inside: Rect { x: 0.0, y: 0.0, w: 200.0, h: 0.0 },
             caret: None,
             answer: None,
@@ -1094,6 +1221,10 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
         let _ = DwmSetWindowAttribute(window, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const _, size_of_val(&round) as u32);
         // (Its frame gone at once: the size it was made at is the size it is.)
         let _ = SetWindowPos(window, None, x, y, wide, tall, SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_FRAMECHANGED);
+        #[cfg(test)]
+        for path in GIVEN_FOR_TEST.take() {
+            dialog.pictures.extend(picture::from_file(&path, dialog.likeness()));
+        }
         let focus = dialog.focus;
         DIALOG.set(Some(dialog));
         with(|dialog| {
@@ -1101,6 +1232,13 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
             dialog.draw();
         });
         let _ = AddClipboardFormatListener(window);
+        // Files dropped on it, from Explorer too (which is not elevated, as Glance is: what it sends is let through).
+        if asked.own.is_some() {
+            DragAcceptFiles(window, true);
+            for message in [WM_DROPFILES, WM_COPYDATA, COPY_GLOBAL_DATA] {
+                let _ = ChangeWindowMessageFilterEx(window, message, MSGFLT_ALLOW, None);
+            }
+        }
         let _ = SetTimer(Some(window), 1, GetCaretBlinkTime(), None);
 
         let _ = EnableWindow(owner, false);
@@ -1119,7 +1257,7 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
             DispatchMessageW(&message);
             // The file chooser, which has its own turn at the messages: shown with nothing of the window's held.
             if with(|dialog| std::mem::take(&mut dialog.choose_files)).unwrap_or(false) {
-                let asked = with(|dialog| (dialog.own.as_ref().map(|own| own.5.clone()).unwrap_or_default(), dialog.likeness()));
+                let asked = with(|dialog| (dialog.own.as_ref().map(|own| own.kinds.clone()).unwrap_or_default(), dialog.likeness()));
                 if let Some((kinds, small)) = asked {
                     let more = chosen(window, &kinds).iter().filter_map(|path| picture::from_file(path, small)).collect();
                     with(|dialog| dialog.add(more));
@@ -1187,12 +1325,15 @@ mod tests {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
             let owner = CreateWindowExW(Default::default(), w!("STATIC"), w!(""), WS_POPUP | WS_VISIBLE, 300, 200, 900, 700, None, None, None, None).unwrap();
             std::thread::spawn(|| {
-                std::thread::sleep(std::time::Duration::from_secs(8));
+                std::thread::sleep(std::time::Duration::from_secs(std::env::var("FOR").ok().and_then(|s| s.parse().ok()).unwrap_or(8)));
                 let _ = PostMessageW(FindWindowW(w!("GlanceAsk"), None).ok(), WM_CLOSE, Default::default(), Default::default());
             });
             let dark = std::env::var("DARK").is_ok();
+            // Pictures to hold, by their files, as `PICTURES` names them (split by `;`).
+            super::POINTER_FOR_TEST.set(std::env::var("POINTER").ok().and_then(|at| at.split_once(',').and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?)))));
+            super::GIVEN_FOR_TEST.set(std::env::var("PICTURES").map(|paths| paths.split(';').map(str::to_string).collect()).unwrap_or_default());
             let text = (0..60).map(|line| format!("Line {line} of what is sent")).collect::<Vec<_>>().join("\n");
-            let own = super::Own { words: "你想说的话（可不填）", hint: "比如：主板温度没有显示；风扇转速和别的软件里看到的不一样", pictures: "截图（可不添，最多 3 张；也可以直接按 Ctrl+V 粘贴）", add: "添加截图…", paste: "粘贴截图", kinds: "图片" };
+            let own = super::Own { words: "你想说的话（可不填）", hint: "比如：主板温度没有显示；风扇转速和别的软件里看到的不一样", pictures: "截图（可不添，最多 3 张）", add: "添加截图", ways: "点击选择、拖进窗口，或按 Ctrl+V 粘贴", paste: "粘贴剪贴板里的截图", waiting: "剪贴板里有截图，按 Ctrl+V 即可粘贴", kinds: "图片" };
             let asked = super::Asked { title: "发送诊断信息", intro: "下面是将要发送给 Glance（glancepc.com）的全部内容：你写的话、你添加的截图，和最下面的诊断信息。不包含你的文件、账号或网络地址。", own: Some(own), sent: Some(("诊断信息", &text)), yes: "发送", no: "取消", dark };
             assert!(super::show(owner, &asked).is_none());
         }

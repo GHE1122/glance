@@ -23,9 +23,9 @@ const SIDE_MOST: u32 = 2560;
 /// The most one picture may weigh as it is sent (the site keeps none heavier).
 pub const BYTES_MOST: usize = 1_400_000;
 
-/// One picture: as it is sent, and its likeness (within the size asked
-/// for, its own shape kept): its pixels (BGRA, opaque) and how many across
-/// and down.
+/// One picture: as it is sent, and its likeness (as small as covers the
+/// size asked for, its own shape kept): its pixels (BGRA, opaque) and how
+/// many across and down.
 pub struct Picture {
     pub jpeg: Vec<u8>,
     pub small: Vec<u8>,
@@ -87,9 +87,9 @@ mod tests {
         let picture = super::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/website/apple-touch-icon.png"), (84, 52)).expect("read");
         assert_eq!(picture.jpeg[..3], [0xFF, 0xD8, 0xFF]);
         assert!(picture.jpeg.len() <= super::BYTES_MOST);
-        // (A square picture: as tall as its room, and as wide as it is tall.)
-        assert_eq!(picture.size, (52, 52));
-        assert_eq!(picture.small.len(), 52 * 52 * 4);
+        // (A square picture: as wide as its room, and as tall as it is wide.)
+        assert_eq!(picture.size, (84, 84));
+        assert_eq!(picture.small.len(), 84 * 84 * 4);
         assert!(super::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"), (84, 52)).is_none());
     }
 }
@@ -108,7 +108,7 @@ unsafe fn made(factory: &IWICImagingFactory, image: &IWICBitmapSource, small: (u
             }
             side /= 2;
         };
-        let (likeness, (w, h)) = within(factory, image, (width, height), small)?;
+        let (likeness, (w, h)) = covering(factory, image, (width, height), small)?;
         let converter = factory.CreateFormatConverter()?;
         converter.Initialize(&likeness, &GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
         let mut small = vec![0u8; (w * h * 4) as usize];
@@ -130,6 +130,14 @@ unsafe fn within(factory: &IWICImagingFactory, image: &IWICBitmapSource, size: (
         scaler.Initialize(image, scaled.0, scaled.1, WICBitmapInterpolationModeFant)?;
         Ok((scaler.cast()?, scaled))
     }
+}
+
+/// `image` (of `size`) as small as covers `room`, its shape kept (itself, if it is no larger), and the size
+/// it then has.
+unsafe fn covering(factory: &IWICImagingFactory, image: &IWICBitmapSource, size: (u32, u32), room: (u32, u32)) -> Result<(IWICBitmapSource, (u32, u32))> {
+    let covers = (room.0 as f64 / size.0 as f64).max(room.1 as f64 / size.1 as f64).min(1.0);
+    let most = (((size.0 as f64 * covers).ceil() as u32).max(1), ((size.1 as f64 * covers).ceil() as u32).max(1));
+    unsafe { within(factory, image, size, most) }
 }
 
 /// `image` as a JPEG's bytes.

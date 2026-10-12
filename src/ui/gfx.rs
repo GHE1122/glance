@@ -734,6 +734,13 @@ impl<'a> Frame<'a> {
         &self.brush
     }
 
+    /// The outline of the rounded rectangle, dashed, a line `width` DIPs wide centred on it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stroke_rounded_dashed(&self, color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32, width: f32) {
+        let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: radius, radiusY: radius };
+        unsafe { self.dc.DrawRoundedRectangle(&shape, self.brush(color), width, &self.gfx.dashed) };
+    }
+
     /// Draws `text` in lines `width` wide, the first line's box at `(x, y)`.
     pub fn text_wrapped(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32) {
         let layout = self.gfx.wrapped(text, font, width);

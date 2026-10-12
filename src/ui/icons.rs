@@ -22,12 +22,13 @@ pub enum Icon {
     Quit,
     Layers,
     Clock,
+    ImagePlus,
 }
 
 impl Icon {
     /// Lucide's path data for it ("cpu", "gpu", "memory-stick", "hard-drive",
     /// "arrow-down-up", "gamepad-2", "pin", "x", "settings", "check",
-    /// "mouse-pointer-2", "panel-right", "undo-2", "refresh-cw", "power", "layers", "clock";
+    /// "mouse-pointer-2", "panel-right", "undo-2", "refresh-cw", "power", "layers", "clock", "image-plus";
     /// lucide-static 1.53.0), its
     /// rectangles and circles written as paths.
     fn data(self) -> &'static [&'static str] {
@@ -62,6 +63,13 @@ impl Icon {
             Icon::Update => &["M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8", "M21 3v5h-5", "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16", "M8 16H3v5"],
             Icon::Quit => &["M12 2v10", "M18.4 6.6a9 9 0 1 1-12.77.04"],
             Icon::Clock => &["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20z", "M12 6v6l4 2"],
+            Icon::ImagePlus => &[
+                "M16 5h6",
+                "M19 2v6",
+                "M21 11.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7.5",
+                "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21",
+                "M7 9a2 2 0 1 0 4 0a2 2 0 1 0-4 0z",
+            ],
             Icon::Layers => &[
                 "M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z",
                 "M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12",
@@ -278,7 +286,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid.
