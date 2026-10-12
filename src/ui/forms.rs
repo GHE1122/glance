@@ -151,6 +151,8 @@ impl Small {
 /// What a reading is of.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
+    /// The time of day: its ring, how much of the day has gone.
+    Time,
     Game,
     Cpu,
     Gpu(usize),
@@ -202,6 +204,8 @@ impl Reading {
     /// second rate.
     fn value(&self, s: &Sample, scene: &Scene, second: bool) -> Option<f64> {
         match (self.kind, second) {
+            // (The time is not charted: see `chart`.)
+            (Kind::Time, _) => None,
             // The game shown now: another's frames before it are not its own.
             (Kind::Game, _) => {
                 let playing = scene.history.last().and_then(|last| last.game.as_ref()).map(|g| g.pid);
@@ -242,7 +246,8 @@ fn rate(value: Option<f64>, bits: bool, short: bool) -> (String, String) {
     (figure.to_string(), unit)
 }
 
-/// The readings of the modules that are on, in a fixed order: a game's
+/// The readings of the modules that are on, in a fixed order: the time of
+/// day, a game's
 /// frame rate while one runs (with its module on), the CPU, the first
 /// graphics card, memory, the network both ways, the disk both ways.
 fn readings(scene: &Scene) -> Vec<Reading> {
@@ -251,6 +256,26 @@ fn readings(scene: &Scene) -> Vec<Reading> {
     let celsius = |value: Option<f32>| value.map(|t| format!("{t:.0}°")).unwrap_or_default();
     let percent = |value: Option<f32>| value.map_or("—".into(), |v| format!("{v:.0}"));
     let mut readings = Vec::new();
+    if on("time") {
+        let now = text::Local::at(s.t);
+        readings.push(Reading {
+            kind: Kind::Time,
+            id: "time".into(),
+            module: "time",
+            icon: Icon::Clock,
+            // (Named by its day: a tile says the time under it.)
+            label: now.date(lang),
+            share: Some(now.of_day()),
+            figure: now.time(),
+            unit: String::new(),
+            beside: String::new(),
+            detail: String::new(),
+            hot: false,
+            warm: false,
+            hot_at: None,
+            pair: None,
+        });
+    }
     // A game's frame rate; asked for by hand (the window in front taken
     // for a game) with none presenting yet, its place kept, waiting.
     let game = s.game.as_ref().filter(|_| on("game") && !super::view::game_hidden());
@@ -631,7 +656,8 @@ impl Painter<'_> {
     /// same ink, a key to which line is which in its corner, for `legend`.
     fn chart(&self, reading: &Reading, second: Second, (x, y, w, h): (f32, f32, f32, f32), legend: bool) {
         let theme = self.theme();
-        if w < 2.0 || h < 2.0 {
+        // (The time of day has nothing to chart.)
+        if w < 2.0 || h < 2.0 || reading.kind == Kind::Time {
             return;
         }
         self.name(reading, "chart");
@@ -703,7 +729,7 @@ impl Painter<'_> {
     /// game is shown, its frame rate's with the card's (or the first
     /// reading's).
     fn history(&self, area: (f32, f32, f32, f32), with_card: bool, legend: bool) {
-        let Some(main) = self.first(|k| *k == Kind::Game).or(self.first(|k| *k == Kind::Cpu)).or(self.readings.first()) else { return };
+        let Some(main) = self.first(|k| *k == Kind::Game).or(self.first(|k| *k == Kind::Cpu)).or(self.readings.iter().find(|r| r.kind != Kind::Time)) else { return };
         let card = self.first(|k| matches!(k, Kind::Gpu(_))).filter(|_| with_card && matches!(main.kind, Kind::Cpu | Kind::Game));
         self.chart(main, card.map_or(Second::None, Second::Other), area, legend);
     }

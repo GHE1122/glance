@@ -874,6 +874,11 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             blocks
         }
+        // The time of day, and the day under its name, as the sample has them.
+        "time" => {
+            let now = text::Local::at(s.t);
+            vec![head(lang.pick("时间", "Time"), now.date(lang), "", false), Block::Readout { figure: now.time(), unit: "", hot: false, plot: None }]
+        }
         "system" => {
             let rows = [
                 ("uptime", lang.pick("开机时长", "Uptime"), lang.duration(s.system.uptime_s)),
@@ -1211,15 +1216,17 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 name("detail");
                 frame.text(aside, theme.body, color, left, row, width, Align::End);
             }
-            (Block::Readout { figure, unit, hot, .. }, Pass::Content) => {
+            (Block::Readout { figure, unit, hot, plot }, Pass::Content) => {
                 let color = if *hot { theme.signal } else { theme.text };
-                // The figure and its unit stand on the chart's baseline.
+                // The figure and its unit stand on the chart's baseline: in
+                // the room before the chart, or, with none, the lane's.
+                let room = if plot.is_some() { LABEL } else { width };
                 let figure_width = frame.measure(figure, theme.figure);
                 let bottom = y + height;
                 name("value");
-                text_on_line(frame, figure, theme.figure, color, left, bottom, theme.figure.size * theme.figure_line, LABEL);
+                text_on_line(frame, figure, theme.figure, color, left, bottom, theme.figure.size * theme.figure_line, room);
                 name("unit");
-                text_on_line(frame, unit, theme.unit, theme.text2, left + figure_width + 3.0, bottom, theme.unit.size, (LABEL - figure_width - 3.0).max(30.0));
+                text_on_line(frame, unit, theme.unit, theme.text2, left + figure_width + 3.0, bottom, theme.unit.size, (room - figure_width - 3.0).max(30.0));
             }
             (Block::Rates { rows, .. }, Pass::Content) => {
                 for (i, (label, value)) in rows.iter().enumerate() {

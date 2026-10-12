@@ -394,7 +394,7 @@ pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&
                 reading(Kind::Network, lang.pick("上传", "Up"), vec![chosen("up", rate(s.net_up), &RATE)]),
             ],
             // The time of day, as the sample has it: a game played over the whole screen hides the taskbar's.
-            "clock" => vec![reading(Kind::Clock, lang.pick("时间", "Time"), vec![chosen("time", Some(text::time_of_day(s.t)), &TIME)])],
+            "clock" => vec![reading(Kind::Clock, lang.pick("时间", "Time"), vec![chosen("time", Some(text::Local::at(s.t).time()), &TIME)])],
             _ => vec![s.mic_muted.filter(|_| on("mic")).and_then(|muted| {
                 let value = if muted { lang.pick("已静音", "Muted") } else { lang.pick("开启", "On") };
                 let form = if lang == Lang::Zh { &MIC_ZH } else { &MIC_EN };

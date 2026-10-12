@@ -119,29 +119,65 @@ pub fn link_speed(bits_per_second: u64) -> String {
     }
 }
 
-/// The time of day where this PC is, at `t` (milliseconds since the Unix
-/// epoch), as hours and minutes of a 24-hour clock.
-#[cfg(windows)]
-pub fn time_of_day(t: u64) -> String {
-    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
-    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-    // (A file time counts hundreds of nanoseconds from 1601.)
-    let ticks = (t + 11_644_473_600_000) * 10_000;
-    let file = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
-    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
-    unsafe {
-        let _ = FileTimeToSystemTime(&file, &mut utc);
-        let _ = SystemTimeToTzSpecificLocalTime(None, &utc, &mut local);
-    }
-    format!("{:02}:{:02}", local.wHour, local.wMinute)
+/// A moment where this PC is: the hour and minute of its day, the month
+/// and the day of it, and the day of the week (0, Sunday).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Local {
+    pub hour: u32,
+    pub minute: u32,
+    pub month: u32,
+    pub day: u32,
+    pub weekday: u32,
 }
 
-#[cfg(target_os = "macos")]
-pub fn time_of_day(t: u64) -> String {
-    let seconds = (t / 1000) as libc::time_t;
-    let mut local: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&seconds, &mut local) };
-    format!("{:02}:{:02}", local.tm_hour, local.tm_min)
+impl Local {
+    /// The moment `t` (milliseconds since the Unix epoch).
+    #[cfg(windows)]
+    pub fn at(t: u64) -> Local {
+        use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+        use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+        // (A file time counts hundreds of nanoseconds from 1601.)
+        let ticks = (t + 11_644_473_600_000) * 10_000;
+        let file = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+        let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+        unsafe {
+            let _ = FileTimeToSystemTime(&file, &mut utc);
+            let _ = SystemTimeToTzSpecificLocalTime(None, &utc, &mut local);
+        }
+        Local { hour: local.wHour as u32, minute: local.wMinute as u32, month: local.wMonth as u32, day: local.wDay as u32, weekday: local.wDayOfWeek as u32 }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn at(t: u64) -> Local {
+        let seconds = (t / 1000) as libc::time_t;
+        let mut local: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&seconds, &mut local) };
+        Local { hour: local.tm_hour as u32, minute: local.tm_min as u32, month: local.tm_mon as u32 + 1, day: local.tm_mday as u32, weekday: local.tm_wday as u32 }
+    }
+
+    /// Hours and minutes, of a 24-hour clock.
+    pub fn time(self) -> String {
+        format!("{:02}:{:02}", self.hour, self.minute)
+    }
+
+    /// How much of its day has gone (0 to 1).
+    pub fn of_day(self) -> f32 {
+        (self.hour * 60 + self.minute) as f32 / 1440.0
+    }
+
+    /// The day: "10月11日 周日", "Sun, Oct 11".
+    pub fn date(self, lang: Lang) -> String {
+        let (weekday, month) = (self.weekday as usize % 7, (self.month as usize).clamp(1, 12) - 1);
+        match lang {
+            Lang::Zh => format!("{}月{}日 周{}", self.month, self.day, ["日", "一", "二", "三", "四", "五", "六"][weekday]),
+            Lang::En => format!(
+                "{}, {} {}",
+                ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][weekday],
+                ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month],
+                self.day
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -158,5 +194,8 @@ mod tests {
         assert_eq!(usage(30 * 1024 * 1024 * 1024, 64 * 1024 * 1024 * 1024), "30.0 / 64.0 GB");
         assert_eq!(link_speed(2_402_000_000), "2.4 Gbps");
         assert_eq!(Lang::Zh.duration(3 * 3600 + 5 * 60), "3 小时 5 分");
+        let noon = Local { hour: 9, minute: 5, month: 10, day: 11, weekday: 0 };
+        assert_eq!((noon.time().as_str(), noon.date(Lang::Zh).as_str(), noon.date(Lang::En).as_str()), ("09:05", "10月11日 周日", "Sun, Oct 11"));
+        assert_eq!(Local { hour: 12, minute: 0, ..noon }.of_day(), 0.5);
     }
 }
