@@ -1342,15 +1342,22 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let track = (mute - 6.0 - said_width - LABEL_GAP - plot_left).max(0.0);
                 let (tall, radius) = (theme.meter_height, theme.meter_radius);
                 part("track");
-                frame.fill_rounded(theme.track, plot_left, middle - tall / 2.0, track, tall, radius);
+                // What is filled, its knob, and the rest of the track: each beside the next, none over another
+                // (their colours are not solid: where two lay over each other, it would show).
                 let filled = track * (*level as f32 / 100.0).clamp(0.0, 1.0);
-                if filled > 0.0 {
-                    frame.clip(plot_left, middle - tall / 2.0, filled, tall);
-                    frame.fill_rounded(if *muted { theme.text3 } else { ink.trace }, plot_left, middle - tall / 2.0, track, tall, radius);
+                let (knob, reach) = (5.0, 4.5);
+                let colour = if *muted { theme.text3 } else { ink.trace };
+                if filled > reach {
+                    frame.clip(plot_left, middle - tall / 2.0, filled - reach, tall);
+                    frame.fill_rounded(colour, plot_left, middle - tall / 2.0, track, tall, radius);
                     frame.unclip();
                 }
-                // (Its knob in the colour of what is filled: one piece with it, muted or not.)
-                frame.fill_circle(if *muted { theme.text3 } else { ink.trace }, Point { x: plot_left + filled, y: middle }, 5.0);
+                if track - filled > reach {
+                    frame.clip(plot_left + filled + reach, middle - tall / 2.0, track - filled - reach, tall);
+                    frame.fill_rounded(theme.track, plot_left, middle - tall / 2.0, track, tall, radius);
+                    frame.unclip();
+                }
+                frame.fill_circle(colour, Point { x: plot_left + filled, y: middle }, knob);
                 hits.push((plot_left, row, track, MEDIA_ROW, Hit::Volume));
                 part("level");
                 frame.text(&said, theme.small, if *muted { theme.text3 } else { theme.text2 }, mute - 6.0 - said_width, middle - LINE / 2.0, said_width, Align::End);
