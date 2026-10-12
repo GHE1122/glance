@@ -9,9 +9,11 @@
 
 use serde_json::Value;
 use windows::core::Interface;
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT, D2D_SIZE_U};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1Geometry, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_CAP_STYLE_ROUND, D2D1_ELLIPSE, D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINE_JOIN_ROUND, D2D1_QUADRATIC_BEZIER_SEGMENT,
+    ID2D1BitmapBrush1, ID2D1Geometry, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_BRUSH_PROPERTIES, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_CAP_STYLE_ROUND, D2D1_ELLIPSE, D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINE_JOIN_ROUND, D2D1_QUADRATIC_BEZIER_SEGMENT,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
 };
 use windows_numerics::{Matrix3x2, Vector2};
@@ -403,6 +405,39 @@ impl Making {
     }
 }
 
+/// Every hue round a middle, from three o'clock, as a brush: what a ring
+/// drawn with it is coloured by, `across` wide about `centre`.
+fn hues(frame: &Frame, centre: Vector2, across: f32) -> Option<ID2D1BitmapBrush1> {
+    const SIDE: u32 = 512;
+    let bitmap = frame
+        .gfx
+        .made([u32::from_be_bytes(*b"HUES"), SIDE, 0, 0], || {
+            let mut pixels = vec![0u8; (SIDE * SIDE * 4) as usize];
+            for row in 0..SIDE {
+                for column in 0..SIDE {
+                    let (x, y) = (column as f32 + 0.5 - SIDE as f32 / 2.0, row as f32 + 0.5 - SIDE as f32 / 2.0);
+                    let Color { r, g, b, .. } = hued(y.atan2(x).to_degrees().rem_euclid(360.0), 1.0);
+                    let at = ((row * SIDE + column) * 4) as usize;
+                    // BGRA, opaque.
+                    pixels[at..at + 4].copy_from_slice(&[(b * 255.0).round() as u8, (g * 255.0).round() as u8, (r * 255.0).round() as u8, 255]);
+                }
+            }
+            let properties = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                ..Default::default()
+            };
+            unsafe { frame.dc.CreateBitmap(D2D_SIZE_U { width: SIDE, height: SIDE }, Some(pixels.as_ptr().cast()), SIDE * 4, &properties) }
+        })
+        .ok()?;
+    let k = across / SIDE as f32;
+    let placed = D2D1_BRUSH_PROPERTIES { opacity: 1.0, transform: Matrix3x2::scale(k, k) * Matrix3x2::translation(centre.X - across / 2.0, centre.Y - across / 2.0) };
+    let smooth = D2D1_BITMAP_BRUSH_PROPERTIES1 { extendModeX: D2D1_EXTEND_MODE_CLAMP, extendModeY: D2D1_EXTEND_MODE_CLAMP, interpolationMode: D2D1_INTERPOLATION_MODE_LINEAR };
+    unsafe { frame.dc.CreateBitmapBrush(&bitmap, Some(&smooth), Some(&placed)).ok() }
+}
+
 /// The colour of a hue (degrees) with so much colour in it (0 to 1), at its brightest.
 fn hued(hue: f32, depth: f32) -> Color {
     let part = |shift: f32| {
@@ -604,10 +639,8 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
         // (After them, what opens the ring to make another.)
         let step = ((wide - 32.0 - 36.0) / colours.len() as f32).min(46.0);
         let opens = Vector2 { X: side + 16.0 + 18.0 + colours.len() as f32 * step, Y: y + 62.0 };
-        for turn in 0..60 {
-            let (from, to) = ((turn as f32 * 6.0 - 0.5).to_radians(), (turn as f32 * 6.0 + 6.5).to_radians());
-            let on = |angle: f32| Vector2 { X: opens.X + 9.0 * angle.cos(), Y: opens.Y + 9.0 * angle.sin() };
-            unsafe { frame.dc.DrawLine(on(from), on(to), frame.brush(hued(turn as f32 * 6.0 + 3.0, 1.0)), 8.0, None) };
+        if let Some(hues) = hues(frame, opens, 26.0) {
+            unsafe { frame.dc.DrawEllipse(&D2D1_ELLIPSE { point: opens, radiusX: 9.0, radiusY: 9.0 }, &hues, 8.0, None) };
         }
         if making.is_some() {
             unsafe { frame.dc.DrawEllipse(&D2D1_ELLIPSE { point: opens, radiusX: 16.75, radiusY: 16.75 }, frame.brush(INK), 2.5, None) };
@@ -650,10 +683,8 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             let centre = Vector2 { X: side + wide / 2.0, Y: y + 196.0 + 4.0 + across / 2.0 };
             let middle = across / 2.0 - band / 2.0;
             let on = |angle: f32, r: f32| Vector2 { X: centre.X + r * angle.cos(), Y: centre.Y + r * angle.sin() };
-            // (Each two degrees of it a straight piece, long enough to meet the next at the ring's outside.)
-            for turn in 0..180 {
-                let (from, to) = ((turn as f32 * 2.0 - 0.4).to_radians(), (turn as f32 * 2.0 + 2.4).to_radians());
-                unsafe { frame.dc.DrawLine(on(from, middle), on(to, middle), frame.brush(hued(turn as f32 * 2.0 + 1.0, 1.0)), band, None) };
+            if let Some(hues) = hues(frame, centre, across) {
+                unsafe { frame.dc.DrawEllipse(&D2D1_ELLIPSE { point: centre, radiusX: middle, radiusY: middle }, &hues, band, None) };
             }
             let hue = held.filter(|(held, _)| **held == Part::Hue).map_or(making.hue, |(_, at)| at * 360.0);
             let depth = along(&Part::Depth, making.depth);

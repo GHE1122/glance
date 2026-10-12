@@ -26,7 +26,7 @@ use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, DeleteProcThreadAttributeList, GetExitCodeProcess, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT,
-    INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_FORCEOFFFEEDBACK, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 use crate::elevation;
@@ -208,7 +208,8 @@ fn run_plainly(program: &Path, arguments: &[&str]) -> Option<(u32, String, Strin
         let started = UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize, Some(given.as_ptr().cast()), size_of_val(&given), None, None).and_then(|()| {
             let mut startup = STARTUPINFOEXW::default();
             startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
-            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            // (Asked again and again as the settings' phone page is used: the pointer is not to say a program is starting.)
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_FORCEOFFFEEDBACK;
             startup.StartupInfo.hStdOutput = said.0;
             startup.StartupInfo.hStdError = said_wrong.0;
             startup.lpAttributeList = list;
