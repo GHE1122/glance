@@ -1912,6 +1912,9 @@ impl Widget {
         }
         self.window.place_keeping(window);
         self.window.show_in_place();
+        if self.tip.is_some() {
+            crate::ui::tip::above();
+        }
         self.shown_once |= whole;
     }
 

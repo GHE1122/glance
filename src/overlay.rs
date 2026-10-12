@@ -428,8 +428,9 @@ impl Overlay {
             self.place();
             self.shown = true;
         }
-        // Its buttons, lit as it is now.
+        // Its buttons, lit as it is now; and what one of them says, over it still.
         self.draw_bar();
+        crate::ui::tip::above();
     }
 
     /// Where each of its buttons' middles is on the screen, whether it
@@ -503,6 +504,7 @@ impl Overlay {
         }
         self.bar.place_under(rect, self.beneath);
         self.bar.show();
+        crate::ui::tip::above();
         if self.bar_at.replace(rect) != Some(rect) {
             crate::widget::own_window_changed(rect);
         }

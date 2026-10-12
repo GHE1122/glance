@@ -82,6 +82,16 @@ pub fn show(text: &str, at: POINT, dark: bool) {
     });
 }
 
+/// Puts it over the windows again, while it says something: what it speaks
+/// of puts itself above all each time it is drawn.
+pub fn above() {
+    TIP.with(|kept| {
+        if let Some(tip) = kept.borrow().as_ref().filter(|tip| !tip.said.0.is_empty()) {
+            tip.window.show();
+        }
+    });
+}
+
 /// Says nothing more.
 pub fn hide() {
     TIP.with(|kept| {

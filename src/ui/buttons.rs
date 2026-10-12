@@ -47,14 +47,15 @@ impl Button {
     pub fn says(self, lit: bool, lang: Lang, overlay: bool) -> &'static str {
         let p = |zh, en| lang.pick(zh, en);
         match (self, lit) {
-            (Button::Game, false) => p("把最前面的窗口当作游戏，显示它的帧率", "Take the window in front for a game, and show its frame rate"),
-            (Button::Game, true) => p("正在显示游戏的帧率，点一下不再显示", "Showing a game's frame rate. Press to stop"),
+            (Button::Game, false) => p("显示当前窗口的帧率", "Show the front window's frame rate"),
+            (Button::Game, true) => p("停止显示帧率", "Stop showing the frame rate"),
             (Button::Settings, _) => p("设置", "Settings"),
-            (Button::Pin, false) if overlay => p("锁定位置：不能再拖动或缩放", "Lock where it is: no longer moved or sized"),
-            (Button::Pin, false) => p("固定位置和大小：不能再拖动或缩放", "Pin where it is: no longer moved or sized"),
-            (Button::Pin, true) => p("已固定，点一下取消", "Kept where it is. Press to free it"),
-            (Button::Through, false) => p("鼠标穿透：点击落到后面的窗口上；要关闭，把鼠标停在这里片刻", "Let clicks through to what is behind; to end it, rest the pointer here a moment"),
-            (Button::Through, true) => p("鼠标穿透已开启，点一下关闭", "Clicks pass through. Press to end it"),
+            (Button::Pin, false) if overlay => p("锁定位置", "Lock position"),
+            (Button::Pin, true) if overlay => p("解除锁定", "Unlock position"),
+            (Button::Pin, false) => p("固定位置和大小", "Pin position and size"),
+            (Button::Pin, true) => p("取消固定", "Unpin"),
+            (Button::Through, false) => p("鼠标穿透：点击作用于后方窗口", "Click-through: clicks reach the window behind"),
+            (Button::Through, true) => p("关闭鼠标穿透", "Turn off click-through"),
             (Button::Close, _) if overlay => p("关闭悬浮窗", "Close the overlay"),
             (Button::Close, _) => p("收起", "Put away"),
         }
