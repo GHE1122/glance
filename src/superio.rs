@@ -6,6 +6,9 @@
 
 use crate::reading::BoardSensors;
 use crate::pawnio::Module;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
 use crate::sensors::{NamedLock, LOCK_WAIT};
 
 const LPC_IO: &[u8] = include_bytes!("../pawnio-modules/LpcIO.bin");
@@ -329,9 +332,12 @@ impl SuperIo {
 
     /// The board's temperatures and fans. The chip is reached through an
     /// address and a data port, so only under the ISA lock other programs
-    /// share; while another program has the bus, the last readings stand.
-    pub fn read(&mut self) -> BoardSensors {
-        let Some(_lock) = NamedLock::acquire(ISA_LOCK, LOCK_WAIT) else {
+    /// share, waited for `patience` ms at most; while another program has
+    /// the bus, the last readings stand.
+    pub fn read(&mut self, patience: u32) -> BoardSensors {
+        READS.fetch_add(1, Ordering::Relaxed);
+        let Some(_lock) = NamedLock::acquire(ISA_LOCK, patience) else {
+            MISSED.fetch_add(1, Ordering::Relaxed);
             return self.last.clone();
         };
         let mut sensors = BoardSensors::default();
@@ -401,6 +407,53 @@ impl SuperIo {
 }
 
 const ISA_LOCK: windows::core::PCWSTR = windows::core::w!("Global\\Access_ISABUS.HTP.Method");
+
+/// How many times the chip was read, and how many of those the bus was another program's all the while it was
+/// waited for (the readings then stood as they were), for a report.
+static READS: AtomicU64 = AtomicU64::new(0);
+static MISSED: AtomicU64 = AtomicU64::new(0);
+
+pub fn reads() -> (u64, u64) {
+    (READS.load(Ordering::Relaxed), MISSED.load(Ordering::Relaxed))
+}
+
+/// How often the chip is read, and how long the bus is waited for each time (other programs that monitor the
+/// board, or light it, take it too, some for long stretches).
+const EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+const PATIENCE: u32 = 900;
+
+/// A chip read on a thread of its own, as often as a sample is taken: a wait for the bus there holds up nothing
+/// else. What it read last is what is asked for.
+pub struct Watched {
+    latest: Arc<Mutex<BoardSensors>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Watched {
+    pub fn new(mut chip: SuperIo) -> Self {
+        let (latest, stop) = (Arc::new(Mutex::new(BoardSensors::default())), Arc::new(AtomicBool::new(false)));
+        let (kept, stopped) = (latest.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stopped.load(Ordering::Relaxed) {
+                let began = std::time::Instant::now();
+                let read = chip.read(PATIENCE);
+                *kept.lock().unwrap() = read;
+                std::thread::sleep(EVERY.saturating_sub(began.elapsed()));
+            }
+        });
+        Watched { latest, stop }
+    }
+
+    pub fn read(&self) -> BoardSensors {
+        self.latest.lock().unwrap().clone()
+    }
+}
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
 
 /// How it is said that the bus was not to be had as the chip was looked
 /// for: another program had it then, and the chip is looked for again.
@@ -575,6 +628,6 @@ mod tests {
     #[ignore = "needs administrator rights and the PawnIO driver; run with --ignored"]
     fn reads_this_board() {
         let mut chip = super::SuperIo::open("Gigabyte Technology Co., Ltd.").expect("a supported Super I/O chip, elevated");
-        println!("{:?}", chip.read());
+        println!("{:?}", chip.read(crate::sensors::LOCK_WAIT));
     }
 }

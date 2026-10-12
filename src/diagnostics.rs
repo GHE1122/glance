@@ -33,6 +33,15 @@ pub fn report() -> String {
     if let Some(later) = crate::superio::found_later() {
         lines.push(format!("Motherboard chip, looked for again: {later}"));
     }
+    let (reads, missed) = crate::superio::reads();
+    if reads > 0 {
+        lines.push(format!("Motherboard chip reads: {reads}, the bus another program's all the while at {missed}"));
+    }
+    // Other programs that read the board or light it, running now: they share the bus Glance reads the board by.
+    let sharing = sharing_the_bus();
+    if !sharing.is_empty() {
+        lines.push(format!("Running that share the bus: {}", sharing.join(", ")));
+    }
     let log = crate::journal::recent(15);
     lines.push(format!("Recent log ({} lines):", log.len()));
     lines.extend(log.into_iter().map(|line| format!("  {line}")));
@@ -73,6 +82,34 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     text
+}
+
+/// Programs known to read a board's chip or light it (and so to take the bus it is read by), by the names their
+/// processes run under: those running now. Only the list of processes is read; none is opened.
+fn sharing_the_bus() -> Vec<String> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    const KNOWN: &[&str] = &[
+        "armourycrate", "armourycrateservice", "lightingservice", "asuscertservice", "aisuite3", "asus_framework", "hwinfo64", "hwinfo32", "aida64", "librehardwaremonitor",
+        "openhardwaremonitor", "fancontrol", "signalrgb", "icue", "msi.centralserver", "msi_center", "mysticlight", "rgbfusion", "gcc", "openrgb", "hwmonitor", "speedfan", "argus monitor",
+        "nzxt cam", "corsair.service", "thermaltake", "aura", "auraservice",
+    ];
+    let mut found = Vec::new();
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return found };
+        let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+        while more {
+            let length = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
+            let bare = name.to_lowercase().trim_end_matches(".exe").to_string();
+            if KNOWN.contains(&bare.as_str()) && !found.contains(&name) {
+                found.push(name);
+            }
+            more = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+    }
+    found
 }
 
 /// Windows' name, release and build. Windows 11 keeps "Windows 10" in its
