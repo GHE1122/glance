@@ -193,38 +193,90 @@ private class Chip(on: Face, wide: Float, deep: Float, r: Float) {
 }
 
 /**
- * A laptop, drawn as the case is: its screen up at the back, and in its body, seen through its deck, its two fans,
- * its processor and its card between them, its memory and its drive.
+ * A laptop, drawn as the case is and as one with a clear shell would look: its screen up at the back; in its body,
+ * its board with the processor and the card on it, a pipe from each to its fan, its memory, its drive and its
+ * battery; and over them, faintly, its keys and its pad. In the middle of the picture, as the case is.
+ *
+ * As a laptop of fourteen inches is: its body 104 by 74 (about 312 mm by 222), its lid as deep as its body (shut, it
+ * covers it), opened 18 degrees past upright; its screen 16 by 10 in the lid, the wider edge of the lid under it.
+ * Its body and its lid are drawn thicker than they are, to be seen at this size: the body twice the lid.
  */
 private object Laptop {
-    private const val X0 = -20f
-    private const val Y0 = 6f
-    private const val WIDE = 114f
-    private const val DEEP = 81f
+    private const val X0 = -52f
+    private const val Y0 = 9f
+    private const val WIDE = 104f
+    private const val DEEP = 74f
     private const val THICK = 6f
-    private const val UP = 75f
-    private const val LEAN = 18f
+    private const val UP = DEEP * 0.951f
+    private const val LEAN = DEEP * 0.309f
+    private const val LID = 3f
+    /** How far up in the body what is in it lies. */
+    private const val IN = 1.5f
 
-    val lid = loop(listOf(v(X0, Y0, THICK), v(X0 + WIDE, Y0, THICK), v(X0 + WIDE, Y0 - LEAN, THICK + UP), v(X0, Y0 - LEAN, THICK + UP)), 4f)
-    val display = Face(v(X0 + 5, Y0 - LEAN * 5 / UP, THICK + 5), v(1, 0, 0), v(0, -LEAN / UP, 1)).box(WIDE - 10, UP - 11, 2.5f)
-    val body = Block(v(X0, Y0, 0), v(X0 + WIDE, Y0 + DEEP, THICK), 2f)
-    private fun deck(x: Float, y: Float) = Face(v(X0 + x, Y0 + y, THICK), v(1, 0, 0), v(0, 1, 0))
-    val fans = listOf(17f, WIDE - 17f).map { Face(v(X0 + it, Y0 + 18, THICK + 0.2), v(1, 0, 0), v(0, 1, 0)) }
-    val chips = mapOf(
-        Part.Cpu to Chip(deck(34f, 8f), 20f, 20f, 1.6f),
-        Part.Gpu to Chip(deck(60f, 8f), 22f, 20f, 1.6f),
-        Part.Ram to Chip(deck(13f, 39f), 39f, 9f, 1.6f),
-        Part.Disk to Chip(deck(62f, 39f), 39f, 9f, 1.6f),
+    private val corners = listOf(v(X0, Y0, THICK), v(X0 + WIDE, Y0, THICK), v(X0 + WIDE, Y0 - LEAN, THICK + UP), v(X0, Y0 - LEAN, THICK + UP))
+    private fun behind(corner: V) = v(corner.x, corner.y - LID * UP / DEEP, corner.z - LID * LEAN / DEEP)
+    /** The lid's side towards the eye and its top: it is as thick as [LID]. */
+    val edges = listOf(
+        loop(listOf(corners[1], corners[2], behind(corners[2]), behind(corners[1])), 1f),
+        loop(listOf(corners[3], corners[2], behind(corners[2]), behind(corners[3])), 1f),
     )
-    /** Where the hand rests. */
-    val pad = deck((WIDE - 34f) / 2, DEEP - 26f).box(34f, 20f, 2.5f)
+    val lid = loop(corners, 4f)
+    val display = run {
+        // Up the lid, a step as long as one across it; the screen 3.5 in from its sides and its top.
+        val up = v(0, -LEAN / DEEP, UP / DEEP)
+        val (across, edge) = (WIDE - 7f) to 3.5f
+        val tall = across * 10f / 16f
+        val from = DEEP - edge - tall
+        Face(v(X0 + edge, Y0 + up.y * from, THICK + up.z * from), v(1, 0, 0), up).box(across, tall, 2.5f)
+    }
+    val body = Block(v(X0, Y0, 0), v(X0 + WIDE, Y0 + DEEP, THICK), 2.5f)
+
+    private fun inside(x: Float, y: Float) = Face(v(X0 + x, Y0 + y, IN), v(1, 0, 0), v(0, 1, 0))
+    private fun deck(x: Float, y: Float) = Face(v(X0 + x, Y0 + y, THICK), v(1, 0, 0), v(0, 1, 0))
+    private fun lines(on: Face, each: List<Pair<Offset, Offset>>) = Path().apply {
+        for ((from, to) in each) {
+            on.at(from.x, from.y).let { moveTo(it.x, it.y) }
+            on.at(to.x, to.y).let { lineTo(it.x, it.y) }
+        }
+    }
+
+    /** The board across the back, and the battery before it with its cells. */
+    val board = inside(7f, 4f).box(90f, 33f, 3f)
+    val battery = inside(15f, 43f).box(74f, 21f, 3f)
+    val cells = lines(inside(15f, 43f), listOf(1f, 2f).map { Offset(it * 74f / 3f, 3f) to Offset(it * 74f / 3f, 18f) })
+    /** A pipe from the processor and from the card, each out to its fan. */
+    val pipes = lines(inside(0f, 0f), listOf(Offset(25f, 17f) to Offset(45f, 17f), Offset(25f, 20f) to Offset(45f, 20f), Offset(64f, 17f) to Offset(79f, 17f), Offset(64f, 20f) to Offset(79f, 20f)))
+    val fans = listOf(20f, 84f).map { Face(v(X0 + it, Y0 + 19, IN + 0.2), v(1, 0, 0), v(0, 1, 0)) }
+    val chips = mapOf(
+        Part.Cpu to Chip(inside(37f, 11f), 14f, 14f, 1.6f),
+        Part.Gpu to Chip(inside(54f, 11f), 15f, 14f, 1.6f),
+        Part.Ram to Chip(inside(34f, 28f), 17f, 6f, 1.6f),
+        Part.Disk to Chip(inside(54f, 28f), 22f, 6f, 1.6f),
+    )
+    /** Over them: the keys in their rows (each row's set off from the next's, the last with its long key), and the pad. */
+    val keys = deck(7f, 6f).box(90f, 31f, 2f)
+    val rows = run {
+        val (wide, deep, rows, across) = listOf(90f, 31f, 5f, 13f)
+        val each = mutableListOf<Pair<Offset, Offset>>()
+        for (row in 1 until rows.toInt()) each += Offset(0f, deep * row / rows) to Offset(wide, deep * row / rows)
+        for (row in 0 until rows.toInt()) {
+            val (top, bottom) = (deep * row / rows) to (deep * (row + 1) / rows)
+            val shift = listOf(0f, 0.5f, 0.25f, 0.75f, 0f)[row] * wide / across
+            for (key in 1 until across.toInt()) {
+                val x = key * wide / across + shift
+                if (x < wide - 1f && (row + 1 < rows.toInt() || x !in wide * 0.3f..wide * 0.7f)) each += Offset(x, top) to Offset(x, bottom)
+            }
+        }
+        lines(deck(7f, 6f), each)
+    }
+    val pad = deck(37f, 44f).box(30f, 19f, 2.5f)
 
     /** Where each note is. */
     val places = mapOf(
-        Part.Cpu to Place(v(X0 + 44, Y0 + 18, THICK), -122f, -96f, true),
-        Part.Gpu to Place(v(X0 + 71, Y0 + 18, THICK), 82f, -64f, false),
-        Part.Ram to Place(v(X0 + 32.5, Y0 + 43.5, THICK), -134f, 58f, true),
-        Part.Disk to Place(v(X0 + 81.5, Y0 + 43.5, THICK), 82f, 76f, false),
+        Part.Cpu to Place(v(X0 + 44, Y0 + 18, IN), -122f, -104f, true),
+        Part.Gpu to Place(v(X0 + 61.5, Y0 + 18, IN), 74f, -34f, false),
+        Part.Ram to Place(v(X0 + 42.5, Y0 + 31, IN), -134f, 64f, true),
+        Part.Disk to Place(v(X0 + 65, Y0 + 31, IN), 74f, 66f, false),
     )
 
     fun part(p: Offset): Part? = chips.entries.firstOrNull { it.value.holds(p) }?.key
@@ -369,19 +421,35 @@ fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Par
                 val stroke = Stroke(thin, cap = StrokeCap.Round, join = StrokeJoin.Round)
                 if (laptop) {
                     val shell = lerp(Color(0xFF8F99A6), glow, 0.22f * shine)
-                    // The screen at the back, then the body, and on its deck what is in it.
+                    val traced = Color(0xFF46505C)
+                    // The screen at the back: its lid's edges, its face, and the picture's place in it.
+                    for (edge in Laptop.edges) {
+                        drawPath(edge, shade(shell, 0.12f))
+                        drawPath(edge, shell, style = stroke)
+                    }
                     drawPath(Laptop.lid, Color(0xFF12161B))
                     drawPath(Laptop.lid, shell, style = Stroke(thin * 1.4f, cap = StrokeCap.Round, join = StrokeJoin.Round))
                     drawPath(Laptop.display, Color(0xFF0B0E12))
                     drawPath(Laptop.display, Color(0xFF3A424D), style = stroke)
+                    // The body, clear: what is in it lies on its floor, seen through its deck.
                     block(Laptop.body, shell, thin)
+                    drawPath(Laptop.board, Color(0xFF161B21))
+                    drawPath(Laptop.board, traced, style = stroke)
+                    drawPath(Laptop.battery, Color(0xFF141920))
+                    drawPath(Laptop.battery, traced, style = stroke)
+                    drawPath(Laptop.cells, traced.copy(alpha = 0.7f), style = stroke)
+                    drawPath(Laptop.pipes, Color(0xFF59636F), style = Stroke(thin * 1.6f, cap = StrokeCap.Round, join = StrokeJoin.Round))
                     val fans = lerp(Color(0xFF59636F), glow, shine)
-                    for (one in Laptop.fans) fan(one, 12.5f, turned[1], fans, thin)
+                    for (one in Laptop.fans) fan(one, 11.5f, turned[1], fans, thin)
                     for ((part, chip) in Laptop.chips) {
-                        drawPath(chip.path, shade(colour(part), 0.14f))
+                        drawPath(chip.path, shade(colour(part), 0.16f))
                         drawPath(chip.path, colour(part), style = Stroke(width(part), cap = StrokeCap.Round, join = StrokeJoin.Round))
                     }
-                    drawPath(Laptop.pad, Color(0xFF46505C), style = stroke)
+                    // Over them, faintly: the keys in their rows, and the pad; brighter while their light is on.
+                    val keys = lerp(Color(0xFF8F99A6), glow, 0.5f * shine).copy(alpha = 0.34f + 0.21f * shine)
+                    drawPath(Laptop.keys, keys, style = stroke)
+                    drawPath(Laptop.rows, keys, style = Stroke(thin * 0.8f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    drawPath(Laptop.pad, keys, style = stroke)
                     return@faded
                 }
                 // The lights' colour on the walls and the floor.

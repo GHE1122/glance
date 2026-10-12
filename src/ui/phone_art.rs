@@ -232,53 +232,95 @@ impl Picture<'_> {
         self.words(lines[2], small, DIM, x, to.1 + 25.0, end);
     }
 
-    /// A laptop, drawn as the case is: its screen up at the back, and in
-    /// its body, seen through its deck, its two fans, its processor and
-    /// its card between them, its memory and its drive. `light` is the
-    /// colour of the light under its keys while that is on.
+    /// A laptop, drawn as the case is and as one with a clear shell would
+    /// look: its screen up at the back; in its body, its board with the
+    /// processor and the card on it, a pipe from each to its fan, its
+    /// memory, its drive and its battery; and over them, faintly, its keys
+    /// and its pad. In the middle of the room, as the case is. `light` is
+    /// the colour of the light under its keys while that is on.
     #[allow(clippy::too_many_arguments)]
     fn laptop(&mut self, x: f32, y: f32, width: f32, reads: &Value, lang: Lang, seconds: f32, light: Option<Color>) {
         let k = width / ROOM.2;
         self.room = Matrix3x2::scale(k, k) * Matrix3x2::translation(x - ROOM.0 * k, y - ROOM.1 * k);
         // Its body: from (X0, Y0), W wide and D deep, T thick; its screen S up from its back edge, leaning back by LEAN.
-        const X0: f32 = -20.0;
-        const Y0: f32 = 6.0;
-        const W: f32 = 114.0;
-        const D: f32 = 81.0;
+        // As a laptop of fourteen inches is: its body 104 by 74 (about 312 mm by 222), its lid as deep as its
+        // body (shut, it covers it), opened 18 degrees past upright; its screen 16 by 10 in the lid, the wider
+        // edge of the lid under it. Its body and its lid drawn thicker than they are, to be seen at this size:
+        // the body twice the lid.
+        const U: f32 = 1.0;
+        const X0: f32 = -52.0;
+        const Y0: f32 = 9.0;
+        const W: f32 = 104.0 * U;
+        const D: f32 = 74.0 * U;
         const T: f32 = 6.0;
-        const S: f32 = 75.0;
-        const LEAN: f32 = 18.0;
+        const S: f32 = D * 0.951;
+        const LEAN: f32 = D * 0.309;
+        /// How thick the lid is, and how far up in the body what is in it lies.
+        const LID: f32 = 3.0;
+        const IN: f32 = 1.5;
+        let at = |x: f32, y: f32| Vector2 { X: x, Y: y };
         let lit = |color: Color, much: f32| light.map_or(color, |light| Color { r: color.r + (light.r - color.r) * much, g: color.g + (light.g - color.g) * much, b: color.b + (light.b - color.b) * much, a: color.a });
         let turn = |rpm: Option<i64>| seconds * rpm.unwrap_or(0).max(0) as f32 / 60.0 / SLOWED * std::f32::consts::TAU;
         let cpu_fan = reads.get("cpu_fan").and_then(Value::as_i64);
         let shell = lit(Color::hex(0x8F99A6, 1.0), 0.22);
+        let traced = Color::hex(0x46505C, 1.0);
         // The screen, at the back: its lid, and the picture's place in it.
+        // (As thick as LID: its back is that far behind its face, of which its top and its side towards the eye show.)
         let lid = [[X0, Y0, T], [X0 + W, Y0, T], [X0 + W, Y0 - LEAN, T + S], [X0, Y0 - LEAN, T + S]];
+        let slant = (S * S + LEAN * LEAN).sqrt();
+        let behind = |corner: Point| [corner[0], corner[1] - LID * S / slant, corner[2] - LID * LEAN / slant];
+        for edge in [[lid[1], lid[2], behind(lid[2]), behind(lid[1])], [lid[3], lid[2], behind(lid[2]), behind(lid[3])]] {
+            self.draw(self.ring(&edge, 1.0), Some(shade(shell, 12.0)), Some((shell, 1.0)));
+        }
         self.draw(self.ring(&lid, 4.0), Some(Color::hex(0x12161B, 1.0)), Some((shell, 1.4)));
-        let up = [0.0, -LEAN / S, 1.0];
-        self.draw(self.sheet((W - 10.0, S - 11.0), 2.5, face([X0 + 5.0, Y0 - LEAN * 5.0 / S, T + 5.0], [1.0, 0.0, 0.0], up)), Some(Color::hex(0x0B0E12, 1.0)), Some((Color::hex(0x3A424D, 1.0), 1.0)));
-        // The body, and on its deck what is in it.
-        self.block([X0, Y0, 0.0], [X0 + W, Y0 + D, T], 2.0, shell);
-        let on_deck = |x: f32, y: f32| face([X0 + x, Y0 + y, T], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        // (Up the lid, a step as long as one across it; the screen 3.5 in from its sides and its top.)
+        let up = [0.0, -LEAN / D, S / D];
+        let (across, edge) = (W - 7.0, 3.5);
+        let tall = across * 10.0 / 16.0;
+        let from = D - edge - tall;
+        self.draw(self.sheet((across, tall), 2.5, face([X0 + edge, Y0 + up[1] * from, T + up[2] * from], [1.0, 0.0, 0.0], up)), Some(Color::hex(0x0B0E12, 1.0)), Some((Color::hex(0x3A424D, 1.0), 1.0)));
+        // The body, clear: what is in it lies on its floor, seen through its deck.
+        self.block([X0, Y0, 0.0], [X0 + W, Y0 + D, T], 2.5, shell);
+        let inside = |x: f32, y: f32| face([X0 + x * U, Y0 + y * U, IN], [U, 0.0, 0.0], [0.0, U, 0.0]);
         let colour = |part: &str| match read(reads, part).0 {
             Some(temp) if temp >= HOT => Color::hex(0xFF6B5E, 1.0),
             Some(temp) if temp >= WARM => Color::hex(0xFFB057, 1.0),
             _ => lit(STEEL, 0.42),
         };
+        // The board across the back, and the battery before it.
+        self.draw(self.sheet((90.0, 33.0), 3.0, inside(7.0, 4.0)), Some(Color::hex(0x161B21, 1.0)), Some((traced, 1.0)));
+        self.draw(self.sheet((74.0, 21.0), 3.0, inside(15.0, 43.0)), Some(Color::hex(0x141920, 1.0)), Some((traced, 1.0)));
+        let cells: Vec<_> = [1.0, 2.0].iter().map(|cell| (at(cell * 74.0 / 3.0, 3.0), at(cell * 74.0 / 3.0, 18.0))).collect();
+        self.lines(&cells, inside(15.0, 43.0), traced.alpha(0.7), 1.0);
+        // A pipe from the processor and from the card, each out to its fan.
+        let pipes = [(at(25.0, 17.0), at(45.0, 17.0)), (at(25.0, 20.0), at(45.0, 20.0)), (at(64.0, 17.0), at(79.0, 17.0)), (at(64.0, 20.0), at(79.0, 20.0))];
+        self.lines(&pipes, inside(0.0, 0.0), Color::hex(0x59636F, 1.0), 1.6);
+        let fans = lit(Color::hex(0x59636F, 1.0), 1.0);
+        for across in [20.0, 84.0] {
+            self.fan([X0 + across * U, Y0 + 19.0 * U, IN + 0.2], [U, 0.0, 0.0], [0.0, U, 0.0], 11.5, fans, turn(cpu_fan));
+        }
         let chip = |picture: &Picture, part: &str, x: f32, y: f32, size: (f32, f32)| {
             let color = colour(part);
-            picture.draw(picture.sheet(size, 1.6, on_deck(x, y)), Some(shade(color, 14.0)), Some((color, 1.0)));
+            picture.draw(picture.sheet(size, 1.6, inside(x, y)), Some(shade(color, 16.0)), Some((color, 1.0)));
         };
-        let fans = lit(Color::hex(0x59636F, 1.0), 1.0);
-        for across in [17.0, W - 17.0] {
-            self.fan([X0 + across, Y0 + 18.0, T + 0.2], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 12.5, fans, turn(cpu_fan));
+        chip(self, "cpu", 37.0, 11.0, (14.0, 14.0));
+        chip(self, "gpu", 54.0, 11.0, (15.0, 14.0));
+        chip(self, "ram", 34.0, 28.0, (17.0, 6.0));
+        chip(self, "disk", 54.0, 28.0, (22.0, 6.0));
+        // Over them, faintly: the keys in their rows, and the pad.
+        let deck = |x: f32, y: f32| face([X0 + x * U, Y0 + y * U, T], [U, 0.0, 0.0], [0.0, U, 0.0]);
+        let keys = lit(Color::hex(0x8F99A6, 1.0), 0.5).alpha(if light.is_some() { 0.55 } else { 0.34 });
+        let (wide, deep, rows, across) = (90.0, 31.0, 5, 13);
+        self.draw(self.sheet((wide, deep), 2.0, deck(7.0, 6.0)), None, Some((keys, 1.0)));
+        let mut grid: Vec<(Vector2, Vector2)> = (1..rows).map(|row| (at(0.0, deep * row as f32 / rows as f32), at(wide, deep * row as f32 / rows as f32))).collect();
+        // (Each row's keys set off from the next row's, as keys are; the last row with its long key in the middle.)
+        for row in 0..rows {
+            let (top, bottom) = (deep * row as f32 / rows as f32, deep * (row + 1) as f32 / rows as f32);
+            let shift = [0.0, 0.5, 0.25, 0.75, 0.0][row] * wide / across as f32;
+            grid.extend((1..across).map(|key| key as f32 * wide / across as f32 + shift).filter(|x| *x < wide - 1.0 && (row + 1 < rows || !(wide * 0.3..wide * 0.7).contains(x))).map(|x| (at(x, top), at(x, bottom))));
         }
-        chip(self, "cpu", 34.0, 8.0, (20.0, 20.0));
-        chip(self, "gpu", 60.0, 8.0, (22.0, 20.0));
-        chip(self, "ram", 13.0, 39.0, (39.0, 9.0));
-        chip(self, "disk", 62.0, 39.0, (39.0, 9.0));
-        // (Where the hand rests: the pad, faintly.)
-        self.draw(self.sheet((34.0, 20.0), 2.5, on_deck((W - 34.0) / 2.0, D - 26.0)), None, Some((Color::hex(0x46505C, 1.0), 1.0)));
+        self.lines(&grid, deck(7.0, 6.0), keys, 0.8);
+        self.draw(self.sheet((30.0, 19.0), 2.5, deck(37.0, 44.0)), None, Some((keys, 1.0)));
 
         // What is said of each part. (In the room's own measure, as the laptop is.)
         self.frame.place(self.room * self.screen);
@@ -287,10 +329,10 @@ impl Picture<'_> {
             _ => name.to_string(),
         };
         let fan = cpu_fan.map(|rpm| lang.pick(&format!("风扇 {rpm} 转"), &format!("Fan {rpm} rpm")).to_string()).unwrap_or_default();
-        self.say([X0 + 44.0, Y0 + 18.0, T], (-122.0, -96.0), true, [&figure(read(reads, "cpu")), &named("cpu", "CPU"), &fan]);
-        self.say([X0 + 71.0, Y0 + 18.0, T], (82.0, -64.0), false, [&figure(read(reads, "gpu")), &named("gpu", lang.pick("显卡", "Graphics")), ""]);
-        self.say([X0 + 32.5, Y0 + 43.5, T], (-134.0, 58.0), true, [&figure(read(reads, "ram")), &named("ram", lang.pick("内存", "Memory")), ""]);
-        self.say([X0 + 81.5, Y0 + 43.5, T], (82.0, 76.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("硬盘", "Disk")), ""]);
+        self.say([X0 + 44.0 * U, Y0 + 18.0 * U, IN], (-122.0, -104.0), true, [&figure(read(reads, "cpu")), &named("cpu", "CPU"), &fan]);
+        self.say([X0 + 61.5 * U, Y0 + 18.0 * U, IN], (74.0, -34.0), false, [&figure(read(reads, "gpu")), &named("gpu", lang.pick("显卡", "Graphics")), ""]);
+        self.say([X0 + 42.5 * U, Y0 + 31.0 * U, IN], (-134.0, 64.0), true, [&figure(read(reads, "ram")), &named("ram", lang.pick("内存", "Memory")), ""]);
+        self.say([X0 + 65.0 * U, Y0 + 31.0 * U, IN], (74.0, 66.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("硬盘", "Disk")), ""]);
         self.frame.place(self.screen);
     }
 
