@@ -412,6 +412,18 @@ pub struct Settings {
     pub lyric_card: Option<(i32, i32)>,
     #[serde(default)]
     pub lyric_subtitle: Option<(i32, i32)>,
+    /// Their sizes (DIPs; none, as they come), whether each is pinned (neither moved nor sized), and whether the
+    /// floating lyrics let clicks through.
+    #[serde(default)]
+    pub lyric_card_size: Option<(f32, f32)>,
+    #[serde(default)]
+    pub lyric_subtitle_size: Option<(f32, f32)>,
+    #[serde(default)]
+    pub lyric_card_pinned: bool,
+    #[serde(default)]
+    pub lyric_subtitle_pinned: bool,
+    #[serde(default)]
+    pub lyric_subtitle_through: bool,
     pub view: serde_json::Value,
 }
 
@@ -444,6 +456,11 @@ impl Default for Settings {
             widgets: Vec::new(),
             lyric_card: None,
             lyric_subtitle: None,
+            lyric_card_size: None,
+            lyric_subtitle_size: None,
+            lyric_card_pinned: false,
+            lyric_subtitle_pinned: false,
+            lyric_subtitle_through: false,
             view: serde_json::Value::Null,
         }
     }

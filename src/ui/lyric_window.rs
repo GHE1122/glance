@@ -22,12 +22,15 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::Foundation::{COLORREF, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, LoadCursorW, RegisterClassExW, SetWindowPos, ShowWindow, HTCAPTION, HWND_TOPMOST, IDC_SIZEALL, MA_NOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_NCRBUTTONUP, WM_SETCURSOR, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, GetWindowRect, LoadCursorW, RegisterClassExW, SetCursor, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, GWL_EXSTYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOPMOST, IDC_ARROW, IDC_SIZEALL, LWA_ALPHA, MA_NOACTIVATE,
+    MINMAXINFO, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
+use super::buttons::{self, Button};
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
 use super::gfx::{self, rect, Frame, Gfx, Surface};
 use crate::cover::Cover;
@@ -54,6 +57,22 @@ impl Style {
         match self {
             Style::Card => 20.0,
             Style::Subtitle => 0.0,
+        }
+    }
+
+    /// The least it can be sized to (DIPs).
+    fn least(self) -> (f32, f32) {
+        match self {
+            Style::Card => (320.0, 230.0),
+            Style::Subtitle => (420.0, 100.0),
+        }
+    }
+
+    /// The buttons it shows while the pointer is over it, in their row.
+    fn buttons(self) -> &'static [Button] {
+        match self {
+            Style::Card => &[Button::Settings, Button::Pin, Button::Close],
+            Style::Subtitle => &[Button::Settings, Button::Pin, Button::Through, Button::Close],
         }
     }
 
@@ -85,6 +104,18 @@ struct Shown {
     gfx: Rc<Gfx>,
     surface: Option<Surface>,
     scale: f32,
+    /// Its size (DIPs, inside the room for its shadow).
+    room: (f32, f32),
+    /// Neither moved nor sized; letting clicks through (the floating lyrics alone).
+    pinned: bool,
+    through: bool,
+    /// The pointer over it, since when; letting clicks through, the pointer has stayed long enough for the button
+    /// that ends that to be pressed (it takes clicks meanwhile).
+    over: Option<Instant>,
+    reachable: bool,
+    /// Where its buttons were drawn (DIPs, inside), and the one whose words show.
+    hits: Vec<(f32, f32, f32, f32, Button)>,
+    tipped: Option<Button>,
     next_frame: Instant,
     /// The rows the lines have glided to (the line sung now's place, fractional while gliding), and how fast.
     rail: f32,
@@ -104,7 +135,8 @@ thread_local! {
     static SHOWN: RefCell<Vec<Shown>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Shows the windows wanted, takes away those no longer wanted, and draws each that is due; when next to come.
+/// Shows the windows wanted, takes away those no longer wanted, follows the pointer over them, and draws each
+/// that is due; when next to come.
 pub fn tick(now: Instant) -> Option<Duration> {
     let wanted: Vec<Style> = {
         let settings = crate::app().settings.lock().unwrap();
@@ -116,6 +148,9 @@ pub fn tick(now: Instant) -> Option<Duration> {
         shown.retain(|one| {
             let keep = wanted.contains(&one.style);
             if !keep {
+                if one.tipped.is_some() {
+                    super::tip::hide();
+                }
                 unsafe {
                     let _ = DestroyWindow(one.hwnd);
                 }
@@ -131,63 +166,255 @@ pub fn tick(now: Instant) -> Option<Duration> {
         }
         let mut due: Option<Duration> = None;
         for one in shown.iter_mut() {
+            one.follow_pointer(now);
             if now >= one.next_frame {
                 let busy = one.draw(now);
                 one.next_frame = now + if busy { PLAYING_FRAME } else { REST_FRAME };
             }
-            let wait = one.next_frame.saturating_duration_since(now);
+            // (The pointer over it is followed closely.)
+            let wait = one.next_frame.saturating_duration_since(now).min(if one.over.is_some() { Duration::from_millis(40) } else { Duration::MAX });
             due = Some(due.map_or(wait, |due| due.min(wait)));
         }
         due
     })
 }
 
+/// Lets clicks through `hwnd` (to what is behind it), or no longer.
+fn let_through(hwnd: HWND, through: bool) {
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let style = if through { style | WS_EX_TRANSPARENT.0 as isize } else { style & !(WS_EX_TRANSPARENT.0 as isize) };
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
+    }
+}
+
+impl Shown {
+    /// Where the pointer is (DIPs, inside), if it is over it.
+    fn pointer(&self) -> Option<(f32, f32)> {
+        let (mut cursor, mut at) = (POINT::default(), RECT::default());
+        unsafe {
+            GetCursorPos(&mut cursor).ok()?;
+            GetWindowRect(self.hwnd, &mut at).ok()?;
+        }
+        let margin = self.style.margin();
+        let (x, y) = ((cursor.x - at.left) as f32 / self.scale - margin, (cursor.y - at.top) as f32 / self.scale - margin);
+        (x >= 0.0 && y >= 0.0 && x < self.room.0 && y < self.room.1).then_some((x, y))
+    }
+
+    fn button_at(&self, (x, y): (f32, f32)) -> Option<Button> {
+        self.hits.iter().find(|(bx, by, bw, bh, _)| x >= *bx && x < bx + bw && y >= *by && y < by + bh).map(|hit| hit.4)
+    }
+
+    /// The pointer come, gone, or resting on a button (whose words then show); letting clicks through, the
+    /// button that ends that made reachable once it has stayed.
+    fn follow_pointer(&mut self, now: Instant) {
+        let pointer = self.pointer();
+        if pointer.is_some() != self.over.is_some() {
+            self.over = pointer.map(|_| now);
+            self.next_frame = now;
+        }
+        if self.through {
+            let reach = self.over.is_some_and(|since| now.duration_since(since) >= buttons::LINGER);
+            if reach != self.reachable {
+                self.reachable = reach;
+                let_through(self.hwnd, !reach);
+                self.next_frame = now;
+            }
+        }
+        let on = pointer.and_then(|at| self.button_at(at));
+        if on != self.tipped {
+            self.tipped = on;
+            match on {
+                Some(button) => {
+                    let lit = (button == Button::Pin && self.pinned) || (button == Button::Through && self.through);
+                    let hit = self.hits.iter().find(|hit| hit.4 == button).copied().unwrap();
+                    let mut at = RECT::default();
+                    unsafe {
+                        let _ = GetWindowRect(self.hwnd, &mut at);
+                    }
+                    let margin = self.style.margin();
+                    let px = |v: f32| (v * self.scale) as i32;
+                    let about = RECT { left: at.left + px(margin + hit.0), top: at.top + px(margin + hit.1), right: at.left + px(margin + hit.0 + hit.2), bottom: at.top + px(margin + hit.1 + hit.3) };
+                    super::tip::show(button.says(lit, crate::update::language(), false), about, true);
+                    super::tip::above();
+                }
+                None => super::tip::hide(),
+            }
+        }
+    }
+
+    /// `button` pressed.
+    fn press(&mut self, button: Button) {
+        let style = self.style;
+        match button {
+            Button::Close => {
+                super::tip::hide();
+                crate::app().change(|settings| super::prefs::set_item(&mut settings.view, "lyrics", style.item(), false));
+            }
+            Button::Pin => {
+                self.pinned = !self.pinned;
+                let pinned = self.pinned;
+                crate::app().change(|settings| match style {
+                    Style::Card => settings.lyric_card_pinned = pinned,
+                    Style::Subtitle => settings.lyric_subtitle_pinned = pinned,
+                });
+            }
+            Button::Through => {
+                self.through = !self.through;
+                self.reachable = false;
+                let through = self.through;
+                let_through(self.hwnd, through);
+                crate::app().change(|settings| settings.lyric_subtitle_through = through);
+            }
+            Button::Settings => crate::show_settings(),
+            Button::Game => {}
+        }
+        self.tipped = None;
+        super::tip::hide();
+        self.next_frame = Instant::now();
+    }
+
+    /// The row of buttons in its top right corner, while the pointer is over it (letting clicks through, the one
+    /// that ends that, once the pointer has stayed); where each is, kept for the pointer.
+    fn paint_buttons(&mut self, frame: &Frame, (w, _h): (f32, f32)) {
+        self.hits.clear();
+        if self.over.is_none() {
+            return;
+        }
+        let shown: Vec<Button> = if self.through {
+            if !self.reachable {
+                return;
+            }
+            vec![Button::Through]
+        } else {
+            self.style.buttons().to_vec()
+        };
+        let (size, gap) = (buttons::SIZE, buttons::GAP);
+        let y = 10.0 + size / 2.0;
+        for (place, button) in shown.iter().rev().enumerate() {
+            let x = w - 12.0 - size / 2.0 - place as f32 * (size + gap);
+            let lit = (*button == Button::Pin && self.pinned) || (*button == Button::Through && self.through);
+            buttons::paint(frame, Point { x, y }, *button, lit, true, Color::hex(0xFFFFFF, 0.25));
+            self.hits.push((x - size / 2.0, y - size / 2.0, size, size, *button));
+        }
+    }
+}
+
+/// Which edge of `one` a point (DIPs, inside) is on, for it to be sized there: the card at any edge or corner, the
+/// floating lyrics at their ends.
+fn edge_at(one: &Shown, (x, y): (f32, f32)) -> Option<u32> {
+    let near = 7.0;
+    let (w, h) = one.room;
+    let (left, right, top, bottom) = (x < near, x > w - near, y < near, y > h - near);
+    match one.style {
+        Style::Subtitle => {
+            if left {
+                Some(HTLEFT)
+            } else if right {
+                Some(HTRIGHT)
+            } else {
+                None
+            }
+        }
+        Style::Card => match (left, right, top, bottom) {
+            (true, _, true, _) => Some(HTTOPLEFT),
+            (_, true, true, _) => Some(HTTOPRIGHT),
+            (true, _, _, true) => Some(HTBOTTOMLEFT),
+            (_, true, _, true) => Some(HTBOTTOMRIGHT),
+            (true, ..) => Some(HTLEFT),
+            (_, true, ..) => Some(HTRIGHT),
+            (_, _, true, _) => Some(HTTOP),
+            (_, _, _, true) => Some(HTBOTTOM),
+            _ => None,
+        },
+    }
+}
+
+/// Does `act` with the window shown as `hwnd`, while nothing else holds them.
+fn with<R>(hwnd: HWND, act: impl FnOnce(&mut Shown) -> R) -> Option<R> {
+    SHOWN.with(|shown| shown.try_borrow_mut().ok().and_then(|mut shown| shown.iter_mut().find(|one| one.hwnd == hwnd).map(act)))
+}
+
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
-        // Held anywhere, it is moved.
-        WM_NCHITTEST => LRESULT(HTCAPTION as isize),
+        // On a button: pressed. Pinned: held still. At an edge: sized. Anywhere else: moved.
+        WM_NCHITTEST => {
+            let hit = with(hwnd, |one| {
+                let at = one.pointer();
+                if at.and_then(|at| one.button_at(at)).is_some() || one.pinned {
+                    return HTCLIENT;
+                }
+                at.and_then(|at| edge_at(one, at)).unwrap_or(HTCAPTION)
+            });
+            LRESULT(hit.unwrap_or(HTCAPTION) as isize)
+        }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
-        WM_SETCURSOR => {
-            unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursor(LoadCursorW(None, IDC_SIZEALL).ok()) };
+        WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCAPTION => {
+            unsafe { SetCursor(LoadCursorW(None, IDC_SIZEALL).ok()) };
             LRESULT(1)
         }
-        // Moved: kept where it was put.
+        WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
+            unsafe { SetCursor(LoadCursorW(None, IDC_ARROW).ok()) };
+            LRESULT(1)
+        }
+        WM_LBUTTONUP => {
+            with(hwnd, |one| {
+                if let Some(button) = one.pointer().and_then(|at| one.button_at(at)) {
+                    one.press(button);
+                }
+            });
+            LRESULT(0)
+        }
+        WM_GETMINMAXINFO => {
+            let least = with(hwnd, |one| {
+                let (w, h) = one.style.least();
+                let margin = one.style.margin();
+                (((w + 2.0 * margin) * one.scale) as i32, ((h + 2.0 * margin) * one.scale) as i32)
+            });
+            if let Some((w, h)) = least {
+                let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+                info.ptMinTrackSize = POINT { x: w, y: h };
+            }
+            LRESULT(0)
+        }
+        // Sized: what it shows laid out afresh at once (the panel's own turn waits while it is sized by hand).
+        WM_SIZE => {
+            with(hwnd, |one| {
+                let margin = one.style.margin();
+                let (w, h) = ((lparam.0 & 0xFFFF) as f32 / one.scale - 2.0 * margin, ((lparam.0 >> 16) & 0xFFFF) as f32 / one.scale - 2.0 * margin);
+                if w > 0.0 && h > 0.0 && (w, h) != one.room {
+                    one.room = (w, h);
+                    one.draw(Instant::now());
+                }
+            });
+            LRESULT(0)
+        }
+        // Moved or sized: kept so.
         WM_EXITSIZEMOVE => {
             let mut at = RECT::default();
             unsafe {
                 let _ = GetWindowRect(hwnd, &mut at);
             }
-            let style = SHOWN.with(|shown| shown.try_borrow().ok().and_then(|shown| shown.iter().find(|one| one.hwnd == hwnd).map(|one| one.style)));
-            if let Some(style) = style {
+            if let Some((style, room)) = with(hwnd, |one| (one.style, one.room)) {
                 crate::app().change(|settings| {
                     let kept = Some((at.left, at.top));
                     match style {
-                        Style::Card => settings.lyric_card = kept,
-                        Style::Subtitle => settings.lyric_subtitle = kept,
+                        Style::Card => {
+                            settings.lyric_card = kept;
+                            settings.lyric_card_size = Some(room);
+                        }
+                        Style::Subtitle => {
+                            settings.lyric_subtitle = kept;
+                            settings.lyric_subtitle_size = Some(room);
+                        }
                     }
                 });
             }
             LRESULT(0)
         }
-        // Its menu: put away (its switch turned off).
-        WM_NCRBUTTONUP => {
-            let style = SHOWN.with(|shown| shown.try_borrow().ok().and_then(|shown| shown.iter().find(|one| one.hwnd == hwnd).map(|one| one.style)));
-            let lang = crate::update::language();
-            let close = super::menu::Item { label: lang.pick("关闭", "Close"), icon: Some(super::icons::Icon::Close), checked: false, rule_before: false };
-            if let (Some(style), Some(0)) = (style, super::menu::show(&[close], crate::os::apps_dark())) {
-                crate::app().change(|settings| super::prefs::set_item(&mut settings.view, "lyrics", style.item(), false));
-            }
-            LRESULT(0)
-        }
         WM_DPICHANGED => {
             let suggested = unsafe { *(lparam.0 as *const RECT) };
-            SHOWN.with(|shown| {
-                if let Ok(mut shown) = shown.try_borrow_mut() {
-                    if let Some(one) = shown.iter_mut().find(|one| one.hwnd == hwnd) {
-                        one.scale = (wparam.0 & 0xFFFF) as f32 / 96.0;
-                    }
-                }
-            });
+            with(hwnd, |one| one.scale = (wparam.0 & 0xFFFF) as f32 / 96.0);
             unsafe {
                 let _ = SetWindowPos(hwnd, None, suggested.left, suggested.top, suggested.right - suggested.left, suggested.bottom - suggested.top, SWP_NOZORDER | SWP_NOACTIVATE);
             }
@@ -201,11 +428,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 /// floating lyrics in its middle).
 fn make(style: Style) -> Option<Shown> {
     let gfx = gfx::current().ok()?;
-    let kept = {
+    let (kept, size, pinned, through) = {
         let settings = crate::app().settings.lock().unwrap();
         match style {
-            Style::Card => settings.lyric_card,
-            Style::Subtitle => settings.lyric_subtitle,
+            Style::Card => (settings.lyric_card, settings.lyric_card_size, settings.lyric_card_pinned, false),
+            Style::Subtitle => (settings.lyric_subtitle, settings.lyric_subtitle_size, settings.lyric_subtitle_pinned, settings.lyric_subtitle_through),
         }
     };
     unsafe {
@@ -215,7 +442,7 @@ fn make(style: Style) -> Option<Shown> {
         let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         let _ = GetMonitorInfoW(MonitorFromPoint(Default::default(), MONITOR_DEFAULTTOPRIMARY), &mut screen);
         let work = screen.rcWork;
-        let (w, h) = style.size();
+        let (w, h) = size.unwrap_or(style.size());
         let margin = style.margin();
         // (Sized at the main screen's scale; a move to another screen sizes it again.)
         let scale = windows::Win32::UI::HiDpi::GetDpiForSystem() as f32 / 96.0;
@@ -224,8 +451,15 @@ fn make(style: Style) -> Option<Shown> {
             Style::Card => (work.right - pw - (12.0 * scale) as i32, work.bottom - ph - (12.0 * scale) as i32),
             Style::Subtitle => ((work.left + work.right - pw) / 2, work.bottom - ph - (60.0 * scale) as i32),
         });
-        let topmost = if style == Style::Subtitle { WS_EX_TOPMOST } else { Default::default() };
-        let hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP | topmost, class, w!("Glance"), WS_POPUP, x, y, pw, ph, None, None, Some(module.into()), None).ok()?;
+        // The floating lyrics above all, and layered (as a window that lets clicks through must be).
+        let over_all = if style == Style::Subtitle { WS_EX_TOPMOST | WS_EX_LAYERED } else { Default::default() };
+        let hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP | over_all, class, w!("Glance"), WS_POPUP, x, y, pw, ph, None, None, Some(module.into()), None).ok()?;
+        if style == Style::Subtitle {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+            if through {
+                let_through(hwnd, true);
+            }
+        }
         let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
         let surface = Surface::new(&gfx, hwnd).ok();
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -239,6 +473,13 @@ fn make(style: Style) -> Option<Shown> {
             gfx,
             surface,
             scale,
+            room: (w, h),
+            pinned,
+            through,
+            over: None,
+            reachable: false,
+            hits: Vec::new(),
+            tipped: None,
             next_frame: now,
             rail: 0.0,
             rail_speed: 0.0,
@@ -501,7 +742,7 @@ impl Shown {
             self.surface = Surface::new(&self.gfx, self.hwnd).ok();
         }
         let Some(mut surface) = self.surface.take() else { return false };
-        let (w, h) = self.style.size();
+        let (w, h) = self.room;
         let margin = self.style.margin();
         let size = (((w + 2.0 * margin) * self.scale) as u32, ((h + 2.0 * margin) * self.scale) as u32);
         let gfx = self.gfx.clone();
@@ -510,8 +751,15 @@ impl Shown {
             frame.origin(margin, margin);
             match self.style {
                 Style::Card => self.card(frame, &moment, (w, h)),
-                Style::Subtitle => self.subtitle(frame, &moment, (w, h)),
+                Style::Subtitle => {
+                    // Pointed at, where it is shows, for it to be taken and moved.
+                    if self.over.is_some() && !self.through {
+                        frame.fill_rounded(Color::hex(0x000000, 0.28), 0.0, 0.0, w, h, 12.0);
+                    }
+                    self.subtitle(frame, &moment, (w, h));
+                }
             }
+            self.paint_buttons(frame, (w, h));
         });
         if drawn.is_ok() {
             self.surface = Some(surface);
@@ -582,7 +830,8 @@ impl Shown {
         let pad = 26.0;
         // What plays, along the top.
         let about = [moment.title.as_str(), moment.artist.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("  ·  ");
-        frame.text(&about, TITLE_FONT, Color::hex(0xFFFFFF, 0.62), pad, 16.0, w - 2.0 * pad, Align::Start);
+        let buttons_room = if self.over.is_some() { self.style.buttons().len() as f32 * (buttons::SIZE + buttons::GAP) } else { 0.0 };
+        frame.text(&about, TITLE_FONT, Color::hex(0xFFFFFF, 0.62), pad, 16.0, w - 2.0 * pad - buttons_room, Align::Start);
         // The spectrum, along the bottom.
         let bars = 40;
         let floor = h - 14.0;
