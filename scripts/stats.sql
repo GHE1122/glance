@@ -27,6 +27,14 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 CREATE INDEX IF NOT EXISTS reports_day ON reports (day, sender);
 
+-- The pictures sent with a report (screenshots, as JPEGs): whose, and which of its.
+CREATE TABLE IF NOT EXISTS report_pictures (
+  id TEXT NOT NULL,
+  n INTEGER NOT NULL,
+  picture BLOB NOT NULL,
+  PRIMARY KEY (id, n)
+);
+
 -- Glance's own askings of the site (see /api/latest in _worker.js): one row for each time a Glance asked for
 -- the latest version ('ask') or took an installer ('take'); which of that day's PCs, the version asking (or
 -- taken), the version it came from, whether it was a new install's first asking, and how many weeks Glance

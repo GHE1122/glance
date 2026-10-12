@@ -155,6 +155,11 @@ async function record(request, env) {
 // day from everyone, and how long one is kept.
 const REPORT_MOST = 32 * 1024;
 const REPORT_BYTES = 4 * REPORT_MOST;
+// The pictures that may go with one (JPEGs, in base64 as they are sent), how many and how heavy each: a row of
+// the table holds no more than two million bytes.
+const PICTURES_MOST = 3;
+const PICTURE_BYTES = 1400000;
+const PICTURES_SENT_BYTES = PICTURES_MOST * (Math.ceil(PICTURE_BYTES / 3) * 4 + 16);
 const REPORTS_A_DAY = 6;
 const REPORTS_A_DAY_IN_ALL = 500;
 const REPORTS_KEPT_FOR = 180 * 86400000;
@@ -188,7 +193,7 @@ async function bodyWithin(request, most) {
 async function report(request, env) {
   // Only what Glance sends.
   if (!/^Glance\//.test(request.headers.get("user-agent") || "")) return json({ error: "nothing" }, 400);
-  const body = await bodyWithin(request, REPORT_BYTES);
+  const body = await bodyWithin(request, REPORT_BYTES + PICTURES_SENT_BYTES);
   if (body === null) return json({ error: "too long" }, 413);
   let sent;
   try {
@@ -197,6 +202,18 @@ async function report(request, env) {
     return json({ error: "not json" }, 400);
   }
   if (!sent || typeof sent !== "object" || typeof sent.text !== "string" || !sent.text) return json({ error: "nothing" }, 400);
+  // The pictures with it, if any: each a JPEG, by how it begins, and no heavier than one may be.
+  const pictures = [];
+  for (const picture of Array.isArray(sent.pictures) ? sent.pictures.slice(0, PICTURES_MOST) : []) {
+    let bytes;
+    try {
+      bytes = Uint8Array.from(atob(picture), (c) => c.charCodeAt(0));
+    } catch {
+      return json({ error: "not a picture" }, 400);
+    }
+    if (bytes.length > PICTURE_BYTES || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) return json({ error: "not a picture" }, 400);
+    pictures.push(bytes);
+  }
   const now = Date.now();
   const day = dayOf(now);
   const sender = (await hex(`${await saltOf(env.STATS, day)}|${request.headers.get("cf-connecting-ip") || ""}`)).slice(0, 16);
@@ -212,7 +229,13 @@ async function report(request, env) {
     .bind(id, now, day, sender, clip(sent.version, 20), request.cf?.country || "", clip(sent.text, REPORT_MOST), REPORTS_A_DAY, REPORTS_A_DAY_IN_ALL)
     .run();
   if (!kept.meta.changes) return json({ error: "too many" }, 429);
-  await env.STATS.prepare("DELETE FROM reports WHERE ts < ?").bind(now - REPORTS_KEPT_FOR).run();
+  for (const [n, picture] of pictures.entries()) {
+    await env.STATS.prepare("INSERT INTO report_pictures (id, n, picture) VALUES (?, ?, ?)").bind(id, n, picture.buffer).run();
+  }
+  await env.STATS.batch([
+    env.STATS.prepare("DELETE FROM reports WHERE ts < ?").bind(now - REPORTS_KEPT_FOR),
+    env.STATS.prepare("DELETE FROM report_pictures WHERE id NOT IN (SELECT id FROM reports)"),
+  ]);
   return json({ id });
 }
 
@@ -220,8 +243,14 @@ async function reports(request, env) {
   if (!env.STATS_KEY || request.headers.get("x-stats-key") !== env.STATS_KEY) return json({ error: "key" }, 403);
   const url = new URL(request.url);
   const id = url.searchParams.get("id");
-  if (id) return json(await env.STATS.prepare("SELECT id, ts, day, version, country, text FROM reports WHERE id = ?").bind(id.toUpperCase()).first());
-  const listed = await env.STATS.prepare("SELECT id, ts, day, version, country, substr(text, 1, 400) AS head FROM reports ORDER BY ts DESC LIMIT 100").all();
+  // One of a report's pictures, by its number; a report whole, with how many pictures it has; or the list.
+  const n = url.searchParams.get("picture");
+  if (id && n !== null) {
+    const one = await env.STATS.prepare("SELECT picture FROM report_pictures WHERE id = ? AND n = ?").bind(id.toUpperCase(), Number(n)).first();
+    return one ? new Response(new Uint8Array(one.picture), { headers: { "content-type": "image/jpeg", "cache-control": "no-store" } }) : json({ error: "none" }, 404);
+  }
+  if (id) return json(await env.STATS.prepare("SELECT id, ts, day, version, country, text, (SELECT COUNT(*) FROM report_pictures WHERE report_pictures.id = reports.id) AS pictures FROM reports WHERE id = ?").bind(id.toUpperCase()).first());
+  const listed = await env.STATS.prepare("SELECT id, ts, day, version, country, substr(text, 1, 400) AS head, (SELECT COUNT(*) FROM report_pictures WHERE report_pictures.id = reports.id) AS pictures FROM reports ORDER BY ts DESC LIMIT 100").all();
   return json(listed.results);
 }
 

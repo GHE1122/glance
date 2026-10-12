@@ -55,10 +55,24 @@ const REPORTS: &str = "https://glancepc.com/api/report";
 /// Sends `text` (the report, as the user was shown it) to Glance's site:
 /// the short name it was given there, to quote when asking about it; none
 /// if it did not get there.
-pub fn send(text: &str) -> Option<String> {
-    let sent = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "text": text }).to_string();
+pub fn send(text: &str, pictures: &[Vec<u8>]) -> Option<String> {
+    let pictures: Vec<String> = pictures.iter().map(|picture| base64(picture)).collect();
+    let sent = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "text": text, "pictures": pictures }).to_string();
     let answer: serde_json::Value = serde_json::from_slice(&crate::update::post(REPORTS, sent.as_bytes())?).ok()?;
     answer.get("id")?.as_str().map(str::to_string)
+}
+
+/// `bytes` in base64 (RFC 4648), as JSON carries a picture.
+fn base64(bytes: &[u8]) -> String {
+    const LETTERS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for three in bytes.chunks(3) {
+        let bits = three.iter().enumerate().fold(0u32, |bits, (at, &byte)| bits | (byte as u32) << (16 - 8 * at));
+        for at in 0..4 {
+            text.push(if at <= three.len() { LETTERS[(bits >> (18 - 6 * at) & 63) as usize] as char } else { '=' });
+        }
+    }
+    text
 }
 
 /// Windows' name, release and build. Windows 11 keeps "Windows 10" in its
@@ -135,9 +149,20 @@ pub fn copy(owner: HWND, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn base64_is_as_the_standard_has_it() {
+        for (bytes, text) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
+            assert_eq!(super::base64(bytes.as_bytes()), text);
+        }
+    }
+
+    #[test]
     #[ignore = "sends a report to Glance's site"]
     fn sends_a_report() {
-        let id = super::send("Glance (a test of sending from this program; nothing is wrong)");
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let picture = std::mem::take(&mut crate::ui::picture::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/website/apple-touch-icon.png"), (84, 52)).expect("a picture to send").jpeg);
+        let id = super::send("Glance (a test of sending from this program; nothing is wrong)", &[picture]);
         println!("sent as {id:?}");
         assert!(id.is_some_and(|id| id.len() == 6));
     }

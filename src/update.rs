@@ -56,6 +56,8 @@ const STRAGGLER: Duration = Duration::from_secs(3);
 const RESOLVE_MS: i32 = 10_000;
 const CONNECT_MS: i32 = 10_000;
 const ANSWER_MS: i32 = 15_000;
+/// The slowest line that what is sent is waited for on (bytes a millisecond: a quarter of a megabit a second).
+const SLOWEST: usize = 32;
 /// More than any installer of Glance's: an answer this large is not one.
 const MOST: usize = 64 << 20;
 
@@ -499,7 +501,8 @@ fn ask(url: &str, sent: Option<&[u8]>) -> Option<Vec<u8>> {
         if WinHttpSetOption(Some(session.0), WINHTTP_OPTION_SECURE_PROTOCOLS, Some(&protocols)).is_err() {
             let _ = WinHttpSetOption(Some(session.0), WINHTTP_OPTION_SECURE_PROTOCOLS, Some(&WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2.to_ne_bytes()));
         }
-        let _ = WinHttpSetTimeouts(session.0, RESOLVE_MS, CONNECT_MS, ANSWER_MS, ANSWER_MS);
+        // (Longer for the sending by what is sent, were the line that slow.)
+        let _ = WinHttpSetTimeouts(session.0, RESOLVE_MS, CONNECT_MS, ANSWER_MS + (sent.map_or(0, <[u8]>::len) / SLOWEST) as i32, ANSWER_MS);
         let connection = Handle(WinHttpConnect(session.0, &HSTRING::from(host), INTERNET_DEFAULT_HTTPS_PORT, 0));
         if connection.0.is_null() {
             return None;

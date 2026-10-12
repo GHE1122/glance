@@ -2299,12 +2299,22 @@ impl Ui {
             Target::SendReport if self.sending.is_none() => {
                 let report = crate::diagnostics::report();
                 let (title, intro, yes, no) = match self.lang {
-                    Lang::Zh => ("发送诊断信息", "下面是将要发送给 Glance（glancepc.com）的全部内容：这台电脑的硬件、Glance 读到的数值和它最近的日志。不包含你的文件、账号或网络地址。", "发送", "取消"),
-                    Lang::En => ("Send diagnostics", "Below is all that would be sent to Glance (glancepc.com): this PC's hardware, what Glance reads of it, and Glance's recent log. Nothing of your files, accounts or network address.", "Send", "Cancel"),
+                    Lang::Zh => ("发送诊断信息", "下面是将要发送给 Glance（glancepc.com）的全部内容：这台电脑的硬件、Glance 读到的数值和它最近的日志。不包含你的文件、账号或网络地址。你写的话和添加的截图会一起发送。", "发送", "取消"),
+                    Lang::En => ("Send diagnostics", "Below is all that would be sent to Glance (glancepc.com): this PC's hardware, what Glance reads of it, and Glance's recent log. Nothing of your files, accounts or network address. What you write and the pictures you add go with it.", "Send", "Cancel"),
                 };
-                if super::ask::read_and_agree(self.hwnd, title, intro, &report, yes, no) {
+                let own = super::ask::Own {
+                    words: pick(self.lang, "想告诉我们什么？比如哪里显示得不对、哪个读数没有（可以不填）", "Anything to tell us? What shows wrongly, which reading is missing (may be left empty)"),
+                    add: pick(self.lang, "添加截图…", "Add a picture…"),
+                    paste: pick(self.lang, "粘贴截图", "Paste one"),
+                    kinds: pick(self.lang, "图片", "Pictures"),
+                };
+                if let Some(said) = super::ask::read_and_say(self.hwnd, title, intro, Some(&own), &report, yes, no) {
+                    // (Their words first, set off from what Glance says of the PC.)
+                    let report = if said.words.is_empty() { report } else { format!("The user says: {}
+
+{report}", said.words) };
                     self.sent = None;
-                    self.sending = Some(std::thread::spawn(move || crate::diagnostics::send(&report)));
+                    self.sending = Some(std::thread::spawn(move || crate::diagnostics::send(&report, &said.pictures)));
                 }
             }
             Target::SendReport => {}

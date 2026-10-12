@@ -58,5 +58,8 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
 .chart .d3 { fill: var(--series-3); stroke: var(--surface); stroke-width: 2; }
 h2.part { font-size: 17px; margin: 8px 0 0; }
 tr.pick { cursor: pointer; }
+.report-pictures { display: flex; flex-wrap: wrap; gap: 8px; }
+.report-pictures:not(:empty) { margin: 12px 0 0; }
+.report-pictures img { display: block; max-width: 100%; max-height: 360px; border-radius: 8px; border: 1px solid var(--rule); }
 .report { margin: 12px 0 0; padding: 12px; border-radius: 8px; background: var(--page); border: 1px solid var(--rule); font: 12px/1.5 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 520px; overflow: auto; }
 .gap { margin-top: 12px; } .gap-s { margin-top: 8px; } .gap-l { margin-top: 16px; }
