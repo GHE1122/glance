@@ -30,18 +30,7 @@ pub fn report() -> String {
     ];
     lines.extend(info.gpus.iter().map(|gpu| format!("GPU: {}", gpu.name)));
     lines.extend(info.found.iter().cloned());
-    if let Some(later) = crate::superio::found_later() {
-        lines.push(format!("Motherboard chip, looked for again: {later}"));
-    }
-    let (reads, missed) = crate::superio::reads();
-    if reads > 0 {
-        lines.push(format!("Motherboard chip reads: {reads}, the bus another program's all the while at {missed}"));
-    }
-    // Other programs that read the board or light it, running now: they share the bus Glance reads the board by.
-    let sharing = sharing_the_bus();
-    if !sharing.is_empty() {
-        lines.push(format!("Running that share the bus: {}", sharing.join(", ")));
-    }
+    lines.extend(crate::source::sensor_lines());
     let log = crate::journal::recent(15);
     lines.push(format!("Recent log ({} lines):", log.len()));
     lines.extend(log.into_iter().map(|line| format!("  {line}")));
@@ -82,6 +71,26 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     text
+}
+
+/// What the sensors have to say for a report, beyond what they found as they started: what a later look for the
+/// board's chip found, how its reads went, and which programs that share its bus are running. Said by whichever
+/// process reads the sensors.
+pub fn sensor_lines() -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(later) = crate::superio::found_later() {
+        lines.push(format!("Motherboard chip, looked for again: {later}"));
+    }
+    let (reads, missed) = crate::superio::reads();
+    if reads > 0 {
+        lines.push(format!("Motherboard chip reads: {reads}, the bus another program's all the while at {missed}"));
+    }
+    // Other programs that read the board or light it, running now: they share the bus Glance reads the board by.
+    let sharing = sharing_the_bus();
+    if !sharing.is_empty() {
+        lines.push(format!("Running that share the bus: {}", sharing.join(", ")));
+    }
+    lines
 }
 
 /// Programs known to read a board's chip or light it (and so to take the bus it is read by), by the names their

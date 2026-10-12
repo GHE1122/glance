@@ -578,7 +578,7 @@ impl Overlay {
             Button::Game => {
                 // Showing a game (found or asked for): off; else on.
                 let shown = self.game;
-                crate::presents::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
+                crate::source::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
                 None
             }
             Button::Settings => Some(Choice::Settings),

@@ -1331,7 +1331,7 @@ impl Widget {
                             let history = crate::app().controller.history.lock().unwrap();
                             let shown = game_shown(history.iter().last().map(std::slice::from_ref).unwrap_or_default());
                             drop(history);
-                            crate::presents::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
+                            crate::source::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
                             Released::Nothing
                         }
                         // No button: what of its lanes is there (what plays, the sound).

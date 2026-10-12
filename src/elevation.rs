@@ -3,9 +3,11 @@
 //!
 //! The driver only answers administrators. Windows asks the user to confirm
 //! every elevated start, except for scheduled tasks set to run with highest
-//! privileges: so Glance, once elevated, registers such a task for itself,
-//! and an ordinary start of Glance hands over to that task and exits. The
-//! user confirms once, on the first start.
+//! privileges: so Glance's sensors (`glance.exe --sensors`, see `sensing`),
+//! once elevated, register such a task for themselves, and Glance, which
+//! runs as the user, starts them through it. The user confirms once, on the
+//! first start. Glance itself starts at sign-in through a task that runs it
+//! as the user.
 //!
 //! A task like that runs whatever file is at its path, elevated, whenever
 //! anyone running as the user asks. So Glance only makes one for an
@@ -52,7 +54,6 @@ use windows::Win32::System::TaskScheduler::{
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 /// The task an ordinary start hands over to, and the one that starts Glance
 /// when the user signs in.
@@ -943,31 +944,49 @@ fn task_is_mine(name: &str) -> bool {
     principal.eq_ignore_ascii_case(&account) || user_sid().is_some_and(|sid| principal.eq_ignore_ascii_case(&sid))
 }
 
+/// What the task `name` passes the program it runs.
+fn task_arguments(name: &str) -> Option<String> {
+    unsafe {
+        let task = task_folder()?.GetTask(&BSTR::from(name)).ok()?;
+        let action: IExecAction = task.Definition().ok()?.Actions().ok()?.get_Item(1).ok()?.cast().ok()?;
+        let mut arguments = BSTR::new();
+        action.Arguments(&mut arguments).ok()?;
+        Some(arguments.to_string())
+    }
+}
+
+/// What the sensors are started with.
+pub const SENSORS: &str = "--sensors";
+
+/// Whether this account's launch task starts this very executable's sensors (an older one started Glance whole).
+fn launches_sensors() -> bool {
+    runs_this(&launch_task()) && task_arguments(&launch_task()).is_some_and(|arguments| arguments.trim() == SENSORS)
+}
+
+/// Starts Glance's sensors, elevated: through the launch task, if it starts this very executable's sensors and
+/// this copy may start unasked; else by asking the user (once: the sensors then make the task). Returns whether
+/// they were started (or asked for).
+pub fn start_sensors() -> bool {
+    if launches_sensors() && may_start_unasked() {
+        let started = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(launch_task())).ok()?.Run(&VARIANT::default()).ok() });
+        if started.is_some() {
+            return true;
+        }
+    }
+    let exe = std::env::current_exe().expect("own path");
+    let started = unsafe { ShellExecuteW(None, w!("runas"), &HSTRING::from(exe.as_os_str()), &HSTRING::from(SENSORS), PCWSTR::null(), windows::Win32::UI::WindowsAndMessaging::SW_HIDE) };
+    // ShellExecute reports success with a value above 32.
+    started.0 as usize > 32
+}
+
 /// Whether the task `name` runs this very executable.
 fn runs_this(name: &str) -> bool {
     let (Some(program), Some(this)) = (task_program(name), this_program()) else { return false };
     std::fs::canonicalize(&program).is_ok_and(|program| std::fs::canonicalize(&this).is_ok_and(|this| program == this))
 }
 
-/// Starts an elevated copy of Glance, through its task if that runs this
-/// very executable, else by asking the user. Returns whether one was started.
-pub fn relaunch_elevated() -> bool {
-    let exe = std::env::current_exe().expect("own path");
-    if runs_this(&launch_task()) && may_start_unasked() {
-        let started = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(launch_task())).ok()?.Run(&VARIANT::default()).ok() });
-        if started.is_some() {
-            return true;
-        }
-    }
-    let started = unsafe {
-        ShellExecuteW(None, w!("runas"), &HSTRING::from(exe.as_os_str()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL)
-    };
-    // ShellExecute reports success with a value above 32.
-    started.0 as usize > 32
-}
-
-/// A task that runs `exe` with highest privileges, for the current user, on
-/// demand or, with `at_sign_in`, when the user signs in.
+/// A task for the current user: the launch task, which starts `exe`'s sensors with highest privileges on demand;
+/// or, `at_sign_in`, the one that starts Glance as the user when the user signs in.
 fn task_xml(exe: &Path, at_sign_in: bool) -> String {
     let user = std::env::var("USERDOMAIN").map(|domain| format!("{domain}\\")).unwrap_or_default()
         + &std::env::var("USERNAME").unwrap_or_default();
@@ -985,7 +1004,7 @@ fn task_xml(exe: &Path, at_sign_in: bool) -> String {
     <Principal id="Author">
       <UserId>{user}</UserId>
       <LogonType>InteractiveToken</LogonType>
-      <RunLevel>HighestAvailable</RunLevel>
+      <RunLevel>{level}</RunLevel>
     </Principal>
   </Principals>
   <Settings>
@@ -996,11 +1015,13 @@ fn task_xml(exe: &Path, at_sign_in: bool) -> String {
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
-    <Exec><Command>{exe}</Command></Exec>
+    <Exec><Command>{exe}</Command>{arguments}</Exec>
   </Actions>
 </Task>"#,
         user = escape(&user),
         exe = escape(&exe.display().to_string()),
+        level = if at_sign_in { "LeastPrivilege" } else { "HighestAvailable" },
+        arguments = if at_sign_in { String::new() } else { format!("<Arguments>{SENSORS}</Arguments>") },
     )
 }
 
@@ -1046,6 +1067,11 @@ pub fn register_launch_task() {
         }
         if mine(LOGON_TASK) && register_task(&logon_task(), true) {
             delete_task(LOGON_TASK);
+        }
+        // This account's sign-in task, made by an earlier version to start Glance whole and elevated, starts it as
+        // the user now.
+        if runs_this(&logon_task()) {
+            register_task(&logon_task(), true);
         }
     } else {
         // A copy that may not start unasked keeps no task that starts it,

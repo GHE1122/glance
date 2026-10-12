@@ -31,8 +31,9 @@ pub enum Told {
     Hello { version: String, info: StaticInfo, found: Vec<String> },
     /// What they read, each time they read.
     Sample(Box<Sample>),
-    /// The games presenting frames, as they are seen now.
-    Presenting(Vec<crate::presents::Presenting>),
+    /// The games presenting frames, as they are seen now, and whether a game shows (as set by hand, or as it
+    /// came back to by itself).
+    Presenting { games: Vec<crate::presents::Presenting>, mode: GameModeSent },
     /// The mouse moved by so much (raw counts), while a window the rest cannot hear the mouse over (an elevated
     /// one) is in front.
     Mouse { dx: i32, dy: i32 },
@@ -133,6 +134,10 @@ pub struct Sensors {
     asked: HANDLE,
 }
 
+// (The pipes are the kernel's: their handles may be used from any thread.)
+unsafe impl Send for Sensors {}
+unsafe impl Sync for Sensors {}
+
 impl Sensors {
     pub fn open() -> Option<Self> {
         let (told, asked) = names()?;
@@ -193,6 +198,18 @@ pub fn heard(from: &mut File) -> Option<Asked> {
     receive(from)
 }
 
+/// Asks the sensors `asked`, on the rest's asking end.
+pub fn ask_on(to: &mut File, asked: &Asked) -> bool {
+    send(to, asked)
+}
+
+/// The process at the other end of the sensors' telling pipe (the rest of Glance).
+pub fn client_of(sensors: &Sensors) -> Option<u32> {
+    let mut pid = 0u32;
+    unsafe { windows::Win32::System::Pipes::GetNamedPipeClientProcessId(sensors.told, &mut pid) }.ok()?;
+    Some(pid)
+}
+
 // ---- The rest's side ----
 
 /// The rest's ends: what it is told, and what it asks with.
@@ -239,10 +256,6 @@ impl Link {
 
     pub fn receive(&mut self) -> Option<Told> {
         receive(&mut self.told)
-    }
-
-    pub fn ask(&mut self, asked: &Asked) -> bool {
-        send(&mut self.asked, asked)
     }
 }
 

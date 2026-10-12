@@ -197,10 +197,35 @@ pub fn set_game_mode(mode: GameMode) {
     GAME_MODE.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The other process of Glance's (the sensors' process's partner, or the other way about): its windows are no
+/// game's either.
+static PARTNER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_partner(pid: u32) {
+    PARTNER.store(pid, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `pid` is one of Glance's own processes.
+fn ours(pid: u32) -> bool {
+    pid == std::process::id() || pid == PARTNER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The games presenting and the game mode, as the sensors' process last told them (where it reads them): what
+/// `presenting` and `game_mode` say here then.
+static MIRRORED: Mutex<Option<Vec<Presenting>>> = Mutex::new(None);
+
+pub fn mirror(games: Vec<Presenting>, mode: GameMode) {
+    *MIRRORED.lock().unwrap() = Some(games);
+    set_game_mode(mode);
+}
+
 /// Every program presenting frames now, by its topmost window, topmost
 /// first; programs that have stopped presenting are forgotten. Looked at
 /// through their windows alone: no program's process is opened.
 pub fn presenting() -> Vec<Presenting> {
+    if let Some(games) = MIRRORED.lock().unwrap().clone() {
+        return games;
+    }
     let mut now = 0i64;
     if unsafe { QueryPerformanceCounter(&mut now) }.is_err() {
         return Vec::new();
@@ -216,7 +241,6 @@ pub fn presenting() -> Vec<Presenting> {
     if stats.is_empty() {
         return Vec::new();
     }
-    let own = std::process::id();
     let front = unsafe { GetForegroundWindow() };
     let mut cursor = POINT::default();
     let pointer_screen = unsafe { GetCursorPos(&mut cursor) }.ok().map(|_| unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) });
@@ -232,7 +256,7 @@ pub fn presenting() -> Vec<Presenting> {
         let mut pid = 0u32;
         unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
         let Some(&frames) = stats.get(&pid) else { continue };
-        if pid == own || found.iter().any(|seen| seen.pid == pid) || !unsafe { IsWindowVisible(window) }.as_bool() || unsafe { IsIconic(window) }.as_bool() {
+        if ours(pid) || found.iter().any(|seen| seen.pid == pid) || !unsafe { IsWindowVisible(window) }.as_bool() || unsafe { IsIconic(window) }.as_bool() {
             continue;
         }
         let (fills_screen, refresh_hz, monitor) = screen_of(window);
@@ -264,7 +288,7 @@ pub fn in_front() -> Option<Presenting> {
         pid
     };
     let pid = pid_of(front);
-    if front.is_invalid() || pid == 0 || pid == std::process::id() || pid == pid_of(unsafe { GetShellWindow() }) {
+    if front.is_invalid() || pid == 0 || ours(pid) || pid == pid_of(unsafe { GetShellWindow() }) {
         return None;
     }
     let (fills_screen, refresh_hz, monitor) = screen_of(front);

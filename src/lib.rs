@@ -77,6 +77,10 @@ mod media;
 #[cfg(windows)]
 mod link;
 #[cfg(windows)]
+mod sensing;
+#[cfg(windows)]
+mod source;
+#[cfg(windows)]
 mod update;
 #[cfg(windows)]
 mod watch;
@@ -107,8 +111,6 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 
 #[cfg(windows)]
-use metrics::Sampler;
-#[cfg(windows)]
 use reading::StaticInfo;
 #[cfg(windows)]
 use panel::Controller;
@@ -118,7 +120,7 @@ use settings::Settings;
 /// With the panel hidden, the process list and network adapter are read once
 /// in this many samples: often enough to be current when the panel opens.
 #[cfg(windows)]
-const HIDDEN_SLOW_TICKS: u64 = 5;
+pub(crate) const HIDDEN_SLOW_TICKS: u64 = 5;
 
 /// What every part of Glance shares.
 #[cfg(windows)]
@@ -307,6 +309,11 @@ pub fn run() {
     };
     let done = |result: Result<(), elevation::InstallFolder>| std::process::exit(result.map_or_else(code, |_| 0));
     match args.as_slice() {
+        // Glance's elevated half: the sensors, told to the rest over the link (see `sensing`).
+        [_, flag] if flag == elevation::SENSORS => {
+            sensing::run();
+            return;
+        }
         [_, flag, folder] if flag == "--check-install-folder" => {
             std::process::exit(code(elevation::install_folder(std::path::Path::new(folder))))
         }
@@ -357,13 +364,6 @@ pub fn run() {
         tray::ask_for_settings();
         return;
     }
-    // The sensors need administrator rights. An ordinary start hands over to
-    // an elevated one and leaves; if the user declines, Glance runs without
-    // the driver's sensors. A debug build runs as started, so that tools
-    // without those rights can drive it.
-    if !cfg!(debug_assertions) && !elevation::is_elevated() && elevation::relaunch_elevated() {
-        return;
-    }
     // Two starts at once: the later one asks the first for its settings.
     let _single = unsafe { CreateMutexW(None, true, SINGLE_INSTANCE) };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -375,8 +375,8 @@ pub fn run() {
     let config = settings::config_dir();
     let settings = Settings::load(&config);
 
-    // Elevated (see elevation.rs): keep later starts from asking again, and
-    // put the sensor driver in place before the sensors are looked for.
+    // Started elevated (an earlier version's task, a build run by hand), Glance reads the sensors itself, and does
+    // what the sensors' process does as it starts (see elevation.rs): its task kept, the driver in place.
     if elevation::is_elevated() {
         elevation::register_launch_task();
         // The installer of an update taken last time, once it has run.
@@ -385,9 +385,10 @@ pub fn run() {
         elevation::ensure_pawnio(&exe.with_file_name("resources").join("PawnIO_setup.exe"));
     }
 
-    let mut sampler = Sampler::new();
-    let controller = Arc::new(Controller::new(sampler.info.clone(), &settings));
-    let _ = APP.set(App { info: sampler.info.clone(), controller: controller.clone(), settings: Mutex::new(settings), config });
+    // The readings: from the sensors' process, started now if it is not running; else Glance's own.
+    let (info, mut source) = source::open();
+    let controller = Arc::new(Controller::new(info.clone(), &settings));
+    let _ = APP.set(App { info, controller: controller.clone(), settings: Mutex::new(settings), config });
 
     thread::spawn({
         let controller = controller.clone();
@@ -396,8 +397,6 @@ pub fn run() {
     thread::spawn(update::watch);
     // The phone remote, if it is on: running from now, whatever stopped it.
     thread::spawn(phone::keep);
-    // The frames programs present (for the game in front), while Glance runs.
-    presents::start();
     // What touches the PC while the phone remote has the screens out, heard for it.
     if phone::helper().is_some() {
         touches::start();
@@ -413,22 +412,18 @@ pub fn run() {
         let mut watch = watch::Watch::default();
         // What the remote-control helper is told of each sample.
         let mut told = remote::Told::open();
-        let mut next = Instant::now();
-        for tick in 0u64.. {
-            let (interval, wsl, docker) = {
+        loop {
+            let want = {
                 let settings = app().settings.lock().unwrap();
-                (settings.interval(), ui::prefs::module_on(&settings.view, "wsl"), ui::prefs::module_on(&settings.view, "docker"))
+                link::Want {
+                    interval_ms: settings.interval().as_millis() as u32,
+                    // (What changes slowly is read afresh while something shows it; else now and then.)
+                    refresh_slow: controller.is_shown() || ui::settings_window::is_open(),
+                    wsl: ui::prefs::module_on(&settings.view, "wsl"),
+                    docker: ui::prefs::module_on(&settings.view, "docker"),
+                }
             };
-            next += interval;
-            // Fallen far behind (the machine slept): carry on from now rather
-            // than sampling again and again to catch up.
-            let now = Instant::now();
-            if next + interval < now {
-                next = now;
-            }
-            thread::sleep(next.saturating_duration_since(now));
-            let refresh_slow = controller.is_shown() || ui::settings_window::is_open() || tick % HIDDEN_SLOW_TICKS == 0;
-            if let Some(sample) = sampler.sample(refresh_slow, wsl, docker) {
+            if let Some(sample) = source.next(want) {
                 watch.sample(&sample, Instant::now());
                 if let Some(told) = &mut told {
                     told.tell(&sample, &app().info);

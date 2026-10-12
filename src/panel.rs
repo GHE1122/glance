@@ -128,6 +128,9 @@ const RECALL_WIDGET: u32 = WM_APP + 10;
 const TRAY_MENU: u32 = WM_APP + 11;
 /// The line of the lyrics sung has changed: what shows them is drawn at once (it glides to the next).
 const LYRIC: u32 = WM_APP + 13;
+/// The mouse moved by so much (WPARAM across, LPARAM down, raw counts), as the sensors' process heard it: while a
+/// window Glance cannot hear the mouse over (an elevated one) is in front.
+const RELAYED: u32 = WM_APP + 14;
 /// The panel thread's own hotkey: Escape, while the panel is open.
 const ESCAPE_HOTKEY: i32 = 1;
 
@@ -234,6 +237,14 @@ impl Controller {
         if sink != 0 {
             let at = ((y as u16 as u32) << 16 | x as u16 as u32) as isize;
             let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), TRAY_MENU, WPARAM(0), LPARAM(at)) };
+        }
+    }
+
+    /// The mouse moved by so much, as the sensors' process heard it (from any thread).
+    pub fn relay_mouse(&self, dx: i32, dy: i32) {
+        let sink = self.sink.load(Ordering::Acquire);
+        if sink != 0 {
+            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), RELAYED, WPARAM(dx as isize as usize), LPARAM(dy as isize)) };
         }
     }
 
@@ -828,12 +839,13 @@ impl Controller {
                     let delta = (msg.wParam.0 >> 16) as u16 as i16;
                     panel.wheel(lparam_point(msg.lParam), delta);
                 }
-                WM_INPUT if !panel.is_open() => {
+                // The mouse's own motion, heard here, or by the sensors' process while Glance cannot hear it.
+                WM_INPUT | RELAYED if !panel.is_open() => {
                     raw_since_watch = true;
                     if let Some(cursor) = cursor_position() {
                         on_seam(cursor, &mut panel);
                     }
-                    let moved = read_motion(HRAWINPUT(msg.lParam.0 as *mut _));
+                    let moved = if msg.message == RELAYED { Some(Moved::By(msg.wParam.0 as isize as i32, msg.lParam.0 as i32)) } else { read_motion(HRAWINPUT(msg.lParam.0 as *mut _)) };
                     if let (Some(moved), Some(cursor)) = (moved, cursor_position()) {
                         match at_edge(cursor) {
                             Some((contact, edge, pressure)) if armed && detector.motion(moved.toward(edge), now, pressure) => {
