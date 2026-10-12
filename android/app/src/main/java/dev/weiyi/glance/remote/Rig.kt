@@ -176,6 +176,60 @@ private object Case {
     }
 }
 
+/** Something flat lying on a face: its outline, and whether a point of the picture is on it. */
+private class Chip(on: Face, wide: Float, deep: Float, r: Float) {
+    val path = on.box(wide, deep, r)
+    val middle = on.at(wide / 2, deep / 2)
+    private val corners = listOf(on.at(0f, 0f), on.at(wide, 0f), on.at(wide, deep), on.at(0f, deep))
+
+    fun holds(p: Offset): Boolean {
+        var inside = false
+        for (i in corners.indices) {
+            val (a, b) = corners[i] to corners[(i + 1) % corners.size]
+            if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside
+        }
+        return inside
+    }
+}
+
+/**
+ * A laptop, drawn as the case is: its screen up at the back, and in its body, seen through its deck, its two fans,
+ * its processor and its card between them, its memory and its drive.
+ */
+private object Laptop {
+    private const val X0 = -20f
+    private const val Y0 = 6f
+    private const val WIDE = 114f
+    private const val DEEP = 81f
+    private const val THICK = 6f
+    private const val UP = 75f
+    private const val LEAN = 18f
+
+    val lid = loop(listOf(v(X0, Y0, THICK), v(X0 + WIDE, Y0, THICK), v(X0 + WIDE, Y0 - LEAN, THICK + UP), v(X0, Y0 - LEAN, THICK + UP)), 4f)
+    val display = Face(v(X0 + 5, Y0 - LEAN * 5 / UP, THICK + 5), v(1, 0, 0), v(0, -LEAN / UP, 1)).box(WIDE - 10, UP - 11, 2.5f)
+    val body = Block(v(X0, Y0, 0), v(X0 + WIDE, Y0 + DEEP, THICK), 2f)
+    private fun deck(x: Float, y: Float) = Face(v(X0 + x, Y0 + y, THICK), v(1, 0, 0), v(0, 1, 0))
+    val fans = listOf(17f, WIDE - 17f).map { Face(v(X0 + it, Y0 + 18, THICK + 0.2), v(1, 0, 0), v(0, 1, 0)) }
+    val chips = mapOf(
+        Part.Cpu to Chip(deck(34f, 8f), 20f, 20f, 1.6f),
+        Part.Gpu to Chip(deck(60f, 8f), 22f, 20f, 1.6f),
+        Part.Ram to Chip(deck(13f, 39f), 39f, 9f, 1.6f),
+        Part.Disk to Chip(deck(62f, 39f), 39f, 9f, 1.6f),
+    )
+    /** Where the hand rests. */
+    val pad = deck((WIDE - 34f) / 2, DEEP - 26f).box(34f, 20f, 2.5f)
+
+    /** Where each note is. */
+    val places = mapOf(
+        Part.Cpu to Place(v(X0 + 44, Y0 + 18, THICK), -122f, -96f, true),
+        Part.Gpu to Place(v(X0 + 71, Y0 + 18, THICK), 82f, -64f, false),
+        Part.Ram to Place(v(X0 + 32.5, Y0 + 43.5, THICK), -134f, 58f, true),
+        Part.Disk to Place(v(X0 + 81.5, Y0 + 43.5, THICK), 82f, 76f, false),
+    )
+
+    fun part(p: Offset): Part? = chips.entries.firstOrNull { it.value.holds(p) }?.key
+}
+
 /** What is said beside the picture of one thing in it: a figure, and one or two lines under it. */
 class Note(val figure: String, val first: String, val second: String = "")
 
@@ -251,10 +305,11 @@ private inline fun DrawScope.faded(alpha: Float, draw: DrawScope.() -> Unit) {
  * [light] is the lights' colour while they are on, which the whole inside
  * of the case takes; at [night] it is dim and still. A part pressed is
  * [choose]n. Whatever of this changes, the picture goes over to it, not at
- * once.
+ * once. A [laptop] is drawn as one.
  */
 @Composable
-fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Part, modifier: Modifier = Modifier, choose: (Part) -> Unit) {
+fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Part, modifier: Modifier = Modifier, laptop: Boolean = false, choose: (Part) -> Unit) {
+    val asLaptop by rememberUpdatedState(laptop)
     val picked by rememberUpdatedState(choose)
     // How far each kind of fan has turned (the case's, the processor's), in degrees.
     val turned = remember { FloatArray(2) }
@@ -296,7 +351,7 @@ fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Par
             detectTapGestures { tap ->
                 val k = min(size.width / WIDE, size.height / TALL)
                 val origin = Offset((size.width - WIDE * k) / 2 - LEFT * k, (size.height - TALL * k) / 2 - TOP * k)
-                Case.part((tap - origin) / k)?.let { picked(it) }
+                (if (asLaptop) Laptop.part((tap - origin) / k) else Case.part((tap - origin) / k))?.let { picked(it) }
             }
         },
     ) {
@@ -312,6 +367,23 @@ fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Par
         }) {
             faded(0.4f + 0.6f * wake) {
                 val stroke = Stroke(thin, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                if (laptop) {
+                    val shell = lerp(Color(0xFF8F99A6), glow, 0.22f * shine)
+                    // The screen at the back, then the body, and on its deck what is in it.
+                    drawPath(Laptop.lid, Color(0xFF12161B))
+                    drawPath(Laptop.lid, shell, style = Stroke(thin * 1.4f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    drawPath(Laptop.display, Color(0xFF0B0E12))
+                    drawPath(Laptop.display, Color(0xFF3A424D), style = stroke)
+                    block(Laptop.body, shell, thin)
+                    val fans = lerp(Color(0xFF59636F), glow, shine)
+                    for (one in Laptop.fans) fan(one, 12.5f, turned[1], fans, thin)
+                    for ((part, chip) in Laptop.chips) {
+                        drawPath(chip.path, shade(colour(part), 0.14f))
+                        drawPath(chip.path, colour(part), style = Stroke(width(part), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    }
+                    drawPath(Laptop.pad, Color(0xFF46505C), style = stroke)
+                    return@faded
+                }
                 // The lights' colour on the walls and the floor.
                 val wall = lerp(Color(0xFF12161B), glow, 0.09f * shine)
                 for (one in Case.walls) {
@@ -375,8 +447,8 @@ fun Rig(reads: Reads?, notes: Notes?, light: Color?, night: Boolean, chosen: Par
                             if (note.second.isNotEmpty()) canvas.drawText(note.second, x, place.y + 25f, words)
                         }
                     }
-                    for ((part, place) in PLACES) told.parts[part]?.let { say(place, it, chosen == part) }
-                    told.fans?.let { say(FANS, it, false) }
+                    for ((part, place) in if (laptop) Laptop.places else PLACES) told.parts[part]?.let { say(place, it, chosen == part) }
+                    if (!laptop) told.fans?.let { say(FANS, it, false) }
                 }
             }
         }

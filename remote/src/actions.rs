@@ -7,12 +7,32 @@ use windows::Win32::Foundation::HLOCAL;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::System::Com::{CoCreateInstance, CoIncrementMTAUsage, CLSCTX_ALL};
-use windows::Win32::System::Power::{PowerEnumerate, PowerGetActiveScheme, PowerReadFriendlyName, PowerSetActiveScheme, SetSuspendState, ACCESS_SCHEME};
+use windows::Win32::System::Power::{
+    GetPwrCapabilities, GetSystemPowerStatus, PowerEnumerate, PowerGetActiveScheme, PowerReadFriendlyName, PowerSetActiveScheme, SetSuspendState, ACCESS_SCHEME, SYSTEM_POWER_CAPABILITIES,
+    SYSTEM_POWER_STATUS,
+};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
 /// Windows' own "Power saver" plan.
 pub const POWER_SAVER: GUID = GUID::from_u128(0xa1841308_3541_4fab_bc81_f71556f20b4a);
+
+/// Whether this PC is a laptop: one with a battery of its own.
+pub fn laptop() -> bool {
+    let mut status = SYSTEM_POWER_STATUS::default();
+    // (128: no system battery; 255: not known.)
+    unsafe { GetSystemPowerStatus(&mut status) }.is_ok() && status.BatteryFlag != 128 && status.BatteryFlag != 255
+}
+
+/// Whether this PC stands by with its screens ("modern standby": always
+/// on, always connected): one whose screens Windows cannot put out and
+/// leave the PC as it is. It stands by as they go out, and is signed in to
+/// again as they come on.
+pub fn stands_by_with_its_screens() -> bool {
+    let mut can = SYSTEM_POWER_CAPABILITIES::default();
+    let read = unsafe { GetPwrCapabilities(&mut can) };
+    read && can.AoAc
+}
 
 /// The PC to sleep (not hibernation), letting what is running hear of it.
 pub fn sleep() -> bool {

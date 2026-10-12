@@ -92,6 +92,12 @@ struct State {
     night: Option<Night>,
 }
 
+/// Whether this PC's lights are the light under its keys: a laptop whose
+/// keyboard's light can be set here.
+fn lights_are_keys() -> bool {
+    actions::laptop() && keys::there()
+}
+
 /// How many colours are kept to choose from at most.
 const COLOURS_MOST: usize = 24;
 
@@ -160,14 +166,19 @@ impl Helper {
         // (whether or not there are other lights to set), and meanwhile:
         // each takes its own while.
         let cooler = std::thread::spawn(move || if on { cooler::lit() } else { cooler::dark() });
-        // And the light under a laptop's keys, where its brightness has been chosen.
-        if let Some(level) = *self.keys.lock().unwrap() {
-            keys::light(if on { level } else { 0 });
+        // And the light under a laptop's keys: out, and on again as bright as it was chosen (not chosen yet, the
+        // brightest).
+        let keyed = keys::there() && keys::light(if on { self.keys.lock().unwrap().unwrap_or(keys::MOST) } else { 0 });
+        // A laptop whose keys' light is set here has that for its lights: OpenRGB is not asked there (it knows
+        // few laptops, and not starting on one must not stand for the keys' light not having been set). With no
+        // OpenRGB on this PC, the lights it would set are left to their makers' programs: there is still the rest.
+        let set = if lights_are_keys() || lights::program(&self.config).is_none() { Ok(()) } else { lights::set(&self.config, on, &light).map(|_| ()).map_err(|error| error.to_string()) };
+        let cooled = cooler.join().is_ok() && cooler::there();
+        // (One kind of light set stands for the lights set: what did not take it is noted, not answered.)
+        match set {
+            Err(error) if keyed || cooled => journal::note(format!("the lights {}: the keys' or the cooler's were set; OpenRGB: {error}", if on { "on" } else { "out" })),
+            other => other?,
         }
-        // (With no OpenRGB on this PC, the lights it would set are left to their makers' programs: there is still the rest.)
-        let set = if lights::program(&self.config).is_some() { lights::set(&self.config, on, &light).map(|_| ()).map_err(|error| error.to_string()) } else { Ok(()) };
-        let _ = cooler.join();
-        set?;
         self.state.lock().unwrap().lights = Some(on);
         Ok(())
     }
@@ -293,7 +304,7 @@ impl Helper {
 
     /// The screens out, the way that is chosen (see `display`).
     fn screens_off(&self) -> Result<(), String> {
-        match Config::load().screens {
+        match Config::load().way() {
             Screens::Signal => display::sleep().map_err(|error| error.to_string()),
             Screens::Kept => {
                 display::darken();
@@ -361,8 +372,11 @@ impl Helper {
             "lights": lights,
             // Whether there is the program the lights are set by at all (none: the phone has no lights to show).
             "lights_there": lights::program(&self.config).is_some() || cooler::there() || keys::there(),
-            // And whether, of those, there is the program that sets a board's and a card's lights and their colours.
-            "colours_there": lights::program(&self.config).is_some(),
+            // And whether, of those, there is the program that sets a board's and a card's lights and their colours
+            // (not asked on a laptop whose lights are its keys': see `lights`).
+            "colours_there": lights::program(&self.config).is_some() && !lights_are_keys(),
+            // A laptop is drawn as one, and its lights are called what they are.
+            "laptop": actions::laptop(),
             "light": light,
             "colours": *self.colours.lock().unwrap(),
             "reads": reads::read(),
@@ -827,11 +841,11 @@ fn main() -> std::io::Result<()> {
             let config = match way {
                 Some(way) => {
                     journal::note(format!("the screens are to be put out the {way:?} way"));
-                    Config::change(|config| config.screens = way)?
+                    Config::change(|config| (config.screens, config.screens_chosen) = (way, true))?
                 }
                 None => config,
             };
-            say!("{}", format!("{:?}", config.screens).to_lowercase());
+            say!("{}", format!("{:?}", config.way()).to_lowercase());
             return Ok(());
         }
         Some("monitors") => {
@@ -864,7 +878,8 @@ fn main() -> std::io::Result<()> {
             say!("cooler display: {}", if cooler::there() { "there" } else { "none" });
             say!("keyboard light: {}", if keys::there() { "there" } else { "none" });
             say!("power: {}", power::choices().iter().map(|choice| format!("{}{}", if choice.name.is_empty() { &choice.id } else { &choice.name }, if choice.on { "*" } else { "" })).collect::<Vec<_>>().join(", "));
-            say!("screens put out: {}", format!("{:?}", config.screens).to_lowercase());
+            say!("screens put out: {}{}", format!("{:?}", config.way()).to_lowercase(), if config.screens_chosen { " (chosen)" } else { "" });
+            say!("a laptop: {}; stands by with its screens: {}", actions::laptop(), actions::stands_by_with_its_screens());
             for line in journal::recent(REPORTED) {
                 say!("log: {line}");
             }
@@ -906,7 +921,7 @@ fn main() -> std::io::Result<()> {
         _ => {}
     }
     journal::note_crashes();
-    journal::note(format!("started: version {}, port {}, the screens put out the {:?} way", env!("CARGO_PKG_VERSION"), config.port, config.screens));
+    journal::note(format!("started: version {}, port {}, the screens put out the {:?} way", env!("CARGO_PKG_VERSION"), config.port, config.way()));
     for monitor in display::monitors() {
         journal::note(format!("monitor: {} {}x{} at {},{}; says it is on: {:?}; brightness: {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on, monitor.brightness));
     }

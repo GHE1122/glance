@@ -124,6 +124,8 @@ data class PcState(
      * older: each phone then keeps its own); and those it keeps, once any were kept.
      */
     val keepsColours: Boolean = false, val colours: List<String>? = null,
+    /** A laptop: drawn as one, its lights called what they are (the light under its keys). */
+    val laptop: Boolean = false,
 ) {
     companion object {
         fun from(json: JSONObject) = PcState(
@@ -132,6 +134,7 @@ data class PcState(
             lightsThere = json.optBoolean("lights_there", true),
             coloursThere = json.optBoolean("colours_there", true),
             keepsColours = json.has("colours"),
+            laptop = json.optBoolean("laptop"),
             colours = json.optJSONArray("colours")?.let { list -> (0 until list.length()).map { list.optString(it).uppercase() }.filter { it.length == 6 } },
             keys = json.optJSONObject("keys")?.let { Keys(it.int("level"), it.optInt("most", 3)) },
             media = json.optJSONObject("media")?.let { Media(it.optString("title"), it.optString("artist"), it.optString("app"), it.optBoolean("playing")) },

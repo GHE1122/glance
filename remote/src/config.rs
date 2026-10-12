@@ -89,8 +89,10 @@ pub struct Config {
     /// them. None kept yet: each shows the ones it starts with, and a phone
     /// that kept its own before this did sends them.
     pub colours: Option<Vec<String>>,
-    /// How the screens are put out.
+    /// How the screens are put out, and whether that was chosen: till it
+    /// is, as this PC is best served (see `way`).
     pub screens: Screens,
+    pub screens_chosen: bool,
     /// The monitors this helper is keeping dark with their signal kept,
     /// each as it is to be put back: one that ends before it has put them
     /// back does so when it next starts.
@@ -113,7 +115,22 @@ impl Default for Config {
             local: None,
             colours: None,
             screens: Screens::default(),
+            screens_chosen: false,
             darkened: Vec::new(),
+        }
+    }
+}
+
+impl Config {
+    /// The way the screens are put out: as chosen; not chosen, with their
+    /// signal kept on a PC that stands by with its screens (there, Windows
+    /// putting them out puts the PC to standby: its downloads stop, and it
+    /// asks to be signed in to as they come on), else as kept.
+    pub fn way(&self) -> Screens {
+        if !self.screens_chosen && crate::actions::stands_by_with_its_screens() {
+            Screens::Kept
+        } else {
+            self.screens
         }
     }
 }

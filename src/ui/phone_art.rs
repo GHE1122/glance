@@ -214,6 +214,86 @@ impl Picture<'_> {
         unsafe { self.frame.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(at.x, at.y, at.w, at.h), radiusX: r, radiusY: r }, self.frame.brush(color)) };
     }
 
+    /// What is said of a part, out beside the picture on a line from the
+    /// part (`from`, in space) to its words (at `to`, in the room; ending
+    /// there, `end`, or beginning): a figure, and a line or two under it.
+    fn say(&self, from: Point, to: (f32, f32), end: bool, lines: [&str; 3]) {
+        let at = |x: f32, y: f32| Vector2 { X: x, Y: y };
+        let (large, small) = (Font::new(Family::Segoe, 15.0, 600.0), Font::new(Family::Segoe, 9.5, 400.0));
+        let (from, elbow) = (seen(from), to.0 + if end { 12.0 } else { -12.0 });
+        unsafe {
+            self.frame.dc.DrawLine(from, at(elbow, to.1), self.frame.brush(FAINT), 0.8, &self.round);
+            self.frame.dc.DrawLine(at(elbow, to.1), at(to.0, to.1), self.frame.brush(FAINT), 0.8, &self.round);
+            self.frame.dc.FillEllipse(&D2D1_ELLIPSE { point: from, radiusX: 2.0, radiusY: 2.0 }, self.frame.brush(INK));
+        }
+        let x = to.0 + if end { -5.0 } else { 5.0 };
+        self.words(lines[0], large, INK, x, to.1 + 1.0, end);
+        self.words(lines[1], small, DIM, x, to.1 + 13.0, end);
+        self.words(lines[2], small, DIM, x, to.1 + 25.0, end);
+    }
+
+    /// A laptop, drawn as the case is: its screen up at the back, and in
+    /// its body, seen through its deck, its two fans, its processor and
+    /// its card between them, its memory and its drive. `light` is the
+    /// colour of the light under its keys while that is on.
+    #[allow(clippy::too_many_arguments)]
+    fn laptop(&mut self, x: f32, y: f32, width: f32, reads: &Value, lang: Lang, seconds: f32, light: Option<Color>) {
+        let k = width / ROOM.2;
+        self.room = Matrix3x2::scale(k, k) * Matrix3x2::translation(x - ROOM.0 * k, y - ROOM.1 * k);
+        // Its body: from (X0, Y0), W wide and D deep, T thick; its screen S up from its back edge, leaning back by LEAN.
+        const X0: f32 = -20.0;
+        const Y0: f32 = 6.0;
+        const W: f32 = 114.0;
+        const D: f32 = 81.0;
+        const T: f32 = 6.0;
+        const S: f32 = 75.0;
+        const LEAN: f32 = 18.0;
+        let lit = |color: Color, much: f32| light.map_or(color, |light| Color { r: color.r + (light.r - color.r) * much, g: color.g + (light.g - color.g) * much, b: color.b + (light.b - color.b) * much, a: color.a });
+        let turn = |rpm: Option<i64>| seconds * rpm.unwrap_or(0).max(0) as f32 / 60.0 / SLOWED * std::f32::consts::TAU;
+        let cpu_fan = reads.get("cpu_fan").and_then(Value::as_i64);
+        let shell = lit(Color::hex(0x8F99A6, 1.0), 0.22);
+        // The screen, at the back: its lid, and the picture's place in it.
+        let lid = [[X0, Y0, T], [X0 + W, Y0, T], [X0 + W, Y0 - LEAN, T + S], [X0, Y0 - LEAN, T + S]];
+        self.draw(self.ring(&lid, 4.0), Some(Color::hex(0x12161B, 1.0)), Some((shell, 1.4)));
+        let up = [0.0, -LEAN / S, 1.0];
+        self.draw(self.sheet((W - 10.0, S - 11.0), 2.5, face([X0 + 5.0, Y0 - LEAN * 5.0 / S, T + 5.0], [1.0, 0.0, 0.0], up)), Some(Color::hex(0x0B0E12, 1.0)), Some((Color::hex(0x3A424D, 1.0), 1.0)));
+        // The body, and on its deck what is in it.
+        self.block([X0, Y0, 0.0], [X0 + W, Y0 + D, T], 2.0, shell);
+        let on_deck = |x: f32, y: f32| face([X0 + x, Y0 + y, T], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let colour = |part: &str| match read(reads, part).0 {
+            Some(temp) if temp >= HOT => Color::hex(0xFF6B5E, 1.0),
+            Some(temp) if temp >= WARM => Color::hex(0xFFB057, 1.0),
+            _ => lit(STEEL, 0.42),
+        };
+        let chip = |picture: &Picture, part: &str, x: f32, y: f32, size: (f32, f32)| {
+            let color = colour(part);
+            picture.draw(picture.sheet(size, 1.6, on_deck(x, y)), Some(shade(color, 14.0)), Some((color, 1.0)));
+        };
+        let fans = lit(Color::hex(0x59636F, 1.0), 1.0);
+        for across in [17.0, W - 17.0] {
+            self.fan([X0 + across, Y0 + 18.0, T + 0.2], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 12.5, fans, turn(cpu_fan));
+        }
+        chip(self, "cpu", 34.0, 8.0, (20.0, 20.0));
+        chip(self, "gpu", 60.0, 8.0, (22.0, 20.0));
+        chip(self, "ram", 13.0, 39.0, (39.0, 9.0));
+        chip(self, "disk", 62.0, 39.0, (39.0, 9.0));
+        // (Where the hand rests: the pad, faintly.)
+        self.draw(self.sheet((34.0, 20.0), 2.5, on_deck((W - 34.0) / 2.0, D - 26.0)), None, Some((Color::hex(0x46505C, 1.0), 1.0)));
+
+        // What is said of each part. (In the room's own measure, as the laptop is.)
+        self.frame.place(self.room * self.screen);
+        let named = |part: &str, name: &str| match read(reads, part) {
+            (Some(_), Some(load)) => format!("{name} · {load}%"),
+            _ => name.to_string(),
+        };
+        let fan = cpu_fan.map(|rpm| lang.pick(&format!("风扇 {rpm} 转"), &format!("Fan {rpm} rpm")).to_string()).unwrap_or_default();
+        self.say([X0 + 44.0, Y0 + 18.0, T], (-122.0, -96.0), true, [&figure(read(reads, "cpu")), &named("cpu", "CPU"), &fan]);
+        self.say([X0 + 71.0, Y0 + 18.0, T], (82.0, -64.0), false, [&figure(read(reads, "gpu")), &named("gpu", lang.pick("显卡", "Graphics")), ""]);
+        self.say([X0 + 32.5, Y0 + 43.5, T], (-134.0, 58.0), true, [&figure(read(reads, "ram")), &named("ram", lang.pick("内存", "Memory")), ""]);
+        self.say([X0 + 81.5, Y0 + 43.5, T], (82.0, 76.0), false, [&figure(read(reads, "disk")), &named("disk", lang.pick("硬盘", "Disk")), ""]);
+        self.frame.place(self.screen);
+    }
+
     /// The case and what is in it, with what is said of each part out
     /// beside it, on a line to it: in a room `width` wide whose corner is
     /// at `(x, y)`.
@@ -287,19 +367,7 @@ impl Picture<'_> {
 
         // What is said of each part. (In the room's own measure, as the case is.)
         self.frame.place(self.room * self.screen);
-        let (large, small) = (Font::new(Family::Segoe, 15.0, 600.0), Font::new(Family::Segoe, 9.5, 400.0));
-        let say = |from: Point, to: (f32, f32), end: bool, lines: [&str; 3]| {
-            let (from, elbow) = (seen(from), to.0 + if end { 12.0 } else { -12.0 });
-            unsafe {
-                self.frame.dc.DrawLine(from, at(elbow, to.1), self.frame.brush(FAINT), 0.8, &self.round);
-                self.frame.dc.DrawLine(at(elbow, to.1), at(to.0, to.1), self.frame.brush(FAINT), 0.8, &self.round);
-                self.frame.dc.FillEllipse(&D2D1_ELLIPSE { point: from, radiusX: 2.0, radiusY: 2.0 }, self.frame.brush(INK));
-            }
-            let x = to.0 + if end { -5.0 } else { 5.0 };
-            self.words(lines[0], large, INK, x, to.1 + 1.0, end);
-            self.words(lines[1], small, DIM, x, to.1 + 13.0, end);
-            self.words(lines[2], small, DIM, x, to.1 + 25.0, end);
-        };
+        let say = |from: Point, to: (f32, f32), end: bool, lines: [&str; 3]| self.say(from, to, end, lines);
         let named = |part: &str, name: &str| match read(reads, part) {
             (Some(_), Some(load)) => format!("{name} · {load}%"),
             _ => name.to_string(),
@@ -545,7 +613,13 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
         Some(making) => Some(hued(held.filter(|(held, _)| **held == Part::Hue).map_or(making.hue, |(_, at)| at * 360.0), held.filter(|(held, _)| **held == Part::Depth).map_or(making.depth, |(_, at)| at))),
         None => state["light"]["color"].as_str().filter(|color| color.len() == 6).map(colour),
     });
-    picture.rig(side + 8.0, top + 8.0, wide - 16.0, reads, lang, seconds, light);
+    // (A laptop is drawn as one; its light is the one under its keys, which has no colour to say: the lights' own.)
+    if state.is_some_and(|state| state["laptop"].as_bool() == Some(true)) {
+        let keys = state.filter(|state| state["lights"].as_bool() == Some(true) && state["night"].as_bool() != Some(true)).map(|_| INK);
+        picture.laptop(side + 8.0, top + 8.0, wide - 16.0, reads, lang, seconds, keys);
+    } else {
+        picture.rig(side + 8.0, top + 8.0, wide - 16.0, reads, lang, seconds, light);
+    }
     let named = [("cpu", "CPU"), ("gpu", lang.pick("显卡", "Graphics")), ("ram", lang.pick("内存", "Memory")), ("disk", lang.pick("硬盘", "Disk"))];
     let each = (wide - 24.0 - 3.0 * 8.0) / 4.0;
     for (place, (part, called)) in named.into_iter().enumerate() {
@@ -567,6 +641,8 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     let night = flag("night") == Some(true);
     let (screens, lights) = (flag("screen"), flag("lights"));
     let (lights_there, colours_there) = (flag("lights_there").unwrap_or(true), flag("colours_there").unwrap_or(true));
+    // A laptop whose lights are the one under its keys: called that.
+    let keys_alone = flag("laptop") == Some(true) && !colours_there && said.get("keys").is_some_and(|keys| !keys.is_null());
     let text = |value: &Value, name: &str| value.get(name).and_then(Value::as_str).unwrap_or_default().to_string();
     let effect = said.get("light").map_or("steady".to_string(), |light| text(light, "effect"));
     let effects = [("steady", lang.pick("常亮", "Steady")), ("breathing", lang.pick("呼吸", "Breathing")), ("rainbow", lang.pick("彩虹", "Rainbow")), ("heat", lang.pick("跟随温度", "By heat"))];
@@ -606,7 +682,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             Some(false) => lang.pick("关着，点一下打开", "Off. Press to turn them on").to_string(),
             None => lang.pick("点一下关灯", "Press to turn them off").to_string(),
         };
-        tile(&picture, &mut parts, Rect { x: side + half + 12.0, y, w: half, h: 88.0 }, lights != Some(false), lang.pick("灯光", "Lights"), &how, Part::Lights);
+        tile(&picture, &mut parts, Rect { x: side + half + 12.0, y, w: half, h: 88.0 }, lights != Some(false), if keys_alone { lang.pick("键盘背光", "Keyboard light") } else { lang.pick("灯光", "Lights") }, &how, Part::Lights);
     }
     y += 88.0 + 12.0;
 
@@ -771,7 +847,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     if let Some(keys) = said.get("keys").filter(|keys| !keys.is_null() && lights != Some(false) && !night) {
         let (level, most) = (keys.get("level").and_then(Value::as_u64), keys.get("most").and_then(Value::as_u64).unwrap_or(3));
         picture.plate(Rect { x: side, y, w: wide, h: 92.0 }, 20.0, CARD);
-        picture.words(lang.pick("键盘背光", "Keyboard light"), label, DIM, side + 16.0, y + 27.0, false);
+        picture.words(if keys_alone { lang.pick("背光亮度", "How bright") } else { lang.pick("键盘背光", "Keyboard light") }, label, DIM, side + 16.0, y + 27.0, false);
         // Out, then each step up to the brightest: named where there are the usual three, numbered otherwise.
         let names: Vec<String> = if most == 3 {
             [lang.pick("关", "Off"), lang.pick("低", "Low"), lang.pick("中", "Medium"), lang.pick("高", "High")].iter().map(|name| name.to_string()).collect()
