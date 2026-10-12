@@ -268,6 +268,10 @@ pub struct NetworkInfo {
     pub model: String,
     pub ipv4: Option<String>,
     pub link_bps: u64,
+    /// The wireless network it is on, by its name; none on a wire, or
+    /// where Windows does not say (it asks for its location service to be
+    /// on before it tells a program which network it is on).
+    pub wifi: Option<String>,
 }
 
 #[derive(Clone, Serialize)]

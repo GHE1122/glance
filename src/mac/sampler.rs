@@ -422,7 +422,7 @@ fn primary_interface(network: Option<&Network>, interfaces: Option<&HashMap<Stri
     let bsd = network?.primary()?;
     let shown = display_name(&bsd).unwrap_or_else(|| bsd.clone());
     let link_bps = interfaces.and_then(|interfaces| interfaces.get(&bsd)).map_or(0, |(_, _, speed)| *speed);
-    Some(NetworkInfo { name: shown.clone(), model: shown, ipv4: ipv4(&bsd), link_bps })
+    Some(NetworkInfo { name: shown.clone(), model: shown, ipv4: ipv4(&bsd), link_bps, wifi: None })
 }
 
 /// An interface's IPv4 address.

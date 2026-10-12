@@ -29,6 +29,7 @@ pub struct Seen {
     /// The disks' busy time (which macOS does not keep).
     pub disk_active: bool,
     pub address: bool,
+    pub wifi: bool,
     pub link: bool,
     /// The drives that give their temperature: number, and name.
     pub drives: Vec<(u32, String)>,
@@ -100,6 +101,7 @@ impl Seen {
         self.disk_active |= s.disk_active.is_some();
         if let Some(network) = &s.network {
             self.address |= network.ipv4.is_some();
+            self.wifi |= network.wifi.is_some();
             self.link |= network.link_bps > 0;
         }
         merge(&mut self.drives, s.drive_temps.iter().map(|d| (d.id, d.name.clone())), |a, b| a.0 == b.0);
@@ -142,6 +144,7 @@ impl Seen {
             "docker" => news.extend((self.containers + 1..=other.containers).map(Item::Containers)),
             "network" => {
                 flag(self.address, other.address, Item::Address);
+                flag(self.wifi, other.wifi, Item::Wifi);
                 flag(self.link, other.link, Item::Link);
             }
             "disk" => news.extend(other.drives.iter().filter(|(id, _)| !self.drives.iter().any(|(ours, _)| ours == id)).map(|(id, _)| Item::Drive(*id))),
@@ -218,6 +221,7 @@ impl Seen {
             Item::Dimms(count) => seen.dimms = *count,
             Item::Containers(count) => seen.containers = *count,
             Item::Address => seen.address = true,
+            Item::Wifi => seen.wifi = true,
             Item::Link => seen.link = true,
             Item::Drive(id) => add(&mut seen.drives, &other.drives, |key| key.0 == *id, |a, b| a.0 == b.0),
             Item::Volume(name) => add(&mut seen.volumes, &other.volumes, |key| key == name, |a, b| a == b),
@@ -273,6 +277,7 @@ pub enum Item {
     /// Docker's containers, this many (one more).
     Containers(usize),
     Address,
+    Wifi,
     Link,
     Drive(u32),
     Volume(String),

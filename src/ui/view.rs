@@ -514,6 +514,9 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if on("adapter") {
                 facts.push((lang.pick("网卡", "Adapter").into(), adapter.map_or(lang.pick("未连接", "Not connected").into(), |a| a.name.clone()), false));
             }
+            if on("wifi") && scene.seen.wifi {
+                facts.push(("Wi-Fi".into(), shown(adapter.and_then(|a| a.wifi.clone()), |name| name), false));
+            }
             if on("address") && scene.seen.address {
                 facts.push((lang.pick("地址", "Address").into(), shown(adapter.and_then(|a| a.ipv4.clone()), |ip| ip), false));
             }

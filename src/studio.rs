@@ -861,6 +861,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
             model: info.network_adapter.clone().unwrap_or_default(),
             ipv4: Some("192.168.1.23".into()),
             link_bps: 2_401_000_000,
+            wifi: None,
         }),
         disk_read: Some(disk_read),
         disk_write: Some(disk_write),

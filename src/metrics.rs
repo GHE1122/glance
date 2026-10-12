@@ -1225,12 +1225,37 @@ fn default_interface() -> Option<NetworkInfo> {
                     model: unsafe { a.Description.to_string() }.unwrap_or_default(),
                     ipv4,
                     link_bps: a.ReceiveLinkSpeed,
+                    wifi: unsafe { a.AdapterName.to_string() }.ok().and_then(|adapter| wifi_name(&adapter)),
                 });
             }
             adapter = a.Next;
         }
         return None;
     }
+}
+
+/// The wireless network the adapter `adapter` (its identifier, in braces, as Windows names adapters) is on, by
+/// its name; none for an adapter that is no wireless one, or is on none, or where Windows does not say.
+fn wifi_name(adapter: &str) -> Option<String> {
+    use windows::Win32::NetworkManagement::WiFi::{wlan_intf_opcode_current_connection, WlanCloseHandle, WlanFreeMemory, WlanOpenHandle, WlanQueryInterface, WLAN_CONNECTION_ATTRIBUTES};
+    let adapter = windows::core::GUID::try_from(adapter.trim_matches(|c| c == '{' || c == '}')).ok()?;
+    let (mut version, mut client) = (0u32, windows::Win32::Foundation::HANDLE::default());
+    if unsafe { WlanOpenHandle(2, None, &mut version, &mut client) } != ERROR_SUCCESS.0 {
+        return None;
+    }
+    let (mut size, mut told) = (0u32, std::ptr::null_mut::<std::ffi::c_void>());
+    let asked = unsafe { WlanQueryInterface(client, &adapter, wlan_intf_opcode_current_connection, None, &mut size, &mut told, None) };
+    let name = (asked == ERROR_SUCCESS.0 && !told.is_null() && size as usize >= size_of::<WLAN_CONNECTION_ATTRIBUTES>()).then(|| {
+        let network = unsafe { &(*(told as *const WLAN_CONNECTION_ATTRIBUTES)).wlanAssociationAttributes.dot11Ssid };
+        String::from_utf8_lossy(&network.ucSSID[..(network.uSSIDLength as usize).min(network.ucSSID.len())]).into_owned()
+    });
+    unsafe {
+        if !told.is_null() {
+            WlanFreeMemory(told);
+        }
+        let _ = WlanCloseHandle(client, None);
+    }
+    name.filter(|name| !name.is_empty())
 }
 
 fn performance_info() -> PERFORMANCE_INFORMATION {
@@ -1400,5 +1425,16 @@ mod tests {
         let since = last_boot().expect("the last start in the event log");
         assert!(since <= unsafe { GetTickCount64() } + 1000, "{since} ms ago, the tick count {}", unsafe { GetTickCount64() });
         assert!(sample.system.uptime_s.abs_diff(since / 1000) <= 2);
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    /// On a PC: the interface the default route goes through, and the wireless network it is on.
+    #[test]
+    #[ignore]
+    fn says_the_default_interface() {
+        let found = super::default_interface();
+        println!("{:?}", found.map(|network| (network.name, network.ipv4.is_some(), network.link_bps, network.wifi)));
     }
 }
