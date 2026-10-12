@@ -243,11 +243,11 @@ pub fn accent(dark: bool) -> Color {
     Color::hex(crate::os::accent(dark).unwrap_or(if dark { 0x99EBFF } else { 0x005FB8 }), 1.0)
 }
 
-/// Windows 11, as the Start menu, Quick Settings and Settings draw it: one
-/// acrylic sheet with an 8 px radius, a hairline stroke and a soft shadow;
-/// each lane on a card of its own (Settings' cards: a light layer, a faint
-/// stroke, 4 px corners) with room round and between them; a slightly
-/// darker footer; the user's accent colour for anything that is data.
+/// Windows 11, as the Start menu and Quick Settings draw it: one acrylic
+/// sheet with an 8 px radius, a hairline stroke and a soft shadow; content
+/// grouped by headings, space and a hairline between lanes rather than
+/// boxes; a slightly darker footer; the user's accent colour for anything
+/// that is data.
 fn fluent(dark: bool) -> Theme {
     let segoe = |size, weight| Font::new(Family::Segoe, size, weight);
     let ink = ink(accent(dark), 0.5, 0.22, 0.0);
@@ -273,15 +273,15 @@ fn fluent(dark: bool) -> Theme {
         unit: segoe(15.0, 500.0),
         value: segoe(13.0, 500.0),
         pad_x: 16.0,
-        pad_top: 12.0,
+        pad_top: 10.0,
         pad_bottom: 12.0,
-        outer: (12.0, 12.0, 12.0),
-        lane_gap: 6.0,
-        column_gap: 6.0,
+        outer: (10.0, 6.0, 6.0),
+        lane_gap: 0.0,
+        column_gap: 0.0,
         bar_gap: 0.0,
         bar_height: 52.0,
         bar_pad: (22.0, 14.0),
-        ruled: false,
+        ruled: true,
         meter_height: 4.0,
         meter_radius: 2.0,
         thread_radius: 1.0,
@@ -306,8 +306,8 @@ fn fluent(dark: bool) -> Theme {
         tint: if dark { rgba(0x2C2C2C, 0.15) } else { rgba(0xFCFCFC, 0.0) },
         stroke: if dark { rgba(0xFFFFFF, 0.09) } else { rgba(0x000000, 0.1) },
         footer: rgba(0x000000, if dark { 0.18 } else { 0.035 }),
-        card: if dark { rgba(0xFFFFFF, 0.05) } else { rgba(0xFFFFFF, 0.7) },
-        card_stroke: if dark { rgba(0x000000, 0.1) } else { rgba(0x000000, 0.06) },
+        card: Color::CLEAR,
+        card_stroke: Color::CLEAR,
         glass: Color::CLEAR,
         glass_clear: 0.0,
         glass_frosted: 0.0,
