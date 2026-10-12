@@ -256,16 +256,11 @@ pub struct OverlaySettings {
     pub screen: Option<(i32, i32)>,
     /// Locked where it is: not dragged.
     pub locked: bool,
-    /// How clear its glass is: 0, all there (what is behind blurred and
-    /// tinted); 1, gone (the words alone over what is behind).
+    /// How clear its glass is: 0, all there (what is behind tinted); 1,
+    /// gone (the words alone over what is behind).
     pub clear: f32,
     /// Clicks pass through it (Ctrl held, it takes them).
     pub click_through: bool,
-    /// Its glass is frosted: what is behind it blurred, by the system's
-    /// compositor, which then draws the game behind into it every frame
-    /// (some frames in a hundred of the game's). Without, its glass is its
-    /// tint alone.
-    pub frosted: bool,
     /// A card or a strip.
     pub layout: crate::ui::overlay::Layout,
     /// A strip's rows (see `ui::overlay::ROWS`).
@@ -301,8 +296,6 @@ impl Default for OverlaySettings {
             locked: false,
             clear: 0.0,
             click_through: false,
-            // (Its tint alone, till frosting is asked for: frosting costs a game frames.)
-            frosted: false,
             layout: Default::default(),
             rows: 1,
             size: 1.0,

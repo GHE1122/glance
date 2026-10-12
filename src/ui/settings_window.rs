@@ -416,7 +416,6 @@ enum Switch {
     OverlayInGame,
     OverlayThrough,
     /// Whether the overlay's glass blurs what is behind it.
-    OverlayFrosted,
     /// The phone remote.
     Remote,
     /// Whether the remote sets the lights: the program that does, fetched or not.
@@ -1070,7 +1069,6 @@ impl Ui {
                     Row::Slider(Field::OverlaySize),
                     Row::Slider(Field::OverlayClear),
                     Row::Switch(Switch::OverlayThrough),
-                    Row::Switch(Switch::OverlayFrosted),
                     Row::Choice(Field::OverlayLayout),
                 ]);
                 // Rows only for a strip.
@@ -1773,11 +1771,6 @@ impl Ui {
                 Some(p("始终显示在屏幕上。可拖动调整位置，滚轮调透明度，右键可锁定、关闭或打开设置", "Always on screen. Drag to move; the wheel sets how clear it is; right-click to lock, close or open settings")),
                 self.settings.overlay.on,
             ),
-            Switch::OverlayFrosted => (
-                p("磨砂玻璃", "Frosted glass"),
-                Some(p("模糊悬浮窗背后的画面。模糊由系统完成，会占用游戏约 3%–4% 的帧率；关闭后改为不模糊的半透明底色", "Blurs what is behind the overlay. The system does the blurring, at a cost of some 3–4% of a game's frames; off, the glass is its tint alone, unblurred")),
-                self.settings.overlay.frosted,
-            ),
             Switch::OverlayThrough => (
                 p("鼠标穿透", "Let clicks through"),
                 Some(p("点击会落到悬浮窗后面的游戏或窗口上；按住 Ctrl 才能拖动它或打开右键菜单", "Clicks go to the game or window behind it; hold Ctrl to move it or for its menu")),
@@ -1865,7 +1858,6 @@ impl Ui {
                 settings.overlay.offered = true;
             }
             Switch::OverlayThrough => settings.overlay.click_through ^= true,
-            Switch::OverlayFrosted => settings.overlay.frosted ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;
@@ -1942,6 +1934,7 @@ impl Ui {
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间和它占用的资源", "A fullscreen game's frame rate, frame times and what it uses"))),
             "docker" => ("Docker".into(), Some(p("运行中的容器各占多少处理器、内存、网络和磁盘，问的是 Docker 当前连接的引擎", "What each container running uses, as the engine Docker's current context points at says"))),
             "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器和内存占用，只从 Windows 读取，不会启动或唤醒发行版", "WSL 2's processors and memory, read from Windows alone: no distribution is started or kept up"))),
+            "time" => (p("时间", "Time"), Some(p("现在几点和今天的日期（24 小时制）", "The time of day and the date (24-hour)"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
         }
     }
@@ -3547,7 +3540,7 @@ impl Ui {
         let (_, (gw, gh), _) = glass(k);
         let room = 2.0 * super::overlay::MARGIN;
         let k = k.min(area.w / (gw * size + room)).min(area.h / (gh * size + room));
-        let (px, (gw, gh), radius) = glass(k);
+        let (px, (gw, gh), _) = glass(k);
         let (w, h) = (gw * size, gh * size);
         let inset = super::overlay::INSET;
         let x = inset + overlay.at.0.clamp(0.0, 1.0) * (sw - 2.0 * inset - w).max(0.0);
@@ -3574,10 +3567,7 @@ impl Ui {
         let ring = RECT { left: whole(x - around), top: whole(y - around), right: whole(x + w + around), bottom: whole(y + h + around) };
         let frost = 1.0 - overlay.clear.clamp(0.0, 1.0);
         let glass = super::overlay::Glass { presence: frost, ..super::overlay::glass(&mut self.stage.desktop.luminances(ring, hole, 1), None) };
-        // (Blurred only where the glass is frosted: unfrosted, its tint alone is over the screen as it is.)
-        if let Some((_, bitmap)) = self.stage.bitmap.as_ref().filter(|_| overlay.frosted) {
-            frame.frosted(bitmap, screen, (0.0, 0.0, gw, gh, radius), placed, frost);
-        }
+        // (Its tint alone over the screen as it is: the overlay does not blur what is behind it.)
         frame.place(placed);
         frame.crisp_text();
         super::overlay::shadow(frame, &readings, shape, glass, false, px);

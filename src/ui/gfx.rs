@@ -719,49 +719,6 @@ impl<'a> Frame<'a> {
         }
     }
 
-    /// The picture `bitmap`, placed by `placed` from the surface's corner,
-    /// frosted as the glass frosts what is behind it (see `glass`), inside
-    /// the rounded rectangle `pane` (left, top, width, height, radius)
-    /// placed by `at`, as much of it as `frost` (1, all; 0, none: the
-    /// picture as it is). For the glass where no compositor draws it.
-    pub fn frosted(&self, bitmap: &ID2D1Bitmap1, placed: Matrix3x2, pane: (f32, f32, f32, f32, f32), at: Matrix3x2, frost: f32) {
-        use windows::Win32::Graphics::Direct2D::{CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation, D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_LAYER_PARAMETERS1, D2D1_PROPERTY_TYPE_ENUM, D2D1_SATURATION_PROP_SATURATION};
-        let (x, y, width, height, radius) = pane;
-        let dc = &self.dc;
-        let _ = (|| -> Result<()> {
-            unsafe {
-                use windows::Win32::Graphics::Direct2D::Common::D2D1_BORDER_MODE_HARD;
-                let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius };
-                let mask = self.gfx.factory.CreateRoundedRectangleGeometry(&shape)?;
-                let softened = dc.CreateEffect(&CLSID_D2D1Saturation)?;
-                softened.SetInput(0, &effect_input(dc, bitmap)?, true);
-                softened.SetValue(D2D1_SATURATION_PROP_SATURATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &super::glass::SATURATION.to_ne_bytes())?;
-                let blurred = dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;
-                blurred.SetInput(0, &softened.GetOutput()?, true);
-                blurred.SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &super::glass::blur().to_ne_bytes())?;
-                blurred.SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_BORDER_MODE_HARD.0 as u32).to_ne_bytes())?;
-                let mut before = Matrix3x2::default();
-                dc.GetTransform(&mut before);
-                let layer = D2D1_LAYER_PARAMETERS1 {
-                    contentBounds: rect(-1e6, -1e6, 2e6, 2e6),
-                    geometricMask: std::mem::ManuallyDrop::new(Some(mask.cast()?)),
-                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                    maskTransform: at * self.base,
-                    opacity: frost,
-                    ..Default::default()
-                };
-                dc.SetTransform(&Matrix3x2::identity());
-                dc.PushLayer(&layer, None);
-                std::mem::ManuallyDrop::into_inner(layer.geometricMask);
-                dc.SetTransform(&(placed * self.base));
-                dc.DrawImage(&blurred.GetOutput()?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-                dc.PopLayer();
-                dc.SetTransform(&before);
-            }
-            Ok(())
-        })();
-    }
-
     /// Draws from here on with `(x, y)`, in DIPs from the surface's corner, as the origin.
     pub fn origin(&self, x: f32, y: f32) {
         self.place(Matrix3x2::translation(x, y));

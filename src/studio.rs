@@ -461,7 +461,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "wsl", "docker"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
     let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     if let Some(shown) = &shot.modules {
         prefs.modules.sort_by_key(|entry| shown.iter().position(|id| *id == entry.id).unwrap_or(usize::MAX));
@@ -651,7 +651,6 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                     let metrics = Metrics { width: &width, line: &line };
                     let shape = overlay::Shape { layout, rows: 1, width: sw - 2.0 * INSET };
                     let (w, h) = overlay::size(&readings, shape, px, &metrics);
-                    let radius = overlay::radius(&readings, shape, px, &metrics);
                     // Tinted for the desktop around it, over the desktop behind it.
                     let whole = |dips: f32| (dips * px).round() as i32;
                     let hole = RECT { left: whole(INSET), top: whole(INSET), right: whole(INSET + w), bottom: whole(INSET + h) };
@@ -659,9 +658,6 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                     let presence = 1.0 - shot.overlay_clear.clamp(0.0, 1.0);
                     let glass = overlay::Glass { presence, ..overlay::glass(&mut desktop.luminances(ring, hole, 1), None) };
                     let at = Matrix3x2::translation(INSET, INSET);
-                    if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
-                        frame.frosted(&bitmap, Matrix3x2::identity(), (0.0, 0.0, w, h, radius), at, presence);
-                    }
                     frame.place(at);
                     frame.crisp_text();
                     overlay::shadow(frame, &readings, shape, glass, false, px);
@@ -956,7 +952,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
     let desktop = wallpaper::picture(wallpaper, width, height).map_err(|e| format!("{wallpaper}: {e}"))?;
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "wsl", "docker"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
     let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     let history: Vec<Sample> = (0..400).map(|i| made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None)).collect();
     let theme = Theme::new(Skin::Glass, true);

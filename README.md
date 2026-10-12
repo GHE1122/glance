@@ -53,9 +53,9 @@ starts, in the panel's look.
 A few readings floating over the screen, all the time or only while a game
 runs. Laid out as a card (the frame rate large, its
 last minute charted beside it, the rest in tiles) or as a strip of one to
-three rows, on frosted glass: the screen behind is blurred, and the glass is
-tinted dark or light by what is around it, just enough for every figure to
-read (on Windows 10 it is tinted, not blurred). Drag it into place, drag its
+three rows, on tinted glass: dark or light by what is around it, just enough
+for every figure to read (what is behind is not blurred: that would cost a
+game frames). Drag it into place, drag its
 edges to size it, right-click it to lock it or close it. Turn the mouse wheel
 over it, or use the slider in the settings, to make the glass clearer, down
 to the figures alone over the screen; and let clicks pass through it to the

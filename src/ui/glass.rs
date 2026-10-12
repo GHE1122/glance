@@ -30,15 +30,6 @@ use super::gfx::{Frame, Gfx};
 /// (a deviation, DIPs), and how much colour it leaves it (1 as it is).
 const BLUR: f32 = 20.0;
 pub const SATURATION: f32 = 0.5;
-/// How much the system's backdrop is blurred already (a deviation, DIPs;
-/// acrylic's).
-const HOST_BLUR: f32 = 30.0;
-
-/// How much the glass blurs what is behind in all (a deviation, DIPs): for
-/// drawing it where no compositor does (the settings' preview).
-pub fn blur() -> f32 {
-    (HOST_BLUR * HOST_BLUR + BLUR * BLUR).sqrt()
-}
 
 thread_local! {
     /// This thread's compositor, with the dispatcher queue it needs.
