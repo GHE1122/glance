@@ -99,7 +99,7 @@
     table($("[data-versions]"), ["版本", "电脑", "占比"], data.versions.map(function (v) { return [v.version, fmt(v.running), pct(v.running, running)]; }));
     table($("[data-updates]"), ["从", "到", "次数"], data.updates.map(function (u) { return [u.came_from === "pre" ? "0.3.3 之前" : u.came_from, u.version, fmt(u.updates)]; }));
     var days = data.staying.reduce(function (a, s) { return a + s.asking_days; }, 0);
-    table($("[data-staying]"), ["装了", "电脑·天", "占比"], data.staying.map(function (s) { return [since(s.weeks), fmt(s.asking_days), pct(s.asking_days, days)]; }));
+    table($("[data-staying]"), ["已使用", "电脑·天", "占比"], data.staying.map(function (s) { return [since(s.weeks), fmt(s.asking_days), pct(s.asking_days, days)]; }));
   }
 
   // The reports users sent, the newest first; one pressed is shown whole.
