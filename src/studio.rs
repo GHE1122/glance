@@ -469,7 +469,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     }
 
     // (The media module, where a shot shows it: a track made up.)
-    crate::playing::pretend(crate::playing::Now { title: "Clair de lune".into(), artist: "Claude Debussy".into(), app: lang.pick("音乐", "Music").into(), playing: true, volume: Some(40), muted: false });
+    crate::playing::pretend(crate::playing::Now { title: "Clair de lune".into(), artist: "Claude Debussy".into(), app: lang.pick("音乐", "Music").into(), playing: true, volume: Some(40), muted: false, sung: None });
     let frames = (shot.seconds * script.fps).round() as usize;
     let interval = 1000.0;
     let start_ms = 1_760_000_000_000.0;

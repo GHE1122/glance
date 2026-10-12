@@ -75,7 +75,8 @@ const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const WSL: [Item; 4] = [item("chart", true), item("memory", true), item("gpu", true), item("distros", true)];
-const TIME: [Item; 3] = [item("twelve", false), item("sound", true), item("media", true)];
+const TIME: [Item; 4] = [item("twelve", false), item("sound", true), item("media", true), item("lyrics", false)];
+const LYRICS: [Item; 1] = [item("translation", true)];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
 const GAME: [Item; 9] = [
     item("chart", true),
@@ -103,6 +104,7 @@ pub fn items(module: &str) -> &'static [Item] {
         "battery" => &BATTERY,
         "system" => &SYSTEM,
         "time" => &TIME,
+        "lyrics" => &LYRICS,
         "wsl" => &WSL,
         "game" => &GAME,
         _ => &[],
@@ -220,12 +222,19 @@ impl Default for ProcessPrefs {
 }
 
 /// Modules off until chosen.
-const DEFAULT_OFF: [&str; 4] = ["system", "time", "wsl", "docker"];
+const DEFAULT_OFF: [&str; 5] = ["system", "time", "lyrics", "wsl", "docker"];
 
 /// Whether module `id` is on in the stored preferences `stored` (as kept,
 /// before they are resolved: off unless listed on).
 pub fn module_on(stored: &serde_json::Value, id: &str) -> bool {
     stored["modules"].as_array().is_some_and(|modules| modules.iter().any(|entry| entry["id"] == id && entry["on"] == true))
+}
+
+/// Whether module `id` shows item `name` in the stored preferences `stored`: as switched there, else as it is
+/// by default.
+pub fn item_on(stored: &serde_json::Value, id: &str, name: &str) -> bool {
+    let switched = stored["modules"].as_array().and_then(|modules| modules.iter().find(|entry| entry["id"] == id)).and_then(|entry| entry["items"][name].as_bool());
+    switched.unwrap_or_else(|| items(id).iter().find(|item| item.name == name).is_some_and(|item| item.on))
 }
 
 /// `entries` matched to this machine's modules (`known`, in default order):

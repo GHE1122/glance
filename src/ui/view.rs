@@ -25,6 +25,78 @@ const LINE: f32 = 16.0;
 /// The sound and what plays: the room over each, and how tall what is pressed there is.
 const MEDIA_GAP: f32 = 8.0;
 const MEDIA_ROW: f32 = 24.0;
+/// The lyrics module's rows: how many, and each one's height (DIPs).
+const LYRIC_ROWS: usize = 7;
+const LYRIC_ROW: f32 = 22.0;
+
+/// What a row of the lyrics module is: a line sung before, the line sung now, its translation, a line to come,
+/// or what is said of why there are none.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Sing {
+    Past,
+    Now,
+    Under,
+    Next,
+    Said,
+}
+
+/// What the lyrics show for what plays now (`heard`): the line sung now and under it its translation (with
+/// `translated`) or the next; else why there are none, and whether that is it (`said`).
+fn sung_now(heard: Option<&crate::playing::Now>, lang: Lang, translated: bool) -> (String, String, bool) {
+    use crate::playing::Sung;
+    let said = |line: &str, under: &str| (line.to_string(), under.to_string(), true);
+    let Some(sung) = heard.and_then(|heard| heard.sung.as_ref()) else {
+        return said(lang.pick("没有正在播放的歌曲", "Nothing is playing"), "");
+    };
+    match sung {
+        Sung::Untimed { netease: true } => said(lang.pick("网易云音乐没有提供播放进度", "NetEase Cloud Music does not say how far in it is"), lang.pick("安装 InfLink-rs 插件后可以显示歌词", "With the InfLink-rs plugin, it does")),
+        Sung::Untimed { netease: false } => said(lang.pick("这个播放器没有提供播放进度", "This player does not say how far in it is"), lang.pick("无法跟着播放显示歌词", "so no line can be shown as it is sung")),
+        Sung::Asking => said(lang.pick("正在查找歌词…", "Finding the lyrics…"), ""),
+        Sung::Unknown => said(lang.pick("没有找到这首歌的歌词", "No lyrics were found for this track"), ""),
+        Sung::Lines { lines, now } => {
+            let line = now.map_or(String::new(), |now| sung_line(&lines[now].text));
+            let translation = now.and_then(|now| lines[now].translation.clone()).filter(|_| translated);
+            let next = lines.get(now.map_or(0, |now| now + 1)).map(|line| line.text.clone()).unwrap_or_default();
+            (line, translation.unwrap_or(next), false)
+        }
+    }
+}
+
+/// A line as it is shown: one with nothing sung, a note.
+fn sung_line(text: &str) -> String {
+    if text.is_empty() { "♪".to_string() } else { text.to_string() }
+}
+
+/// The rows of the lyrics module for what plays now (`heard`): two lines sung before, the line sung now (with
+/// `translated`, its translation under it), and those to come; else why there are none, in the middle.
+fn lyric_rows(heard: Option<&crate::playing::Now>, lang: Lang, translated: bool) -> Vec<(String, Sing)> {
+    use crate::playing::Sung;
+    let mut rows = Vec::with_capacity(LYRIC_ROWS);
+    match heard.and_then(|heard| heard.sung.as_ref()) {
+        Some(Sung::Lines { lines, now }) => {
+            let text = |at: Option<usize>| at.and_then(|at| lines.get(at)).map_or(String::new(), |line| line.text.clone());
+            let at = now.map(|now| now as isize).unwrap_or(-1);
+            for before in [2, 1] {
+                rows.push((text(usize::try_from(at - before).ok()), Sing::Past));
+            }
+            rows.push((now.map_or(String::new(), |now| sung_line(&lines[now].text)), Sing::Now));
+            if translated {
+                rows.push((now.and_then(|now| lines[now].translation.clone()).unwrap_or_default(), Sing::Under));
+            }
+            let mut next = (at + 1) as usize;
+            while rows.len() < LYRIC_ROWS {
+                rows.push((text(Some(next)), Sing::Next));
+                next += 1;
+            }
+        }
+        _ => {
+            let (line, under, _) = sung_now(heard, lang, translated);
+            rows.extend([(String::new(), Sing::Past), (String::new(), Sing::Past), (line, Sing::Said), (under, Sing::Next)]);
+            rows.resize(LYRIC_ROWS, (String::new(), Sing::Next));
+        }
+    }
+    rows
+}
 const FACT_GAP: f32 = 3.0;
 pub const TABLE_ROW: f32 = 22.0;
 /// The most processes a lane past `Detail::Full` lists.
@@ -149,6 +221,11 @@ enum Block {
     /// What plays (and, under it, by whom and where), with what pauses,
     /// plays and skips it.
     Playing { title: String, about: String, playing: bool },
+    /// The line sung now, and under it its translation (or the next line); `said`, where they say why there are
+    /// none instead.
+    Lyric { line: String, under: String, said: bool },
+    /// Lyrics as they are sung: a row each (see `Sing`), as many as `LYRIC_ROWS`.
+    Lyrics { rows: Vec<(String, Sing)> },
     /// A list in five columns: headings that sort it (the processes'), or
     /// not; scrolled through past `visible` rows, or not.
     Table { headings: Vec<(String, Option<ProcessSort>)>, sort: Option<ProcessSort>, rows: Vec<[String; 5]>, visible: usize, scrolls: bool, widths: [f32; 4] },
@@ -167,6 +244,8 @@ impl Block {
             Block::Facts { .. } => 0.0,
             Block::Sound { .. } => MEDIA_GAP + MEDIA_ROW,
             Block::Playing { .. } => MEDIA_GAP + 2.0 * LINE,
+            Block::Lyric { .. } => MEDIA_GAP + 2.0 * LINE,
+            Block::Lyrics { .. } => MEDIA_GAP + LYRIC_ROWS as f32 * LYRIC_ROW,
             Block::Table { visible, .. } => *visible as f32 * TABLE_ROW,
         }
     }
@@ -187,6 +266,8 @@ impl Hash for Block {
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
             Block::Sound { level, muted } => (level, muted).hash(state),
             Block::Playing { title, about, playing } => (title, about, playing).hash(state),
+            Block::Lyric { line, under, said } => (line, under, said).hash(state),
+            Block::Lyrics { rows } => rows.hash(state),
             Block::Table { headings, sort, rows, visible, scrolls, widths } => {
                 headings.iter().for_each(|(label, key)| (label, key.map(|key| key as u8)).hash(state));
                 (sort.map(|sort| sort as u8), rows, visible, scrolls, widths.map(f32::to_bits)).hash(state);
@@ -922,7 +1003,17 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     blocks.push(Block::Playing { title, about, playing: heard.playing });
                 }
             }
+            if on("lyrics") {
+                let (line, under, said) = sung_now(crate::playing::now().as_ref(), lang, prefs.shows("lyrics", "translation"));
+                blocks.push(Block::Lyric { line, under, said });
+            }
             blocks
+        }
+        // The lyrics of what plays, as it plays (looked for and followed by `playing`).
+        "lyrics" => {
+            let heard = crate::playing::now();
+            let about = heard.as_ref().filter(|heard| !heard.title.is_empty()).map_or(String::new(), |heard| [heard.title.as_str(), heard.artist.as_str()].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · "));
+            vec![head(lang.pick("歌词", "Lyrics"), about, "", false), Block::Lyrics { rows: lyric_rows(heard.as_ref(), lang, on("translation")) }]
         }
         "system" => {
             let rows = [
@@ -1228,6 +1319,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Facts { .. } => "facts",
             Block::Sound { .. } => "sound",
             Block::Playing { .. } => "playing",
+            Block::Lyric { .. } => "lyric",
+            Block::Lyrics { .. } => "lyrics",
             Block::Table { .. } => "table",
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
@@ -1402,6 +1495,27 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let row = top + (2.0 * LINE - MEDIA_ROW) / 2.0;
                 for (place, (key, glyph)) in [(Key::Previous, "\u{E892}"), (Key::Toggle, if *playing { "\u{E769}" } else { "\u{E768}" }), (Key::Next, "\u{E893}")].into_iter().enumerate() {
                     pressed(frame, scene, hits, Hit::Media(key), glyph, pressed_from + place as f32 * (MEDIA_ROW + 2.0), row, false);
+                }
+            }
+            (Block::Lyric { line, under, said }, Pass::Content) => {
+                let top = y + MEDIA_GAP;
+                part("line");
+                frame.text(line, if *said { theme.small } else { theme.body }, if *said { theme.text2 } else { theme.text }, left, top, width, Align::Start);
+                part("under");
+                frame.text(under, theme.small, theme.text3, left, top + LINE, width, Align::Start);
+            }
+            (Block::Lyrics { rows }, Pass::Content) => {
+                for (index, (text, sing)) in rows.iter().enumerate() {
+                    let row = y + MEDIA_GAP + index as f32 * LYRIC_ROW;
+                    let (font, colour) = match sing {
+                        Sing::Now => (theme.body, theme.text),
+                        Sing::Under | Sing::Said => (theme.small, theme.text2),
+                        Sing::Past | Sing::Next => (theme.small, theme.text3),
+                    };
+                    // Each on the middle of its row, whatever its size.
+                    let (ascent, descent) = frame.baseline(font);
+                    part(&index.to_string());
+                    frame.text(text, font, colour, left, row + (LYRIC_ROW - ascent - descent) / 2.0, width, Align::Start);
                 }
             }
             (Block::Meter { label, fraction, value, hot, gap }, Pass::Content) => {

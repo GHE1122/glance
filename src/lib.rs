@@ -59,6 +59,8 @@ mod superio;
 mod tray;
 mod ui;
 mod playing;
+#[cfg(windows)]
+mod lyrics;
 // What plays and how loud, read and changed as the phone remote does: its own code for it.
 #[cfg(windows)]
 #[allow(dead_code)]
@@ -396,7 +398,12 @@ pub fn run() {
     }
     thread::spawn(move || {
         // What plays and how loud, while the module that shows them is on.
-        playing::watch(|| ui::prefs::module_on(&app().settings.lock().unwrap().view, "time"));
+        // The lyrics too, while either shows them.
+        playing::watch(|| {
+            let view = &app().settings.lock().unwrap().view;
+            let lyrics = ui::prefs::module_on(view, "lyrics") || (ui::prefs::module_on(view, "time") && ui::prefs::item_on(view, "time", "lyrics"));
+            (ui::prefs::module_on(view, "time") || lyrics, lyrics)
+        });
         let mut watch = watch::Watch::default();
         // What the remote-control helper is told of each sample.
         let mut told = remote::Told::open();

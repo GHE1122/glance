@@ -1936,6 +1936,13 @@ impl Ui {
             "docker" => ("Docker".into(), Some(p("运行中的容器各占多少处理器、内存、网络和磁盘，问的是 Docker 当前连接的引擎", "What each container running uses, as the engine Docker's current context points at says"))),
             "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器和内存占用，只从 Windows 读取，不会启动或唤醒发行版", "WSL 2's processors and memory, read from Windows alone: no distribution is started or kept up"))),
             "time" => (p("时间与媒体", "Time and media"), Some(p("时间和日期，以及音量和正在播放的内容", "The time and the date, the sound's level and what is playing"))),
+            "lyrics" => (
+                p("歌词", "Lyrics"),
+                Some(p(
+                    "正在播放的歌曲的歌词，随播放滚动。会把歌名发给网易云音乐或 LRCLIB 来查找；播放器要提供播放进度（网易云音乐需要 InfLink-rs 插件）",
+                    "The lyrics of what plays, as it plays. The track's title is sent to NetEase Cloud Music or LRCLIB to find them; the player must say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
+                )),
+            ),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
         }
     }
@@ -2062,6 +2069,8 @@ impl Ui {
             ("overlay" | "time", "twelve") => (p("12 小时制", "12-hour clock"), Some(p("关闭时为 24 小时制", "Off, a 24-hour clock"))),
             ("time", "sound") => (p("音量", "Volume"), Some(p("拖动调节音量，可静音", "Dragged to set how loud the sound is; muted too"))),
             ("time", "media") => (p("正在播放", "Now playing"), Some(p("可暂停、播放和切换曲目", "Paused, played and skipped"))),
+            ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在唱的这一句和下一句；会把歌名发给网易云音乐或 LRCLIB 来查找", "The line sung now and the next; the track's title is sent to NetEase Cloud Music or LRCLIB to find them"))),
+            ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在正在唱的这一句下面", "Under the line sung now, where there is one"))),
             ("overlay", "low") => (p("1% low", "1% low"), Some(p("最慢 1% 的帧换算成的帧率", "The slowest 1% of frames, as frames a second"))),
             ("overlay", "frametime") => (p("帧时间", "Frame time"), Some(p("最近一秒里最慢的一帧", "The slowest frame of the last second"))),
             ("overlay", "cpu" | "gpu") => (p("占用", "Use"), None),

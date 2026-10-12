@@ -22,9 +22,35 @@ pub struct Playing {
     /// What it is called; empty where the program does not say.
     pub title: String,
     pub artist: String,
-    /// The program playing it, by a short name.
+    pub album: String,
+    /// What kind of music the program says it is (a NetEase Cloud Music
+    /// with the InfLink-rs plugin puts the track's number there, `NCM-…`).
+    pub genres: Vec<String>,
+    /// The program playing it, by a short name, and as Windows identifies
+    /// it (empty where it does not tell Windows what it plays).
     pub app: String,
+    pub app_id: String,
     pub playing: bool,
+    /// How far into the track it is now and how long the track is
+    /// (seconds), where the program says.
+    pub timeline: Option<(f64, f64)>,
+}
+
+/// How far into its track `session` is now, and how long the track is
+/// (seconds): where it was when the program last said, and, while it
+/// plays, on by the time since. None where the program does not say.
+fn timeline(session: &Session, playing: bool) -> Option<(f64, f64)> {
+    let told = session.GetTimelineProperties().ok()?;
+    let ticks = |span: windows::Foundation::TimeSpan| span.Duration as f64 / 1e7;
+    let (position, end) = (ticks(told.Position().ok()?), ticks(told.EndTime().ok()?));
+    if end <= 0.0 {
+        return None;
+    }
+    // (Windows' times count from 1601, in tenths of a microsecond.)
+    let said = told.LastUpdatedTime().ok()?.UniversalTime as f64 / 1e7;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64() + 11_644_473_600.0;
+    let since = if playing { (now - said).max(0.0) } else { 0.0 };
+    Some(((position + since).min(end), end))
 }
 
 /// What Windows would act on were a media key pressed now. (Asked of the
@@ -78,13 +104,19 @@ fn told() -> Option<Playing> {
     if title.is_empty() {
         return None;
     }
+    let playing = session.GetPlaybackInfo().and_then(|info| info.PlaybackStatus()).is_ok_and(|status| status == Status::Playing);
+    let app_id = session.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default();
     Some(Playing {
         title,
         artist: about.Artist().map(|artist| artist.to_string()).unwrap_or_default(),
+        album: about.AlbumTitle().map(|album| album.to_string()).unwrap_or_default(),
+        genres: about.Genres().map(|genres| genres.into_iter().map(|genre| genre.to_string()).collect()).unwrap_or_default(),
         // (One with no name to show is not named: what plays is said
         // already, and a file's name adds nothing to it.)
-        app: session.SourceAppUserModelId().ok().and_then(|id| shown(&id.to_string())).unwrap_or_default(),
-        playing: session.GetPlaybackInfo().and_then(|info| info.PlaybackStatus()).is_ok_and(|status| status == Status::Playing),
+        app: shown(&app_id).unwrap_or_default(),
+        app_id,
+        playing,
+        timeline: timeline(&session, playing),
     })
 }
 
@@ -194,7 +226,7 @@ fn heard() -> Option<Playing> {
     *heard = Some(name.clone());
     // As its file describes it; one that does not say, by its file's name.
     let app = programs.iter().find(|(program, _, _)| *program == name).and_then(|(_, path, _)| described(path)).unwrap_or(name);
-    Some(Playing { title: String::new(), artist: String::new(), app, playing })
+    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None })
 }
 
 /// What is playing (or paused); none, when nothing is.

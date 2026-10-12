@@ -479,15 +479,23 @@ impl Drop for Handle {
 /// The body of an HTTPS GET of `url`, if it answered 200 (redirects
 /// followed, never from HTTPS to HTTP).
 fn get(url: &str) -> Option<Vec<u8>> {
-    ask(url, None)
+    ask(url, None, RELEASES)
+}
+
+/// What a release's places are asked for as: GitHub's API's JSON, or a file itself.
+const RELEASES: &str = "application/vnd.github+json, application/octet-stream";
+
+/// The body of an HTTPS GET of `url` asked for as JSON (any other site's API), if it answered 200.
+pub fn get_json(url: &str) -> Option<Vec<u8>> {
+    ask(url, None, "application/json, */*")
 }
 
 /// What `url` answers to JSON sent to it (an HTTPS POST), if it answered 200.
 pub fn post(url: &str, json: &[u8]) -> Option<Vec<u8>> {
-    ask(url, Some(json))
+    ask(url, Some(json), "application/json")
 }
 
-fn ask(url: &str, sent: Option<&[u8]>) -> Option<Vec<u8>> {
+fn ask(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<Vec<u8>> {
     let rest = url.strip_prefix("https://")?;
     let (host, path) = rest.split_at(rest.find('/')?);
     let agent = HSTRING::from(format!("Glance/{}", env!("CARGO_PKG_VERSION")));
@@ -514,11 +522,11 @@ fn ask(url: &str, sent: Option<&[u8]>) -> Option<Vec<u8>> {
         }
         match sent {
             None => {
-                let headers: Vec<u16> = "Accept: application/vnd.github+json, application/octet-stream\r\n".encode_utf16().collect();
+                let headers: Vec<u16> = format!("Accept: {accept}\r\n").encode_utf16().collect();
                 WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0).ok()?;
             }
             Some(body) => {
-                let headers: Vec<u16> = "Content-Type: application/json\r\n".encode_utf16().collect();
+                let headers: Vec<u16> = format!("Content-Type: application/json\r\nAccept: {accept}\r\n").encode_utf16().collect();
                 WinHttpSendRequest(request.0, Some(&headers), Some(body.as_ptr().cast()), body.len() as u32, body.len() as u32, 0).ok()?;
             }
         }
