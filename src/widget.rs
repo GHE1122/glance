@@ -576,6 +576,7 @@ impl Widgets {
     /// The desktop behind `hwnd` has been taken (see `CAPTURED`): it is
     /// drawn with it at once.
     pub fn captured(&mut self, hwnd: HWND) {
+        crate::ui::lyric_window::capture_ends();
         let live = self.live;
         if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
             let px = widget.contact.scale * widget.zoom;
@@ -1763,6 +1764,7 @@ impl Widget {
             // On another thread: the widget goes on meanwhile (with what it
             // had), kept out of the capture, and is told as it is done.
             self.exclude(true);
+            crate::ui::lyric_window::capture_begins();
             let (send, receiver) = std::sync::mpsc::channel();
             let (area, flush, hwnd) = (self.backdrop_area(), !live, self.window.hwnd.0 as isize);
             std::thread::spawn(move || {
