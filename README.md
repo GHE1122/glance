@@ -20,9 +20,9 @@ out with everything your PC is doing; move away and it slides back.
 ## What it shows
 
 - **CPU**: usage, every thread (point at one for its clock), clock (each kind's on processors with big and little cores), temperature, package power, each chiplet's temperature
-- **Graphics**: usage, video memory, clock, temperature, fan, and the card's power on NVIDIA and AMD cards
+- **Graphics**: usage, video memory, clock, temperature, fan, and the card's power on NVIDIA and AMD cards; Intel Arc graphics' temperature, clock, fan and power, from Intel's own driver library; and a hot spot line on the cards whose driver says it apart (NVIDIA's before the RTX 50 series, AMD's)
 - **Memory**: use, its speed (and what the modules are rated for, if it runs below that), and each module's temperature
-- **Network and disk**: traffic, and each drive's temperature, every drive on a line of its own
+- **Network and disk**: traffic, the name of the Wi-Fi network if you like, and each drive's temperature, every drive on a line of its own
 - **Processes**: the busiest programs by CPU, memory, I/O or GPU
 - **Storage**: space on each drive
 - **Motherboard**: temperatures and fan speeds
@@ -103,7 +103,12 @@ three at once, and ends at a touch of the mouse.
   [OpenRGB](https://openrgb.org), an open-source program under the GPL,
   which is downloaded from its own project (about 22 MB) only when you turn
   *Control the lights* on, and removed when you turn it off. A Thermalright
-  cooler's display and an ASUS laptop's keyboard light go out with them.
+  cooler's display goes out with them.
+- **Laptops**: the app draws a laptop, and its lights are the light under
+  its keys (ASUS laptops, for now): its levels, and on a keyboard that takes
+  a colour, its colour and what it does, with no need of OpenRGB. With the
+  screens put out the laptop does not stand by: touch it and they are on,
+  without signing in again.
 - The web page is served over plain HTTP: use it only on a network you
   trust. The app's requests cannot be forged or replayed by someone
   listening, but what the PC answers (temperatures, the song playing) is
