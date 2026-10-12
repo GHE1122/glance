@@ -430,8 +430,9 @@ fn latest() -> Option<Release> {
         heard += 1;
         installers.extend(answer);
     }
-    // The newest first; of the same version, still the sooner site first.
-    installers.sort_by(|(a, _), (b, _)| if newer(a, b) { Ordering::Less } else if newer(b, a) { Ordering::Greater } else { Ordering::Equal });
+    // The newest first; of the same version, Glance's own site's, then the sooner of the others.
+    let own = |url: &str| url.starts_with("https://glancepc.com/");
+    installers.sort_by(|(a, from_a), (b, from_b)| if newer(a, b) { Ordering::Less } else if newer(b, a) { Ordering::Greater } else { own(from_b).cmp(&own(from_a)) });
     let version = installers.first()?.0.clone();
     Some(Release { version, installers })
 }

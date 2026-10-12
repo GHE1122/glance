@@ -233,17 +233,19 @@ async function stats(request, env) {
     all(`SELECT ref, COUNT(*) AS views FROM events WHERE day >= ? AND kind = 'view' GROUP BY ref ORDER BY views DESC LIMIT 20`),
     all(`SELECT path, COUNT(*) AS views FROM events WHERE day >= ? AND kind = 'view' GROUP BY path ORDER BY views DESC LIMIT 20`),
     // Glance itself, each day: how many PCs asked (one address a day counts once), how many of them were new
-    // installs' first asking, and how many installers Glance took (updates).
+    // installs' first asking, how many askings were an updated Glance's first (it says which version it came
+    // from, wherever it took the installer), and how many installers were taken from this site.
     all(`SELECT day,
            COUNT(DISTINCT CASE WHEN kind = 'ask' THEN machine END) AS running,
            COUNT(DISTINCT CASE WHEN kind = 'ask' AND fresh = 1 THEN machine END) AS new_installs,
-           SUM(kind = 'take') AS updates
+           SUM(kind = 'ask' AND came_from != '') AS updates,
+           SUM(kind = 'take') AS taken_here
          FROM asks WHERE day >= ? GROUP BY day ORDER BY day`),
     // Which versions run, over the latest day there is.
     all(`SELECT version, COUNT(DISTINCT machine) AS running FROM asks
          WHERE day >= ? AND kind = 'ask' AND day = (SELECT MAX(day) FROM asks WHERE kind = 'ask') GROUP BY version ORDER BY running DESC`),
     // Updates, from which version to which.
-    all(`SELECT came_from, version, COUNT(*) AS updates FROM asks WHERE day >= ? AND kind = 'take' GROUP BY came_from, version ORDER BY updates DESC LIMIT 40`),
+    all(`SELECT came_from, version, COUNT(*) AS updates FROM asks WHERE day >= ? AND kind = 'ask' AND came_from != '' GROUP BY came_from, version ORDER BY updates DESC LIMIT 40`),
     // Staying: of the PCs asking each day (counted per day, then added up), how many weeks Glance has been there.
     all(`SELECT weeks, COUNT(*) AS asking_days FROM (SELECT DISTINCT day, machine, weeks FROM asks WHERE day >= ? AND kind = 'ask' AND weeks IS NOT NULL)
          GROUP BY weeks ORDER BY weeks`),
