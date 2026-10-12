@@ -110,7 +110,6 @@ pub fn hide() {
 
 #[cfg(test)]
 mod tests {
-    use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsWindowVisible};
 
     /// On a desktop: the tip comes where it is asked for, and goes.
