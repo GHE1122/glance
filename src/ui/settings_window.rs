@@ -1455,8 +1455,8 @@ impl Ui {
                     (Some(_), _) => (p("正在发送…", "Sending…"), (p("发送中", "Sending"), Target::SendReport, Button::Quiet)),
                     (None, Some(Some(id))) => (
                         match lang {
-                            Lang::Zh => format!("已发送，编号 {id}。向我们提问时附上这个编号"),
-                            Lang::En => format!("Sent, as {id}. Quote that when asking us about it"),
+                            Lang::Zh => format!("已发送，编号 {id}。向我们提问时请附上这个编号"),
+                            Lang::En => format!("Sent, as {id}. Please quote it when asking us about it"),
                         },
                         (p("再发一次", "Send again"), Target::SendReport, Button::Plain),
                     ),
