@@ -54,7 +54,7 @@ impl Button {
             (Button::Pin, true) if overlay => p("解除锁定", "Unlock position"),
             (Button::Pin, false) => p("固定位置和大小", "Pin position and size"),
             (Button::Pin, true) => p("取消固定", "Unpin"),
-            (Button::Through, false) => p("鼠标穿透：点击作用于后方窗口", "Click-through: clicks reach the window behind"),
+            (Button::Through, false) => p("鼠标穿透", "Click-through"),
             (Button::Through, true) => p("关闭鼠标穿透", "Turn off click-through"),
             (Button::Close, _) if overlay => p("关闭悬浮窗", "Close the overlay"),
             (Button::Close, _) => p("收起", "Put away"),

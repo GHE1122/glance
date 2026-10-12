@@ -119,6 +119,11 @@ data class PcState(
     val light: Light = Light("FFFFFF", "steady"), val media: Media? = null, val reads: Reads? = null, val power: List<Plan> = emptyList(), val keys: Keys? = null,
     /** Whether the PC has any lights this can put out and light at all, and whether it can give them an effect and a colour. */
     val lightsThere: Boolean = true, val coloursThere: Boolean = true,
+    /**
+     * Whether the PC keeps the colours to choose from, for every phone and its own settings (one that does not is
+     * older: each phone then keeps its own); and those it keeps, once any were kept.
+     */
+    val keepsColours: Boolean = false, val colours: List<String>? = null,
 ) {
     companion object {
         fun from(json: JSONObject) = PcState(
@@ -126,6 +131,8 @@ data class PcState(
             power = json.optJSONArray("power")?.let { list -> (0 until list.length()).map { at -> list.getJSONObject(at).let { Plan(it.optString("id"), it.optString("name"), it.optBoolean("on")) } } } ?: emptyList(),
             lightsThere = json.optBoolean("lights_there", true),
             coloursThere = json.optBoolean("colours_there", true),
+            keepsColours = json.has("colours"),
+            colours = json.optJSONArray("colours")?.let { list -> (0 until list.length()).map { list.optString(it).uppercase() }.filter { it.length == 6 } },
             keys = json.optJSONObject("keys")?.let { Keys(it.int("level"), it.optInt("most", 3)) },
             media = json.optJSONObject("media")?.let { Media(it.optString("title"), it.optString("artist"), it.optString("app"), it.optBoolean("playing")) },
             reads = json.optJSONObject("reads")?.let { Reads(it.read("cpu"), it.read("gpu"), it.read("ram"), it.read("disk"), it.int("cpu_fan"), it.int("case_fan")) },
@@ -316,4 +323,63 @@ object Look {
     fun colours(context: Context): List<String> = kept(context).getString("palette", null)?.let(::list) ?: (GIVEN + list(kept(context).getString("colours", "")))
 
     fun keep(context: Context, colours: List<String>) = kept(context).edit().putString("palette", colours.joinToString(",")).apply()
+
+    /** The colours made on this phone: those it keeps that it did not start with. */
+    fun made(context: Context): List<String> = colours(context).filter { it !in GIVEN }
+
+    /**
+     * Whether this phone's colours have been given to the PC with key [pc], which keeps them for every phone: given
+     * once, the first time it is reached after it began keeping them.
+     */
+    fun given(context: Context, pc: String) = kept(context).getBoolean("given_${pc.take(8)}", false)
+
+    fun give(context: Context, pc: String) = kept(context).edit().putBoolean("given_${pc.take(8)}", true).apply()
+}
+
+/**
+ * Whether there is a newer app than this one, as Glance's site says: asked once a day, as the app is opened. (The
+ * app is not from a store: nothing else would tell of a newer one.) The site counts the asking, by the day and the
+ * network it comes from, and is told nothing of the phone but this app's version.
+ */
+object Newer {
+    private const val SITE = "https://glancepc.com"
+
+    /** Where the newest app is got. */
+    const val PAGE = "$SITE/app/"
+
+    private fun kept(context: Context) = context.getSharedPreferences("newer", Context.MODE_PRIVATE)
+
+    private fun parts(version: String) = version.split('.').map { it.toIntOrNull() ?: 0 }
+
+    /** Whether version [one] is later than [other]. */
+    fun later(one: String, other: String): Boolean {
+        val (a, b) = parts(one) to parts(other)
+        for (at in 0 until maxOf(a.size, b.size)) {
+            val (x, y) = (a.getOrElse(at) { 0 }) to (b.getOrElse(at) { 0 })
+            if (x != y) return x > y
+        }
+        return false
+    }
+
+    /** The newer version last heard of, if this app is still older than it. */
+    fun known(context: Context): String? = kept(context).getString("version", null)?.takeIf { later(it, BuildConfig.VERSION_NAME) }
+
+    /** Asks the site, unless it was asked today: not from the main thread. */
+    fun ask(context: Context) {
+        val today = System.currentTimeMillis() / 86_400_000
+        if (kept(context).getLong("asked", 0) == today) return
+        val asking = (java.net.URL("$SITE/api/app?v=${BuildConfig.VERSION_NAME}").openConnection() as java.net.HttpURLConnection).apply {
+            connectTimeout = 8000
+            readTimeout = 8000
+            setRequestProperty("User-Agent", "GlanceApp/${BuildConfig.VERSION_NAME}")
+        }
+        try {
+            val said = JSONObject(asking.inputStream.bufferedReader().use { it.readText() }).optString("version")
+            if (Regex("[0-9]+(\\.[0-9]+){1,3}").matches(said)) kept(context).edit().putString("version", said).putLong("asked", today).apply()
+        } catch (_: Exception) {
+            // Not reached, or not answered as expected: asked again the next time the app is opened.
+        } finally {
+            asking.disconnect()
+        }
+    }
 }

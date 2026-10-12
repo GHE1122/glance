@@ -84,6 +84,11 @@ pub struct Config {
     /// The key this PC's own Glance asks by (its settings show the phone's
     /// page, to be used there as on a phone): taken from this PC alone.
     pub local: Option<String>,
+    /// The colours the lights are chosen from (RRGGBB), in their order, as
+    /// a phone or this PC's settings last kept them: the same for all of
+    /// them. None kept yet: each shows the ones it starts with, and a phone
+    /// that kept its own before this did sends them.
+    pub colours: Option<Vec<String>>,
     /// How the screens are put out.
     pub screens: Screens,
     /// The monitors this helper is keeping dark with their signal kept,
@@ -106,6 +111,7 @@ impl Default for Config {
             lights_left_alone: false,
             openrgb_started: None,
             local: None,
+            colours: None,
             screens: Screens::default(),
             darkened: Vec::new(),
         }

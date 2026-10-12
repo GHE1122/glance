@@ -92,10 +92,15 @@ struct State {
     night: Option<Night>,
 }
 
+/// How many colours are kept to choose from at most.
+const COLOURS_MOST: usize = 24;
+
 struct Helper {
     config: Config,
     /// How the lights are when they are on: as the phone last chose.
     light: Mutex<Light>,
+    /// The colours they are chosen from, once kept (see `Config::colours`).
+    colours: Mutex<Option<Vec<String>>>,
     /// How bright the light under the keys is with them, once chosen.
     keys: Mutex<Option<u8>>,
     /// The phones paired with, as the configuration had them when it was
@@ -359,6 +364,7 @@ impl Helper {
             // And whether, of those, there is the program that sets a board's and a card's lights and their colours.
             "colours_there": lights::program(&self.config).is_some(),
             "light": light,
+            "colours": *self.colours.lock().unwrap(),
             "reads": reads::read(),
             // A laptop's keys: how bright their light is set to be with the lights on (not known till chosen), of how bright it goes.
             "keys": keys::there().then(|| json!({ "level": *self.keys.lock().unwrap(), "most": keys::MOST })),
@@ -406,6 +412,24 @@ impl Helper {
                 let effect = asked.get("effect").and_then(|effect| serde_json::from_value::<Effect>(effect.clone()).ok());
                 self.choose(asked.get("color").and_then(Value::as_str), effect, asked.get("brightness").and_then(Value::as_u64));
                 self.lights(asked.get("on").and_then(Value::as_bool).unwrap_or(true)).map_err(failed)?
+            }
+            // The colours to choose from, as they are from now on: each a
+            // colour, once, no more than a row of them holds.
+            ("POST", "/v1/colours") => {
+                let said = asked.get("colours").and_then(Value::as_array).ok_or((400, "\"colours\" is missing".to_string()))?;
+                let mut colours: Vec<String> = Vec::new();
+                for one in said {
+                    let one = one.as_str().filter(|one| one.len() == 6 && one.bytes().all(|b| b.is_ascii_hexdigit())).ok_or((400, "a colour is not RRGGBB".to_string()))?.to_ascii_uppercase();
+                    if !colours.contains(&one) {
+                        colours.push(one);
+                    }
+                }
+                if colours.len() > COLOURS_MOST {
+                    return Err((400, "too many colours".to_string()));
+                }
+                let kept = colours.clone();
+                Config::change(|config| config.colours = Some(kept)).map_err(|error| failed(error.to_string()))?;
+                *self.colours.lock().unwrap() = Some(colours);
             }
             // How bright the light under the keys is: set now (unless the
             // lights are out: then for when they are on again), and kept.
@@ -924,7 +948,7 @@ fn main() -> std::io::Result<()> {
     let _ = Config::change(|_| {});
     // (Whether the lights are on, as OpenRGB has them if it is running.)
     let state = State { lights: lights::lit(), ..State::default() };
-    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), keys: Mutex::new(config.keys), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false), nighting: Mutex::new(()), session, callers: Mutex::default() });
+    let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), colours: Mutex::new(config.colours.clone()), keys: Mutex::new(config.keys), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false), nighting: Mutex::new(()), session, callers: Mutex::default() });
     let following = helper.clone();
     std::thread::spawn(move || {
         let mut last = None;

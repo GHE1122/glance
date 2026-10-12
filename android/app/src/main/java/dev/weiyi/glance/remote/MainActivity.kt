@@ -94,6 +94,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.min
 
@@ -133,6 +134,12 @@ private fun App(opened: String?, taken: () -> Unit) {
     var page by remember { mutableStateOf(Page.Home) }
     var shown by remember { mutableStateOf(Look.shown(context)) }
     var colours by remember { mutableStateOf(Look.colours(context)) }
+    // A newer app than this one, once the site has said so.
+    var newer by remember { mutableStateOf(Newer.known(context)) }
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { Newer.ask(context) }
+        newer = Newer.known(context)
+    }
     // A code scanned that is no pairing code is said on the pairing page.
     var wrong by remember { mutableStateOf(false) }
     var unpairing by remember { mutableStateOf<Int?>(null) }
@@ -154,6 +161,14 @@ private fun App(opened: String?, taken: () -> Unit) {
 
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         Column(Modifier.fillMaxSize()) {
+            newer?.let { version ->
+                Text(
+                    stringResource(R.string.newer_app, version),
+                    color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clip(RoundedCornerShape(12.dp)).background(Accent)
+                        .clickable(role = Role.Button) { context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Newer.PAGE))) }.padding(horizontal = 14.dp, vertical = 9.dp),
+                )
+            }
             Computers(pcs, chosen, choose = { at -> Pcs.choose(context, at); chosen = at }, add = { wrong = false; page = Page.Pairing }, settings = { page = Page.Settings })
             val pc = pcs.getOrNull(chosen)
             if (pc == null) {
@@ -350,6 +365,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
     var part by remember { mutableStateOf(Part.Cpu) }
     // A colour being made, shown before the PC has it.
     var making by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
 
     suspend fun ask(path: String, body: JSONObject? = null) {
         val before = asked[0]
@@ -388,6 +404,19 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 ask(next.path, next.body)
             }
             busy = null
+        }
+    }
+
+    // A PC that keeps the colours is given those made on this phone, once: after those it has already (those a
+    // phone starts with, where it has kept none).
+    val keeps = state?.keepsColours == true
+    LaunchedEffect(pc, keeps) {
+        val now = state
+        if (now != null && keeps && !Look.given(context, pc.key)) {
+            val theirs = now.colours ?: colours.filter { it !in Look.made(context) }
+            val all = (theirs + Look.made(context).filter { it !in theirs }).take(24)
+            if (all != now.colours) act("colours", "/v1/colours", JSONObject().put("colours", JSONArray(all))) { it.copy(colours = all) }
+            Look.give(context, pc.key)
         }
     }
 
@@ -490,8 +519,18 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
             }
         }
         if (shown["lights"] != false && now.coloursThere && now.lights == true && !night && light != null) {
+            // The colours to choose from: the PC's, where it keeps them (the same on every phone and in its own
+            // settings); this phone's own, with a PC that does not, or has kept none yet.
+            val palette = now.colours ?: colours
+            val keepColours: (List<String>) -> Unit = { kept ->
+                if (now.keepsColours) {
+                    act("colours", "/v1/colours", JSONObject().put("colours", JSONArray(kept))) { it.copy(colours = kept) }
+                } else {
+                    keep(kept)
+                }
+            }
             LightsCard(
-                light, heat = reads != null, own = colours, enabled = reached, keep = keep, preview = { making = it },
+                light, heat = reads != null, own = palette, enabled = reached, keep = keepColours, preview = { making = it },
                 choose = { color, effect, brightness ->
                     making = null
                     val body = JSONObject().put("on", true)

@@ -87,6 +87,22 @@ async function latest(request, env, url) {
   return new Response(answer.body, { status: answer.status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
 }
 
+// The phone app asking for the latest release: told its version (the app's
+// is the release's), and counted as Glance's own asking is.
+async function app(request, env, url) {
+  const of = version(url.searchParams.get("v"));
+  if (of && /^GlanceApp\//.test(request.headers.get("user-agent") || "")) {
+    try {
+      await count(request, env, "app", of, "", false, null);
+    } catch {
+      // (The count failing is no reason to keep the answer from the app.)
+    }
+  }
+  const answer = await env.ASSETS.fetch(new Request(new URL("/latest.json", url), { method: "GET" }));
+  const told = answer.ok ? await answer.json() : {};
+  return json({ version: String(told.tag_name || "").replace(/^v/, "") });
+}
+
 // An installer taken by Glance itself (it says which version takes it).
 async function taken(request, env, url) {
   const of = version((url.pathname.match(/^\/dl\/Glance_([0-9.]+)_x64-setup\.exe$/) || [])[1]);
@@ -214,13 +230,15 @@ async function stats(request, env) {
   const days = Math.min(Math.max(parseInt(new URL(request.url).searchParams.get("days") || "30", 10) || 30, 1), 365);
   const since = dayOf(Date.now() - (days - 1) * 86400000);
   const all = (sql) => env.STATS.prepare(sql).bind(since).all().then((r) => r.results);
-  const [daily, countries, sources, refs, pages, glance, versions, updates, staying] = await Promise.all([
+  const [daily, countries, sources, refs, pages, glance, apps, versions, updates, staying] = await Promise.all([
     // Each day: pages shown, visitors, downloads, visitors who downloaded.
     all(`SELECT day,
            SUM(kind = 'view') AS views,
            COUNT(DISTINCT CASE WHEN kind = 'view' THEN visitor END) AS visitors,
-           SUM(kind = 'download') AS downloads,
-           COUNT(DISTINCT CASE WHEN kind = 'download' THEN visitor END) AS downloaders
+           SUM(kind = 'download' AND path NOT LIKE '/app%') AS downloads,
+           COUNT(DISTINCT CASE WHEN kind = 'download' AND path NOT LIKE '/app%' THEN visitor END) AS downloaders,
+           SUM(kind = 'download' AND path LIKE '/app%') AS app_downloads,
+           COUNT(DISTINCT CASE WHEN kind = 'download' AND path LIKE '/app%' THEN visitor END) AS app_downloaders
          FROM events WHERE day >= ? GROUP BY day ORDER BY day`),
     // A visitor is one a day: counted per day, then added up.
     all(`SELECT country, SUM(visitors) AS visitors, SUM(downloaders) AS downloaders FROM (
@@ -239,8 +257,12 @@ async function stats(request, env) {
            COUNT(DISTINCT CASE WHEN kind = 'ask' THEN machine END) AS running,
            COUNT(DISTINCT CASE WHEN kind = 'ask' AND fresh = 1 THEN machine END) AS new_installs,
            SUM(kind = 'ask' AND came_from != '') AS updates,
-           SUM(kind = 'take') AS taken_here
+           SUM(kind = 'take') AS taken_here,
+           COUNT(DISTINCT CASE WHEN kind = 'app' THEN machine END) AS apps
          FROM asks WHERE day >= ? GROUP BY day ORDER BY day`),
+    // Which versions of the phone app are in use, over the latest day there is.
+    all(`SELECT version, COUNT(DISTINCT machine) AS running FROM asks
+         WHERE day >= ? AND kind = 'app' AND day = (SELECT MAX(day) FROM asks WHERE kind = 'app') GROUP BY version ORDER BY running DESC`),
     // Which versions run, over the latest day there is.
     all(`SELECT version, COUNT(DISTINCT machine) AS running FROM asks
          WHERE day >= ? AND kind = 'ask' AND day = (SELECT MAX(day) FROM asks WHERE kind = 'ask') GROUP BY version ORDER BY running DESC`),
@@ -250,7 +272,7 @@ async function stats(request, env) {
     all(`SELECT weeks, COUNT(*) AS asking_days FROM (SELECT DISTINCT day, machine, weeks FROM asks WHERE day >= ? AND kind = 'ask' AND weeks IS NOT NULL)
          GROUP BY weeks ORDER BY weeks`),
   ]);
-  return json({ since, days, daily, countries, sources, refs, pages, glance, versions, updates, staying });
+  return json({ since, days, daily, countries, sources, refs, pages, glance, apps, versions, updates, staying });
 }
 
 export default {
@@ -261,6 +283,7 @@ export default {
     if (url.pathname === "/api/report" && request.method === "POST") return report(request, env);
     if (url.pathname === "/api/reports" && request.method === "GET") return reports(request, env);
     if (url.pathname === "/api/latest" && request.method === "GET") return latest(request, env, url);
+    if (url.pathname === "/api/app" && request.method === "GET") return app(request, env, url);
     if (url.pathname.startsWith("/dl/Glance_") && request.method === "GET" && url.searchParams.has("u")) return taken(request, env, url);
     return env.ASSETS.fetch(request);
   },

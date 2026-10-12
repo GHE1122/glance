@@ -588,6 +588,10 @@ struct PhonePage {
     pressed: Option<super::phone_art::Part>,
     /// A colour being made for the lights, while the ring it is made on is open.
     making: Option<super::phone_art::Making>,
+    /// Since when what is pressed has been held (a colour held a while: the colours kept are taken away); and
+    /// whether they are being.
+    held_since: Instant,
+    removing: bool,
     link: Option<(std::sync::mpsc::Sender<(String, String, String)>, std::sync::mpsc::Receiver<Option<serde_json::Value>>)>,
     /// When the remote was last asked how the PC is, and how many askings are unanswered.
     asked: Instant,
@@ -780,7 +784,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             sending: None,
             sent: None,
             phone_from: Instant::now(),
-            phone: PhonePage { state: None, parts: Vec::new(), at: None, scroll: 0.0, most: 0.0, slid: None, pressed: None, making: None, link: None, asked: Instant::now(), waiting: 0 },
+            phone: PhonePage { state: None, parts: Vec::new(), at: None, scroll: 0.0, most: 0.0, slid: None, pressed: None, making: None, held_since: Instant::now(), removing: false, link: None, asked: Instant::now(), waiting: 0 },
             uninstaller: std::env::current_exe().ok().and_then(|exe| elevation::trusted(&exe.with_file_name("uninstall.exe"))),
             scroll: 0.0,
             scroll_target: 0.0,
@@ -3322,8 +3326,15 @@ impl Ui {
         // (The ring is shut with the lights' card: where they are off, or the remote does not answer.)
         if !state.is_some_and(|state| state["lights"].as_bool() == Some(true) && state["night"].as_bool() != Some(true)) {
             self.phone.making = None;
+            self.phone.removing = false;
         }
-        let painted = super::phone_art::paint(frame, Rect { x, y, w, h }, self.lang, &name, &reads, state, !self.remote, self.phone_from.elapsed().as_secs_f32(), self.phone.scroll, held, self.phone.making.as_ref());
+        // A colour held a while: the colours kept can be taken away (and it is not chosen as it is let go).
+        if matches!(self.phone.pressed, Some(super::phone_art::Part::Colour(_))) && self.phone.held_since.elapsed() >= super::buttons::LINGER {
+            self.phone.pressed = None;
+            self.phone.making = None;
+            self.phone.removing = true;
+        }
+        let painted = super::phone_art::paint(frame, Rect { x, y, w, h }, self.lang, &name, &reads, state, !self.remote, self.phone_from.elapsed().as_secs_f32(), self.phone.scroll, held, self.phone.making.as_ref(), self.phone.removing);
         self.phone.at = Some((Rect { x, y, w, h }, k));
         self.phone.most = (painted.tall - tall).max(0.0);
         self.phone.scroll = self.phone.scroll.min(self.phone.most);
@@ -3386,6 +3397,7 @@ impl Ui {
             unsafe { SetCapture(self.hwnd) };
         } else {
             self.phone.pressed = Some(part);
+            self.phone.held_since = Instant::now();
         }
         self.next_frame = Instant::now();
         true
@@ -3454,8 +3466,23 @@ impl Ui {
                 self.next_frame = Instant::now();
                 return true;
             }
+            // Kept with the others, for this PC's settings and every phone, where it is not one of them already.
             Part::Use => {
-                self.phone.making = None;
+                let Some(making) = self.phone.making.take() else { return true };
+                self.next_frame = Instant::now();
+                let (made, mut kept) = (making.hex(), super::phone_art::kept_colours(&state));
+                if kept.contains(&made) {
+                    return true;
+                }
+                kept.push(made);
+                ("/v1/colours", json!({ "colours": kept }))
+            }
+            Part::Remove(colour) => {
+                let kept: Vec<String> = super::phone_art::kept_colours(&state).into_iter().filter(|one| one != colour).collect();
+                ("/v1/colours", json!({ "colours": kept }))
+            }
+            Part::Done => {
+                self.phone.removing = false;
                 self.next_frame = Instant::now();
                 return true;
             }
@@ -3503,6 +3530,7 @@ impl Ui {
                     }
                 }
                 Part::Colour(_) | Part::GiveUp => state["light"]["color"] = body["color"].clone(),
+                Part::Use | Part::Remove(_) => state["colours"] = body["colours"].clone(),
                 Part::Effect(effect) => state["light"]["effect"] = json!(effect),
                 Part::Monitor(index) => state["monitors"][*index]["on"] = body["on"].clone(),
                 Part::Keys(level) => state["keys"]["level"] = json!(level),

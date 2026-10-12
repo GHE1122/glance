@@ -82,19 +82,22 @@
 
   // Glance itself: what its askings of this site say.
   function glance(data) {
-    var rows = everyDay(data.since, data.days, data.glance, ["running", "new_installs", "updates", "taken_here"]);
+    var rows = everyDay(data.since, data.days, data.glance, ["running", "new_installs", "updates", "taken_here", "apps"]);
     var sum = function (k) { return rows.reduce(function (a, r) { return a + (r[k] || 0); }, 0); };
     var told = data.glance.length ? data.glance[data.glance.length - 1] : null;
     tiles($("[data-glance-tiles]"), [
       ["在运行的电脑", told ? fmt(told.running) : "—", told ? told.day + " 这一天" : "还没有数据"],
       ["新安装", fmt(sum("new_installs")), "这段时间里"],
       ["更新", fmt(sum("updates")), "这段时间里"],
-      ["从官网取的安装包", fmt(sum("taken_here")), "更新时下载的次数"]
+      ["从官网取的安装包", fmt(sum("taken_here")), "更新时下载的次数"],
+      ["在用的手机 APP", told ? fmt(told.apps) : "—", told ? told.day + " 这一天" : "还没有数据"]
     ]);
     chart($("[data-glance-chart]"), rows, ["running", "new_installs", "updates"], function (r) {
       return "在运行 " + fmt(r.running) + "<br>新安装 " + fmt(r.new_installs) + " · 更新 " + fmt(r.updates);
     });
-    table($("[data-glance-daily]"), ["日期", "在运行", "新安装", "更新", "从官网取的安装包"], rows.slice().reverse().map(function (r) { return [r.day, fmt(r.running), fmt(r.new_installs), fmt(r.updates), fmt(r.taken_here)]; }));
+    table($("[data-glance-daily]"), ["日期", "在运行", "新安装", "更新", "从官网取的安装包", "手机 APP"], rows.slice().reverse().map(function (r) { return [r.day, fmt(r.running), fmt(r.new_installs), fmt(r.updates), fmt(r.taken_here), fmt(r.apps)]; }));
+    var apps = data.apps.reduce(function (a, v) { return a + v.running; }, 0);
+    table($("[data-apps]"), ["版本", "手机", "占比"], data.apps.map(function (v) { return [v.version, fmt(v.running), pct(v.running, apps)]; }));
     var running = data.versions.reduce(function (a, v) { return a + v.running; }, 0);
     table($("[data-versions]"), ["版本", "电脑", "占比"], data.versions.map(function (v) { return [v.version, fmt(v.running), pct(v.running, running)]; }));
     table($("[data-updates]"), ["从", "到", "次数"], data.updates.map(function (u) { return [u.came_from === "pre" ? "0.3.3 之前" : u.came_from, u.version, fmt(u.updates)]; }));
@@ -121,19 +124,20 @@
 
   function show(data) {
     glance(data); reports();
-    var rows = everyDay(data.since, data.days, data.daily, ["views", "visitors", "downloads", "downloaders"]);
+    var rows = everyDay(data.since, data.days, data.daily, ["views", "visitors", "downloads", "downloaders", "app_downloads", "app_downloaders"]);
     var sum = function (k) { return rows.reduce(function (a, r) { return a + (r[k] || 0); }, 0); };
     var visitors = sum("visitors"), downloaders = sum("downloaders");
     tiles($("[data-tiles]"), [
       ["独立访客", fmt(visitors), "按天去重后相加"],
       ["浏览", fmt(sum("views")), "打开页面的次数"],
-      ["下载点击", fmt(sum("downloads")), fmt(downloaders) + " 位访客"],
+      ["下载点击", fmt(sum("downloads")), "电脑版，" + fmt(downloaders) + " 位访客"],
+      ["APP 下载点击", fmt(sum("app_downloads")), "手机 APP，" + fmt(sum("app_downloaders")) + " 位访客"],
       ["转化率", pct(downloaders, visitors), "点了下载的访客 / 独立访客"]
     ]);
     chart($("[data-chart]"), rows, ["visitors", "downloaders"], function (r) {
       return "独立访客 " + fmt(r.visitors) + " · 浏览 " + fmt(r.views) + "<br>点了下载的访客 " + fmt(r.downloaders) + "（" + pct(r.downloaders, r.visitors) + "）";
     });
-    table($("[data-daily]"), ["日期", "独立访客", "浏览", "下载点击", "点了下载的访客"], rows.slice().reverse().map(function (r) { return [r.day, fmt(r.visitors), fmt(r.views), fmt(r.downloads), fmt(r.downloaders)]; }));
+    table($("[data-daily]"), ["日期", "独立访客", "浏览", "下载点击", "点了下载的访客", "APP 下载点击"], rows.slice().reverse().map(function (r) { return [r.day, fmt(r.visitors), fmt(r.views), fmt(r.downloads), fmt(r.downloaders), fmt(r.app_downloads)]; }));
     table($("[data-countries]"), ["国家和地区", "访客", "下载", "转化"], data.countries.map(function (c) { return [place(c.country), fmt(c.visitors), fmt(c.downloaders), pct(c.downloaders, c.visitors)]; }));
     table($("[data-sources]"), ["来源", "下载点击"], data.sources.map(function (s) { return [s.source === "gitee" ? "Gitee" : s.source === "github" ? "GitHub" : s.source || "未知", fmt(s.downloads)]; }));
     table($("[data-pages]"), ["页面", "浏览"], data.pages.map(function (p) { return [p.path === "/" ? "中文首页" : p.path === "/en/" ? "英文首页" : p.path, fmt(p.views)]; }));

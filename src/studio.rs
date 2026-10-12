@@ -1051,16 +1051,16 @@ pub fn phone_page(out: &Path) -> Result<(), String> {
         "night": false, "screen": true, "lights": true, "lights_there": true, "colours_there": true,
         "light": { "color": "3CE0A0", "effect": "steady", "brightness": 80 },
         "power": [{ "id": "efficiency", "name": "", "on": false }, { "id": "balanced", "name": "", "on": true }, { "id": "performance", "name": "", "on": false }],
-        "monitors": [], "volume": 40, "muted": false, "media": null, "keys": null,
+        "colours": ["FF7B4A", "FFFFFF", "70B3FF", "59C98A", "C68CFF", "FF5E7E", "112233", "AA22CC", "FFE14A"], "monitors": [], "volume": 40, "muted": false, "media": null, "keys": null,
     });
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let px = 2.0;
     let (w, h) = ((SCREEN.0 * px) as u32, (SCREEN.1 * px) as u32);
     let making = Making { was: "3CE0A0".into(), hue: 210.0, depth: 0.6 };
-    for (name, making, scroll) in [("shut", None, 0.0), ("ring", Some(&making), 330.0), ("ring-top", Some(&making), 0.0)] {
+    for (name, making, scroll) in [("shut", None, 0.0), ("ring", Some(&making), 330.0), ("ring-top", None, 330.0)] {
         let pixels = gfx
             .draw_offscreen((w, h), px, |frame| {
-                phone_art::paint(frame, view::Rect { x: 0.0, y: 0.0, w: SCREEN.0, h: SCREEN.1 }, Lang::Zh, "DESKTOP", &reads, Some(&state), false, 3.0, scroll, None, making);
+                phone_art::paint(frame, view::Rect { x: 0.0, y: 0.0, w: SCREEN.0, h: SCREEN.1 }, Lang::Zh, "DESKTOP", &reads, Some(&state), false, 3.0, scroll, None, making, name == "ring-top");
             })
             .map_err(|e| e.to_string())?;
         save_png(&out.join(format!("{name}.png")), w, h, &pixels).map_err(|e| e.to_string())?;

@@ -326,6 +326,9 @@ pub enum Part {
     Power(String),
     /// A colour for the lights (RRGGBB).
     Colour(String),
+    /// A colour kept to choose from, taken away; and the taking away ended.
+    Remove(String),
+    Done,
     /// What the lights do.
     Effect(&'static str),
     /// How bright the lights are: slid.
@@ -457,6 +460,17 @@ pub struct Painted {
 
 /// The colours the app starts with.
 const GIVEN: [&str; 6] = ["FF7B4A", "FFFFFF", "70B3FF", "59C98A", "C68CFF", "FF5E7E"];
+/// How far apart the colours to choose from are, each way (the screen's measure).
+const SWATCH: f32 = 42.0;
+
+/// The colours kept to choose from, as the remote says (see the remote's
+/// `Config::colours`); none kept yet, those the app starts with.
+pub fn kept_colours(state: &Value) -> Vec<String> {
+    match state.get("colours").and_then(Value::as_array) {
+        Some(kept) => kept.iter().filter_map(Value::as_str).map(str::to_uppercase).collect(),
+        None => GIVEN.iter().map(|given| given.to_string()).collect(),
+    }
+}
 /// How much taller the lights' card is with the ring open: the ring, how much colour, and the two buttons.
 const RING: f32 = 4.0 + 196.0 + 16.0 + 28.0 + 16.0 + 44.0 + 16.0;
 /// Where the page under its head begins (the screen's measure).
@@ -474,9 +488,10 @@ fn colour(hex: &str) -> Color {
 /// where the remote is not turned on at all), `seconds` into the fans'
 /// turning, the page under its head moved up by `scroll`,
 /// and a slider in hand shown where it is held (`held`: which, and how far
-/// along); the ring a colour is made on is open while one is `making`.
+/// along); the ring a colour is made on is open while one is `making`;
+/// the colours kept are being taken away while `removing`.
 #[allow(clippy::too_many_arguments)]
-pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, state: Option<&Value>, off: bool, seconds: f32, scroll: f32, held: Option<(&Part, f32)>, making: Option<&Making>) -> Painted {
+pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, state: Option<&Value>, off: bool, seconds: f32, scroll: f32, held: Option<(&Part, f32)>, making: Option<&Making>, removing: bool) -> Painted {
     let nothing = Painted { parts: Vec::new(), tall: 0.0 };
     let k = at.w / SCREEN.0;
     let screen = Matrix3x2::scale(k, k) * Matrix3x2::translation(at.x, at.y);
@@ -628,38 +643,62 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
         let light = said.get("light").cloned().unwrap_or(Value::Null);
         let now = text(&light, "color").to_uppercase();
         let tall = if making.is_some() { 196.0 + RING } else { 196.0 };
-        picture.plate(Rect { x: side, y, w: wide, h: tall }, 20.0, CARD);
-        picture.words(lang.pick("灯光的效果和颜色", "Lighting effect and colour"), label, DIM, side + 16.0, y + 27.0, false);
-        // The colours it starts with, and the one in use where it is another (while one is made, the one in use before).
-        let mut colours: Vec<String> = GIVEN.iter().map(|given| given.to_string()).collect();
+        // The colours kept to choose from (those it starts with, till any were kept), and before them the one in
+        // use where it is none of them (while one is made, the one in use before).
+        let kept = kept_colours(said);
+        let mut colours = kept.clone();
         let own = making.map_or(&now, |making| &making.was);
         if own.len() == 6 && !colours.contains(own) {
             colours.insert(0, own.clone());
         }
-        // (After them, what opens the ring to make another.)
-        let step = ((wide - 32.0 - 36.0) / colours.len() as f32).min(46.0);
-        let opens = Vector2 { X: side + 16.0 + 18.0 + colours.len() as f32 * step, Y: y + 62.0 };
+        // In rows of as many as its width holds; after them, what opens the ring to make another.
+        let (across, apart) = (((wide - 32.0) / SWATCH) as usize, SWATCH);
+        let rows = (colours.len() + 1).div_ceil(across);
+        let more = (rows - 1) as f32 * apart;
+        let at = |place: usize| Vector2 { X: side + 16.0 + 18.0 + (place % across) as f32 * apart, Y: y + 62.0 + (place / across) as f32 * apart };
+        picture.plate(Rect { x: side, y, w: wide, h: tall + more }, 20.0, CARD);
+        picture.words(lang.pick("灯光的效果和颜色", "Lighting effect and colour"), label, DIM, side + 16.0, y + 27.0, false);
+        // How one is taken away, said at the card's other end; while they are, what ends that.
+        let word = if removing { lang.pick("完成", "Done") } else { lang.pick("长按颜色可删除", "Hold a colour to remove it") };
+        picture.words(word, label, if removing { ACCENT } else { FAINT }, side + wide - 16.0, y + 27.0, true);
+        if live && removing {
+            let across = frame.gfx.measure(word, label);
+            parts.extend(shown(Rect { x: side + wide - 16.0 - across - 8.0, y: y + 8.0, w: across + 16.0, h: 30.0 }).map(|shown| (shown, Part::Done)));
+        }
+        let opens = at(colours.len());
         if let Some(hues) = hues(frame, opens, 26.0) {
             unsafe { frame.dc.DrawEllipse(&D2D1_ELLIPSE { point: opens, radiusX: 9.0, radiusY: 9.0 }, &hues, 8.0, None) };
         }
         if making.is_some() {
             unsafe { frame.dc.DrawEllipse(&D2D1_ELLIPSE { point: opens, radiusX: 16.75, radiusY: 16.75 }, frame.brush(INK), 2.5, None) };
         }
-        if live {
+        if live && !removing {
             parts.extend(shown(Rect { x: opens.X - 18.0, y: opens.Y - 18.0, w: 36.0, h: 36.0 }).map(|shown| (shown, Part::Make)));
         }
         for (place, one) in colours.iter().enumerate() {
-            let centre = Vector2 { X: side + 16.0 + 18.0 + place as f32 * step, Y: y + 62.0 };
+            let centre = at(place);
+            // (Only one that is kept can be taken away.)
+            let goes = removing && kept.contains(one);
             unsafe {
-                if making.is_none() && *one == now && effect != "rainbow" {
+                if making.is_none() && !removing && *one == now && effect != "rainbow" {
                     frame.dc.DrawEllipse(&D2D1_ELLIPSE { point: centre, radiusX: 17.0, radiusY: 17.0 }, frame.brush(INK), 2.0, None);
                 }
                 frame.dc.FillEllipse(&D2D1_ELLIPSE { point: centre, radiusX: 13.0, radiusY: 13.0 }, frame.brush(colour(one)));
+                if goes {
+                    // A minus at its upper right corner.
+                    let minus = Vector2 { X: centre.X + 10.0, Y: centre.Y - 10.0 };
+                    frame.dc.FillEllipse(&D2D1_ELLIPSE { point: minus, radiusX: 8.5, radiusY: 8.5 }, frame.brush(CARD));
+                    frame.dc.FillEllipse(&D2D1_ELLIPSE { point: minus, radiusX: 7.0, radiusY: 7.0 }, frame.brush(INK));
+                    frame.dc.DrawLine(Vector2 { X: minus.X - 3.5, Y: minus.Y }, Vector2 { X: minus.X + 3.5, Y: minus.Y }, frame.brush(PAGE), 1.8, &picture.round);
+                }
             }
-            if live {
-                parts.extend(shown(Rect { x: centre.X - 18.0, y: centre.Y - 18.0, w: 36.0, h: 36.0 }).map(|shown| (shown, Part::Colour(one.clone()))));
+            if live && (goes || !removing) {
+                let part = if goes { Part::Remove(one.clone()) } else { Part::Colour(one.clone()) };
+                parts.extend(shown(Rect { x: centre.X - 18.0, y: centre.Y - 18.0, w: 36.0, h: 36.0 }).map(|shown| (shown, part)));
             }
         }
+        // (What follows is under the colours' last row.)
+        y += more;
         let mut x = side + 16.0;
         for (id, called) in effects {
             let across = frame.gfx.measure(called, chip) + 24.0;

@@ -117,4 +117,5 @@
     <string name="licences_what">本应用的许可证，以及所用开源组件的许可证</string>
     <string name="view">查看</string>
     <string name="close">关闭</string>
+    <string name="newer_app">有新版本 %1$s，点此下载</string>
 </resources>
