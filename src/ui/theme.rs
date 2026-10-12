@@ -272,10 +272,11 @@ fn fluent(dark: bool) -> Theme {
         figure_line: 0.86,
         unit: segoe(15.0, 500.0),
         value: segoe(13.0, 500.0),
-        pad_x: 16.0,
+        pad_x: 22.0,
         pad_top: 10.0,
         pad_bottom: 12.0,
-        outer: (10.0, 6.0, 6.0),
+        // (Its lines run from edge to edge of the sheet: no room beside the lanes, their own padding the wider.)
+        outer: (4.0, 0.0, 0.0),
         lane_gap: 0.0,
         column_gap: 0.0,
         bar_gap: 0.0,

@@ -1349,7 +1349,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     frame.fill_rounded(if *muted { theme.text3 } else { ink.trace }, plot_left, middle - tall / 2.0, track, tall, radius);
                     frame.unclip();
                 }
-                frame.fill_circle(if *muted { theme.text3 } else { theme.text }, Point { x: plot_left + filled, y: middle }, 5.0);
+                // (Its knob in the colour of what is filled: one piece with it, muted or not.)
+                frame.fill_circle(if *muted { theme.text3 } else { ink.trace }, Point { x: plot_left + filled, y: middle }, 5.0);
                 hits.push((plot_left, row, track, MEDIA_ROW, Hit::Volume));
                 part("level");
                 frame.text(&said, theme.small, if *muted { theme.text3 } else { theme.text2 }, mute - 6.0 - said_width, middle - LINE / 2.0, said_width, Align::End);
