@@ -461,7 +461,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "media", "wsl", "docker"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
     let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     if let Some(shown) = &shot.modules {
         prefs.modules.sort_by_key(|entry| shown.iter().position(|id| *id == entry.id).unwrap_or(usize::MAX));
@@ -954,7 +954,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
     let desktop = wallpaper::picture(wallpaper, width, height).map_err(|e| format!("{wallpaper}: {e}"))?;
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "media", "wsl", "docker"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
     let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     let history: Vec<Sample> = (0..400).map(|i| made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None)).collect();
     let theme = Theme::new(Skin::Glass, true);

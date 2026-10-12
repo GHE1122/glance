@@ -105,6 +105,19 @@ pub fn act(act: Act) {
     });
 }
 
+/// The sound as loud as `level` while its track is dragged along: shown so
+/// at once, and set (it is looked at again when the track is let go: see
+/// `act`).
+#[cfg(windows)]
+pub fn slide(level: u8) {
+    let shown = now().map(|now| Now { volume: Some(level), ..now });
+    if shown.is_none() || shown == now() {
+        return;
+    }
+    keep(shown);
+    std::thread::spawn(move || drop(crate::actions::set_volume(Some(level), None)));
+}
+
 #[cfg(not(windows))]
 pub fn act(_: Act) {}
 

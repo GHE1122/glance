@@ -1938,8 +1938,7 @@ impl Ui {
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间和它占用的资源", "A fullscreen game's frame rate, frame times and what it uses"))),
             "docker" => ("Docker".into(), Some(p("运行中的容器各占多少处理器、内存、网络和磁盘，问的是 Docker 当前连接的引擎", "What each container running uses, as the engine Docker's current context points at says"))),
             "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器和内存占用，只从 Windows 读取，不会启动或唤醒发行版", "WSL 2's processors and memory, read from Windows alone: no distribution is started or kept up"))),
-            "time" => (p("时间", "Time"), Some(p("现在几点和今天的日期", "The time of day and the date"))),
-            "media" => (p("媒体", "Media"), Some(p("正在播放的内容，可暂停、切换曲目、调节音量和静音", "What is playing: paused, skipped, the sound turned up, down and muted"))),
+            "time" => (p("时间与媒体", "Time and media"), Some(p("时间和日期，以及音量和正在播放的内容", "The time and the date, the sound's level and what is playing"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
         }
     }
@@ -2062,6 +2061,8 @@ impl Ui {
             ("overlay", "fps") => (p("帧率", "Frame rate"), None),
             ("overlay", "time") => (p("时间", "Time"), None),
             ("overlay" | "time", "twelve") => (p("12 小时制", "12-hour clock"), Some(p("关闭时为 24 小时制", "Off, a 24-hour clock"))),
+            ("time", "sound") => (p("音量", "Volume"), Some(p("拖动调节音量，可静音", "Dragged to set how loud the sound is; muted too"))),
+            ("time", "media") => (p("正在播放", "Now playing"), Some(p("可暂停、播放和切换曲目", "Paused, played and skipped"))),
             ("overlay", "low") => (p("1% low", "1% low"), Some(p("最慢 1% 的帧换算成的帧率", "The slowest 1% of frames, as frames a second"))),
             ("overlay", "frametime") => (p("帧时间", "Frame time"), Some(p("最近一秒里最慢的一帧", "The slowest frame of the last second"))),
             ("overlay", "cpu" | "gpu") => (p("占用", "Use"), None),

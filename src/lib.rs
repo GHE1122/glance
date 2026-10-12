@@ -396,7 +396,7 @@ pub fn run() {
     }
     thread::spawn(move || {
         // What plays and how loud, while the module that shows them is on.
-        playing::watch(|| ui::prefs::module_on(&app().settings.lock().unwrap().view, "media"));
+        playing::watch(|| ui::prefs::module_on(&app().settings.lock().unwrap().view, "time"));
         let mut watch = watch::Watch::default();
         // What the remote-control helper is told of each sample.
         let mut told = remote::Told::open();

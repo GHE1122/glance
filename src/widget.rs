@@ -296,6 +296,8 @@ impl Side {
 enum Drag {
     Move { grab: POINT, trail: Vec<(Instant, POINT)>, torn: bool, moved: bool },
     Size { edges: (bool, bool, bool, bool), from: POINT, room: (f32, f32), corner: POINT },
+    /// The sound's track slid along: where it begins and how wide it is (from the widget's corner, its own DIPs).
+    Slide { from: f32, wide: f32 },
 }
 
 /// What the widgets are drawn with, as the panel has them now.
@@ -1136,6 +1138,14 @@ impl Widget {
         self.fling = None;
         self.opacity = 1.0;
         self.anchor = None;
+        // On the sound's track: it is slid along till let go (pinned or not: that is not moving it).
+        let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
+        if let Some((hx, _, wide, ..)) = self.hits.iter().find(|(hx, hy, w, h, hit)| *hit == view::Hit::Volume && lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).copied() {
+            self.drag = Some(Drag::Slide { from: hx + self.hits_from.0, wide });
+            unsafe { SetCapture(self.window.hwnd) };
+            self.slide();
+            return;
+        }
         let edges = edges_at(x, y, w, h);
         // Pinned, it is neither moved nor sized: only its buttons are pressed.
         if self.pinned && self.button_at(x, y).is_none() {
@@ -1163,12 +1173,24 @@ impl Widget {
         note(match &self.drag {
             Some(Drag::Size { edges, .. }) => format!("widget: sized by {edges:?} (left, right, top, bottom)"),
             Some(Drag::Move { .. }) => "widget: pressed to move".to_string(),
+            Some(Drag::Slide { .. }) => "widget: the sound's track pressed".to_string(),
             None => "widget: pressed, nothing taken".to_string(),
         });
     }
 
     /// Follows the pointer while it is in hand.
+    /// The sound as loud as where the pointer is along its track.
+    fn slide(&self) {
+        let (Some(Drag::Slide { from, wide }), Some(cursor)) = (&self.drag, cursor_position()) else { return };
+        let x = (cursor.x - self.at.x) as f32 / (self.contact.scale * self.zoom);
+        crate::playing::slide((((x - from) / wide).clamp(0.0, 1.0) * 100.0).round() as u8);
+    }
+
     fn follow(&mut self, now: Instant) {
+        if matches!(self.drag, Some(Drag::Slide { .. })) {
+            self.slide();
+            return;
+        }
         let Some(cursor) = cursor_position() else { return };
         let scale = self.contact.scale;
         match &mut self.drag {
@@ -1241,7 +1263,7 @@ impl Widget {
                 let bottom = corner.y + start.1 as i32;
                 self.at = POINT { x: if l { right } else { corner.x }, y: if t { bottom } else { corner.y } };
             }
-            None => {}
+            Some(Drag::Slide { .. }) | None => {}
         }
     }
 
@@ -1253,6 +1275,13 @@ impl Widget {
         // (The capture's end after a release comes here too, with nothing.)
         let Some(drag) = self.drag.take() else { return Released::Nothing };
         match drag {
+            // The sound's track let go: as loud as it was left, and looked at again.
+            Drag::Slide { .. } => {
+                if let Some(level) = crate::playing::now().and_then(|now| now.volume) {
+                    crate::playing::act(crate::playing::Act::Volume(level));
+                }
+                Released::Nothing
+            }
             Drag::Size { .. } => {
                 // It settles from the surface it shows (the hand's room, given
                 // as a band gives) onto what it shows, the edges not dragged
@@ -1296,7 +1325,6 @@ impl Widget {
                             let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
                             match self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h) {
                                 Some((.., view::Hit::Media(key))) => crate::playing::act(crate::playing::Act::Key(*key)),
-                                Some((hx, _, w, _, view::Hit::Volume)) => crate::playing::act(crate::playing::Act::Volume((((lx - hx) / w).clamp(0.0, 1.0) * 100.0).round() as u8)),
                                 _ => {}
                             }
                             Released::Nothing

@@ -74,7 +74,7 @@ const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const WSL: [Item; 4] = [item("chart", true), item("memory", true), item("gpu", true), item("distros", true)];
-const TIME: [Item; 1] = [item("twelve", false)];
+const TIME: [Item; 3] = [item("twelve", false), item("sound", true), item("media", true)];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
 const GAME: [Item; 9] = [
     item("chart", true),
@@ -219,7 +219,7 @@ impl Default for ProcessPrefs {
 }
 
 /// Modules off until chosen.
-const DEFAULT_OFF: [&str; 5] = ["system", "time", "media", "wsl", "docker"];
+const DEFAULT_OFF: [&str; 4] = ["system", "time", "wsl", "docker"];
 
 /// Whether module `id` is on in the stored preferences `stored` (as kept,
 /// before they are resolved: off unless listed on).

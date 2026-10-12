@@ -372,7 +372,7 @@ impl Controller {
         // The game in front first, while there is one.
         let mut known = vec!["game".to_string(), "cpu".to_string()];
         known.extend(self.info.gpu_modules());
-        known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "media", "wsl", "docker"].map(String::from));
+        known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
         known
     }
 
@@ -760,6 +760,8 @@ impl Controller {
                         });
                     }
                 }
+                // The sound's track let go (or the button up unheard, or the capture lost).
+                WM_LBUTTONUP | WM_TIMER | crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.sliding => panel.slid(),
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
                 // The overlay dragged into place.
                 WM_LBUTTONDOWN if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().press(),
@@ -1140,6 +1142,8 @@ struct Panel<'a> {
     /// While it is sized by its edges: the size it is at, and the limit
     /// the pointer is past, if it is (shown on it as it is dragged).
     sizing: Option<(f32, Option<Limit>)>,
+    /// The sound's track is being slid along.
+    sliding: bool,
     /// The desktop behind the glass is to be taken again (the panel moved
     /// or grew past what was taken).
     recapture: bool,
@@ -1207,6 +1211,7 @@ impl<'a> Panel<'a> {
             drag: None,
             largest: SIZES.1,
             sizing: None,
+            sliding: false,
             recapture: false,
             capturing: None,
             generation: 0,
@@ -1729,6 +1734,16 @@ impl<'a> Panel<'a> {
     /// it is pinned, on its edges it begins to size it, elsewhere (see
     /// `grip_at`) to move it.
     fn press(&mut self, client: POINT) {
+        // On the sound's track: it is slid along till let go.
+        if self.hit_at(client) == Some(Hit::Volume) {
+            self.sliding = true;
+            self.slide(client);
+            unsafe {
+                windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd);
+                SetTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER, FOLLOW_MS, None);
+            }
+            return;
+        }
         let Some(edges) = self.grip_at(client) else { return };
         let (Some(from), Some(placement)) = (cursor_position(), &self.placement) else { return };
         self.drag = Some(PanelDrag { from, rect: placement.panel, size: self.size, edges, sized: false });
@@ -1738,15 +1753,44 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// Whether it is being dragged, the button still down.
+    /// Whether it is being dragged (or the sound's track is), the button still down.
     fn held(&self) -> bool {
-        self.drag.is_some() && crate::overlay::primary_down()
+        (self.drag.is_some() || self.sliding) && crate::overlay::primary_down()
+    }
+
+    /// The sound as loud as where `client` is along its track (the pointer may have left the track: as far as it goes).
+    fn slide(&mut self, client: POINT) -> Option<u8> {
+        let px = self.placement.as_ref()?.px;
+        let x = client.x as f32 / px - self.corner.0;
+        let (from, wide) = self.hits.iter().find(|hit| hit.4 == Hit::Volume).map(|(hx, _, w, ..)| (*hx, *w))?;
+        let level = (((x - from) / wide).clamp(0.0, 1.0) * 100.0).round() as u8;
+        crate::playing::slide(level);
+        self.next_frame = Instant::now();
+        Some(level)
+    }
+
+    /// The sound's track let go: as loud as it was left.
+    fn slid(&mut self) {
+        self.sliding = false;
+        unsafe {
+            let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+        }
+        if let Some(level) = crate::playing::now().and_then(|now| now.volume) {
+            crate::playing::act(crate::playing::Act::Volume(level));
+        }
     }
 
     /// Follows the pointer while it is dragged: the panel moves with it,
     /// onto another screen too; or, held by its edges, grows and shrinks as
     /// a whole from the corner opposite them (its shape is its lanes').
     fn dragged(&mut self, now: Instant) {
+        if self.sliding {
+            if let (Some(cursor), Some(window)) = (cursor_position(), self.placement.as_ref().map(|p| p.window)) {
+                self.slide(POINT { x: cursor.x - window.left, y: cursor.y - window.top });
+            }
+            return;
+        }
         let (Some(drag), Some(cursor)) = (self.drag, cursor_position()) else { return };
         point_at(&self.window, drag.edges);
         let (dx, dy) = (cursor.x - drag.from.x, cursor.y - drag.from.y);
@@ -2098,13 +2142,6 @@ impl<'a> Panel<'a> {
         self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
     }
 
-    /// How far along what is under `client` it is (0 at its left, 1 at its right).
-    fn along(&self, client: POINT) -> Option<f32> {
-        let px = self.placement.as_ref()?.px;
-        let (x, y) = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
-        self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|(hx, _, w, ..)| ((x - hx) / w).clamp(0.0, 1.0))
-    }
-
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
         // Unpinned, its edges and its bar show what a drag there does (the
@@ -2144,11 +2181,6 @@ impl<'a> Panel<'a> {
                 self.controller.set_overlay(!self.controller.overlay_wanted());
             }
             Some(Hit::Media(key)) => crate::playing::act(crate::playing::Act::Key(key)),
-            Some(Hit::Volume) => {
-                if let Some(along) = self.along(client) {
-                    crate::playing::act(crate::playing::Act::Volume((along * 100.0).round() as u8));
-                }
-            }
             Some(Hit::Sort(sort)) if sort != self.prefs.processes.sort => {
                 self.prefs.processes.sort = sort;
                 self.scroll = 0.0;
