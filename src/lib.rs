@@ -63,6 +63,8 @@ mod playing;
 mod lyrics;
 #[cfg(windows)]
 mod sound;
+#[cfg(windows)]
+mod cover;
 // What plays and how loud, read and changed as the phone remote does: its own code for it.
 #[cfg(windows)]
 #[allow(dead_code)]

@@ -41,6 +41,7 @@ features = [
     "Wdk_System_Threading",
     "Foundation",
     "Media_Control",
+    "Storage_Streams",
     "Graphics",
     "Graphics_DirectX",
     "Graphics_Effects",
