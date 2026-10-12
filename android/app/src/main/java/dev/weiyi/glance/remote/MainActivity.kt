@@ -353,6 +353,8 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf<PcState?>(null) }
     var failure by remember { mutableStateOf<Failure?>(null) }
+    // Whether, unanswered, the phone is on the PC's network (see `Pc.near`): what it may be told differs.
+    var near by remember { mutableStateOf<Boolean?>(null) }
     // Since when the PC has not answered a look (none: it answered the last): it is not said to be away till that has gone on a while.
     var silent by remember { mutableStateOf<Long?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
@@ -378,6 +380,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 if (SystemClock.elapsedRealtime() - since < PATIENCE) return
             }
             if (body != null || asked[0] == before) failure = error
+            if (error == Failure.Unreachable) near = withContext(Dispatchers.IO) { pc.near() }
             return
         }
         silent = null
@@ -477,7 +480,8 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         when (val why = failure) {
             null -> {}
             is Failure.Failed -> Panel { Text(why.why, color = Dim, fontSize = 14.sp, lineHeight = 21.sp) }
-            else -> Panel { Text(stringResource(if (why == Failure.Refused) R.string.refused else R.string.unreachable), color = Dim, fontSize = 14.sp, lineHeight = 21.sp) }
+            Failure.Refused -> Panel { Text(stringResource(R.string.refused), color = Dim, fontSize = 14.sp, lineHeight = 21.sp) }
+            else -> Panel { Text(unreachable(near), color = Dim, fontSize = 14.sp, lineHeight = 21.sp) }
         }
         if (now == null) return@cards
         // With the picture turned off, the readings alone.
@@ -637,7 +641,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
             // Under the picture, what the PC may be asked; asleep, why that may be. The one comes up over the other as it goes.
             val rest: @Composable () -> Unit = {
                 AnimatedContent(asleep, transitionSpec = { (fadeIn(tween(WAKING)) + slideInVertically(tween(WAKING)) { rise }) togetherWith fadeOut(tween(WAKING / 3)) }, label = "rest") { sleeping ->
-                    if (sleeping) Away(pc.name, failure) else Column(Modifier.fillMaxWidth(), verticalArrangement = gap) { cards() }
+                    if (sleeping) Away(pc.name, failure, near) else Column(Modifier.fillMaxWidth(), verticalArrangement = gap) { cards() }
                 }
             }
             if (maxWidth >= WIDE && pictured) {
@@ -685,14 +689,22 @@ private fun MonitorRow(at: Int, monitor: Monitor, enabled: Boolean, lit: Boolean
     }
 }
 
+/**
+ * What may keep a PC from answering: with the phone on its network, it is off or asleep, or the network keeps its
+ * devices apart (as campus, hotel and guest networks do), which the PC's own hotspot gets round; with the phone on
+ * another, that; and where that cannot be told, either.
+ */
+@Composable
+private fun unreachable(near: Boolean?) = stringResource(when (near) { true -> R.string.unreachable_near; false -> R.string.unreachable_far; null -> R.string.unreachable })
+
 /** Of a PC that has not answered, what may be the matter (nothing yet: it is still being asked). */
 @Composable
-private fun Away(name: String, failure: Failure?) {
+private fun Away(name: String, failure: Failure?, near: Boolean?) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         if (failure != null) {
             Column(Modifier.widthIn(max = 420.dp).padding(top = 8.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(stringResource(if (failure == Failure.Refused) R.string.away_refused_title else R.string.away_title, name), color = Ink, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
-                val what = when (failure) { Failure.Refused -> stringResource(R.string.refused); is Failure.Failed -> failure.why; else -> stringResource(R.string.unreachable) }
+                val what = when (failure) { Failure.Refused -> stringResource(R.string.refused); is Failure.Failed -> failure.why; else -> unreachable(near) }
                 Text(what, color = Dim, fontSize = 14.sp, lineHeight = 22.sp, textAlign = TextAlign.Center)
                 if (failure == Failure.Unreachable) Text(stringResource(R.string.away_retry), color = Faint, fontSize = 12.5.sp, textAlign = TextAlign.Center)
             }

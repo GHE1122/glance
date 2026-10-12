@@ -44,6 +44,8 @@
     <string name="refused_short">需要重新配对</string>
     <string name="failed_short">没有做成</string>
     <string name="unreachable">它可能关机了、睡着了，或者和手机不在同一个网络。</string>
+    <string name="unreachable_near">它可能关机了或睡着了。如果它开着，可能是这个网络不让设备之间互相访问（校园网、酒店、访客 Wi-Fi 常这样）：在电脑上打开“移动热点”，手机连上它再试。</string>
+    <string name="unreachable_far">手机和电脑不在同一个网络（手机可能在用移动数据，或连着别的 Wi-Fi）：让手机连上电脑所在的网络再试。</string>
     <string name="away_title">%1$s 没有回应</string>
     <string name="away_refused_title">%1$s 不认这部手机了</string>
     <string name="away_retry">每隔几秒会再试一次，连上后这里自动恢复</string>

@@ -267,6 +267,23 @@ private fun Pc.ask(path: String, body: JSONObject?, again: Boolean): PcState {
 fun on(value: Boolean) = JSONObject().put("on", value)
 
 /**
+ * Whether this phone is on the network the PC's address is in: one of the
+ * phone's own networks holds that address. None where the PC is known by a
+ * name rather than an address (nothing is looked up for it).
+ */
+fun Pc.near(): Boolean? {
+    val literal = host.all { it.isDigit() || it == '.' } || host.contains(':')
+    if (!literal) return null
+    val there = runCatching { java.net.InetAddress.getByName(host).address }.getOrNull() ?: return null
+    val mine = runCatching { java.net.NetworkInterface.getNetworkInterfaces().toList() }.getOrDefault(emptyList()).filter { it.isUp && !it.isLoopback }.flatMap { it.interfaceAddresses }
+    return mine.any { own ->
+        val here = own.address.address
+        val bits = own.networkPrefixLength.toInt()
+        here.size == there.size && bits > 0 && (0 until bits).all { bit -> (here[bit / 8].toInt() xor there[bit / 8].toInt()) and (0x80 ushr (bit % 8)) == 0 }
+    }
+}
+
+/**
  * Looks for the PC on the network the phone is on now (its address may
  * have changed since it was paired): everyone there is asked for the PC
  * that holds this key, by the key's name; the PC proves it holds it. Its

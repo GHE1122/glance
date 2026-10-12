@@ -44,6 +44,8 @@
     <string name="refused_short">Pair again</string>
     <string name="failed_short">Not done</string>
     <string name="unreachable">It may be off, asleep, or on another network than the phone.</string>
+    <string name="unreachable_near">It may be off or asleep. If it is on, this network may keep its devices from reaching each other (campus, hotel and guest Wi-Fi often do): turn on the PC\'s mobile hotspot, join it with the phone and try again.</string>
+    <string name="unreachable_far">The phone is not on the PC\'s network (it may be on mobile data or another Wi-Fi): join the network the PC is on and try again.</string>
     <string name="away_title">%1$s does not answer</string>
     <string name="away_refused_title">%1$s no longer takes this phone</string>
     <string name="away_retry">Asked again every few seconds; this page comes back by itself</string>
