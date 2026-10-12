@@ -30,6 +30,9 @@ pub fn report() -> String {
     ];
     lines.extend(info.gpus.iter().map(|gpu| format!("GPU: {}", gpu.name)));
     lines.extend(info.found.iter().cloned());
+    if let Some(later) = crate::superio::found_later() {
+        lines.push(format!("Motherboard chip, looked for again: {later}"));
+    }
     let log = crate::journal::recent(15);
     lines.push(format!("Recent log ({} lines):", log.len()));
     lines.extend(log.into_iter().map(|line| format!("  {line}")));

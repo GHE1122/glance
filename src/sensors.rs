@@ -68,13 +68,20 @@ const PCI_LOCK: PCWSTR = w!("Global\\Access_PCI");
 impl NamedLock {
     /// Waits up to `timeout_ms` for the lock; `None` if another program has it.
     pub fn acquire(name: PCWSTR, timeout_ms: u32) -> Option<Self> {
-        let mutex = unsafe { CreateMutexW(None, false, name) }.ok()?;
+        Self::taken(name, timeout_ms).ok()
+    }
+
+    /// The same, saying what stood in the way: the lock not to be opened
+    /// at all (another program made it for itself alone), or held by
+    /// another program all the while.
+    pub fn taken(name: PCWSTR, timeout_ms: u32) -> Result<Self, String> {
+        let mutex = unsafe { CreateMutexW(None, false, name) }.map_err(|error| format!("its lock could not be opened ({error})"))?;
         let waited = unsafe { WaitForSingleObject(mutex, timeout_ms) };
         if waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED {
-            Some(NamedLock(mutex))
+            Ok(NamedLock(mutex))
         } else {
             let _ = unsafe { CloseHandle(mutex) };
-            None
+            Err(format!("held by another program for {timeout_ms} ms and more"))
         }
     }
 }

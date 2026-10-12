@@ -111,15 +111,28 @@ const GIGABYTE_IT8696E: Layout = Layout {
     fans: &["cpu_fan", "system_fan_1", "system_fan_2", "system_fan_3", "cpu_opt_fan"],
 };
 
+/// MSI's boards with an NCT6687D wire its first seven monitoring channels
+/// and its eight fan inputs the same way (as Linux's nct6687d driver for
+/// those boards and LibreHardwareMonitor name them): by the channel's and
+/// the input's own number, not by which of them are in use.
+const MSI_NCT6687D: Layout = Layout {
+    temps: &["cpu", "system", "vrm", "chipset", "cpu_socket", "pcie_x1", "m2_1"],
+    fans: &["cpu_fan", "pump_fan", "system_fan_1", "system_fan_2", "system_fan_3", "system_fan_4", "system_fan_5", "system_fan_6"],
+};
+
 fn layout(vendor: &str, chip: u16) -> Option<&'static Layout> {
-    if !vendor.starts_with("Gigabyte") {
-        return None;
+    if vendor.starts_with("Gigabyte") {
+        return match chip {
+            0x8689 => Some(&GIGABYTE_IT8689E),
+            0x8696 => Some(&GIGABYTE_IT8696E),
+            _ => None,
+        };
     }
-    match chip {
-        0x8689 => Some(&GIGABYTE_IT8689E),
-        0x8696 => Some(&GIGABYTE_IT8696E),
-        _ => None,
+    // (The NCT6687D, whatever its revision.)
+    if vendor.starts_with("Micro-Star") && chip & 0xFFF0 == 0xD590 {
+        return Some(&MSI_NCT6687D);
     }
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -165,8 +178,22 @@ impl SuperIo {
     /// its values elsewhere, or nothing answering. Each run of registers by
     /// its first, in hex; `--` for one that could not be read.
     fn raw(&self) -> Option<String> {
-        let Kind::Nuvoton { .. } = self.kind else { return None };
         let _lock = NamedLock::acquire(ISA_LOCK, LOCK_WAIT)?;
+        // On an embedded controller's chip: each monitoring channel that is set to anything (its number, what
+        // it is of, what it reads) and each fan input (its number, how it is set, its speed): which is which
+        // on a board whose wiring is not known shows by them.
+        if let Kind::NuvotonEc = self.kind {
+            let hex = |value: Option<u16>, digits: usize| value.map_or("-".repeat(digits), |value| format!("{value:0digits$X}"));
+            let channels: Vec<String> = (0..EC_CHANNELS)
+                .filter_map(|channel| {
+                    let source = self.register(EC_MONITOR_SOURCE + channel)?;
+                    (source & 0x7F != 0).then(|| format!("{channel}:{source:02X}={}", hex(self.register16(EC_MONITOR + channel * 2), 4)))
+                })
+                .collect();
+            let fans: Vec<String> = (0..EC_FANS).map(|fan| format!("{fan}:{}={}", hex(self.register(EC_FAN_INPUT + fan).map(u16::from), 2), hex(self.register16(EC_FAN_RPM + fan * 2), 4))).collect();
+            return Some(format!("channels {} | fans {}", channels.join(" "), fans.join(" ")));
+        }
+        let Kind::Nuvoton { .. } = self.kind else { return None };
         let run = |from: u16, count: u16| {
             let bytes: Vec<String> = (from..from + count).map(|register| self.register(register).map_or("--".to_string(), |value| format!("{value:02X}"))).collect();
             format!("{from:03X}: {}", bytes.join(" "))
@@ -182,7 +209,7 @@ impl SuperIo {
     pub fn open(vendor: &str) -> Result<Self, String> {
         let mut module = Module::load(LPC_IO).map_err(|_| "PawnIO driver not available".to_string())?;
         // Entering configuration mode writes to the chip: only with the bus to ourselves.
-        let _lock = NamedLock::acquire(ISA_LOCK, 1000).ok_or("ISA bus held by another program")?;
+        let _lock = NamedLock::taken(ISA_LOCK, 1000).map_err(|why| format!("{BUS_NOT_HAD}: {why}"))?;
         let mut seen = Vec::new();
         for slot in 0..2u64 {
             let port = if slot == 0 { 0x2E } else { 0x4E };
@@ -247,8 +274,10 @@ impl SuperIo {
             if !ec_source_is_temperature(source) {
                 continue;
             }
-            // A second channel of a named source goes by a number, as the rest.
-            let name = ec_source_name(source).filter(|name| !self.ec_temps.iter().any(|(_, taken)| taken == name));
+            // As the board wires it, where that is known; else by what it is of (a second channel of a named
+            // source by a number, as the rest).
+            let wired = self.layout.and_then(|layout| layout.temps.get(channel as usize)).filter(|name| !self.ec_temps.iter().any(|(_, taken)| taken == *name));
+            let name = wired.copied().or_else(|| ec_source_name(source).filter(|name| !self.ec_temps.iter().any(|(_, taken)| taken == name)));
             let name = name.map(str::to_string).unwrap_or_else(|| {
                 numbered += 1;
                 numbered.to_string()
@@ -257,7 +286,9 @@ impl SuperIo {
         }
         for fan in 0..EC_FANS {
             if self.register(EC_FAN_INPUT + fan).is_some_and(|input| input & 0x80 != 0) {
-                self.ec_fans.push((EC_FAN_RPM + fan * 2, (self.ec_fans.len() + 1).to_string()));
+                // (By the input's own number, as the board's maker counts its headers: not by how many are in use.)
+                let name = self.layout.and_then(|layout| layout.fans.get(fan as usize)).map_or_else(|| (fan + 1).to_string(), |name| name.to_string());
+                self.ec_fans.push((EC_FAN_RPM + fan * 2, name));
             }
         }
         Ok(())
@@ -370,6 +401,27 @@ impl SuperIo {
 }
 
 const ISA_LOCK: windows::core::PCWSTR = windows::core::w!("Global\\Access_ISABUS.HTP.Method");
+
+/// How it is said that the bus was not to be had as the chip was looked
+/// for: another program had it then, and the chip is looked for again.
+const BUS_NOT_HAD: &str = "the ISA bus not to be had";
+
+/// Whether `why` a chip was not found is that the bus was not to be had.
+pub fn waits_for_the_bus(why: &str) -> bool {
+    why.starts_with(BUS_NOT_HAD)
+}
+
+/// What a later look for the chip found, for a report (what the first
+/// found is said in what the machine was found to have, as Glance started).
+static LATER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn found_later() -> Option<String> {
+    LATER.lock().unwrap().clone()
+}
+
+pub fn say_later(what: String) {
+    *LATER.lock().unwrap() = Some(what);
+}
 
 /// What the search at a port found short of a chip to read: what it was,
 /// if there was something to say.
@@ -503,6 +555,19 @@ mod tests {
         assert!(!super::ec_source_is_temperature(0x00));
         assert!(!super::ec_source_is_temperature(0x19));
         assert!(!super::ec_source_is_temperature(0x60));
+    }
+
+    #[test]
+    fn knows_the_boards_whose_wiring_it_has() {
+        // MSI's NCT6687D, whatever its revision, by the channel's and the input's own number.
+        let msi = super::layout("Micro-Star International Co., Ltd.", 0xD592).expect("MSI's NCT6687D");
+        assert_eq!((msi.temps[1], msi.temps[4], msi.fans[0], msi.fans[2]), ("system", "cpu_socket", "cpu_fan", "system_fan_1"));
+        assert!(super::layout("Micro-Star International Co., Ltd.", 0xD42B).is_none());
+        assert!(super::layout("Gigabyte Technology Co., Ltd.", 0x8689).is_some());
+        assert!(super::layout("ASUSTeK COMPUTER INC.", 0xD592).is_none());
+        // Looked for again only where it was the bus that was not to be had.
+        assert!(super::waits_for_the_bus(&format!("{}: held by another program for 1000 ms and more", super::BUS_NOT_HAD)));
+        assert!(!super::waits_for_the_bus("0x2E: nothing; 0x4E: chip 5509, not supported"));
     }
 
     /// Needs administrator rights and the PawnIO driver.

@@ -98,6 +98,9 @@ pub struct Sampler {
     /// Readers that need the driver; absent without it or without rights.
     cpu_sensors: Option<CpuReader>,
     super_io: Option<SuperIo>,
+    /// The board's chip was not looked at as Glance started, another
+    /// program having the bus: looked for again every so often, since when.
+    super_io_awaited: Option<Instant>,
     /// An ASUS laptop's fans, as its firmware reports them.
     asus_fans: Option<crate::asus::AsusFans>,
     dimms: Option<Dimms>,
@@ -203,6 +206,7 @@ impl Sampler {
             gpu_power,
             net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
             cpu_sensors,
+            super_io_awaited: super_io.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now()),
             super_io: super_io.ok(),
             asus_fans,
             dimms,
@@ -1229,9 +1233,20 @@ fn performance_info() -> PERFORMANCE_INFORMATION {
     info
 }
 
+/// How often the board's chip is looked for again while another program has the bus.
+const SUPER_IO_AGAIN: Duration = Duration::from_secs(30);
+
 impl Sampler {
     /// The motherboard's sensors, and a laptop's fans its firmware reports.
     fn board(&mut self) -> Option<crate::reading::BoardSensors> {
+        // Another program had the bus as Glance started: the chip is looked for again, every half minute,
+        // till the bus is free (or something else stands in the way, which waiting does not change).
+        if self.super_io_awaited.is_some_and(|since| since.elapsed() >= SUPER_IO_AGAIN) {
+            let found = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")));
+            crate::superio::say_later(found.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe));
+            self.super_io_awaited = found.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now());
+            self.super_io = found.ok();
+        }
         let mut board = self.super_io.as_mut().map(SuperIo::read);
         if let Some(fans) = &self.asus_fans {
             board.get_or_insert_with(Default::default).fans.extend(fans.read());
