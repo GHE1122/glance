@@ -172,6 +172,9 @@ impl Sampler {
         found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| {
             format!("GPU power, {}: {}", gpu.name, adapter.power.map_or("not available", gpu_power::Reader::describe))
         }));
+        if let Some(intel) = gpu_power.describe_intel() {
+            found.push(format!("Intel's graphics library: {}", if intel.is_empty() { "no graphics of Intel's".to_string() } else { intel }));
+        }
         let modules = crate::smbios::memory_modules();
         let drives = crate::drives::models();
         let info = StaticInfo {
@@ -554,10 +557,12 @@ impl Sampler {
     /// fan, clock and power.
     fn from_driver(&self, adapter: &Adapter, gpu: GpuSample) -> GpuSample {
         let perf = adapter_perf(adapter.kmt_handle);
+        // (What Windows does not have of it, its maker's library may: Intel's graphics', so.)
+        let more = adapter.power.and_then(|reader| self.gpu_power.more(reader)).unwrap_or_default();
         GpuSample {
-            temp: perf.and_then(|p| (p.Temperature != 0).then(|| p.Temperature as f32 / 10.0)),
-            fan_rpm: perf.and_then(|p| (p.FanRPM != 0).then_some(p.FanRPM)),
-            clock_mhz: graphics_clock(adapter.kmt_handle),
+            temp: perf.and_then(|p| (p.Temperature != 0).then(|| p.Temperature as f32 / 10.0)).or(more.temp),
+            fan_rpm: perf.and_then(|p| (p.FanRPM != 0).then_some(p.FanRPM)).or(more.fan_rpm),
+            clock_mhz: graphics_clock(adapter.kmt_handle).or(more.clock_mhz),
             power: adapter.power.and_then(|reader| self.gpu_power.read(reader)),
             ..gpu
         }
