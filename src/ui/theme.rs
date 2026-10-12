@@ -245,9 +245,8 @@ pub fn accent(dark: bool) -> Color {
 
 /// Windows 11, as the Start menu and Quick Settings draw it: one acrylic
 /// sheet with an 8 px radius, a hairline stroke and a soft shadow; content
-/// grouped by headings, space and a hairline between lanes rather than
-/// boxes; a slightly darker footer; the user's accent colour for anything
-/// that is data.
+/// grouped by headings and space rather than boxes; a slightly darker
+/// footer; the user's accent colour for anything that is data.
 fn fluent(dark: bool) -> Theme {
     let segoe = |size, weight| Font::new(Family::Segoe, size, weight);
     let ink = ink(accent(dark), 0.5, 0.22, 0.0);
@@ -272,17 +271,16 @@ fn fluent(dark: bool) -> Theme {
         figure_line: 0.86,
         unit: segoe(15.0, 500.0),
         value: segoe(13.0, 500.0),
-        pad_x: 22.0,
+        pad_x: 16.0,
         pad_top: 10.0,
         pad_bottom: 12.0,
-        // (Its lines run from edge to edge of the sheet: no room beside the lanes, their own padding the wider.)
-        outer: (4.0, 0.0, 0.0),
+        outer: (10.0, 6.0, 6.0),
         lane_gap: 0.0,
         column_gap: 0.0,
         bar_gap: 0.0,
         bar_height: 52.0,
         bar_pad: (22.0, 14.0),
-        ruled: true,
+        ruled: false,
         meter_height: 4.0,
         meter_radius: 2.0,
         thread_radius: 1.0,
