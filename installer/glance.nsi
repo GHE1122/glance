@@ -16,7 +16,7 @@ Unicode true
 !include "FileFunc.nsh"
 
 !define NAME "Glance"
-!define VERSION "0.3.4"
+!define VERSION "0.3.5"
 !define PUBLISHER "lulu-loopp"
 !define EXE "glance.exe"
 !define REMOTE "glance-remote.exe"

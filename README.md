@@ -27,6 +27,7 @@ out with everything your PC is doing; move away and it slides back.
 - **Storage**: space on each drive
 - **Motherboard**: temperatures and fan speeds
 - **Battery**, on laptops: its charge, the power going in or out (on battery, what the whole machine draws) and its health
+- **Time and media** (off until chosen): the time and the date (on a 12-hour clock if you like), the sound's level on a track you drag, with mute, and what is playing, paused, played and skipped
 - **WSL and Docker**, for developers (off until chosen, under *More modules*): WSL 2's processors, memory and GPU and the distributions running, read from Windows alone so that no distribution is started or kept running; the containers Docker's current engine runs, each with its processors, memory, network and disk
 - **Games**: while a fullscreen game runs, at the top: its frame rate, 1% low, a chart of its frame times and the screen's refresh rate; the game's own CPU, GPU, memory and video memory; whether the graphics card is held back by its power or temperature limit (NVIDIA); how long you have played; and whether your microphone is muted
 
@@ -38,10 +39,12 @@ room: the panel's lanes, tiles, a chart with the figures beneath, a strip,
 or a few rings, each turning smoothly into the next. Bring it near an edge of
 the screen and it shows where it would sit; let go and it sits there as a
 slim strip or rail, centred where you left it. Throw it off the screen to put
-it away (the tray icon's menu brings it back). Hover over it for its buttons:
-the game readings now (for a game Glance does not recognise as one), the
-settings, a pin that locks its place and size, and close. Right-click it to
-let clicks through to what is behind (hold Ctrl to handle it), to keep it
+it away (the tray icon's menu brings it back). Hover over it for its row of buttons (rest on one, and it says what it does):
+the frame rate of the window in front (for a game Glance does not recognise as
+one), the settings, a pin that locks its place and size, click-through, and
+put away. With click-through on, clicks reach what is behind; to turn it off,
+rest the pointer on the widget a moment and press the one button that shows.
+Right-click it for the same, or to keep it
 on the desktop under your windows rather than above them (Win+D shows it with
 the desktop), to put it away, or for the settings. Widgets come back where you left them when Glance
 starts, in the panel's look.
@@ -56,12 +59,15 @@ last minute charted beside it, the rest in tiles) or as a strip of one to
 three rows, on tinted glass: dark or light by what is around it, just enough
 for every figure to read (what is behind is not blurred: that would cost a
 game frames). Drag it into place, drag its
-edges to size it, right-click it to lock it or close it. Turn the mouse wheel
+edges to size it. Hover over it for the same row of buttons a widget has (the
+frame rate of the window in front, the settings, lock, click-through, close);
+its right-click menu has them too. Turn the mouse wheel
 over it, or use the slider in the settings, to make the glass clearer, down
-to the figures alone over the screen; and let clicks pass through it to the
-game behind (hold Ctrl to move it then). Choose what it shows
+to the figures alone over the screen. With click-through on, clicks reach the
+game behind; to turn it off, rest the pointer on the overlay a moment and
+press the one button that shows. Choose what it shows
 group by group, as for the panel (frame rate, CPU, GPU, memory, video memory,
-download and upload, microphone), each group's figures one by one, and drag
+download and upload, microphone, the time), each group's figures one by one, and drag
 the groups into the order you want.
 
 ![The overlay as a card: the frame rate large, charted beside it, the CPU and GPU in tiles](docs/images/overlay-card-en.webp)
@@ -92,6 +98,7 @@ three at once, and ends at a touch of the mouse.
   its own, good for that phone alone, which the settings can remove. Every
   request is signed with it, nothing goes through a server, and nothing
   works from outside your network.
+- **On the PC too**: the right of the settings' *Phone* page is the app itself, pressed and slid there. The colours you keep for the lights are kept on the PC: the phone and the PC show the same ones.
 - **Lights**: a motherboard's and a graphics card's lights are set through
   [OpenRGB](https://openrgb.org), an open-source program under the GPL,
   which is downloaded from its own project (about 22 MB) only when you turn
