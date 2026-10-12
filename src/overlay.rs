@@ -63,6 +63,9 @@ pub struct Overlay {
     bar_shows: Vec<Button>,
     /// Since when the pointer has been over it or its buttons.
     over: Option<Instant>,
+    /// Whether a game shows (its button lit), as the last sample had it:
+    /// (the samples are held as it is drawn: not asked for again there).
+    game: bool,
     /// Where its buttons' window was last put (none: away).
     bar_at: Option<RECT>,
     /// The button the pointer is on, said under it.
@@ -228,6 +231,7 @@ impl Overlay {
             bar_surface: None,
             bar_shows: Vec::new(),
             over: None,
+            game: false,
             bar_at: None,
             tip: None,
             said: None,
@@ -259,6 +263,7 @@ impl Overlay {
         self.clear = clear;
         self.through = settings.click_through;
         self.window.set_click_through(self.through);
+        self.game = crate::widget::game_shown(history.back().map(std::slice::from_ref).unwrap_or_default());
         self.beneath = beneath;
         self.lang = lang;
         let sample = history.back();
@@ -483,8 +488,7 @@ impl Overlay {
         let Ok(mut surface) = surface else { return };
         let dark = self.glass.is_none_or(|glass| glass.tone == Tone::Dark);
         let rim = if dark { Color::hex(0xFFFFFF, 0.3) } else { Color::hex(0x000000, 0.3) };
-        let game = crate::widget::game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default());
-        let (shows, locked, through) = (&self.bar_shows, self.locked, self.through);
+        let (shows, locked, through, game) = (&self.bar_shows, self.locked, self.through, self.game);
         let drawn = surface.draw(&self.gfx, ((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32), self.dpi, |frame| {
             for (place, button) in shows.iter().enumerate() {
                 let lit = (*button == Button::Pin && locked) || (*button == Button::Through && through) || (*button == Button::Game && game);
@@ -547,7 +551,7 @@ impl Overlay {
                 let lit = match button {
                     Button::Pin => self.locked,
                     Button::Through => self.through,
-                    Button::Game => crate::widget::game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
+                    Button::Game => self.game,
                     _ => false,
                 };
                 crate::ui::tip::show(button.says(lit, self.lang, true), at, crate::os::apps_dark());
@@ -567,7 +571,7 @@ impl Overlay {
         match button {
             Button::Game => {
                 // Showing a game (found or asked for): off; else on.
-                let shown = crate::widget::game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default());
+                let shown = self.game;
                 crate::presents::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
                 None
             }

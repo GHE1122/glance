@@ -53,7 +53,7 @@ impl Button {
             (Button::Pin, false) if overlay => p("锁定位置：不能再拖动或缩放", "Lock where it is: no longer moved or sized"),
             (Button::Pin, false) => p("固定位置和大小：不能再拖动或缩放", "Pin where it is: no longer moved or sized"),
             (Button::Pin, true) => p("已固定，点一下取消", "Kept where it is. Press to free it"),
-            (Button::Through, false) => p("鼠标穿透：点击会落到后面的窗口上。之后把鼠标停在这里片刻，这个按钮会再出现", "Let clicks through to what is behind. To end it, rest the pointer here a moment: this button comes back"),
+            (Button::Through, false) => p("鼠标穿透：点击落到后面的窗口上；要关闭，把鼠标停在这里片刻", "Let clicks through to what is behind; to end it, rest the pointer here a moment"),
             (Button::Through, true) => p("鼠标穿透已开启，点一下关闭", "Clicks pass through. Press to end it"),
             (Button::Close, _) if overlay => p("关闭悬浮窗", "Close the overlay"),
             (Button::Close, _) => p("收起", "Put away"),
