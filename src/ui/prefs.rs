@@ -74,6 +74,7 @@ const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const WSL: [Item; 4] = [item("chart", true), item("memory", true), item("gpu", true), item("distros", true)];
+const TIME: [Item; 1] = [item("twelve", false)];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
 const GAME: [Item; 9] = [
     item("chart", true),
@@ -100,6 +101,7 @@ pub fn items(module: &str) -> &'static [Item] {
         "storage" => &STORAGE,
         "battery" => &BATTERY,
         "system" => &SYSTEM,
+        "time" => &TIME,
         "wsl" => &WSL,
         "game" => &GAME,
         _ => &[],

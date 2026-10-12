@@ -24,7 +24,7 @@ pub const GROUPS: [(&str, &[(&str, bool)]); 8] = [
     ("vram", &[("vram", true)]),
     ("network", &[("down", true), ("up", true)]),
     ("mic", &[("mic", true)]),
-    ("clock", &[("time", true)]),
+    ("clock", &[("time", true), ("twelve", false)]),
 ];
 
 /// The groups shown at first.
@@ -283,6 +283,7 @@ const RATE: Form = Form {
     split: &[("999", "B/s"), ("99.9", "KB/s"), ("999", "KB/s"), ("99.9", "MB/s"), ("999", "MB/s"), ("99.9", "GB/s")],
 };
 const TIME: Form = Form { whole: &["00:00"], split: &[("00:00", "")] };
+const TIME_OF_TWELVE: Form = Form { whole: &["12:00 PM", "12:00 下午"], split: &[("12:00", "PM"), ("12:00", "下午")] };
 const MIC_ZH: Form = Form { whole: &["已静音", "开启"], split: &[("已静音", ""), ("开启", "")] };
 const MIC_EN: Form = Form { whole: &["Muted", "On"], split: &[("Muted", ""), ("On", "")] };
 /// Between the parts that follow the main figure.
@@ -394,7 +395,12 @@ pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&
                 reading(Kind::Network, lang.pick("上传", "Up"), vec![chosen("up", rate(s.net_up), &RATE)]),
             ],
             // The time of day, as the sample has it: a game played over the whole screen hides the taskbar's.
-            "clock" => vec![reading(Kind::Clock, lang.pick("时间", "Time"), vec![chosen("time", Some(text::Local::at(s.t).time()), &TIME)])],
+            // ("twelve" is not a reading of its own: it is how the time is written.)
+            "clock" => {
+                let (figure, half) = text::Local::at(s.t).time(on("twelve"), lang);
+                let written = if half.is_empty() { figure } else { format!("{figure} {half}") };
+                vec![reading(Kind::Clock, lang.pick("时间", "Time"), vec![chosen("time", Some(written), if on("twelve") { &TIME_OF_TWELVE } else { &TIME })])]
+            }
             _ => vec![s.mic_muted.filter(|_| on("mic")).and_then(|muted| {
                 let value = if muted { lang.pick("已静音", "Muted") } else { lang.pick("开启", "On") };
                 let form = if lang == Lang::Zh { &MIC_ZH } else { &MIC_EN };
@@ -745,22 +751,19 @@ pub fn say(frame: &dyn Canvas, (name, figure, unit): (&str, &str, &str), size: (
     }
 }
 
-/// How the overlay is in hand: not; taken (letting clicks through, it
-/// takes them now); dragged.
+/// How the overlay is in hand: not, or dragged.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Hand {
     Free,
-    Taken,
     Dragged,
 }
 
 /// Draws the glass for `readings` from the canvas's corner: its tint (over
 /// the screen behind, blurred, which the window draws), rim, and the
 /// readings on it, at `px` physical pixels a DIP; dragged, in the colour
-/// that says it is being moved; taken, outlined (as a widget says it). Its
-/// shadow is drawn apart (see `shadow`).
+/// that says it is being moved. Its shadow is drawn apart (see `shadow`).
 pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], shape: Shape, glass: Glass, hand: Hand, px: f32) {
-    let (dragged, taken) = (hand == Hand::Dragged, hand == Hand::Taken);
+    let dragged = hand == Hand::Dragged;
     let m = Metrics { width: &|text, font| frame.measure(text, font), line: &|font| frame.baseline(font) };
     let arranged = arrange(readings, shape, &m, px);
     let (glass, tint) = if dragged { (DRAGGED, DRAGGED_TINT) } else { (glass, glass.tone.palette().tint) };
@@ -768,9 +771,6 @@ pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], s
     let (width, height) = arranged.size;
     let (x0, y0, radius) = (0.0, 0.0, arranged.radius);
     frame.fill_rounded(Color::hex(tint, glass.opacity * glass.presence), x0, y0, width, height, radius);
-    if taken {
-        frame.stroke_rounded(Fill::Solid(palette.second), x0 + 0.75, y0 + 0.75, width - 1.5, height - 1.5, radius - 0.75, 1.5);
-    }
     let ink = |ink: Ink| match ink {
         Ink::Main => palette.ink,
         Ink::Second => palette.second,

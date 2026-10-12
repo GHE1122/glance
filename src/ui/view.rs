@@ -877,7 +877,8 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         // The time of day, and the day under its name, as the sample has them.
         "time" => {
             let now = text::Local::at(s.t);
-            vec![head(lang.pick("时间", "Time"), now.date(lang), "", false), Block::Readout { figure: now.time(), unit: "", hot: false, plot: None }]
+            let (figure, unit) = now.time(on("twelve"), lang);
+            vec![head(lang.pick("时间", "Time"), now.date(lang), "", false), Block::Readout { figure, unit, hot: false, plot: None }]
         }
         "system" => {
             let rows = [

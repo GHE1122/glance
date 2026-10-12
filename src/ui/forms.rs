@@ -258,6 +258,7 @@ fn readings(scene: &Scene) -> Vec<Reading> {
     let mut readings = Vec::new();
     if on("time") {
         let now = text::Local::at(s.t);
+        let (figure, half) = now.time(prefs.shows("time", "twelve"), lang);
         readings.push(Reading {
             kind: Kind::Time,
             id: "time".into(),
@@ -266,8 +267,8 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             // (Named by its day: a tile says the time under it.)
             label: now.date(lang),
             share: Some(now.of_day()),
-            figure: now.time(),
-            unit: String::new(),
+            figure,
+            unit: half.into(),
             beside: String::new(),
             detail: String::new(),
             hot: false,

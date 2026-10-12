@@ -155,9 +155,19 @@ impl Local {
         Local { hour: local.tm_hour as u32, minute: local.tm_min as u32, month: local.tm_mon as u32 + 1, day: local.tm_mday as u32, weekday: local.tm_wday as u32 }
     }
 
-    /// Hours and minutes, of a 24-hour clock.
-    pub fn time(self) -> String {
-        format!("{:02}:{:02}", self.hour, self.minute)
+    /// Hours and minutes: of a 24-hour clock ("15:05"), or of one of
+    /// `twelve`, with which half of the day after them ("3:05", "PM").
+    pub fn time(self, twelve: bool, lang: Lang) -> (String, &'static str) {
+        if !twelve {
+            return (format!("{:02}:{:02}", self.hour, self.minute), "");
+        }
+        let half = match (self.hour < 12, lang) {
+            (true, Lang::Zh) => "上午",
+            (false, Lang::Zh) => "下午",
+            (true, Lang::En) => "AM",
+            (false, Lang::En) => "PM",
+        };
+        (format!("{}:{:02}", (self.hour + 11) % 12 + 1, self.minute), half)
     }
 
     /// How much of its day has gone (0 to 1).
@@ -195,7 +205,10 @@ mod tests {
         assert_eq!(link_speed(2_402_000_000), "2.4 Gbps");
         assert_eq!(Lang::Zh.duration(3 * 3600 + 5 * 60), "3 小时 5 分");
         let noon = Local { hour: 9, minute: 5, month: 10, day: 11, weekday: 0 };
-        assert_eq!((noon.time().as_str(), noon.date(Lang::Zh).as_str(), noon.date(Lang::En).as_str()), ("09:05", "10月11日 周日", "Sun, Oct 11"));
+        assert_eq!((noon.time(false, Lang::Zh).0.as_str(), noon.date(Lang::Zh).as_str(), noon.date(Lang::En).as_str()), ("09:05", "10月11日 周日", "Sun, Oct 11"));
+        assert_eq!(noon.time(true, Lang::En), ("9:05".to_string(), "AM"));
+        assert_eq!(Local { hour: 0, ..noon }.time(true, Lang::Zh), ("12:05".to_string(), "上午"));
+        assert_eq!(Local { hour: 15, ..noon }.time(true, Lang::En), ("3:05".to_string(), "PM"));
         assert_eq!(Local { hour: 12, minute: 0, ..noon }.of_day(), 0.5);
     }
 }
