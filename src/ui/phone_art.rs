@@ -359,12 +359,13 @@ fn colour(hex: &str) -> Color {
 /// size), for the PC called `name`: what the phone would be told of it now
 /// (`reads`: see `remote::figures`), and how the remote says it is
 /// (`state`: what a phone is answered; none, while the remote has not
-/// answered: the page is then a picture, with nothing to press), `seconds`
-/// into the fans' turning, the page under its head moved up by `scroll`,
+/// answered: the page is then a picture, with nothing to press; `off`,
+/// where the remote is not turned on at all), `seconds` into the fans'
+/// turning, the page under its head moved up by `scroll`,
 /// and a slider in hand shown where it is held (`held`: which, and how far
 /// along).
 #[allow(clippy::too_many_arguments)]
-pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, state: Option<&Value>, seconds: f32, scroll: f32, held: Option<(&Part, f32)>) -> Painted {
+pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, state: Option<&Value>, off: bool, seconds: f32, scroll: f32, held: Option<(&Part, f32)>) -> Painted {
     let nothing = Painted { parts: Vec::new(), tall: 0.0 };
     let k = at.w / SCREEN.0;
     let screen = Matrix3x2::scale(k, k) * Matrix3x2::translation(at.x, at.y);
@@ -388,7 +389,11 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     let (side, wide) = (16.0, SCREEN.0 - 32.0);
     // Whose it is, and whether it answers.
     picture.words(name, Font::new(Family::Segoe, 21.0, 600.0), INK, side, 50.0, false);
-    let answering = if state.is_some() { lang.pick("已连接", "Connected") } else { lang.pick("正在连接…", "Connecting…") };
+    let answering = match (state.is_some(), off) {
+        (true, _) => lang.pick("已连接", "Connected"),
+        (false, true) => lang.pick("遥控未开启", "The remote is off"),
+        (false, false) => lang.pick("正在连接…", "Connecting…"),
+    };
     let small = Font::new(Family::Segoe, 12.5, 400.0);
     picture.words(answering, small, DIM, SCREEN.0 - side, 48.0, true);
     unsafe { frame.dc.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: SCREEN.0 - side - frame.gfx.measure(answering, small) - 11.0, Y: 43.5 }, radiusX: 4.0, radiusY: 4.0 }, frame.brush(if state.is_some() { GOOD } else { FAINT })) };

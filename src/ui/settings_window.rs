@@ -3321,7 +3321,7 @@ impl Ui {
         self.hear_phone();
         let held = self.phone.slid.as_ref().map(|(part, _, at)| (part, *at));
         let state = self.phone.state.as_ref().filter(|_| self.remote);
-        let painted = super::phone_art::paint(frame, Rect { x, y, w, h }, self.lang, &name, &reads, state, self.phone_from.elapsed().as_secs_f32(), self.phone.scroll, held);
+        let painted = super::phone_art::paint(frame, Rect { x, y, w, h }, self.lang, &name, &reads, state, !self.remote, self.phone_from.elapsed().as_secs_f32(), self.phone.scroll, held);
         self.phone.at = Some((Rect { x, y, w, h }, k));
         self.phone.most = (painted.tall - tall).max(0.0);
         self.phone.scroll = self.phone.scroll.min(self.phone.most);
