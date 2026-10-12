@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::link::{Asked, GameModeSent, Link, Told, Want};
+use crate::link::{Asked, GameModeSent, Link, Switch, Told, Want};
 use crate::metrics::Sampler;
 use crate::presents::GameMode;
 use crate::reading::{Sample, StaticInfo};
@@ -31,6 +31,54 @@ static LINKED: AtomicBool = AtomicBool::new(false);
 static REPORTED: Mutex<Option<Vec<String>>> = Mutex::new(None);
 /// What was last asked of them (asked again only when it changes).
 static WANTED: Mutex<Option<Want>> = Mutex::new(None);
+/// How the switches that need their rights are, as they last told (none: not told yet), and the turn of each
+/// told (for one waiting on an answer).
+static SWITCHES: Mutex<[(Option<bool>, u64); 2]> = Mutex::new([(None, 0), (None, 0)]);
+
+fn slot(switch: Switch) -> usize {
+    match switch {
+        Switch::Autostart => 0,
+        Switch::Remote => 1,
+    }
+}
+
+/// Whether Glance starts at sign-in: as the sensors' process says (their task was made elevated), else as read
+/// here.
+pub fn autostart() -> bool {
+    if linked() {
+        if let Some(on) = SWITCHES.lock().unwrap()[0].0 {
+            return on;
+        }
+    }
+    crate::elevation::autostart_enabled()
+}
+
+/// Turns a switch that needs the sensors' rights: by their process (its answer waited for, a while), or here.
+/// Whether it is on then.
+pub fn switch(switch: Switch, on: bool) -> bool {
+    if !linked() {
+        return match switch {
+            Switch::Autostart => crate::elevation::set_autostart(on),
+            Switch::Remote => crate::phone::turn(on),
+        };
+    }
+    let turn = SWITCHES.lock().unwrap()[slot(switch)].1;
+    ask(&Asked::Switch { switch, on });
+    let until = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < until {
+        let (now, told) = SWITCHES.lock().unwrap()[slot(switch)];
+        if told != turn {
+            return now.unwrap_or(false);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    SWITCHES.lock().unwrap()[slot(switch)].0.unwrap_or(false)
+}
+
+/// Asks the sensors' process to download and run the release found newer.
+pub fn install(release: crate::link::ReleaseSent) {
+    ask(&Asked::Install(release));
+}
 
 /// The readings' source, and what the machine is. Elevated already, Glance reads the sensors itself; else it
 /// links to the sensors running, or starts them (through its task, or by asking the user) and links to them;
@@ -106,6 +154,12 @@ impl Source {
                         Some(Told::Presenting { games, mode }) => crate::presents::mirror(games, mode.into()),
                         Some(Told::Report(lines)) => *REPORTED.lock().unwrap() = Some(lines),
                         Some(Told::Mouse { dx, dy }) => crate::app().controller.relay_mouse(dx, dy),
+                        Some(Told::Switched { switch, on }) => {
+                            let mut switches = SWITCHES.lock().unwrap();
+                            let kept = &mut switches[slot(switch)];
+                            *kept = (Some(on), kept.1 + 1);
+                        }
+                        Some(Told::Updating(state)) => crate::update::set_state(state),
                         Some(Told::Hello { .. }) => {}
                         None => {
                             crate::journal::note("readings: the sensors' process went; Glance reads what it can itself");

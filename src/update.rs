@@ -236,7 +236,8 @@ pub fn tell_if_updated() {
 }
 
 /// Downloads the newer release's installer and runs it, on a thread of its
-/// own; the installer closes Glance as it replaces it.
+/// own; the installer closes Glance as it replaces it. With the sensors in a
+/// process of their own, they do it (with the rights to run it unasked).
 pub fn install() {
     let release = {
         let mut found = FOUND.lock().unwrap();
@@ -248,12 +249,47 @@ pub fn install() {
             _ => return,
         }
     };
+    if crate::source::linked() {
+        crate::source::install(crate::link::ReleaseSent { version: release.version.clone(), installers: release.installers.clone() });
+        return;
+    }
     thread::spawn(move || {
         let outcome = fetch_and_run(&release);
         if let Some((_, state)) = FOUND.lock().unwrap().as_mut() {
             *state = outcome;
         }
     });
+}
+
+/// Where an update asked of the sensors stands, as they tell it.
+pub fn set_state(state: crate::link::UpdateState) {
+    if let Some((_, kept)) = FOUND.lock().unwrap().as_mut() {
+        *kept = match state {
+            crate::link::UpdateState::Ready => State::Ready,
+            crate::link::UpdateState::Downloading => State::Downloading,
+            crate::link::UpdateState::Failed => State::Failed,
+            crate::link::UpdateState::Rejected => State::Rejected,
+        };
+    }
+}
+
+/// The release the rest of Glance asks the sensors to update to, downloaded and run here (see `fetch_and_run`);
+/// its installers taken only from Glance's own site, GitHub and Gitee, over HTTPS.
+pub fn fetch_and_run_sent(release: &crate::link::ReleaseSent) -> crate::link::UpdateState {
+    let ours = |url: &str| {
+        let host = url.strip_prefix("https://").and_then(|rest| rest.split('/').next()).unwrap_or("");
+        ["glancepc.com", "github.com", "gitee.com"].contains(&host)
+    };
+    let installers: Vec<(String, String)> = release.installers.iter().filter(|(_, url)| ours(url)).cloned().collect();
+    if installers.is_empty() {
+        return crate::link::UpdateState::Failed;
+    }
+    match fetch_and_run(&Release { version: release.version.clone(), installers }) {
+        State::Ready => crate::link::UpdateState::Ready,
+        State::Downloading => crate::link::UpdateState::Downloading,
+        State::Failed => crate::link::UpdateState::Failed,
+        State::Rejected => crate::link::UpdateState::Rejected,
+    }
 }
 
 fn fetch_and_run(release: &Release) -> State {

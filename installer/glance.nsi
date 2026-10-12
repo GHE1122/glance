@@ -49,7 +49,8 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !define MUI_ICON "..\icons\icon.ico"
 !define MUI_UNICON "..\icons\icon.ico"
 !define MUI_ABORTWARNING
-!define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE}"
+!define MUI_FINISHPAGE_RUN
+!define MUI_FINISHPAGE_RUN_FUNCTION StartAsUser
 
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE CheckFolder
 !insertmacro MUI_PAGE_DIRECTORY
@@ -112,9 +113,15 @@ Function Restart
   ${IfNot} ${Errors}
   ${AndIf} ${Silent}
   ${AndIf} ${FileExists} "$INSTDIR\${EXE}"
-    SetOutPath "$INSTDIR"
-    Exec '"$INSTDIR\${EXE}"'
+    Call StartAsUser
   ${EndIf}
+FunctionEnd
+
+; Glance started as the user (the installer runs as administrator; Glance itself does not, and starts its
+; sensors elevated through its own task): through Explorer, which runs as the user.
+Function StartAsUser
+  SetOutPath "$INSTDIR"
+  Exec '"$WINDIR\explorer.exe" "$INSTDIR\${EXE}"'
 FunctionEnd
 
 Function .onInit

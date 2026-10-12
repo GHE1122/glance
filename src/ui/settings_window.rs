@@ -766,7 +766,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             settings,
             prefs,
             page: Page::Appearance,
-            autostart: elevation::autostart_enabled(),
+            autostart: crate::source::autostart(),
             remote_there: crate::phone::helper().is_some(),
             remote: crate::phone::on(),
             remote_lights: crate::phone::lights(),
@@ -1882,7 +1882,7 @@ impl Ui {
             Switch::Remote => {
                 // What the system then reports, not what was asked.
                 if self.remote_there {
-                    self.remote = crate::phone::turn(!self.remote);
+                    self.remote = crate::source::switch(crate::link::Switch::Remote, !self.remote);
                     self.web_address = crate::phone::web_address();
                     self.code = None;
                     self.phones = crate::phone::phones();
@@ -1892,7 +1892,7 @@ impl Ui {
             }
             Switch::Startup => {
                 // What the system then reports, not what was asked.
-                self.autostart = elevation::set_autostart(!self.autostart);
+                self.autostart = crate::source::switch(crate::link::Switch::Autostart, !self.autostart);
                 self.next_frame = Instant::now();
                 return;
             }

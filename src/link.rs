@@ -39,6 +39,36 @@ pub enum Told {
     Mouse { dx: i32, dy: i32 },
     /// What they have to say for a report, asked for.
     Report(Vec<String>),
+    /// What became of a switch asked for (or how it is, as they start): whether it is on now.
+    Switched { switch: Switch, on: bool },
+    /// Where an update asked for stands.
+    Updating(UpdateState),
+}
+
+/// The switches that need the sensors' rights to be turned: Glance starting at sign-in (its task was made
+/// elevated), and the phone remote (its task, and its way through the firewall).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Switch {
+    Autostart,
+    Remote,
+}
+
+/// Where taking an update stands, as it travels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum UpdateState {
+    Ready,
+    Downloading,
+    Failed,
+    Rejected,
+}
+
+/// A release to update to: its version, and each site's version and installer (the sensors take an installer
+/// only from Glance's own site, GitHub or Gitee, and run it only if it is signed as Glance is and is that newer
+/// version).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReleaseSent {
+    pub version: String,
+    pub installers: Vec<(String, String)>,
 }
 
 /// What the sensors are asked.
@@ -50,6 +80,10 @@ pub enum Asked {
     GameMode(GameModeSent),
     /// What they have to say for a report.
     Report,
+    /// A switch turned on or off.
+    Switch { switch: Switch, on: bool },
+    /// The release found newer, downloaded and installed.
+    Install(ReleaseSent),
 }
 
 /// How often the sensors read (milliseconds), whether what changes slowly is read afresh each time (something
@@ -164,7 +198,8 @@ impl Sensors {
         Some(Sensors { told, asked })
     }
 
-    /// Waits for the rest to come (both its ends); its ends to write to and read from, once it has.
+    /// Waits for the rest to come (both its ends); its ends to write to and read from, once it has (copies of
+    /// the pipes' handles, closed as they are let go: the pipes stay).
     pub fn accept(&self) -> Option<(File, File)> {
         unsafe {
             for pipe in [self.told, self.asked] {
@@ -175,14 +210,17 @@ impl Sensors {
                     }
                 }
             }
-            // (The handles stay the pipes': these Files are lent, and forgotten rather than closed.)
-            Some((File::from_raw_handle(self.told.0), File::from_raw_handle(self.asked.0)))
+            let copy = |pipe: HANDLE| {
+                let process = windows::Win32::System::Threading::GetCurrentProcess();
+                let mut copied = HANDLE::default();
+                windows::Win32::Foundation::DuplicateHandle(process, pipe, process, &mut copied, 0, false, windows::Win32::Foundation::DUPLICATE_SAME_ACCESS).ok().map(|_| File::from_raw_handle(copied.0))
+            };
+            Some((copy(self.told)?, copy(self.asked)?))
         }
     }
 
-    /// The rest gone: its ends let go, for it to come again.
-    pub fn let_go(&self, ends: (File, File)) {
-        std::mem::forget(ends);
+    /// The rest gone: the pipes free for it to come again.
+    pub fn let_go(&self) {
         unsafe {
             let _ = DisconnectNamedPipe(self.told);
             let _ = DisconnectNamedPipe(self.asked);

@@ -21,7 +21,16 @@ pub fn report() -> String {
     let mut lines = vec![
         format!("Glance {}", env!("CARGO_PKG_VERSION")),
         windows(windows_key),
-        format!("Running elevated: {}", yes(crate::elevation::is_elevated())),
+        format!(
+            "Sensors read: {}",
+            if crate::source::linked() {
+                "in their own process, elevated"
+            } else if crate::elevation::is_elevated() {
+                "by Glance itself, elevated"
+            } else {
+                "by Glance itself, without administrator rights"
+            }
+        ),
         format!("Installed in a protected folder: {}", yes(crate::elevation::may_start_unasked())),
         format!("PawnIO driver: {}", crate::elevation::pawnio_version().unwrap_or_else(|| "not installed".into())),
         format!("CPU: {} ({} threads)", info.cpu_name, info.threads),
