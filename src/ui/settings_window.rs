@@ -3506,7 +3506,8 @@ impl Ui {
         let ring = RECT { left: whole(x - around), top: whole(y - around), right: whole(x + w + around), bottom: whole(y + h + around) };
         let frost = 1.0 - overlay.clear.clamp(0.0, 1.0);
         let glass = super::overlay::Glass { presence: frost, ..super::overlay::glass(&mut self.stage.desktop.luminances(ring, hole, 1), None) };
-        if let Some((_, bitmap)) = &self.stage.bitmap {
+        // (Blurred only where the glass is frosted: unfrosted, its tint alone is over the screen as it is.)
+        if let Some((_, bitmap)) = self.stage.bitmap.as_ref().filter(|_| overlay.frosted) {
             frame.frosted(bitmap, screen, (0.0, 0.0, gw, gh, radius), placed, frost);
         }
         frame.place(placed);
