@@ -681,7 +681,13 @@ impl Widgets {
         let over = widget.button_at(x, y);
         if over != widget.tip {
             widget.tip = over;
-            match (over, cursor_position()) {
+            // (Under the button itself, where that is on the screen: not wherever the pointer came onto it.)
+            let about = over.and_then(|button| widget.buttons().into_iter().find(|(_, one)| *one == button)).map(|(centre, _)| {
+                let on_screen = |dx: f32, dy: f32| ((widget.at.x as f32 + (centre.x + dx) * px).round() as i32, (widget.at.y as f32 + (centre.y + dy) * px).round() as i32);
+                let ((left, top), (right, bottom)) = (on_screen(-BUTTON / 2.0, -BUTTON / 2.0), on_screen(BUTTON / 2.0, BUTTON / 2.0));
+                RECT { left, top, right, bottom }
+            });
+            match (over, about) {
                 (Some(button), Some(at)) => {
                     let lit = match button {
                         Button::Pin => widget.pinned,

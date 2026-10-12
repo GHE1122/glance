@@ -556,7 +556,11 @@ impl Overlay {
                     Button::Game => self.game,
                     _ => false,
                 };
-                crate::ui::tip::show(button.says(lit, self.lang, true), at, crate::os::apps_dark());
+                // (Under the button itself: not wherever the pointer came onto it.)
+                let half = (buttons::SIZE / 2.0 * self.dpi).round() as i32;
+                let middle = self.bar_middles()[buttons::ALL.iter().position(|one| *one == button).unwrap()];
+                let about = RECT { left: middle.x - half, top: middle.y - half, right: middle.x + half, bottom: middle.y + half };
+                crate::ui::tip::show(button.says(lit, self.lang, true), about, crate::os::apps_dark());
             }
             None => crate::ui::tip::hide(),
         }

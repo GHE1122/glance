@@ -23,13 +23,16 @@ thread_local! {
     static TIP: RefCell<Option<Tip>> = const { RefCell::new(None) };
 }
 
-/// How far under the pointer it shows, its height, and the room beside its words (DIPs).
-const UNDER: f32 = 20.0;
+/// How far from what it speaks of it shows, its height, and the room beside its words (DIPs).
+const UNDER: f32 = 8.0;
 const TALL: f32 = 28.0;
 const PAD: f32 = 10.0;
 
-/// Says `text` under `at` (a point of the screen), on its screen, till `hide`.
-pub fn show(text: &str, at: POINT, dark: bool) {
+/// Says `text` under `about` (what it speaks of, where that is on the
+/// screen), its middle under its middle, on its screen, till `hide`: always
+/// as far from it, wherever on it the pointer is.
+pub fn show(text: &str, about: RECT, dark: bool) {
+    let at = POINT { x: (about.left + about.right) / 2, y: (about.top + about.bottom) / 2 };
     let Ok(gfx) = gfx::current() else { return };
     TIP.with(|kept| {
         let mut kept = kept.borrow_mut();
@@ -51,10 +54,10 @@ pub fn show(text: &str, at: POINT, dark: bool) {
         let font = Font::new(Family::Segoe, 12.0, 400.0);
         let (wide, tall) = (gfx.measure(text, font) + 2.0 * PAD, TALL);
         let (width, height) = ((wide * scale).ceil() as i32, (tall * scale).ceil() as i32);
-        // Under the pointer, its middle on it; all of it on the screen; over the pointer where there is no room under.
+        // Under it, its middle on its middle; all of it on the screen; over it where there is no room under.
         let left = (at.x - width / 2).min(screen.right - width).max(screen.left);
-        let under = at.y + (UNDER * scale) as i32;
-        let top = if under + height > screen.bottom { at.y - (UNDER * scale) as i32 - height } else { under };
+        let under = about.bottom + (UNDER * scale) as i32;
+        let top = if under + height > screen.bottom { about.top - (UNDER * scale) as i32 - height } else { under };
         let rect = RECT { left, top, right: left + width, bottom: top + height };
         if tip.said.0 == text && tip.said.1 == rect {
             return;
@@ -114,7 +117,7 @@ mod tests {
     #[test]
     #[ignore]
     fn shows_and_hides() {
-        super::show("鼠标穿透已开启，点一下关闭", POINT { x: 600, y: 400 }, true);
+        super::show("鼠标穿透已开启，点一下关闭", windows::Win32::Foundation::RECT { left: 590, top: 390, right: 610, bottom: 410 }, true);
         let window = super::TIP.with(|kept| kept.borrow().as_ref().map(|tip| tip.window.hwnd)).expect("no tip was made");
         let mut rect = Default::default();
         unsafe { GetWindowRect(window, &mut rect).unwrap() };
