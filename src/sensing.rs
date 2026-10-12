@@ -131,6 +131,11 @@ pub fn run() {
         drop(telling);
         drop(asked);
         pipes.let_go();
+        // (Its read, which letting the pipes go does not end, given up on: it ends, and is waited for.)
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            let _ = windows::Win32::System::IO::CancelSynchronousIo(windows::Win32::Foundation::HANDLE(listener.as_raw_handle()));
+        }
         let _ = listener.join();
     }
     crate::presents::stop();

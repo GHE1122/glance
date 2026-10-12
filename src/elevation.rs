@@ -967,12 +967,16 @@ fn launches_sensors() -> bool {
 /// this copy may start unasked; else by asking the user (once: the sensors then make the task). Returns whether
 /// they were started (or asked for).
 pub fn start_sensors() -> bool {
-    if launches_sensors() && may_start_unasked() {
+    // (An earlier version's launch task starts this executable without the sensors' argument: elevated, with
+    // Glance running, it runs the sensors all the same, and makes the task anew.)
+    if (launches_sensors() || runs_this(&launch_task())) && may_start_unasked() {
         let started = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(launch_task())).ok()?.Run(&VARIANT::default()).ok() });
         if started.is_some() {
+            crate::journal::note("sensors: started through the launch task");
             return true;
         }
     }
+    crate::journal::note("sensors: the user asked to let them run as administrator");
     let exe = std::env::current_exe().expect("own path");
     let started = unsafe { ShellExecuteW(None, w!("runas"), &HSTRING::from(exe.as_os_str()), &HSTRING::from(SENSORS), PCWSTR::null(), windows::Win32::UI::WindowsAndMessaging::SW_HIDE) };
     // ShellExecute reports success with a value above 32.

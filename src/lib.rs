@@ -357,9 +357,13 @@ pub fn run() {
         }
         _ => {}
     }
-    // One Glance at a time: starting it again opens its settings. Asked
-    // before handing over to an elevated start, which the launch task
-    // refuses while the Glance it started is running.
+    // Started elevated with Glance running already: by an earlier version's launch task, which started Glance
+    // whole (Glance runs it, for the sensors, till it is made again as it is now): the sensors, then.
+    if elevation::is_elevated() && already_running() {
+        sensing::run();
+        return;
+    }
+    // One Glance at a time: starting it again opens its settings.
     if already_running() {
         tray::ask_for_settings();
         return;
