@@ -414,7 +414,6 @@ enum Switch {
     HeatAlert,
     Overlay,
     OverlayInGame,
-    OverlayThrough,
     /// Whether the overlay's glass blurs what is behind it.
     /// The phone remote.
     Remote,
@@ -1072,7 +1071,6 @@ impl Ui {
                     Row::Switch(Switch::OverlayInGame),
                     Row::Slider(Field::OverlaySize),
                     Row::Slider(Field::OverlayClear),
-                    Row::Switch(Switch::OverlayThrough),
                     Row::Choice(Field::OverlayLayout),
                 ]);
                 // Rows only for a strip.
@@ -1777,13 +1775,8 @@ impl Ui {
             ),
             Switch::Overlay => (
                 p("悬浮窗", "Overlay"),
-                Some(p("始终显示在屏幕上。可拖动调整位置，滚轮调透明度，右键可锁定、关闭或打开设置", "Always on screen. Drag to move; the wheel sets how clear it is; right-click to lock, close or open settings")),
+                Some(p("始终显示在屏幕上。可拖动调整位置，滚轮调透明度；鼠标移到它上面会出现按钮：锁定位置、鼠标穿透、关闭和设置", "Always on screen. Drag to move; the wheel sets how clear it is; the pointer over it brings its buttons: lock, click-through, close and settings")),
                 self.settings.overlay.on,
-            ),
-            Switch::OverlayThrough => (
-                p("鼠标穿透", "Let clicks through"),
-                Some(p("点击会落到悬浮窗后面的游戏或窗口上。要关闭穿透，把鼠标在悬浮窗上停留片刻，点出现的按钮", "Clicks go to the game or window behind it. To end it, rest the pointer on the overlay a moment and press the button that shows")),
-                self.settings.overlay.click_through,
             ),
             Switch::OverlayInGame => (
                 p("游戏时自动显示", "Show while playing"),
@@ -1866,7 +1859,6 @@ impl Ui {
                 settings.overlay.in_game ^= true;
                 settings.overlay.offered = true;
             }
-            Switch::OverlayThrough => settings.overlay.click_through ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;
