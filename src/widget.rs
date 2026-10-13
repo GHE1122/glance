@@ -1048,8 +1048,9 @@ impl Widget {
         }
     }
 
-    /// How often what is behind is taken anew as it changes: with live
-    /// refraction as the panel's, else once a second at most.
+    /// How often what is behind is taken anew as it changes, with live
+    /// refraction (without, it is taken only as it is arranged anew: see
+    /// `collect`).
     fn backdrop_every(live: bool) -> Duration {
         if live { LIVE_INTERVAL } else { RETAKE_EVERY }
     }
@@ -1061,12 +1062,21 @@ impl Widget {
     fn collect(&mut self, live: bool, px: f32) {
         let Some(scene) = &self.backdrop else { return };
         let Some(capture) = scene.ready() else {
-            if self.pending.is_some() || self.behind.as_ref().is_none_or(|behind| behind.taken.elapsed() >= Self::backdrop_every(live)) {
+            // (Without live refraction, only the one awaited.)
+            let again = live && self.behind.as_ref().is_some_and(|behind| behind.taken.elapsed() >= Self::backdrop_every(live));
+            if self.pending.is_some() || self.behind.is_none() || again {
                 scene.want();
             }
             return;
         };
         let now = Instant::now();
+        // Without live refraction, what is behind is as it was when looked at, till it is looked at again (see
+        // `frame`): the scene rests meanwhile.
+        if !live {
+            if let Some(scene) = &mut self.backdrop {
+                scene.rest();
+            }
+        }
         match self.pending.take() {
             Some(request) if request.generation != self.generation => self.retake |= self.behind.is_some(),
             Some(request) => self.took(Some(capture), request.moved, now, px),

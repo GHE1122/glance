@@ -1668,7 +1668,7 @@ impl<'a> Panel<'a> {
     /// be, and only the frost follows); the same desktop as before, the
     /// last stands.
     fn collect_behind(&mut self, now: Instant) {
-        let Some(scene) = &self.backdrop else { return };
+        let Some(scene) = &mut self.backdrop else { return };
         let Some(capture) = scene.ready() else {
             // (Live, as often as it is looked at: see `refresh_behind`.)
             if self.capturing.is_some() || (self.live && self.behind.as_ref().is_none_or(|behind| now.duration_since(behind.taken) >= LIVE_INTERVAL)) {
@@ -1676,6 +1676,11 @@ impl<'a> Panel<'a> {
             }
             return;
         };
+        // Without live refraction, what is behind is as it was when taken, till it is taken again: the scene rests
+        // meanwhile.
+        if !self.live {
+            scene.rest();
+        }
         let capture = Some(capture);
         let request = self.capturing.take().unwrap_or(PanelRequest { generation: self.generation, menus: crate::ui::menu::SHOWN.load(Ordering::Relaxed), afresh: false });
         if request.generation != self.generation {

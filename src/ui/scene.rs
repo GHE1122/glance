@@ -122,6 +122,26 @@ impl Shared {
             }
             let texture: ID3D11Texture2D = unsafe { frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface() }.ok()?;
             let pixels = read_back(device()?, &mut self.staging.lock().unwrap(), &texture, width as u32, height as u32)?;
+            {
+                static DUMPED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let n = DUMPED.fetch_add(1, Ordering::Relaxed);
+                if n < 12 {
+                    let (w, h) = (width as usize, height as usize);
+                    let mut out = Vec::new();
+                    out.extend_from_slice(b"BM");
+                    out.extend_from_slice(&((54 + w * h * 4) as u32).to_le_bytes());
+                    out.extend_from_slice(&0u32.to_le_bytes());
+                    out.extend_from_slice(&54u32.to_le_bytes());
+                    out.extend_from_slice(&40u32.to_le_bytes());
+                    out.extend_from_slice(&(w as i32).to_le_bytes());
+                    out.extend_from_slice(&(-(h as i32)).to_le_bytes());
+                    out.extend_from_slice(&1u16.to_le_bytes());
+                    out.extend_from_slice(&32u16.to_le_bytes());
+                    out.extend_from_slice(&[0u8; 24]);
+                    out.extend_from_slice(&pixels);
+                    let _ = std::fs::write(std::env::temp_dir().join(format!("scene-{n}-{}x{}-at{}_{}.bmp", w, h, area.left, area.top)), out);
+                }
+            }
             Some(Capture::from_pixels(area, pixels))
         })();
         let Some(capture) = read else { return false };
@@ -317,9 +337,6 @@ impl Scene {
         if same_windows && area == self.area && behind.iter().zip(&self.shown).all(|((_, a), (.., b))| a == b) {
             return false;
         }
-        // Frames of what was there before are not of what is there now.
-        *self.shared.of.lock().unwrap() = (area, now_100ns());
-        *self.shared.latest.lock().unwrap() = None;
         if area != self.area {
             let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
             unsafe {
@@ -350,6 +367,10 @@ impl Scene {
                 self.place(index, rect);
             }
         }
+        // Frames from before all of it was in place are not of what is there now (one may be put together while it
+        // is being put in place).
+        *self.shared.of.lock().unwrap() = (area, now_100ns());
+        *self.shared.latest.lock().unwrap() = None;
         true
     }
 
@@ -373,6 +394,16 @@ impl Scene {
         for (_, thumbnail, _) in self.shown.drain(..) {
             let _ = unsafe { DwmUnregisterThumbnail(thumbnail) };
         }
+    }
+
+    /// Shows nothing till it is arranged again (nor does the compositor put anything together in it meanwhile): for
+    /// whoever wants what is behind only as it was when last looked at, not as it changes.
+    pub fn rest(&mut self) {
+        self.forget();
+        // (Nor is the frame of it emptied wanted, nor any come meanwhile.)
+        self.shared.wanted.store(false, Ordering::Release);
+        *self.shared.latest.lock().unwrap() = None;
+        *self.shared.ready.lock().unwrap() = None;
     }
 
     /// Whether a frame has come that was not wanted as it came (and is not read yet).
