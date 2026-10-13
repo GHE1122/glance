@@ -183,14 +183,14 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
 #[cfg(windows)]
 pub fn watch(wanted: impl Fn() -> (bool, bool) + Send + 'static, changed: impl Fn() + Send + Sync + 'static) {
     let _ = TOLD.set(Box::new(changed));
-    std::thread::spawn(move || loop {
+    std::thread::Builder::new().name("glance: what plays".into()).spawn(move || loop {
         let (on, lyrics) = wanted();
         LYRICS.store(lyrics, Ordering::Relaxed);
         let next = if on { look() } else { keep(None); None };
         // (Not sooner than a twentieth of a second: a line due already is looked at as the next comes.)
         let wait = next.map_or(std::time::Duration::from_secs(1), |next| next.clamp(std::time::Duration::from_millis(50), std::time::Duration::from_secs(1)));
         std::thread::sleep(wait);
-    });
+    }).expect("a thread started");
 }
 
 /// Does `act`, on a thread of its own, and looks at how it is then: at

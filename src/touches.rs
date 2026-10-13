@@ -95,7 +95,7 @@ unsafe extern "system" fn told(window: HWND, message: u32, wparam: WPARAM, lpara
 /// is heard (and Windows is asked for nothing) but while the remote has
 /// the screens out: by the sensors' process while there is one, else here.
 pub fn start() {
-    std::thread::spawn(|| unsafe {
+    std::thread::Builder::new().name("glance: touches".into()).spawn(|| unsafe {
         let Some(shared) = crate::remote::Shared::open(w!("Local\\Glance.Touches")) else { return };
         *SHARED.lock().unwrap() = Some(shared);
         let class = WNDCLASSW { lpfnWndProc: Some(told), lpszClassName: w!("GlanceTouches"), ..Default::default() };
@@ -143,5 +143,5 @@ pub fn start() {
                 DispatchMessageW(&message);
             }
         }
-    });
+    }).expect("a thread started");
 }

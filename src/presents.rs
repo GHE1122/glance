@@ -128,7 +128,7 @@ pub fn start() {
         let _ = unsafe { EnableTraceEx2(handle, &provider, EVENT_CONTROL_CODE_ENABLE_PROVIDER.0, TRACE_LEVEL_INFORMATION as u8, u64::MAX, 0, 0, None) };
     }
     *PRESENTS.lock().unwrap() = Some(HashMap::new());
-    thread::spawn(move || {
+    thread::Builder::new().name("glance: frames presented".into()).spawn(move || {
         let mut logfile = EVENT_TRACE_LOGFILEW { LoggerName: PWSTR(name.as_ptr() as *mut u16), ..Default::default() };
         // Timestamps left as the session takes them, from the performance
         // counter (otherwise turned into the system time).
@@ -140,7 +140,7 @@ pub fn start() {
             let _ = ProcessTrace(&[trace], None, None);
             let _ = CloseTrace(trace);
         }
-    });
+    }).expect("a thread started");
 }
 
 /// Ends the session: it would outlive Glance otherwise.

@@ -40,8 +40,8 @@ pub fn run() {
     }
     let mut sampler = Sampler::new();
     crate::presents::start();
-    std::thread::spawn(watch_edges);
-    std::thread::spawn(watch_readings);
+    std::thread::Builder::new().name("glance sensors: edges".into()).spawn(watch_edges).expect("a thread started");
+    std::thread::Builder::new().name("glance sensors: readings watched".into()).spawn(watch_readings).expect("a thread started");
     let want = Arc::new(Mutex::new(Want { interval_ms: 1000, refresh_slow: true, wsl: false, docker: false }));
     let pipes = Arc::new(pipes);
     loop {
@@ -100,7 +100,7 @@ pub fn run() {
             && tell(&Told::Switched { switch: Switch::Remote, on: crate::phone::on() });
         // What it is asked, heard on a thread of its own; a report is said by the reading loop, the rest done here.
         let (report_wanted, report_asked) = mpsc::channel::<()>();
-        let listener = std::thread::spawn({
+        let listener = std::thread::Builder::new().name("glance sensors: asked".into()).spawn({
             let want = want.clone();
             let telling = telling.clone();
             let mut asked = asked.try_clone().ok();
@@ -130,7 +130,7 @@ pub fn run() {
                     }
                 }
             }
-        });
+        }).expect("a thread started");
         // The pushes seen from now on, told to it.
         *PUSHES_TO.lock().unwrap() = Some(telling.clone());
         let mut next = Instant::now();

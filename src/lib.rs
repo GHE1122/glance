@@ -425,13 +425,13 @@ pub fn run() {
     let controller = Arc::new(Controller::new(info.clone(), &settings));
     let _ = APP.set(App { info, controller: controller.clone(), settings: Mutex::new(settings), config });
 
-    thread::spawn({
+    thread::Builder::new().name("glance: panel".into()).spawn({
         let controller = controller.clone();
         move || controller.run()
-    });
-    thread::spawn(update::watch);
+    }).expect("a thread started");
+    thread::Builder::new().name("glance: updates".into()).spawn(update::watch).expect("a thread started");
     // The phone remote, if it is on: running from now, whatever stopped it.
-    thread::spawn(phone::keep);
+    thread::Builder::new().name("glance: phone remote".into()).spawn(phone::keep).expect("a thread started");
     // What touches the PC while the phone remote has the screens out, heard for it.
     if phone::helper().is_some() {
         touches::start();

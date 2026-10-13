@@ -218,7 +218,7 @@ impl WindowWatch {
     fn start() -> WindowWatch {
         EPOCH.get_or_init(Instant::now);
         let (ends, ended) = std::sync::mpsc::channel::<()>();
-        std::thread::spawn(move || {
+        std::thread::Builder::new().name("glance: windows watched".into()).spawn(move || {
             let mut seen = WindowsSeen::look();
             while ended.recv_timeout(WINDOWS_LOOKED_AT) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
                 let now = WindowsSeen::look();
@@ -231,7 +231,7 @@ impl WindowWatch {
                 }
                 seen = now;
             }
-        });
+        }).expect("a thread started");
         WindowWatch { _ends: ends }
     }
 }

@@ -433,14 +433,14 @@ impl Watched {
     pub fn new(mut chip: SuperIo) -> Self {
         let (latest, stop) = (Arc::new(Mutex::new(BoardSensors::default())), Arc::new(AtomicBool::new(false)));
         let (kept, stopped) = (latest.clone(), stop.clone());
-        std::thread::spawn(move || {
+        std::thread::Builder::new().name("glance: board chip".into()).spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 let began = std::time::Instant::now();
                 let read = chip.read(PATIENCE);
                 *kept.lock().unwrap() = read;
                 std::thread::sleep(EVERY.saturating_sub(began.elapsed()));
             }
-        });
+        }).expect("a thread started");
         Watched { latest, stop }
     }
 

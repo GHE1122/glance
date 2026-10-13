@@ -55,11 +55,11 @@ fn epoch() -> &'static Instant {
 pub fn heard() -> Heard {
     ASKED.store(epoch().elapsed().as_millis() as u64, Ordering::Relaxed);
     if !LISTENING.swap(true, Ordering::AcqRel) {
-        std::thread::spawn(|| {
+        std::thread::Builder::new().name("glance: sound heard".into()).spawn(|| {
             listen();
             *HEARD.lock().unwrap() = Heard::default();
             LISTENING.store(false, Ordering::Release);
-        });
+        }).expect("a thread started");
     }
     *HEARD.lock().unwrap()
 }

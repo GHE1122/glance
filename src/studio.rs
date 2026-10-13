@@ -962,6 +962,11 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
     let theme = Theme::new(Skin::Glass, true);
     let work = (width as f32 / px, height as f32 / px);
     let window = unsafe { CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, w!("STATIC"), None, WS_POPUP | WS_VISIBLE, 200, 200, 1400, 1200, None, None, None, None) }.map_err(|e| e.to_string())?;
+    // Cloaked: timed on whoever's desktop it runs on, it shows nothing there (what is drawn is drawn all the same).
+    unsafe {
+        let cloak: windows::core::BOOL = true.into();
+        let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(window, windows::Win32::Graphics::Dwm::DWMWA_CLOAK, &cloak as *const _ as *const _, 4);
+    }
     let mut surface = crate::ui::gfx::Surface::new(&gfx, window).map_err(|e| e.to_string())?;
     let forms = [
         ("strip", Form::Small(Small::Strip { rich: true })),
