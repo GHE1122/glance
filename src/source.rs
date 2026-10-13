@@ -185,6 +185,7 @@ impl Source {
                             *kept = (Some(on), kept.1 + 1);
                         }
                         Some(Told::Updating(state)) => crate::update::set_state(state),
+                        Some(Told::Note(line)) => crate::journal::note(line),
                         Some(Told::Hello { .. }) => {}
                         None => {
                             crate::journal::note("readings: the sensors' process went; Glance reads what it can itself");

@@ -42,7 +42,30 @@ thread_local! {
 
 /// Adds a line to the log, and keeps the log.
 pub fn note(what: impl Display) {
+    // The sensors' process writes no file of the user's: its lines go to the rest of Glance, which writes them.
+    if KEPT_FOR_THE_APP.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut kept = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() >= KEPT {
+            kept.pop_front();
+        }
+        kept.push_back(private(&what.to_string()));
+        return;
+    }
     note_in(&crate::settings::config_dir(), what);
+}
+
+/// Whether this process's lines are held for the rest of Glance (in the sensors' process), and those held.
+static KEPT_FOR_THE_APP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static HELD: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+/// From now on this process's lines are held for the rest of Glance (see `take_held`), the file left to it.
+pub fn hold_for_the_app() {
+    KEPT_FOR_THE_APP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The lines held since last asked (the latest `KEPT` of them), for the rest of Glance to write.
+pub fn take_held() -> Vec<String> {
+    HELD.lock().unwrap_or_else(PoisonError::into_inner).drain(..).collect()
 }
 
 /// `note`, with the log kept in `dir`.

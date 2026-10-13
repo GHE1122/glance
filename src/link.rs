@@ -44,6 +44,8 @@ pub enum Told {
     Switched { switch: Switch, on: bool },
     /// Where an update asked for stands.
     Updating(UpdateState),
+    /// A line for Glance's log (the sensors' process writes none of its own).
+    Note(String),
 }
 
 /// The switches that need the sensors' rights to be turned: Glance starting at sign-in (its task was made

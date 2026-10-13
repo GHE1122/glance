@@ -27,6 +27,8 @@ pub fn run() {
         return;
     }
     let Some(pipes) = link::Sensors::open() else { return };
+    // Its lines go to the rest of Glance, which writes the log (two processes writing one file lose lines).
+    crate::journal::hold_for_the_app();
     // What an elevated start of Glance has always done: its task kept for later starts, the driver in place.
     crate::elevation::register_launch_task();
     crate::elevation::forget_download();
@@ -144,6 +146,9 @@ pub fn run() {
             next = if next + interval < now { now + interval } else { next + interval };
             tick += 1;
             let refresh_slow = wanted.refresh_slow || tick % crate::HIDDEN_SLOW_TICKS == 0;
+            if !crate::journal::take_held().into_iter().all(|line| tell(&Told::Note(line))) {
+                break;
+            }
             if let Some(sample) = sampler.sample(refresh_slow, wanted.wsl, wanted.docker) {
                 if !tell(&Told::Sample(Box::new(sample))) || !tell(&Told::Presenting { games: crate::presents::presenting(), mode: crate::presents::game_mode().into() }) {
                     break;
