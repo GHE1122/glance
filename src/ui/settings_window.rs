@@ -137,6 +137,8 @@ const FLIP: (Duration, Easing) = (Duration::from_millis(160), Easing(0.16, 1.0, 
 const GLIDE: (Duration, Easing) = (Duration::from_millis(200), Easing(0.16, 1.0, 0.3, 1.0));
 const SETTLE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.16, 1.0, 0.3, 1.0));
 /// How soon to try again when drawing failed for want of a device.
+/// A frame that takes longer than this shows as a stutter: noted.
+const SLOW_FRAME: Duration = Duration::from_millis(33);
 const DEVICE_RETRY: Duration = Duration::from_millis(250);
 /// The pen of the preview's charts runs this far behind the newest sample
 /// beyond one interval, as the panel's does.
@@ -1783,7 +1785,7 @@ impl Ui {
         let (name, hint, on) = match switch {
             Switch::Live => (
                 p("背景实时刷新", "Live backdrop"),
-                Some(p("玻璃和亚克力背后的桌面随时更新；面板和小组件不进截图，录屏可能暂停", "The desktop behind glass and acrylic keeps up; the panel and widgets stay out of captures, and recorders may pause")),
+                Some(p("玻璃和亚克力背后的画面随时跟着变；身后有东西在动时会多用一些处理器和显卡", "What shows behind glass and acrylic keeps up as it changes, using more processor and graphics while something there moves")),
                 self.settings.live_backdrop,
             ),
             // Only a copy no ordinary program can replace (one the installer
@@ -2735,10 +2737,20 @@ impl Ui {
         let mut surface = self.surface.take().unwrap();
         let mut creep = None;
         self.failed = false;
+        let began = Instant::now();
         let drawn = surface.draw(&gfx, size, self.scale, |frame| {
             frame.origin(0.0, 0.0);
             creep = self.paint(frame, now);
         });
+        // A frame slow enough to be seen, noted (as the widgets' are).
+        let took = began.elapsed();
+        if took > SLOW_FRAME {
+            let ms = |d: Duration| d.as_secs_f32() * 1000.0;
+            let (given, handed) = (surface.took.given, surface.took.handed);
+            crate::widget::note_sparingly("settings frame", || {
+                format!("settings: a frame took {:.1} ms (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1})", ms(took), ms(given), ms(took.saturating_sub(given + handed)), ms(handed))
+            });
+        }
         self.surface = Some(surface);
         // The device is gone; a new one is made for the next frame.
         if drawn.is_err() || self.failed {

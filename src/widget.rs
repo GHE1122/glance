@@ -27,7 +27,7 @@ const SPARINGLY: Duration = Duration::from_secs(30);
 /// Notes `what` of `kind`, unless one of that kind was noted within
 /// `SPARINGLY`: then it is only counted, and the next one noted says how
 /// many came between.
-fn note_sparingly(kind: &'static str, what: impl FnOnce() -> String) {
+pub(crate) fn note_sparingly(kind: &'static str, what: impl FnOnce() -> String) {
     static LAST: std::sync::Mutex<Vec<(&'static str, Instant, u32)>> = std::sync::Mutex::new(Vec::new());
     let mut last = LAST.lock().unwrap();
     let now = Instant::now();
