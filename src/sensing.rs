@@ -266,8 +266,7 @@ fn watch_edges() {
         RegisterClassW(&class);
         let Ok(window) = CreateWindowExW(WS_EX_TOOLWINDOW, class.lpszClassName, w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, None, None, Some(module.into()), None) else { return };
         let mouse = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: window };
-        let hear_mouse = || RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32).is_ok();
-        if !hear_mouse() {
+        if RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32).is_err() {
             return;
         }
         SetTimer(Some(window), LOOK_TIMER, LOOK_MS, None);
@@ -304,19 +303,13 @@ fn watch_edges() {
                     // What touches the PC heard from now on, or no longer, as the rest asks; each time anew (what
                     // was heard the last time is not of this one).
                     let wanted = HEARING_ACTIVITY.load(std::sync::atomic::Ordering::Relaxed);
-                    if wanted != activity.is_some() {
-                        if wanted {
-                            if crate::touch::hear(window, true).is_ok() {
-                                let heard = crate::touch::Heard::default();
-                                tell_activity(&heard);
-                                activity = Some((heard, None));
-                            }
-                        } else {
-                            // (Taking the other kinds away takes the mouse too: heard again at once.)
-                            let _ = crate::touch::hear(window, false);
-                            hear_mouse();
-                            activity = None;
-                        }
+                    // (The mouse is heard here throughout.)
+                    if wanted != activity.is_some() && crate::touch::hear_but_the_mouse(window, wanted).is_ok() {
+                        activity = wanted.then(|| {
+                            let heard = crate::touch::Heard::default();
+                            tell_activity(&heard);
+                            (heard, None)
+                        });
                     }
                     if let Some(cursor) = crate::panel::cursor_position() {
                         pusher.looked(&WATCHED.lock().unwrap(), cursor, now);

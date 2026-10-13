@@ -23,12 +23,26 @@ use windows::Win32::UI::Input::{
 /// The kinds of device whose touch wakes the screens: the mouse, the
 /// keyboard, a remote's or a keyboard's media keys, a pen, a touch screen,
 /// a touch pad (each a usage page and a usage, as HID names them).
+/// (The mouse first.)
 const TOUCHED_BY: [(u16, u16); 6] = [(0x01, 0x02), (0x01, 0x06), (0x0C, 0x01), (0x0D, 0x02), (0x0D, 0x04), (0x0D, 0x05)];
 
 /// Has `window` told of what is touched (as WM_INPUT, whichever window is
 /// in front), or no longer.
+#[allow(dead_code)]
 pub fn hear(window: HWND, hear: bool) -> windows::core::Result<()> {
-    let devices: Vec<RAWINPUTDEVICE> = TOUCHED_BY.iter().map(|(page, usage)| RAWINPUTDEVICE { usUsagePage: *page, usUsage: *usage, dwFlags: if hear { RIDEV_INPUTSINK } else { RIDEV_REMOVE }, hwndTarget: if hear { window } else { HWND::default() } }).collect();
+    hear_kinds(window, hear, &TOUCHED_BY)
+}
+
+/// As `hear`, of every kind but the mouse: for a process that hears the
+/// mouse at another window of its own already (a process hears a kind of
+/// device at one window only), and passes on what that one hears.
+#[allow(dead_code)]
+pub fn hear_but_the_mouse(window: HWND, hear: bool) -> windows::core::Result<()> {
+    hear_kinds(window, hear, &TOUCHED_BY[1..])
+}
+
+fn hear_kinds(window: HWND, hear: bool, kinds: &[(u16, u16)]) -> windows::core::Result<()> {
+    let devices: Vec<RAWINPUTDEVICE> = kinds.iter().map(|(page, usage)| RAWINPUTDEVICE { usUsagePage: *page, usUsage: *usage, dwFlags: if hear { RIDEV_INPUTSINK } else { RIDEV_REMOVE }, hwndTarget: if hear { window } else { HWND::default() } }).collect();
     unsafe { RegisterRawInputDevices(&devices, size_of::<RAWINPUTDEVICE>() as u32) }
 }
 

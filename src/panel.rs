@@ -864,15 +864,19 @@ impl Controller {
                 HEAR_OWN if !own_input => {
                     own_input = hear_mouse(sink);
                 }
-                // The mouse's own motion, heard here while there is no sensors' process to watch the edges.
-                WM_INPUT if !panel.is_open() => {
-                    if let Some(cursor) = cursor_position() {
-                        on_seam(cursor, &mut panel);
-                    }
-                    if let (Some((moved, _)), Some(cursor)) = (read_mouse(HRAWINPUT(msg.lParam.0 as *mut _)), cursor_position()) {
-                        let pushed = pusher.heard(&self.config.lock().unwrap().edges, moved, cursor, now);
-                        if let Some(pushed) = pushed {
-                            open_pushed(pushed, &mut panel);
+                // The mouse's own motion, heard here while there is no sensors' process to watch the edges (and
+                // passed on: what touches the PC is listened for here meanwhile too).
+                WM_INPUT => {
+                    crate::touches::mouse_input(msg.lParam);
+                    if !panel.is_open() {
+                        if let Some(cursor) = cursor_position() {
+                            on_seam(cursor, &mut panel);
+                        }
+                        if let (Some((moved, _)), Some(cursor)) = (read_mouse(HRAWINPUT(msg.lParam.0 as *mut _)), cursor_position()) {
+                            let pushed = pusher.heard(&self.config.lock().unwrap().edges, moved, cursor, now);
+                            if let Some(pushed) = pushed {
+                                open_pushed(pushed, &mut panel);
+                            }
                         }
                     }
                 }

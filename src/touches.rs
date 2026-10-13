@@ -7,7 +7,9 @@
 //! set meanwhile); only then is anything listened for, and what is heard
 //! (which device, when, and whether it said anything was moved or pressed:
 //! never what) is left in a piece of memory shared by name, as Glance
-//! leaves its readings.
+//! leaves its readings. Listening here, the mouse is heard by the panel's
+//! window, which hears it for the edges (a process hears a kind of device
+//! at one window only), and passes it on (see `mouse_input`).
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -40,9 +42,8 @@ struct Listening {
     last: Option<(bool, Instant)>,
 }
 
-thread_local! {
-    static HEARD: std::cell::RefCell<Listening> = panic!("heard only on the thread that listens");
-}
+/// While it is listened for here: what has been heard.
+static HEARD: Mutex<Option<Listening>> = Mutex::new(None);
 
 /// Whether the remote has the screens out now.
 fn out() -> bool {
@@ -65,17 +66,27 @@ pub fn heard(touched: Option<(String, u32)>, nothing: Option<(String, u32)>) {
     tell(&touched, &nothing);
 }
 
+/// A WM_INPUT heard here, taken while it is listened for here.
+fn take(input: LPARAM) {
+    let mut heard = HEARD.lock().unwrap();
+    let Some(listening) = heard.as_mut() else { return };
+    if let Some(said) = listening.heard.take(input, unsafe { GetTickCount() }) {
+        let now = Instant::now();
+        if listening.last.is_none_or(|(kind, at)| kind != said || now.duration_since(at) >= TOLD_EVERY) {
+            tell(&listening.heard.touched, &listening.heard.nothing);
+            listening.last = Some((said, now));
+        }
+    }
+}
+
+/// The mouse's raw input, as the panel's window hears it (see the module's note).
+pub fn mouse_input(input: LPARAM) {
+    take(input);
+}
+
 unsafe extern "system" fn told(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if message == WM_INPUT {
-        HEARD.with_borrow_mut(|listening| {
-            if let Some(said) = listening.heard.take(lparam, unsafe { GetTickCount() }) {
-                let now = Instant::now();
-                if listening.last.is_none_or(|(kind, at)| kind != said || now.duration_since(at) >= TOLD_EVERY) {
-                    tell(&listening.heard.touched, &listening.heard.nothing);
-                    listening.last = Some((said, now));
-                }
-            }
-        });
+        take(lparam);
     }
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
 }
@@ -87,7 +98,6 @@ pub fn start() {
     std::thread::spawn(|| unsafe {
         let Some(shared) = crate::remote::Shared::open(w!("Local\\Glance.Touches")) else { return };
         *SHARED.lock().unwrap() = Some(shared);
-        HEARD.set(Listening { heard: Heard::default(), last: None });
         let class = WNDCLASSW { lpfnWndProc: Some(told), lpszClassName: w!("GlanceTouches"), ..Default::default() };
         RegisterClassW(&class);
         let Ok(window) = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None) else { return };
@@ -101,8 +111,9 @@ pub fn start() {
                 let wanted = out();
                 match crate::source::link() {
                     Some(link) => {
-                        if hearing && crate::touch::hear(window, false).is_ok() {
+                        if hearing && crate::touch::hear_but_the_mouse(window, false).is_ok() {
                             hearing = false;
+                            *HEARD.lock().unwrap() = None;
                         }
                         // Asked again on a new link (it knows nothing of what the last was asked); nothing heard
                         // of what it is asked for till it says.
@@ -117,14 +128,11 @@ pub fn start() {
                         if asked.take().is_some() {
                             tell(&None, &None);
                         }
-                        if wanted != hearing && crate::touch::hear(window, wanted).is_ok() {
+                        if wanted != hearing && crate::touch::hear_but_the_mouse(window, wanted).is_ok() {
                             hearing = wanted;
                             // (Each time anew: what was heard the last time is not of this one.)
-                            HEARD.with_borrow_mut(|listening| {
-                                listening.heard = Heard::default();
-                                listening.last = None;
-                                tell(&None, &None);
-                            });
+                            *HEARD.lock().unwrap() = wanted.then(|| Listening { heard: Heard::default(), last: None });
+                            tell(&None, &None);
                         }
                     }
                 }
