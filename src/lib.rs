@@ -7,6 +7,8 @@ mod asus;
 #[cfg(windows)]
 mod battery;
 mod detector;
+#[cfg(windows)]
+mod push;
 mod frames;
 #[cfg(windows)]
 mod diagnostics;
@@ -427,7 +429,7 @@ pub fn run() {
                     docker: ui::prefs::module_on(&settings.view, "docker"),
                 }
             };
-            if let Some(sample) = source.next(want) {
+            if let Some(sample) = source.next(want, controller.edges()) {
                 watch.sample(&sample, Instant::now());
                 if let Some(told) = &mut told {
                     told.tell(&sample, &app().info);

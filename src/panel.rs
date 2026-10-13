@@ -43,10 +43,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_TIMER,
 };
 
-use crate::detector::{Detector, Motion};
+use crate::detector::Motion;
 use crate::reading::{Sample, StaticInfo};
 use crate::overlay::{Choice as OverlayChoice, Overlay};
-use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, Rest, ScreenEdges, Settings, EDGES};
+use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, Settings, EDGES};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::arrange::{self, Form, GAP};
@@ -128,17 +128,18 @@ const RECALL_WIDGET: u32 = WM_APP + 10;
 const TRAY_MENU: u32 = WM_APP + 11;
 /// The line of the lyrics sung has changed: what shows them is drawn at once (it glides to the next).
 const LYRIC: u32 = WM_APP + 13;
-/// The mouse moved by so much (WPARAM across, LPARAM down, raw counts), as the sensors' process heard it: while a
-/// window Glance cannot hear the mouse over (an elevated one) is in front.
-const RELAYED: u32 = WM_APP + 14;
+/// The sensors' process saw a push into an edge (WPARAM the edge, LPARAM where: x low, y high, physical px).
+const PUSHED: u32 = WM_APP + 14;
+/// The sensors' process went: the mouse is heard here, and the edges watched, from now on.
+const HEAR_OWN: u32 = WM_APP + 15;
+
 /// The panel thread's own hotkey: Escape, while the panel is open.
 const ESCAPE_HOTKEY: i32 = 1;
 
 struct Config {
-    /// How the edges of a screen `screens` does not name open the panel;
-    /// and those it names, with theirs.
-    rest: Rest,
-    screens: Vec<ScreenEdges>,
+    /// Which edges of which screens open the panel, to a push (and how hard)
+    /// or to a rest on a seam.
+    edges: crate::push::Edges,
     skin: String,
     live: bool,
     anchor: Anchor,
@@ -148,8 +149,6 @@ struct Config {
     panel_at: Option<PanelAt>,
     panel_pinned: Option<(i32, i32)>,
     widgets: Vec<crate::settings::WidgetAt>,
-    /// None: pushing into the edge opens nothing.
-    pressure: Option<i32>,
     over_fullscreen: OverFullscreen,
     close_delay: Duration,
     interval: Duration,
@@ -159,8 +158,7 @@ struct Config {
 
 fn config_from(settings: &Settings) -> Config {
     Config {
-        rest: settings.rest(),
-        screens: settings.screens.clone(),
+        edges: crate::push::Edges { screens: settings.screens.clone(), rest: settings.rest(), pressure: settings.sensitivity.pressure() },
         skin: settings.skin.clone(),
         live: settings.live_backdrop,
         anchor: settings.anchor,
@@ -171,7 +169,6 @@ fn config_from(settings: &Settings) -> Config {
         panel_at: settings.panel_at,
         panel_pinned: settings.panel_pinned,
         widgets: settings.widgets.clone(),
-        pressure: settings.sensitivity.pressure(),
         over_fullscreen: settings.over_fullscreen,
         close_delay: settings.close_delay(),
         interval: settings.interval(),
@@ -235,17 +232,27 @@ impl Controller {
     pub fn tray_menu(&self, x: i32, y: i32) {
         let sink = self.sink.load(Ordering::Acquire);
         if sink != 0 {
-            let at = ((y as u16 as u32) << 16 | x as u16 as u32) as isize;
-            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), TRAY_MENU, WPARAM(0), LPARAM(at)) };
+            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), TRAY_MENU, WPARAM(0), LPARAM(point_param(x, y))) };
         }
     }
 
-    /// The mouse moved by so much, as the sensors' process heard it (from any thread).
-    pub fn relay_mouse(&self, dx: i32, dy: i32) {
+    /// The sensors' process saw a push into `edge` with the pointer at `at` (from any thread).
+    pub fn pushed(&self, edge: Edge, at: (i32, i32)) {
         let sink = self.sink.load(Ordering::Acquire);
         if sink != 0 {
-            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), RELAYED, WPARAM(dx as isize as usize), LPARAM(dy as isize)) };
+            let edge = EDGES.iter().position(|e| *e == edge).unwrap_or(0);
+            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), PUSHED, WPARAM(edge), LPARAM(point_param(at.0, at.1))) };
         }
+    }
+
+    /// The sensors' process went: the edges are watched on the panel's thread from now on (from any thread).
+    pub fn hear_own(&self) {
+        self.post(HEAR_OWN);
+    }
+
+    /// Which edges open the panel, as the settings have them now.
+    pub fn edges(&self) -> crate::push::Edges {
+        self.config.lock().unwrap().edges.clone()
     }
 
     /// The line of the lyrics sung has changed (from any thread).
@@ -422,8 +429,8 @@ impl Controller {
             )
         }
         .expect("message window");
-        let mouse = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: sink };
-        unsafe { RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32) }.expect("raw mouse input");
+        // The mouse heard here only while there is no sensors' process to watch the edges (see `push`).
+        let mut own_input = !crate::source::linked() && hear_mouse(sink);
         // In the process's multithreaded apartment (see lib.rs).
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -447,23 +454,15 @@ impl Controller {
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
 
-        let mut detector = Detector::default();
         // Once the panel has been up, the pointer has to leave the edge before
         // it can open the panel again: pushing on after it closed is the same
         // gesture, not a new one.
-        let mut armed = true;
+        let mut pusher = crate::push::Pusher::default();
         let mut ticking = false;
         // Escape closes the open panel: taken from every program while the
         // panel is open and not pinned (it has no keyboard focus of its own),
         // and given back as it closes or is pinned.
         let mut escape = false;
-        // Raw input stops reaching this process while a window of higher
-        // privilege (Task Manager, an installer) has the focus. A slow watch
-        // on the cursor notices that: it moved, and no raw input came. The
-        // pointer is then treated as one that cannot push, and opens the
-        // panel by resting on the edge.
-        let mut last_cursor = cursor_position().unwrap_or_default();
-        let mut raw_since_watch = false;
         // A rest on the seam between two screens: since when, and where;
         // and, as on the edge, armed once the pointer has left it.
         let mut seam_rest: Option<(Instant, POINT)> = None;
@@ -591,14 +590,11 @@ impl Controller {
                 return;
             }
             let now = Instant::now();
-            let (pressure, over_fullscreen) = {
-                let config = self.config.lock().unwrap();
-                (config.pressure, config.over_fullscreen)
-            };
+            let over_fullscreen = self.config.lock().unwrap().over_fullscreen;
             // How the edges of a screen open the panel.
             let lit = |monitor: RECT| {
                 let config = self.config.lock().unwrap();
-                crate::screens::lit(&config.screens, config.rest, monitor)
+                crate::screens::lit(&config.edges.screens, config.edges.rest, monitor)
             };
             let (fullscreen_hotkey, fullscreen_edge) = match over_fullscreen {
                 OverFullscreen::Never => (false, false),
@@ -609,17 +605,16 @@ impl Controller {
             // sends to the background; a push into the edge may be an
             // accident in either) it opens only as the settings allow.
             let may_open = |allowed: bool| allowed || !fullscreen_game();
-            // Where the pointer is on an edge of its screen that opens the
-            // panel, which edge, and how hard it has to push there; never,
-            // with pushing turned off. (The ends of an edge open nothing: the
-            // pointer is on one edge at a time, and off them all between two.)
-            let at_edge = |cursor: POINT| {
-                let pressure = pressure?;
-                let here = monitor_at(cursor)?;
-                lit(here.monitor).edges.each().find_map(|edge| edge_contact(cursor, edge).map(|contact| (contact, edge, pressure)))
+            // A push into the edge, seen here or by the sensors' process: the
+            // panel opens, unless over a game the settings keep it from (and
+            // then not again till the pointer has left the edge).
+            let open_pushed = |(cursor, contact, edge): crate::push::Pushed, panel: &mut Panel| {
+                if may_open(fullscreen_edge) {
+                    panel.open(cursor, contact, edge, None, now);
+                }
             };
             if panel.is_shown() {
-                armed = false;
+                pusher.hold();
                 seam_armed = false;
             }
             // The pointer resting on the seam, where the panel opens.
@@ -636,7 +631,7 @@ impl Controller {
                 // on no screen: this is asked at every move of the mouse.)
                 let sought = {
                     let config = self.config.lock().unwrap();
-                    EDGES.map(|edge| crate::settings::seam_anywhere(&config.screens, config.rest, edge))
+                    EDGES.map(|edge| crate::settings::seam_anywhere(&config.edges.screens, config.edges.rest, edge))
                 };
                 let found = EDGES
                     .into_iter()
@@ -839,30 +834,27 @@ impl Controller {
                     let delta = (msg.wParam.0 >> 16) as u16 as i16;
                     panel.wheel(lparam_point(msg.lParam), delta);
                 }
-                // The mouse's own motion, heard here, or by the sensors' process while Glance cannot hear it.
-                WM_INPUT | RELAYED if !panel.is_open() => {
-                    raw_since_watch = true;
+                // A push the sensors' process saw (it watches the edges while
+                // there is one).
+                PUSHED if !panel.is_shown() => {
+                    let (edge, cursor) = pushed_from(msg.wParam, msg.lParam);
+                    if let Some(contact) = monitor_at(cursor) {
+                        open_pushed((cursor, contact, edge), &mut panel);
+                    }
+                }
+                // Their process gone: the edges are watched here from now on.
+                HEAR_OWN if !own_input => {
+                    own_input = hear_mouse(sink);
+                }
+                // The mouse's own motion, heard here while there is no sensors' process to watch the edges.
+                WM_INPUT if !panel.is_open() => {
                     if let Some(cursor) = cursor_position() {
                         on_seam(cursor, &mut panel);
                     }
-                    let moved = if msg.message == RELAYED { Some(Moved::By(msg.wParam.0 as isize as i32, msg.lParam.0 as i32)) } else { read_motion(HRAWINPUT(msg.lParam.0 as *mut _)) };
-                    if let (Some(moved), Some(cursor)) = (moved, cursor_position()) {
-                        match at_edge(cursor) {
-                            Some((contact, edge, pressure)) if armed && detector.motion(moved.toward(edge), now, pressure) => {
-                                detector.reset();
-                                // Not over this game: not again until the
-                                // pointer has left the edge.
-                                if may_open(fullscreen_edge) {
-                                    panel.open(cursor, contact, edge, None, now);
-                                } else {
-                                    armed = false;
-                                }
-                            }
-                            Some(_) => {}
-                            None => {
-                                detector.reset();
-                                armed = !panel.is_shown();
-                            }
+                    if let (Some(moved), Some(cursor)) = (read_motion(HRAWINPUT(msg.lParam.0 as *mut _)), cursor_position()) {
+                        let pushed = pusher.heard(&self.config.lock().unwrap().edges, moved, cursor, now);
+                        if let Some(pushed) = pushed {
+                            open_pushed(pushed, &mut panel);
                         }
                     }
                 }
@@ -876,38 +868,17 @@ impl Controller {
                     if !panel.is_open() {
                         on_seam(cursor, &mut panel);
                     }
-                    let moved = cursor.x != last_cursor.x || cursor.y != last_cursor.y;
-                    if moved && !raw_since_watch && !panel.is_open() {
-                        match at_edge(cursor) {
-                            Some((_, _, pressure)) if armed => {
-                                detector.motion(Motion::Absolute, now, pressure);
-                            }
-                            Some(_) => {}
-                            None => {
-                                detector.reset();
-                                armed = !panel.is_shown();
-                            }
-                        }
+                    if own_input {
+                        pusher.looked(&self.config.lock().unwrap().edges, cursor, now);
                     }
-                    last_cursor = cursor;
-                    raw_since_watch = false;
                 }
                 WM_TIMER if msg.wParam.0 == TRACK_TIMER && !panel.is_open() => {
                     let Some(cursor) = cursor_position() else { continue };
                     on_seam(cursor, &mut panel);
-                    match at_edge(cursor) {
-                        Some((contact, edge, _)) if armed && detector.dwell_elapsed(now) => {
-                            detector.reset();
-                            if may_open(fullscreen_edge) {
-                                panel.open(cursor, contact, edge, None, now);
-                            } else {
-                                armed = false;
-                            }
-                        }
-                        Some(_) => {}
-                        None => {
-                            detector.reset();
-                            armed = !panel.is_shown();
+                    if own_input {
+                        let pushed = pusher.rested(&self.config.lock().unwrap().edges, cursor, now);
+                        if let Some(pushed) = pushed {
+                            open_pushed(pushed, &mut panel);
                         }
                     }
                 }
@@ -925,7 +896,7 @@ impl Controller {
                     }
                 }
             }
-            let needed = !panel.is_open() && (detector.dwelling() || seam_rest.is_some());
+            let needed = !panel.is_open() && (pusher.resting() || seam_rest.is_some());
             if needed != ticking {
                 ticking = needed;
                 unsafe {
@@ -939,6 +910,23 @@ impl Controller {
             unsafe { DispatchMessageW(&msg) };
         }
     }
+}
+
+/// A point as a message carries it (x low, y high: physical px, each within what 16 bits hold).
+fn point_param(x: i32, y: i32) -> isize {
+    ((y as u16 as u32) << 16 | x as u16 as u32) as isize
+}
+
+/// A push as `Controller::pushed` sent it: the edge, and where the pointer was.
+fn pushed_from(wparam: WPARAM, lparam: LPARAM) -> (Edge, POINT) {
+    (EDGES.get(wparam.0).copied().unwrap_or_default(), lparam_point(lparam))
+}
+
+/// Registers this thread's message window `sink` for the mouse's raw input (heard whatever window has the focus):
+/// whether it is.
+fn hear_mouse(sink: HWND) -> bool {
+    let mouse = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: sink };
+    unsafe { RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32) }.is_ok()
 }
 
 fn lparam_point(lparam: LPARAM) -> POINT {
@@ -1357,7 +1345,7 @@ impl<'a> Panel<'a> {
     fn edge_for(&self, point: POINT, contact: Contact) -> Edge {
         let config = self.controller.config.lock().unwrap();
         let m = contact.monitor;
-        crate::screens::lit(&config.screens, config.rest, m).any().nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(config.rest.edge)
+        crate::screens::lit(&config.edges.screens, config.edges.rest, m).any().nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(config.edges.rest.edge)
     }
 
     /// Opens the panel on `contact`'s screen: along its `edge` at `cursor`,
@@ -1366,6 +1354,8 @@ impl<'a> Panel<'a> {
         if self.is_open() || self.controller.history.lock().unwrap().is_empty() {
             return;
         }
+        let began = Instant::now();
+        let mut taking = Duration::ZERO;
         // A reopening during the way out picks the panel up where it is.
         if !self.is_shown() {
             self.edge = edge;
@@ -1408,7 +1398,9 @@ impl<'a> Panel<'a> {
                     (None, Edge::Left | Edge::Right) => RECT { top: monitor.top, bottom: monitor.bottom, ..placement.window },
                     (None, Edge::Top) => RECT { left: monitor.left, right: monitor.right, ..placement.window },
                 };
+                let taken = Instant::now();
                 self.behind = Capture::take(area).map(|capture| Behind::new(capture, placement, now));
+                taking = taken.elapsed();
                 // None readable (the lock screen): taken again once a second
                 // has passed.
                 if self.behind.is_none() {
@@ -1436,6 +1428,11 @@ impl<'a> Panel<'a> {
         self.window.show();
         if let Some(placement) = &self.placement {
             crate::widget::own_window_changed(placement.window);
+        }
+        // An opening slow enough to be seen, and why, for the journal.
+        let took = began.elapsed();
+        if took > Duration::from_millis(50) {
+            crate::journal::note(format!("panel: opened in {} ms (the desktop behind taken in {} ms)", took.as_millis(), taking.as_millis()));
         }
     }
 
@@ -1929,7 +1926,7 @@ impl<'a> Panel<'a> {
         // and open from the edge again.
         let lit = {
             let config = self.controller.config.lock().unwrap();
-            crate::screens::lit(&config.screens, config.rest, contact.monitor).any()
+            crate::screens::lit(&config.edges.screens, config.edges.rest, contact.monitor).any()
         };
         if let Some(edge) = lit.each().find(|edge| docks(*edge, contact, panel)) {
             self.edge = edge;
@@ -2472,14 +2469,14 @@ fn cursor_showing() -> bool {
 /// How the mouse moved, as it says itself: to a place, or by so many
 /// counts across and down.
 #[derive(Clone, Copy)]
-enum Moved {
+pub(crate) enum Moved {
     To,
     By(i32, i32),
 }
 
 impl Moved {
     /// The move as a push into `edge`.
-    fn toward(self, edge: Edge) -> Motion {
+    pub(crate) fn toward(self, edge: Edge) -> Motion {
         let Moved::By(x, y) = self else { return Motion::Absolute };
         let (outward, along) = match edge {
             Edge::Left => (-x, y),
@@ -2490,7 +2487,7 @@ impl Moved {
     }
 }
 
-fn read_motion(handle: HRAWINPUT) -> Option<Moved> {
+pub(crate) fn read_motion(handle: HRAWINPUT) -> Option<Moved> {
     let mut raw = RAWINPUT::default();
     let mut size = size_of::<RAWINPUT>() as u32;
     let read = unsafe {
@@ -2563,7 +2560,7 @@ fn seam_contact(cursor: POINT, edge: Edge, came_from: Option<RECT>) -> Option<Co
 /// trigger edge with intent to point: visible, no button held, clear of the
 /// corners, and where the edge stops it (it does not pass on to another
 /// screen there).
-fn edge_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
+pub(crate) fn edge_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
     let contact = monitor_at(cursor)?;
     let monitor = contact.monitor;
     let corner = (CORNER_EXCLUSION * contact.scale as f64).round() as i32;

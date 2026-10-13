@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use crate::link::{Asked, GameModeSent, Link, Switch, Told, Want};
 use crate::metrics::Sampler;
 use crate::presents::GameMode;
+use crate::push::Edges;
 use crate::reading::{Sample, StaticInfo};
 
 /// How long the sensors are waited for as they are started (an elevated start Windows asks the user about may
@@ -29,8 +30,9 @@ static ASKING: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static LINKED: AtomicBool = AtomicBool::new(false);
 /// What the sensors last said for a report, as it came.
 static REPORTED: Mutex<Option<Vec<String>>> = Mutex::new(None);
-/// What was last asked of them (asked again only when it changes).
+/// What was last asked of them (asked again only when it changes): the readings, and the edges they watch.
 static WANTED: Mutex<Option<Want>> = Mutex::new(None);
+static EDGES: Mutex<Option<Edges>> = Mutex::new(None);
 /// How the switches that need their rights are, as they last told (none: not told yet), and the turn of each
 /// told (for one waiting on an answer).
 static SWITCHES: Mutex<[(Option<bool>, u64); 2]> = Mutex::new([(None, 0), (None, 0)]);
@@ -140,20 +142,27 @@ pub fn sensor_lines() -> Vec<String> {
 impl Source {
     /// The next sample, as `want` asks for them: waited for (the sensors' process sends each as it reads it; Glance's
     /// own sampler reads at its time). None when there was none this time (a sample that could not be taken); the
-    /// link lost, Glance reads what it can itself from then on.
-    pub fn next(&mut self, want: Want) -> Option<Sample> {
+    /// link lost, Glance reads what it can itself from then on, and watches the edges itself. The sensors' process
+    /// watches `edges` meanwhile, and tells each push it sees.
+    pub fn next(&mut self, want: Want, edges: Edges) -> Option<Sample> {
         match self {
             Source::Linked(link) => {
                 if *WANTED.lock().unwrap() != Some(want) {
                     *WANTED.lock().unwrap() = Some(want);
                     ask(&Asked::Want(want));
                 }
+                let mut told = EDGES.lock().unwrap();
+                if told.as_ref() != Some(&edges) {
+                    ask(&Asked::Edges(edges.clone()));
+                    *told = Some(edges);
+                }
+                drop(told);
                 loop {
                     match link.receive() {
                         Some(Told::Sample(sample)) => return Some(*sample),
                         Some(Told::Presenting { games, mode }) => crate::presents::mirror(games, mode.into()),
                         Some(Told::Report(lines)) => *REPORTED.lock().unwrap() = Some(lines),
-                        Some(Told::Mouse { dx, dy }) => crate::app().controller.relay_mouse(dx, dy),
+                        Some(Told::Pushed { edge, at }) => crate::app().controller.pushed(edge, at),
                         Some(Told::Switched { switch, on }) => {
                             let mut switches = SWITCHES.lock().unwrap();
                             let kept = &mut switches[slot(switch)];
@@ -165,6 +174,7 @@ impl Source {
                             crate::journal::note("readings: the sensors' process went; Glance reads what it can itself");
                             LINKED.store(false, Ordering::Relaxed);
                             *ASKING.lock().unwrap() = None;
+                            crate::app().controller.hear_own();
                             let sampler = Sampler::new();
                             crate::presents::start();
                             *self = Source::Own { sampler, next: Instant::now(), tick: 0 };

@@ -2,6 +2,8 @@
 //! only an administrator may (the board's chip, the processor's own
 //! temperatures, the memory's, the drives'), the frames games present, and
 //! tells them over the link to the rest of Glance, which runs as the user.
+//! It watches the edges that open the panel too (see `push`): it hears the
+//! mouse whatever window is in front, which the rest does not.
 //! It does nothing else it is asked but what is checked in `link::Asked`,
 //! and goes once the rest has gone (and has not come back for a while).
 
@@ -10,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::link::{self, Asked, Switch, Told, UpdateState, Want};
+use crate::push::{Edges, Pusher};
 use crate::metrics::Sampler;
 
 /// How long the rest may be gone (restarting, updating) before the sensors go too.
@@ -30,7 +33,7 @@ pub fn run() {
     }
     let mut sampler = Sampler::new();
     crate::presents::start();
-    std::thread::spawn(hear_mouse);
+    std::thread::spawn(watch_edges);
     let want = Arc::new(Mutex::new(Want { interval_ms: 1000, refresh_slow: true, wsl: false, docker: false }));
     let pipes = Arc::new(pipes);
     loop {
@@ -78,25 +81,13 @@ pub fn run() {
                             tell(&Told::Updating(UpdateState::Downloading));
                             tell(&Told::Updating(crate::update::fetch_and_run_sent(&release)));
                         }
+                        Asked::Edges(edges) => *WATCHED.lock().unwrap() = edges.checked(),
                     }
                 }
             }
         });
-        // The mouse's motion the rest cannot hear, told as it comes (a few milliseconds' worth at a time).
-        let connected = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let relay = std::thread::spawn({
-            let telling = telling.clone();
-            let connected = connected.clone();
-            move || {
-                while connected.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(8));
-                    let (dx, dy) = std::mem::take(&mut *MOVED.lock().unwrap());
-                    if (dx, dy) != (0, 0) && !link::tell(&mut telling.lock().unwrap(), &Told::Mouse { dx, dy }) {
-                        break;
-                    }
-                }
-            }
-        });
+        // The pushes seen from now on, told to it.
+        *PUSHES_TO.lock().unwrap() = Some(telling.clone());
         let mut next = Instant::now();
         let mut tick = 0u64;
         while greeted {
@@ -125,9 +116,10 @@ pub fn run() {
                 break;
             }
         }
-        // Gone: the pipes let go (which ends the listener's reading), for the rest to come again.
-        connected.store(false, std::sync::atomic::Ordering::Relaxed);
-        let _ = relay.join();
+        // Gone: the pipes let go (which ends the listener's reading), for the rest to come again; no edge watched
+        // till it says again which.
+        *PUSHES_TO.lock().unwrap() = None;
+        *WATCHED.lock().unwrap() = Edges::none();
         drop(telling);
         drop(asked);
         pipes.let_go();
@@ -141,80 +133,83 @@ pub fn run() {
     crate::presents::stop();
 }
 
-/// The mouse's motion heard here and not yet told (raw counts across and down).
-static MOVED: Mutex<(i32, i32)> = Mutex::new((0, 0));
+/// The edges watched, as the rest last said; and where each push seen is told (none: the rest is not there).
+static WATCHED: Mutex<Edges> = Mutex::new(Edges::none());
+static PUSHES_TO: Mutex<Option<Arc<Mutex<std::fs::File>>>> = Mutex::new(None);
 
-/// Hears the mouse's own motion (raw input, which reaches an elevated process whatever is in front), keeping what
-/// it hears while the window in front is an elevated one: the rest of Glance, running as the user, hears nothing
-/// of the mouse then (Windows keeps an elevated window's input from processes below it).
-fn hear_mouse() {
+/// How often the pointer is looked at (for one that moves without the mouse's motion being heard: see
+/// `Pusher::looked`), and how often again while it rests on an edge.
+const LOOK_MS: u32 = 100;
+const RESTING_MS: u32 = 16;
+const LOOK_TIMER: usize = 1;
+const RESTING_TIMER: usize = 2;
+
+/// Watches the edges that open the panel, on a thread of its own: the mouse's own motion (raw input, which reaches
+/// an elevated process whatever window is in front) and the pointer's place; each push seen told to the rest.
+fn watch_edges() {
     use windows::core::w;
-    use windows::Win32::UI::Input::{GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEMOUSE};
-    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, GetMessageW, HWND_MESSAGE, MSG, WM_INPUT};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::Input::{RegisterRawInputDevices, HRAWINPUT, RAWINPUTDEVICE, RIDEV_INPUTSINK};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, RegisterClassW, SetTimer, MSG, WINDOW_STYLE, WM_DISPLAYCHANGE, WM_INPUT, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
+    };
+
+    // A window never shown, not a message-only one: it hears that the screens changed, as those do not.
+    unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if message == WM_DISPLAYCHANGE {
+            crate::screens::changed();
+        }
+        unsafe { DefWindowProcW(window, message, wparam, lparam) }
+    }
+    let tell = |pushed: Option<crate::push::Pushed>| {
+        let Some((at, _, edge)) = pushed else { return };
+        if let Some(telling) = PUSHES_TO.lock().unwrap().as_ref() {
+            let _ = link::tell(&mut telling.lock().unwrap(), &Told::Pushed { edge, at: (at.x, at.y) });
+        }
+    };
     unsafe {
-        let Ok(window) = CreateWindowExW(Default::default(), w!("STATIC"), w!(""), Default::default(), 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None) else { return };
+        let Ok(module) = GetModuleHandleW(None) else { return };
+        let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: w!("GlanceEdges"), ..Default::default() };
+        RegisterClassW(&class);
+        let Ok(window) = CreateWindowExW(WS_EX_TOOLWINDOW, class.lpszClassName, w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, None, None, Some(module.into()), None) else { return };
         let mouse = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: window };
         if RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32).is_err() {
             return;
         }
-        let mut front = Front::default();
+        SetTimer(Some(window), LOOK_TIMER, LOOK_MS, None);
+        let mut pusher = Pusher::default();
+        let mut resting = false;
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
-            if message.message != WM_INPUT || !front.elevated() {
-                continue;
-            }
-            let mut raw = RAWINPUT::default();
-            let mut size = size_of::<RAWINPUT>() as u32;
-            let read = GetRawInputData(HRAWINPUT(message.lParam.0 as *mut _), RID_INPUT, Some(&mut raw as *mut _ as *mut _), &mut size, size_of::<RAWINPUTHEADER>() as u32);
-            // (Moves to a place, as a tablet's, say nothing of a push: the rest reads the pointer's place itself.)
-            const ABSOLUTE: u16 = 1;
-            if read == u32::MAX || raw.header.dwType != RIM_TYPEMOUSE.0 || raw.data.mouse.usFlags.0 & ABSOLUTE != 0 {
-                continue;
-            }
-            let mut moved = MOVED.lock().unwrap();
-            moved.0 = moved.0.saturating_add(raw.data.mouse.lLastX);
-            moved.1 = moved.1.saturating_add(raw.data.mouse.lLastY);
-        }
-    }
-}
-
-/// The window in front, and whether its program runs elevated (looked at again only when another comes to the
-/// front).
-#[derive(Default)]
-struct Front {
-    window: isize,
-    elevated: bool,
-}
-
-impl Front {
-    fn elevated(&mut self) -> bool {
-        use windows::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
-        use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
-        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
-        let window = unsafe { GetForegroundWindow() };
-        if window.0 as isize == self.window {
-            return self.elevated;
-        }
-        self.window = window.0 as isize;
-        let mut pid = 0u32;
-        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
-        self.elevated = pid != 0
-            && pid != std::process::id()
-            && unsafe {
-                let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
-                let mut token = HANDLE::default();
-                let mut elevation = TOKEN_ELEVATION::default();
-                let mut size = 0u32;
-                let raised = OpenProcessToken(process, TOKEN_QUERY, &mut token).is_ok()
-                    && GetTokenInformation(token, TokenElevation, Some((&mut elevation as *mut TOKEN_ELEVATION).cast()), size_of::<TOKEN_ELEVATION>() as u32, &mut size).is_ok()
-                    && elevation.TokenIsElevated != 0;
-                if !token.is_invalid() {
-                    let _ = CloseHandle(token);
+            let now = Instant::now();
+            match message.message {
+                WM_INPUT => {
+                    if let (Some(moved), Some(cursor)) = (crate::panel::read_motion(HRAWINPUT(message.lParam.0 as *mut _)), crate::panel::cursor_position()) {
+                        tell(pusher.heard(&WATCHED.lock().unwrap(), moved, cursor, now));
+                    }
                 }
-                let _ = CloseHandle(process);
-                raised
-            };
-        self.elevated
+                WM_TIMER if message.wParam.0 == LOOK_TIMER => {
+                    if let Some(cursor) = crate::panel::cursor_position() {
+                        pusher.looked(&WATCHED.lock().unwrap(), cursor, now);
+                    }
+                }
+                WM_TIMER if message.wParam.0 == RESTING_TIMER => {
+                    if let Some(cursor) = crate::panel::cursor_position() {
+                        tell(pusher.rested(&WATCHED.lock().unwrap(), cursor, now));
+                    }
+                }
+                _ => {}
+            }
+            if pusher.resting() != resting {
+                resting = pusher.resting();
+                if resting {
+                    SetTimer(Some(window), RESTING_TIMER, RESTING_MS, None);
+                } else {
+                    let _ = KillTimer(Some(window), RESTING_TIMER);
+                }
+            }
+            DispatchMessageW(&message);
+        }
     }
 }

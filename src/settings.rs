@@ -100,7 +100,7 @@ impl Opens {
 /// not seen before, and all of them up to 0.2.6): from one `edge`, where
 /// the pointer stops at it if `pushed`, and where another screen lies
 /// against it if `seam`.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Rest {
     pub edge: Edge,
     pub pushed: bool,

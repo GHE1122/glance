@@ -34,9 +34,10 @@ pub enum Told {
     /// The games presenting frames, as they are seen now, and whether a game shows (as set by hand, or as it
     /// came back to by itself).
     Presenting { games: Vec<crate::presents::Presenting>, mode: GameModeSent },
-    /// The mouse moved by so much (raw counts), while a window the rest cannot hear the mouse over (an elevated
-    /// one) is in front.
-    Mouse { dx: i32, dy: i32 },
+    /// The pointer pushed into `edge` (an edge that opens the panel, as asked: see `Asked::Edges`) at `at`
+    /// (physical px). They hear the mouse whatever window is in front; the rest, running as the user, does not
+    /// over an elevated one.
+    Pushed { edge: crate::settings::Edge, at: (i32, i32) },
     /// What they have to say for a report, asked for.
     Report(Vec<String>),
     /// What became of a switch asked for (or how it is, as they start): whether it is on now.
@@ -84,6 +85,8 @@ pub enum Asked {
     Switch { switch: Switch, on: bool },
     /// The release found newer, downloaded and installed.
     Install(ReleaseSent),
+    /// Which edges open the panel to a push, and how hard (as the settings have them; told again as they change).
+    Edges(crate::push::Edges),
 }
 
 /// How often the sensors read (milliseconds), whether what changes slowly is read afresh each time (something
