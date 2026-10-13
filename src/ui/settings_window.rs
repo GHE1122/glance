@@ -696,6 +696,12 @@ struct Ui {
     /// When the screens were last asked for.
     screens_at: Instant,
     map_art: Vec<MapArt>,
+    /// The desktops of the other screens the preview has shown, kept: turning to a page that shows another screen
+    /// (the overlay's) and back takes them as they are, not read from the wallpaper and scaled anew each time.
+    kept_stages: Vec<Stage>,
+    /// The other screens' desktops, read on another thread as the window opens (for the first turn to a page that
+    /// shows one not to wait for it): none, once all have come.
+    staging: Option<std::sync::mpsc::Receiver<Stage>>,
     /// The control the keyboard acts on, and whether the keyboard has been
     /// used since the last click (the focus is shown only then).
     focus: Option<Target>,
@@ -824,6 +830,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             map_screen: None,
             screens_at: Instant::now(),
             map_art: Vec::new(),
+            kept_stages: Vec::new(),
+            staging: None,
             focus: None,
             keyboard: false,
             drag: None,
@@ -1302,10 +1310,49 @@ impl Ui {
         let work = contact.work;
         let size = (((work.right - work.left) as f32 / contact.scale).round(), ((work.bottom - work.top) as f32 / contact.scale).round());
         // Shown already, and as it is now (its size, scale and place the same).
-        if self.stage.screen.as_deref() == Some(screen) && self.stage.work == work && self.stage.size == size {
+        let is = |stage: &Stage| stage.screen.as_deref() == Some(screen) && stage.work == work && stage.size == size;
+        if is(&self.stage) {
             return;
         }
-        self.stage = Stage { size, screen: Some(screen.to_string()), work, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
+        // Shown before, as it is now: taken as it was kept; else read from the wallpaper.
+        let next = match self.kept_stages.iter().position(is) {
+            Some(at) => self.kept_stages.swap_remove(at),
+            None => Stage { size, screen: Some(screen.to_string()), work, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None },
+        };
+        let before = std::mem::replace(&mut self.stage, next);
+        // One kept for each screen, as it last was.
+        if let Some(of) = before.screen.clone() {
+            self.kept_stages.retain(|kept| kept.screen.as_deref() != Some(of.as_str()));
+            self.kept_stages.push(before);
+        }
+        let known: Vec<&str> = self.screens.iter().map(|known| known.id.as_str()).collect();
+        self.kept_stages.retain(|kept| kept.screen.as_deref().is_some_and(|id| known.contains(&id)));
+    }
+
+    /// Reads every screen's desktop as the preview shows it (its wallpaper, at its work area's size), on another
+    /// thread: each kept as it comes (see `draw`).
+    fn read_stages(&mut self) {
+        let wanted: Vec<(String, RECT, (f32, f32))> = self
+            .screens
+            .iter()
+            .filter_map(|known| {
+                let m = known.monitor;
+                let contact = crate::panel::monitor_at(POINT { x: (m.left + m.right) / 2, y: (m.top + m.bottom) / 2 })?;
+                let work = contact.work;
+                let size = (((work.right - work.left) as f32 / contact.scale).round(), ((work.bottom - work.top) as f32 / contact.scale).round());
+                Some((known.id.clone(), work, size))
+            })
+            .collect();
+        let (send, staging) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (screen, work, size) in wanted {
+                let stage = Stage { size, screen: Some(screen), work, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
+                if send.send(stage).is_err() {
+                    break;
+                }
+            }
+        });
+        self.staging = Some(staging);
     }
 
     /// The screen the preview shows, by its name: on the page of the map,
@@ -2711,6 +2758,9 @@ impl Ui {
         self.gfx = current;
         self.layers.release();
         self.stage.bitmap = None;
+        for stage in &mut self.kept_stages {
+            stage.bitmap = None;
+        }
         for art in &mut self.map_art {
             art.bitmap = None;
         }
@@ -2720,9 +2770,31 @@ impl Ui {
     fn draw(&mut self, now: Instant) {
         // The screens as they are about now, and the one the preview
         // shows.
+        let first = self.screens.is_empty();
         if now.duration_since(self.screens_at) >= Duration::from_secs(1) {
             self.screens = crate::screens::all();
             self.screens_at = now;
+        }
+        if first {
+            self.read_stages();
+        }
+        // Those read meanwhile, kept (unless shown or kept already, as they are).
+        if let Some(staging) = &self.staging {
+            loop {
+                match staging.try_recv() {
+                    Ok(stage) => {
+                        let same = |other: &Stage| other.screen == stage.screen && other.work == stage.work && other.size == stage.size;
+                        if !same(&self.stage) && !self.kept_stages.iter().any(same) {
+                            self.kept_stages.push(stage);
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.staging = None;
+                        break;
+                    }
+                }
+            }
         }
         if let Some(screen) = self.stage_screen() {
             self.show_screen(&screen);
