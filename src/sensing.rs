@@ -19,6 +19,9 @@ use crate::metrics::Sampler;
 const WAITED_FOR: Duration = Duration::from_secs(20);
 /// How long what came has to say who it is.
 const HELLO_WITHIN: Duration = Duration::from_secs(5);
+/// How long a reading may take before the sensors are taken to be stuck (a driver, a device, a system call that
+/// does not come back): they end, and the rest of Glance starts them again.
+const STUCK_AFTER: Duration = Duration::from_secs(30);
 
 /// Runs the sensors till the rest has gone for good. Not elevated, or with the sensors already running for
 /// this user, it does nothing.
@@ -38,6 +41,7 @@ pub fn run() {
     let mut sampler = Sampler::new();
     crate::presents::start();
     std::thread::spawn(watch_edges);
+    std::thread::spawn(watch_readings);
     let want = Arc::new(Mutex::new(Want { interval_ms: 1000, refresh_slow: true, wsl: false, docker: false }));
     let pipes = Arc::new(pipes);
     loop {
@@ -149,7 +153,10 @@ pub fn run() {
             if !crate::journal::take_held().into_iter().all(|line| tell(&Told::Note(line))) {
                 break;
             }
-            if let Some(sample) = sampler.sample(refresh_slow, wanted.wsl, wanted.docker) {
+            *READING_SINCE.lock().unwrap() = Some(Instant::now());
+            let sample = sampler.sample(refresh_slow, wanted.wsl, wanted.docker);
+            *READING_SINCE.lock().unwrap() = None;
+            if let Some(sample) = sample {
                 if !tell(&Told::Sample(Box::new(sample))) || !tell(&Told::Presenting { games: crate::presents::presenting(), mode: crate::presents::game_mode().into() }) {
                     break;
                 }
@@ -173,6 +180,26 @@ pub fn run() {
         let _ = listener.join();
     }
     crate::presents::stop();
+}
+
+/// When the reading under way began (none: none is).
+static READING_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Ends the sensors once a reading has been under way for longer than `STUCK_AFTER`, the rest of Glance told why
+/// (on the pipe the reading does not hold meanwhile): stuck, they serve nothing, and the rest starts them again.
+fn watch_readings() {
+    loop {
+        std::thread::sleep(STUCK_AFTER / 6);
+        let since = *READING_SINCE.lock().unwrap();
+        if since.is_some_and(|since| since.elapsed() > STUCK_AFTER) {
+            let why = format!("sensors: a reading has taken over {} s; ending, to be started again", STUCK_AFTER.as_secs());
+            // (Not waited for: a pipe the rest has stopped reading may hold it.)
+            if let Some(Ok(mut telling)) = PUSHES_TO.lock().unwrap().as_ref().map(|telling| telling.try_lock()) {
+                let _ = link::tell(&mut telling, &Told::Note(why));
+            }
+            std::process::exit(1);
+        }
+    }
 }
 
 /// The edges watched, as the rest last said; and where each push seen is told (none: the rest is not there).

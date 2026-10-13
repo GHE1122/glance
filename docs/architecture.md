@@ -14,16 +14,20 @@ worth its cost for a desktop monitor. Stage 1 builds, in this order:
 3. The pipe: owner Administrators and the narrow user ACE, both ends
    verified (the client through the pipe at identification level), the
    bootstrap with package versions.
-4. The readings split: Docker, WSL and the microphone read by the app; the
-   service's log lines sent to the app.
+4. The service's log lines sent to the app, which alone writes the log.
+   Docker, WSL and the microphone stay in the service: WSL's readings need
+   the rights (the VM's command line, GPU use by process), and the others,
+   in memory-safe Rust, gain too little from moving to be worth a second
+   reading pipeline.
 5. Updates: the signer by Artifact Signing's profile OID and the root's hash;
    the installer's own version read and compared.
 6. The installer: tasks disabled, processes stopped and seen gone, files
    replaced, tasks restored; a failure is fixed by running it again.
 
-Deferred until something shows they are needed: the maintenance record and
-its phased recovery, the watchdog's table (stage 1 keeps one rule: a sample
-stuck for 30 s ends the service), revocation special cases, leaked-buffer
+All six are built. Deferred until something shows they are needed: the
+maintenance record and its phased recovery, the watchdog's table (stage 1
+keeps one rule: a sample stuck for 30 s ends the service, and the app starts
+it again), revocation special cases, leaked-buffer
 accounting, the queues' saturation rules (a full queue drops the connection),
 and the drag controller's finer association rules (stage 2).
 
