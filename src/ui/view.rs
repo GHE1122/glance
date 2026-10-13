@@ -158,6 +158,8 @@ pub enum Hit {
     /// sound's track, pressed where along it the sound is to be.
     Media(crate::playing::Key),
     Volume,
+    /// A drive's row in the storage lane: the drive opened (by its place among the drives seen).
+    Drive(u16),
 }
 
 impl Hit {
@@ -244,7 +246,8 @@ enum Block {
     /// Each thread's load (0–1), unread where `None`, whether it is hot,
     /// and what the tag over it says while the pointer is on it.
     Threads(Vec<(Option<f32>, bool, String)>),
-    Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32 },
+    /// A labelled bar; `opens`: a click on it opens that drive (its place among those seen: see `Hit::Drive`).
+    Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32, opens: Option<u16> },
     Facts { rows: Vec<(String, String, bool)>, gap: f32 },
     /// How loud the sound is, on a track it is dragged along, and what
     /// mutes it.
@@ -293,7 +296,7 @@ impl Hash for Block {
             Block::Rates { rows, plot } => (rows, plot.as_ref().map(|plot| plot.max.to_bits())).hash(state),
             Block::Trace { label, value, hot, plot, gap } => (label, value, hot, plot.max.to_bits(), gap.to_bits()).hash(state),
             Block::Threads(cells) => cells.iter().for_each(|(load, hot, tag)| (load.map(f32::to_bits), hot, tag).hash(state)),
-            Block::Meter { label, fraction, value, hot, gap } => (label, fraction.to_bits(), value, hot, gap.to_bits()).hash(state),
+            Block::Meter { label, fraction, value, hot, gap, opens } => (label, fraction.to_bits(), value, hot, gap.to_bits(), opens).hash(state),
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
             Block::Sound { level, muted } => (level, muted).hash(state),
             Block::Playing { title, about, playing } => (title, about, playing).hash(state),
@@ -536,6 +539,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     value: shown(used, |used| text::usage(used, gpu.mem_total)),
                     hot: false,
                     gap: 8.0,
+                    opens: None,
                 });
             }
             if full && on("engines") {
@@ -550,6 +554,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                         value: shown(load, text::percent),
                         hot: load.is_some_and(|load| load > hot_load),
                         gap: 6.0,
+                        opens: None,
                     });
                 }
             }
@@ -745,6 +750,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     value: shown(volume, |v| text::usage(v.used, v.total)),
                     hot: fraction * 100.0 > hot_load,
                     gap: if i == 0 { 0.0 } else { 8.0 },
+                    opens: scene.seen.volumes.iter().position(|seen| seen == name).map(|place| place as u16),
                 });
             }
             blocks
@@ -992,6 +998,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                         value,
                         hot: false,
                         gap: 8.0,
+                        opens: None,
                     });
                 }
             }
@@ -1006,7 +1013,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     });
                     blocks.push(Block::Trace { label: "GPU".into(), value, hot, plot: Plot::new(scene, vec![series], Some(100.0), Some(hot_load as f64)), gap: 10.0 });
                 } else {
-                    blocks.push(Block::Meter { label: "GPU".into(), fraction: gpu.unwrap_or(0.0) / 100.0, value, hot, gap: 8.0 });
+                    blocks.push(Block::Meter { label: "GPU".into(), fraction: gpu.unwrap_or(0.0) / 100.0, value, hot, gap: 8.0, opens: None });
                 }
             }
             blocks
@@ -1587,9 +1594,12 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 }
                 frame.unclip();
             }
-            (Block::Meter { label, fraction, value, hot, gap }, Pass::Content) => {
+            (Block::Meter { label, fraction, value, hot, gap, opens }, Pass::Content) => {
                 let row_y = y + gap;
                 part("meter");
+                if let Some(drive) = opens {
+                    hits.push((left, row_y, width, LINE, Hit::Drive(*drive)));
+                }
                 frame.text(label, theme.small, theme.text2, left, row_y, LABEL, Align::Start);
                 let value_width = frame.measure(value, theme.small);
                 frame.text(value, theme.small, theme.text2, left, row_y, width, Align::End);

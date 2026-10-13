@@ -2229,6 +2229,7 @@ impl<'a> Panel<'a> {
                 self.controller.set_overlay(!self.controller.overlay_wanted());
             }
             Some(Hit::Media(key)) => crate::playing::act(crate::playing::Act::Key(key)),
+            Some(Hit::Drive(place)) => open_drive(place),
             Some(Hit::Sort(sort)) if sort != self.prefs.processes.sort => {
                 self.prefs.processes.sort = sort;
                 self.scroll = 0.0;
@@ -2474,6 +2475,19 @@ fn fullscreen_game() -> bool {
 /// background.
 fn exclusive_fullscreen() -> bool {
     unsafe { SHQueryUserNotificationState() }.is_ok_and(|state| state == QUNS_RUNNING_D3D_FULL_SCREEN)
+}
+
+/// Opens the drive seen at `place` (see `Hit::Drive`) where the user browses files, on another thread (the shell may
+/// take a while).
+pub(crate) fn open_drive(place: u16) {
+    let Some(name) = crate::app().controller.seen.lock().unwrap().volumes.get(place as usize).cloned() else { return };
+    std::thread::spawn(move || {
+        let root = windows::core::HSTRING::from(format!("{name}\\"));
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            windows::Win32::UI::Shell::ShellExecuteW(None, windows::core::w!("open"), &root, windows::core::PCWSTR::null(), windows::core::PCWSTR::null(), windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
+        }
+    });
 }
 
 pub(crate) fn cursor_position() -> Option<POINT> {

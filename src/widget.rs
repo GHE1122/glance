@@ -1345,8 +1345,10 @@ impl Widget {
                         // No button: what of its lanes is there (what plays, the sound).
                         None => {
                             let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
-                            if let Some((.., view::Hit::Media(key))) = self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h) {
-                                crate::playing::act(crate::playing::Act::Key(*key));
+                            match self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h) {
+                                Some((.., view::Hit::Media(key))) => crate::playing::act(crate::playing::Act::Key(*key)),
+                                Some((.., view::Hit::Drive(place))) => crate::panel::open_drive(*place),
+                                _ => {}
                             }
                             Released::Nothing
                         }
