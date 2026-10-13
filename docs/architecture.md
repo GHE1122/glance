@@ -177,10 +177,28 @@ With a verified, live service: the app reads no global input state (no
 `GetAsyncKeyState`, raw input registration, low-level or WinEvent hooks).
 Allowed: messages to its own windows (including the button state carried in
 `WM_MOUSEMOVE`'s `wParam`), `GetKeyState` for the message being handled,
-registered hotkeys, `GetCursorPos`, window geometry. Until stage 2, the app's
-current reads (`GetAsyncKeyState` in drags and dismissal, raw input in
-`touches.rs`) remain, and the stage-1 tests treat their failure over an
-elevated window as known.
+registered hotkeys, `GetCursorPos`, window geometry. Without a service the app
+reads the buttons and the mouse's raw input itself (what it can: nothing over
+an elevated window), with the same code.
+
+### As built (stage 2)
+
+- Drags (the panel, widgets, the overlay) end on their own window's
+  `WM_LBUTTONUP`, its capture lost, or a `WM_MOUSEMOVE` without `MK_LBUTTON`;
+  the panel's own release after a tear-off lets the widget go. No broker
+  `Button` is needed for drags: the capture brings the release.
+- The service tells `Buttons { down, pressed }`: on each raw mouse report
+  with a button going down (`pressed`, so a click shorter than the panel's
+  look is not missed) or whenever the state read with `GetAsyncKeyState`
+  changes, and once as the app comes. The panel counts presses since it last
+  looked; one counted, or a button down, away from the panel closes it.
+- Activity: `Asked::Activity(bool)` while the helper has the screens out
+  (asked again on each new link), `Told::Activity { touched, nothing }` at
+  most every 50 ms or when its kind changes; the app writes them to
+  `Local\Glance.Touches` as before. A process hears a device kind at one
+  window only, so the window that hears the mouse for the edges (the
+  service's, or the panel's without one) hears it for activity too, and only
+  the other kinds are registered for activity.
 
 ### The broker (in the service; the same code in the app without one)
 
@@ -780,9 +798,10 @@ the same version (the bootstrap handles a service left from the previous one).
    stopping phase and admission keep old and new from running together; a
    service left from another version is retired by the bootstrap; downgrades
    go through uninstalling).
-2. **Input**: the broker (edges, buttons, activity) and its messages; the drag
-   controller; dismissal by `Button`; `touches.rs` retired; no global input
-   read in the linked app; the owner's real-mouse check.
+2. **Input** (built; see "As built"): the broker (edges, buttons, activity)
+   and its messages; drags ended by their windows' own messages; dismissal by
+   the service's buttons; no global input read in the linked app. Owed: the
+   owner's real-mouse check.
 
 ## Answers to the third review
 
