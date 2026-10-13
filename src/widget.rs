@@ -720,13 +720,13 @@ impl Widgets {
         let widget = &mut self.list[index];
         widget.next_frame = now;
         match widget.release(now) {
-            Released::Closed => {
-                let widget = self.list.remove(index);
-                self.put_away.push(widget.kept());
-                widget.window.destroy();
-            }
+            Released::Closed => self.put_away_at(index),
             Released::Changed => {}
             Released::Settings => {
+                // (What its button said goes with the settings coming.)
+                if self.list[index].tip.take().is_some() {
+                    crate::ui::tip::hide();
+                }
                 crate::show_settings();
                 return;
             }
@@ -749,11 +749,7 @@ impl Widgets {
                 widget.on_desktop ^= true;
                 widget.window.set_on_desktop(widget.low());
             }
-            WidgetChoice::Close => {
-                let widget = self.list.remove(index);
-                self.put_away.push(widget.kept());
-                widget.window.destroy();
-            }
+            WidgetChoice::Close => self.put_away_at(index),
             WidgetChoice::Settings => return Some(choice),
         }
         self.save();
@@ -868,12 +864,21 @@ impl Widgets {
             self.save();
         }
         for index in gone.into_iter().rev() {
-            let widget = self.list.remove(index);
-            self.put_away.push(widget.kept());
-            widget.window.destroy();
+            self.put_away_at(index);
             self.save();
         }
         Some(due)
+    }
+
+    /// Puts the widget at `index` away: kept to be brought back, its window gone, and what one of its buttons said
+    /// under the pointer gone with it (the pointer, no longer over it, would never take it away).
+    fn put_away_at(&mut self, index: usize) {
+        let widget = self.list.remove(index);
+        if widget.tip.is_some() {
+            crate::ui::tip::hide();
+        }
+        self.put_away.push(widget.kept());
+        widget.window.destroy();
     }
 }
 
