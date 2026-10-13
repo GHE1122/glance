@@ -238,6 +238,30 @@ enum SwitchAsked {
     Remote,
 }
 
+/// The desktop inside `rect` as `wallpaper::desktop` reads it, `width` × `height` pixels, on a thread of the
+/// caller's (which joins the process's apartment for the decoders it uses).
+fn read_desktop(rect: RECT, width: u32, height: u32) -> Capture {
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+    }
+    wallpaper::desktop(rect, width, height)
+}
+
+/// A desktop read on another thread for the settings (see `Ui::read`): for the preview, or for the map.
+enum Read {
+    Stage(Stage),
+    Map { id: String, monitor: RECT, size: (u32, u32), desktop: Capture },
+}
+
+/// How the phone remote is, as its helper says (see `Ui::remote_asked`), and a code asked of it with what for (none
+/// asked: none).
+struct RemoteAnswer {
+    lights: bool,
+    screens: bool,
+    address: Option<String>,
+    code: Option<Option<(crate::phone::Code, CodeFor)>>,
+}
+
 /// What the diagnostics are put together for.
 #[derive(Clone, Copy)]
 enum ReportFor {
@@ -572,7 +596,8 @@ struct MapArt {
     /// Where the screen was as the picture was taken (physical px).
     monitor: RECT,
     size: (u32, u32),
-    desktop: Capture,
+    /// None till it has been read (on another thread: see `Ui::read`).
+    desktop: Option<Capture>,
     bitmap: Option<ID2D1Bitmap1>,
 }
 
@@ -583,7 +608,8 @@ struct Stage {
     /// was taken (physical px).
     screen: Option<String>,
     work: RECT,
-    desktop: Capture,
+    /// None till it has been read (on another thread: see `Ui::read`).
+    desktop: Option<Capture>,
     /// The desktop as a bitmap, for the zoom it was made at.
     bitmap: Option<(u32, ID2D1Bitmap1)>,
 }
@@ -658,6 +684,9 @@ struct Ui {
     reporting: Option<(ReportFor, std::thread::JoinHandle<String>)>,
     code: Option<(crate::phone::Code, CodeFor)>,
     phones: Vec<crate::phone::Phone>,
+    /// The phone remote's helper asked something (and how it is then) on another thread: each answer of its is a
+    /// program started and waited for, not to be waited for by the thread that draws every window.
+    remote_asked: Option<std::thread::JoinHandle<RemoteAnswer>>,
     phones_at: Instant,
     /// Whether this copy may start with Windows (see elevation.rs).
     may_autostart: bool,
@@ -699,9 +728,9 @@ struct Ui {
     /// The desktops of the other screens the preview has shown, kept: turning to a page that shows another screen
     /// (the overlay's) and back takes them as they are, not read from the wallpaper and scaled anew each time.
     kept_stages: Vec<Stage>,
-    /// The other screens' desktops, read on another thread as the window opens (for the first turn to a page that
-    /// shows one not to wait for it): none, once all have come.
-    staging: Option<std::sync::mpsc::Receiver<Stage>>,
+    /// The desktops read on other threads (every screen's for the preview as the window opens, and any one asked for
+    /// since: see `read`), come back: for the preview, or for the map.
+    read: (std::sync::mpsc::Sender<Read>, std::sync::mpsc::Receiver<Read>),
     /// The control the keyboard acts on, and whether the keyboard has been
     /// used since the last click (the focus is shown only then).
     focus: Option<Target>,
@@ -781,7 +810,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         let size = ((work_w as f32 / scale).round(), (work_h as f32 / scale).round());
         let centre = POINT { x: (work.left + work.right) / 2, y: (work.top + work.bottom) / 2 };
         let screen = crate::screens::all().into_iter().find(|screen| crate::panel::monitor_at(centre).is_some_and(|contact| contact.monitor == screen.monitor)).map(|screen| screen.id);
-        let stage = Stage { size, screen, work, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
+        // (Its desktop read on another thread: the window shows meanwhile.)
+        let stage = Stage { size, screen, work, desktop: None, bitmap: None };
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
         let mut ui = Ui {
             hwnd,
@@ -799,19 +829,21 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             autostart: crate::source::autostart(),
             remote_there: crate::phone::helper().is_some(),
             remote: crate::phone::on(),
-            remote_lights: crate::phone::lights(),
-            remote_screens: crate::phone::screens_kept(),
+            // (As its helper says, asked as the window opens: see `remote_asked`.)
+            remote_lights: false,
+            remote_screens: false,
             fetching: None,
             fetch_failed: false,
             switching: None,
             reporting: None,
             code: None,
             phones: crate::phone::phones(),
+            remote_asked: None,
             phones_at: Instant::now(),
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
             copied_at: None,
-            web_address: crate::phone::web_address(),
+            web_address: None,
             sending: None,
             sent: None,
             phone_from: Instant::now(),
@@ -831,7 +863,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             screens_at: Instant::now(),
             map_art: Vec::new(),
             kept_stages: Vec::new(),
-            staging: None,
+            read: std::sync::mpsc::channel(),
             focus: None,
             keyboard: false,
             drag: None,
@@ -848,6 +880,10 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             failed: false,
         };
         ui.raise_more();
+        if ui.remote_there {
+            ui.ask_remote(|| None);
+        }
+        ui.read_stages();
         ui.restyle();
         ui.draw(Instant::now());
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
@@ -1315,10 +1351,14 @@ impl Ui {
         if is(&self.stage) {
             return;
         }
-        // Shown before, as it is now: taken as it was kept; else read from the wallpaper.
+        // Shown before, as it is now: taken as it was kept; else read from the wallpaper on another thread (shown
+        // without it meanwhile).
         let next = match self.kept_stages.iter().position(is) {
             Some(at) => self.kept_stages.swap_remove(at),
-            None => Stage { size, screen: Some(screen.to_string()), work, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None },
+            None => {
+                self.read_stage(screen.to_string(), work, size);
+                Stage { size, screen: Some(screen.to_string()), work, desktop: None, bitmap: None }
+            }
         };
         let before = std::mem::replace(&mut self.stage, next);
         // One kept for each screen, as it last was.
@@ -1328,6 +1368,19 @@ impl Ui {
         }
         let known: Vec<&str> = self.screens.iter().map(|known| known.id.as_str()).collect();
         self.kept_stages.retain(|kept| kept.screen.as_deref().is_some_and(|id| known.contains(&id)));
+    }
+
+    /// Asks the phone remote's helper `ask` (a code, or what to do), then how the remote is, on another thread (see
+    /// `remote_asked`); one at a time, a press meanwhile not taken.
+    fn ask_remote(&mut self, ask: impl FnOnce() -> Option<Option<(crate::phone::Code, CodeFor)>> + Send + 'static) {
+        if self.remote_asked.as_ref().is_some_and(|asked| !asked.is_finished()) {
+            return;
+        }
+        self.remote_asked = Some(std::thread::spawn(move || {
+            let code = ask();
+            RemoteAnswer { lights: crate::phone::lights(), screens: crate::phone::screens_kept(), address: crate::phone::web_address(), code }
+        }));
+        self.next_frame = Instant::now();
     }
 
     /// Reads every screen's desktop as the preview shows it (its wallpaper, at its work area's size), on another
@@ -1344,16 +1397,24 @@ impl Ui {
                 Some((known.id.clone(), work, size))
             })
             .collect();
-        let (send, staging) = std::sync::mpsc::channel();
+        let send = self.read.0.clone();
         std::thread::spawn(move || {
             for (screen, work, size) in wanted {
-                let stage = Stage { size, screen: Some(screen), work, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
-                if send.send(stage).is_err() {
+                let stage = Stage { size, screen: Some(screen), work, desktop: Some(read_desktop(work, size.0 as u32, size.1 as u32)), bitmap: None };
+                if send.send(Read::Stage(stage)).is_err() {
                     break;
                 }
             }
         });
-        self.staging = Some(staging);
+    }
+
+    /// Reads screen `screen`'s desktop for the preview (its work area `work`, `size` DIPs) on another thread.
+    fn read_stage(&self, screen: String, work: RECT, size: (f32, f32)) {
+        let send = self.read.0.clone();
+        std::thread::spawn(move || {
+            let desktop = read_desktop(work, size.0 as u32, size.1 as u32);
+            let _ = send.send(Read::Stage(Stage { size, screen: Some(screen), work, desktop: Some(desktop), bitmap: None }));
+        });
     }
 
     /// The screen the preview shows, by its name: on the page of the map,
@@ -1394,7 +1455,14 @@ impl Ui {
         let at = match self.map_art.iter().position(|art| art.id == id) {
             Some(at) if self.map_art[at].size == size && self.map_art[at].monitor == monitor => at,
             found => {
-                let art = MapArt { id: id.to_string(), monitor, size, desktop: wallpaper::desktop(monitor, size.0, size.1), bitmap: None };
+                // (Read on another thread: the map shows the screen without it meanwhile.)
+                let send = self.read.0.clone();
+                let of = id.to_string();
+                std::thread::spawn(move || {
+                    let desktop = read_desktop(monitor, size.0, size.1);
+                    let _ = send.send(Read::Map { id: of, monitor, size, desktop });
+                });
+                let art = MapArt { id: id.to_string(), monitor, size, desktop: None, bitmap: None };
                 match found {
                     Some(at) => self.map_art[at] = art,
                     None => self.map_art.push(art),
@@ -1404,7 +1472,7 @@ impl Ui {
         };
         let art = &mut self.map_art[at];
         if art.bitmap.is_none() {
-            art.bitmap = art.desktop.bitmap(&frame.dc, 1.0).ok();
+            art.bitmap = art.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, 1.0).ok());
         }
         art.bitmap.clone()
     }
@@ -1955,8 +2023,12 @@ impl Ui {
                 return;
             }
             Switch::RemoteScreens => {
-                // What the remote then says, not what was asked.
-                self.remote_screens = crate::phone::keep_screens(!self.remote_screens);
+                // What the remote then says, not what was asked (see `tick`).
+                let kept = !self.remote_screens;
+                self.ask_remote(move || {
+                    crate::phone::keep_screens(kept);
+                    None
+                });
                 self.next_frame = Instant::now();
                 return;
             }
@@ -2427,19 +2499,19 @@ impl Ui {
             Target::SendReport => {}
             // (Pressed again, its code is put away.)
             Target::GetApp if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) => self.code = None,
-            Target::GetApp => self.code = crate::phone::app_code().map(|code| (code, CodeFor::App)),
-            Target::Pair(web) => self.code = crate::phone::offer(web).map(|code| (code, if web { CodeFor::WebPairing } else { CodeFor::Pairing })),
+            // (Each asked of the remote's helper on another thread: see `tick`.)
+            Target::GetApp => self.ask_remote(|| Some(crate::phone::app_code().map(|code| (code, CodeFor::App)))),
+            Target::Pair(web) => self.ask_remote(move || Some(crate::phone::offer(web).map(|code| (code, if web { CodeFor::WebPairing } else { CodeFor::Pairing })))),
             Target::OpenPage if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::WebPage) => self.code = None,
-            Target::OpenPage => {
-                // (Where it is now: this PC's address may have changed.)
-                self.web_address = crate::phone::web_address();
-                self.code = self.web_address.as_deref().and_then(crate::phone::code_of).map(|code| (code, CodeFor::WebPage));
-            }
+            // (Where it is now: this PC's address may have changed.)
+            Target::OpenPage => self.ask_remote(|| Some(crate::phone::web_address().as_deref().and_then(crate::phone::code_of).map(|code| (code, CodeFor::WebPage)))),
             Target::Unpair(at) => {
-                if let Some(phone) = self.phones.get(at) {
-                    crate::phone::unpair(&phone.id);
+                if let Some(id) = self.phones.get(at).map(|phone| phone.id.clone()) {
+                    self.ask_remote(move || {
+                        crate::phone::unpair(&id);
+                        None
+                    });
                 }
-                self.phones = crate::phone::phones();
             }
             // Slid by the pointer, stepped by the arrows; pressing alone does nothing more.
             Target::Grip(_) | Target::Slider(_) => {}
@@ -2772,28 +2844,28 @@ impl Ui {
     fn draw(&mut self, now: Instant) {
         // The screens as they are about now, and the one the preview
         // shows.
-        let first = self.screens.is_empty();
         if now.duration_since(self.screens_at) >= Duration::from_secs(1) {
             self.screens = crate::screens::all();
             self.screens_at = now;
         }
-        if first {
-            self.read_stages();
-        }
-        // Those read meanwhile, kept (unless shown or kept already, as they are).
-        if let Some(staging) = &self.staging {
-            loop {
-                match staging.try_recv() {
-                    Ok(stage) => {
-                        let same = |other: &Stage| other.screen == stage.screen && other.work == stage.work && other.size == stage.size;
-                        if !same(&self.stage) && !self.kept_stages.iter().any(same) {
-                            self.kept_stages.push(stage);
+        // Desktops read meanwhile: the one shown, if it waited for it; else kept (unless kept already); the map's in
+        // place, if it is still of that screen as it is.
+        while let Ok(read) = self.read.1.try_recv() {
+            match read {
+                Read::Stage(stage) => {
+                    let same = |other: &Stage| other.screen == stage.screen && other.work == stage.work && other.size == stage.size;
+                    if same(&self.stage) {
+                        if self.stage.desktop.is_none() {
+                            self.stage = stage;
                         }
+                    } else if !self.kept_stages.iter().any(same) {
+                        self.kept_stages.push(stage);
                     }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        self.staging = None;
-                        break;
+                }
+                Read::Map { id, monitor, size, desktop } => {
+                    if let Some(art) = self.map_art.iter_mut().find(|art| art.id == id && art.monitor == monitor && art.size == size) {
+                        art.desktop = Some(desktop);
+                        art.bitmap = None;
                     }
                 }
             }
@@ -2924,9 +2996,9 @@ impl Ui {
                 SwitchAsked::Startup => self.autostart = on,
                 SwitchAsked::Remote => {
                     self.remote = on;
-                    self.web_address = crate::phone::web_address();
                     self.code = None;
                     self.phones = crate::phone::phones();
+                    self.ask_remote(|| None);
                 }
             }
             self.next_frame = now;
@@ -2946,14 +3018,27 @@ impl Ui {
             }
             self.next_frame = now;
         }
-        if self.switching.is_some() || self.reporting.is_some() {
+        // The remote's helper answered: as it is now, and what was asked of it.
+        if self.remote_asked.as_ref().is_some_and(|asked| asked.is_finished()) {
+            if let Ok(answer) = self.remote_asked.take().unwrap().join() {
+                self.remote_lights = answer.lights;
+                self.remote_screens = answer.screens;
+                self.web_address = answer.address;
+                if let Some(code) = answer.code {
+                    self.code = code;
+                }
+                self.phones = crate::phone::phones();
+            }
+            self.next_frame = now;
+        }
+        if self.switching.is_some() || self.reporting.is_some() || self.remote_asked.is_some() {
             self.next_frame = self.next_frame.min(now + Duration::from_millis(100));
         }
         // The lights' program fetched (or taken away): how that went, once it is over.
         if self.fetching.as_ref().is_some_and(|fetching| fetching.is_finished()) {
             let done = self.fetching.take().unwrap().join().unwrap_or(false);
             self.fetch_failed = !done;
-            self.remote_lights = crate::phone::lights();
+            self.ask_remote(|| None);
         }
         if self.fetching.is_some() {
             self.next_frame = now + Duration::from_millis(300);
@@ -3774,7 +3859,7 @@ impl Ui {
         let (ox, oy) = (area.x - vx * k + ((area.w - sw * k) / 2.0).max(0.0), area.y - vy * k + ((area.h - sh * k) / 2.0).max(0.0));
         unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != 1.0f32.to_bits()) {
-            self.stage.bitmap = self.stage.desktop.bitmap(&frame.dc, 1.0).ok().map(|b| (1.0f32.to_bits(), b));
+            self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, 1.0).ok()).map(|b| (1.0f32.to_bits(), b));
         }
         if let Some((_, bitmap)) = &self.stage.bitmap {
             unsafe {
@@ -3790,7 +3875,7 @@ impl Ui {
         let hole = RECT { left: whole(x), top: whole(y), right: whole(x + w), bottom: whole(y + h) };
         let ring = RECT { left: whole(x - around), top: whole(y - around), right: whole(x + w + around), bottom: whole(y + h + around) };
         let frost = 1.0 - overlay.clear.clamp(0.0, 1.0);
-        let glass = super::overlay::Glass { presence: frost, ..super::overlay::glass(&mut self.stage.desktop.luminances(ring, hole, 1), None) };
+        let glass = super::overlay::Glass { presence: frost, ..super::overlay::glass(&mut self.stage.desktop.as_ref().map_or(Vec::new(), |desktop| desktop.luminances(ring, hole, 1)), None) };
         // (Its tint alone over the screen as it is: the overlay does not blur what is behind it.)
         frame.place(placed);
         frame.crisp_text();
@@ -3860,7 +3945,8 @@ impl Ui {
         // The desktop behind the panel decides its theme when it follows the
         // backdrop, and how frosted glass is.
         let behind = RECT { left: pos.0 as i32, top: pos.1 as i32, right: (pos.0 + pw) as i32, bottom: (pos.1 + ph) as i32 };
-        let tone = self.stage.desktop.luminance(behind, 1.0);
+        // (As grey, till the desktop has been read.)
+        let tone = self.stage.desktop.as_ref().map_or((0.5, 0.0), |desktop| desktop.luminance(behind, 1.0));
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
@@ -3905,7 +3991,7 @@ impl Ui {
         let zoom_key = zoom.to_bits();
         if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != zoom_key) {
             // The desktop in the panel's units, which a zoomed panel shrinks.
-            self.stage.bitmap = self.stage.desktop.bitmap(&frame.dc, zoom).ok().map(|b| (zoom_key, b));
+            self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, zoom).ok()).map(|b| (zoom_key, b));
         }
         if let Some((_, bitmap)) = &self.stage.bitmap {
             unsafe {
@@ -3914,7 +4000,7 @@ impl Ui {
         }
         let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(pos.0, pos.1) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy);
         // The stage's desktop is a pixel a DIP: a panel DIP covers `zoom` of them.
-        let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.digest, zoom));
+        let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.as_ref().map_or(0, |desktop| desktop.digest), zoom));
         let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: Some(edge), backdrop, frost, rough: false };
         let drawn = self.layers.draw(frame, &picture, local, self.scale * zoom * k);
         unsafe { frame.dc.PopLayer() };
