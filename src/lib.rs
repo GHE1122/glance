@@ -409,6 +409,10 @@ pub fn run() {
     journal::note_crashes();
     let config = settings::config_dir();
     let settings = Settings::load(&config);
+    // (What is behind Glance's windows is seen through a device of its own: made meanwhile.)
+    if ui::theme::Skin::named(&settings.skin).sees_backdrop() {
+        ui::scene::prepare();
+    }
 
     // Started elevated (an earlier version's task, a build run by hand), Glance reads the sensors itself, and does
     // what the sensors' process does as it starts (see elevation.rs): its task kept, the driver in place.

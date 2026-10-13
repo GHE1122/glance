@@ -133,35 +133,6 @@ struct Shown {
 
 thread_local! {
     static SHOWN: RefCell<Vec<Shown>> = const { RefCell::new(Vec::new()) };
-    /// How many widgets are taking the desktop behind them now: the lyrics are kept out of it meanwhile (they move
-    /// on as it is shown, and a widget would show them as they were).
-    static CAPTURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Keeps the lyrics' windows out of captures, or puts them back in.
-fn keep_out(hwnd: HWND, out: bool) {
-    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
-    unsafe {
-        let _ = SetWindowDisplayAffinity(hwnd, if out { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE });
-    }
-}
-
-/// A widget begins taking the desktop behind it (see `widget`): the lyrics out of it till it is done.
-pub fn capture_begins() {
-    let count = CAPTURES.get() + 1;
-    CAPTURES.set(count);
-    if count == 1 {
-        SHOWN.with(|shown| shown.try_borrow().map(|shown| shown.iter().for_each(|one| keep_out(one.hwnd, true))).ok());
-    }
-}
-
-/// That widget has the desktop.
-pub fn capture_ends() {
-    let count = CAPTURES.get().saturating_sub(1);
-    CAPTURES.set(count);
-    if count == 0 {
-        SHOWN.with(|shown| shown.try_borrow().map(|shown| shown.iter().for_each(|one| keep_out(one.hwnd, false))).ok());
-    }
 }
 
 /// Shows the windows wanted, takes away those no longer wanted, follows the pointer over them, and draws each
@@ -490,9 +461,6 @@ fn make(style: Style) -> Option<Shown> {
             }
         }
         let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
-        if CAPTURES.get() > 0 {
-            keep_out(hwnd, true);
-        }
         let surface = Surface::new(&gfx, hwnd).ok();
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         if style == Style::Subtitle {

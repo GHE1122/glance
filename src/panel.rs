@@ -1108,7 +1108,6 @@ impl Behind {
 /// `Panel::generation`, and whether it is taken again where the panel now is
 /// (the panel kept out of it; its theme following), else refreshed in place.
 struct PanelRequest {
-    receiver: std::sync::mpsc::Receiver<Option<Capture>>,
     generation: u64,
     /// Menus shown and gone as it was asked for (see `menu::SHOWN`).
     menus: u64,
@@ -1195,8 +1194,9 @@ struct Panel<'a> {
     generation: u64,
     /// The last capture asked for came back with nothing: when.
     failed_behind: Option<Instant>,
-    /// Kept out of captures, as last set (see `exclude`).
-    excluded: bool,
+    /// What is behind it, put together live where no one sees it (see
+    /// `scene`), once it has been taken again while the panel is up.
+    backdrop: Option<crate::ui::scene::Scene>,
     /// The screens changed while the panel was dragged: seen to as it is
     /// let go.
     screens_missed: bool,
@@ -1256,7 +1256,7 @@ impl<'a> Panel<'a> {
             capturing: None,
             generation: 0,
             failed_behind: None,
-            excluded: false,
+            backdrop: None,
             screens_missed: false,
             last_frame: Instant::now(),
             next_frame: Instant::now(),
@@ -1308,28 +1308,14 @@ impl<'a> Panel<'a> {
             }
         }
         self.lang = Lang::resolve(self.prefs.language);
-        // While the backdrop is live the window has to stay out of the
-        // captures of what is behind it; the system offers that only as
-        // "out of every capture", screenshots too. Only while it is up: a
-        // window kept out of captures is "protected content" to recorders
-        // (NVIDIA's Instant Replay stops for it), hidden or not.
-        // (And while the desktop behind is about to be taken again, after a
-        // drag.)
         self.exclude();
         self.dress();
     }
 
-    /// Kept out of captures while it is up with live refraction (the
-    /// desktop behind it is taken without hiding it), while a widget torn
-    /// off it takes the desktop (it is not to be in it), and while the
-    /// desktop behind it is being taken; else in them.
+    /// Left out of what widgets see behind them while a widget torn off it
+    /// takes its place (it is going, and the widget is above it meanwhile).
     fn exclude(&mut self) {
-        // (A capture under way, live or not, holds it out till it is done.)
-        let excluded = (self.is_shown() && (self.live || self.torn)) || self.capturing.is_some();
-        if excluded != self.excluded {
-            self.window.exclude_from_capture(excluded);
-            self.excluded = excluded;
-        }
+        crate::ui::scene::leave_out(self.window.hwnd, self.is_shown() && self.torn);
     }
 
     /// Picks the theme, and how frosted the glass is, for the skin and the
@@ -1538,6 +1524,8 @@ impl<'a> Panel<'a> {
             crate::widget::own_window_changed(placement.window);
         }
         self.exclude();
+        self.backdrop = None;
+        self.capturing = None;
         // The drawing memory is given back while the panel is away.
         if let Some(surface) = &mut self.surface {
             surface.release(&self.gfx);
@@ -1630,13 +1618,10 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// With live refraction, captures the desktop behind the window again
-    /// every so often (on another thread: see `collect_behind`).
+    /// With live refraction, looks at the windows behind again every so
+    /// often (what they show comes as it changes: see `collect_behind`).
     fn refresh_behind(&mut self, now: Instant) {
         let Some(placement) = &self.placement else { return };
-        // Tried again every so often, with or without a capture so far (the
-        // first may have found the screen unreadable).
-        // From the last try (a capture that came back with nothing too).
         if now.duration_since(self.tried_behind) < LIVE_INTERVAL {
             return;
         }
@@ -1645,10 +1630,8 @@ impl<'a> Panel<'a> {
         self.take_behind(area, false);
     }
 
-    /// Takes the desktop behind the glass again where the panel now is,
-    /// kept out of the capture itself for the while: once the desktop has
-    /// been composed again without it (on another thread: see
-    /// `collect_behind`).
+    /// Takes the desktop behind the glass again where the panel now is
+    /// (see `collect_behind`).
     fn recapture_behind(&mut self) {
         let Some(placement) = &self.placement else { return };
         let area = placement.window;
@@ -1656,38 +1639,45 @@ impl<'a> Panel<'a> {
         self.take_behind(area, true);
     }
 
-    /// Takes the desktop within `area` on another thread, once the desktop
-    /// has been composed again for a capture `afresh` (the panel kept out of
-    /// it meanwhile); the panel goes on with what it had.
+    /// Puts together what is behind the panel within `area`, where no one
+    /// sees it (see `scene`), and awaits a frame of it if anything there
+    /// changed; `afresh`, the theme follows what comes. The panel goes on
+    /// with what it had meanwhile; nothing changed, that stands.
     fn take_behind(&mut self, area: RECT, afresh: bool) {
-        let (send, receiver) = std::sync::mpsc::channel();
-        let menus = crate::ui::menu::SHOWN.load(Ordering::Relaxed);
-        self.capturing = Some(PanelRequest { receiver, generation: self.generation, menus, afresh });
-        self.exclude();
-        std::thread::spawn(move || {
-            if afresh {
-                let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
-            }
-            let _ = send.send(Capture::take(area));
-        });
+        if self.backdrop.is_none() {
+            let wake = std::sync::Arc::new(|| crate::app().controller.wake());
+            self.backdrop = crate::ui::scene::Scene::new(area, wake);
+        }
+        let Some(scene) = &mut self.backdrop else {
+            // (It could not be put together: as when the screen cannot be read, tried again in a while.)
+            self.failed_behind = Some(Instant::now());
+            self.recapture |= afresh;
+            return;
+        };
+        let changed = scene.arrange(area, self.window.hwnd);
+        if changed || self.behind.is_none() {
+            let menus = crate::ui::menu::SHOWN.load(Ordering::Relaxed);
+            self.capturing = Some(PanelRequest { generation: self.generation, menus, afresh });
+        }
     }
 
-    /// A capture of the desktop behind come back, if it has (whether the
-    /// panel is up or not: what it holds is let go of either way). Asked for
-    /// what is still so: taken again where the panel now is, its theme
-    /// follows it (live refraction, refreshing over the same place, leaves
-    /// the theme be, and only the frost follows); the same desktop as
-    /// before, the last stands; none readable just now, it is asked for
-    /// again once a second has passed.
+    /// A frame of what is behind come, if one has: the one awaited, or with
+    /// live refraction one that came as what is behind changed. Of what is
+    /// still so: taken again where the panel now is, its theme follows it
+    /// (live refraction, refreshing over the same place, leaves the theme
+    /// be, and only the frost follows); the same desktop as before, the
+    /// last stands.
     fn collect_behind(&mut self, now: Instant) {
-        let Some(request) = &self.capturing else { return };
-        let capture = match request.receiver.try_recv() {
-            Ok(capture) => capture,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        let Some(scene) = &self.backdrop else { return };
+        let Some(capture) = scene.ready() else {
+            // (Live, as often as it is looked at: see `refresh_behind`.)
+            if self.capturing.is_some() || (self.live && self.behind.as_ref().is_none_or(|behind| now.duration_since(behind.taken) >= LIVE_INTERVAL)) {
+                scene.want();
+            }
+            return;
         };
-        let request = self.capturing.take().unwrap();
-        self.exclude();
+        let capture = Some(capture);
+        let request = self.capturing.take().unwrap_or(PanelRequest { generation: self.generation, menus: crate::ui::menu::SHOWN.load(Ordering::Relaxed), afresh: false });
         if request.generation != self.generation {
             return;
         }

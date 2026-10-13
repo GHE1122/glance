@@ -23,6 +23,7 @@ pub mod prefs;
 pub mod seen;
 #[cfg(windows)]
 pub mod render;
+pub mod scene;
 #[cfg(windows)]
 mod ask;
 pub(crate) mod picture;

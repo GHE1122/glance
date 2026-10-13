@@ -409,14 +409,15 @@ struct Widget {
     drawn: Vec<Part>,
     morph_layer: Layer,
     hint: Option<Hint>,
-    /// Kept out of captures: with live refraction, always (so the desktop
-    /// behind can be taken without hiding it, which would show); without,
-    /// while a capture is under way.
-    excluded: bool,
-    /// Taking the desktop behind again is due (without live refraction,
-    /// once let go).
+    /// What is behind it, put together live where no one sees it (see
+    /// `scene`): while it sees the desktop and shows.
+    backdrop: Option<crate::ui::scene::Scene>,
+    /// When the windows behind it were last looked at for it.
+    arranged: Option<Instant>,
+    /// Looking at what is behind it again is due (let go, the settings
+    /// gone from the front).
     retake: bool,
-    /// A capture of the desktop behind under way on another thread.
+    /// What is behind it arranged anew, its frame awaited.
     pending: Option<Request>,
     /// What is behind it is to be replaced at once, even in hand: the
     /// panel's, lent as it was torn off (`false`: its tone kept), or taken
@@ -571,22 +572,15 @@ impl Widgets {
                 widget.next_frame = Instant::now();
             }
         }
-        // Come to the front: a capture under way may take it in.
-        if settings.is_some() {
-            for widget in self.list.iter_mut().filter(|w| w.pending.is_some()) {
-                widget.generation += 1;
-            }
-        }
         self.settings = settings;
         for widget in &self.list {
             widget.window.yield_to(settings);
         }
     }
 
-    /// The desktop behind `hwnd` has been taken (see `CAPTURED`): it is
-    /// drawn with it at once.
+    /// A frame of what is behind `hwnd` has come (see `CAPTURED`): taken,
+    /// if it is due, and drawn with at once.
     pub fn captured(&mut self, hwnd: HWND) {
-        crate::ui::lyric_window::capture_ends();
         let live = self.live;
         if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
             let px = widget.contact.scale * widget.zoom;
@@ -838,9 +832,9 @@ impl Widgets {
             let hidden = widget.game_only && !playing;
             if hidden {
                 widget.window.hide();
-                // A capture come back meanwhile is put in place all the same.
-                let px = widget.contact.scale * widget.zoom;
-                widget.collect(self.live, px);
+                // Nothing behind it looked at meanwhile: as it shows again, again.
+                widget.backdrop = None;
+                widget.pending = None;
                 continue;
             }
             // Drawn when it is due: in hand, flung or turning, at once; else
@@ -861,6 +855,8 @@ impl Widgets {
                 }
                 Frame::Rest | Frame::Waiting => {
                     let rest = if widget.lingered.is_some() { WATCHED } else { REST_FRAME };
+                    // (Or sooner, a frame of what is behind it having come.)
+                    let rest = widget.backdrop_wait(self.live).map_or(rest, |wait| rest.min(wait));
                     widget.next_frame = now + rest;
                     due = due.min(rest);
                 }
@@ -905,19 +901,17 @@ enum Frame {
     Gone,
 }
 
-/// A capture of the desktop behind a widget, asked for: when, for which
-/// screen (see `Widget::generation`), and whether of somewhere else than
-/// the last.
+/// What is behind a widget arranged anew, its frame awaited: when, for
+/// which screen (see `Widget::generation`), and whether of somewhere else
+/// than the last.
 struct Request {
-    receiver: std::sync::mpsc::Receiver<Option<Capture>>,
-    /// What it takes (physical px).
+    /// What it stands for (physical px).
     area: RECT,
-    started: Instant,
     generation: u64,
     moved: bool,
 }
 
-/// Posted to a widget's window as the desktop behind it has been taken.
+/// Posted to a widget's window as a frame of what is behind it has come.
 pub const CAPTURED: u32 = WM_APP + 12;
 
 impl Widget {
@@ -955,7 +949,8 @@ impl Widget {
             drawn: Vec::new(),
             morph_layer: Layer::default(),
             hint: None,
-            excluded: false,
+            backdrop: None,
+            arranged: None,
             retake: false,
             pending: None,
             replace: None,
@@ -1053,25 +1048,37 @@ impl Widget {
         }
     }
 
-    /// A capture asked for come back, if it has: put in place, if it was
-    /// asked for its screen as it is; and kept out of captures only while
-    /// one is under way (or with live refraction).
+    /// How often what is behind is taken anew as it changes: with live
+    /// refraction as the panel's, else once a second at most.
+    fn backdrop_every(live: bool) -> Duration {
+        if live { LIVE_INTERVAL } else { RETAKE_EVERY }
+    }
+
+    /// A frame of what is behind, read, put in place (if it is of its
+    /// screen as it is); else one wanted, if one is due: the one awaited
+    /// (arranged anew) at once, else as often as it is taken (see
+    /// `backdrop_every`).
     fn collect(&mut self, live: bool, px: f32) {
-        if let Some(request) = &self.pending {
-            match request.receiver.try_recv() {
-                Ok(capture) => {
-                    let request = self.pending.take().unwrap();
-                    if request.generation == self.generation {
-                        self.took(capture, request.moved, request.started, px);
-                    } else {
-                        self.retake |= self.behind.is_some();
-                    }
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pending = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        let Some(scene) = &self.backdrop else { return };
+        let Some(capture) = scene.ready() else {
+            if self.pending.is_some() || self.behind.as_ref().is_none_or(|behind| behind.taken.elapsed() >= Self::backdrop_every(live)) {
+                scene.want();
             }
+            return;
+        };
+        let now = Instant::now();
+        match self.pending.take() {
+            Some(request) if request.generation != self.generation => self.retake |= self.behind.is_some(),
+            Some(request) => self.took(Some(capture), request.moved, now, px),
+            None => self.took(Some(capture), false, now, px),
         }
-        self.exclude(live || self.pending.is_some());
+    }
+
+    /// How long till a frame of what is behind that has come is due to be
+    /// taken (none: none has come).
+    fn backdrop_wait(&self, live: bool) -> Option<Duration> {
+        self.backdrop.as_ref().filter(|scene| scene.fresh())?;
+        Some(self.behind.as_ref().map_or(Duration::ZERO, |behind| Self::backdrop_every(live).saturating_sub(behind.taken.elapsed())))
     }
 
     /// What is taken of the desktop behind it: round it by half its width
@@ -1082,14 +1089,6 @@ impl Widget {
         let least = (64.0 * self.contact.scale) as i32;
         let (across, down) = (((r.right - r.left) / 2).max(least), ((r.bottom - r.top) / 2).max(least));
         clip(RECT { left: r.left - across, top: r.top - down, right: r.right + across, bottom: r.bottom + down }, self.contact.monitor)
-    }
-
-    /// Kept out of captures, or put back in them.
-    fn exclude(&mut self, excluded: bool) {
-        if excluded != self.excluded {
-            self.window.exclude_from_capture(excluded);
-            self.excluded = excluded;
-        }
     }
 
     /// Its surface on the screen (physical px).
@@ -1445,9 +1444,9 @@ impl Widget {
         if self.hint.is_none() {
             let Ok(mut window) = Window::new() else { return };
             window.set_click_through(true);
-            // Never in the desktop a widget takes behind it: it is where the
-            // widget would go, not part of the desktop.
-            window.exclude_from_capture(true);
+            // Never in what a widget sees behind it: it is where the widget
+            // would go, not part of the desktop.
+            crate::ui::scene::leave_out(window.hwnd, true);
             let surface = Surface::new(&self.gfx, window.hwnd).ok();
             self.hint = Some(Hint { window, surface, drawn: None });
         }
@@ -1473,6 +1472,7 @@ impl Widget {
 
     fn hide_hint(&mut self) {
         if let Some(hint) = self.hint.take() {
+            crate::ui::scene::leave_out(hint.window.hwnd, false);
             hint.window.destroy();
         }
         self.hint_size = None;
@@ -1485,11 +1485,11 @@ impl Widget {
         // Measured once it is where it comes to rest, on what is taken
         // there (see `frame`).
         self.tone_due = true;
-        // Without live refraction, what is behind it now is taken once,
-        // the desktop having changed meanwhile, or not; not when it was
-        // taken a moment ago (as it was torn off), for taking it shows.
+        // What is behind it now is looked at once, the desktop having
+        // changed meanwhile, or not; not when it was a moment ago (as it was
+        // torn off).
         let fresh = self.behind.as_ref().is_some_and(|behind| behind.taken.elapsed() < RETAKE_AFTER);
-        self.retake |= !self.excluded && !fresh;
+        self.retake |= !fresh;
     }
 
     /// Whether it is kept under every other window.
@@ -1708,15 +1708,17 @@ impl Widget {
         }
         let laid_out = started.elapsed();
         // The desktop behind, for the skins that see it, without the widget:
-        // its whole screen, taken before it first shows (the theme follows
-        // it), again once it is on another screen, and then as the panel's
-        // is. With live refraction the widget stays out of captures, as the
-        // panel does, and the desktop is taken every so often; without, it
-        // is hidden from the capture for the moment of taking it, which
-        // shows, so only once it is let go.
+        // what is behind it put together where no one sees it (see `scene`),
+        // before it first shows (the theme follows it), and arranged anew as
+        // it moves past it, goes onto another screen, or the windows there
+        // change; taken as it changes (see `collect`).
         let sees = look.skin.sees_backdrop();
         let live = look.live && sees;
-        // A desktop taken on another thread, come back.
+        if !sees {
+            self.backdrop = None;
+            self.pending = None;
+        }
+        // A frame of it, come.
         self.collect(live, px);
         // Moved past what was taken round it (that part of it on its screen:
         // beyond, the capture is mirrored in its edge), or onto another screen;
@@ -1731,19 +1733,13 @@ impl Widget {
             let other_screen = clip(taken, self.contact.monitor) != taken;
             other_screen || past
         });
-        let stale = self.behind.as_ref().is_some_and(|behind| live && now.duration_since(behind.taken) >= LIVE_INTERVAL);
         let retake = self.retake && self.drag.is_none();
-        // Without live refraction: other windows changed since it was taken,
-        // and have settled; once a second at most, and not while in hand.
-        let moved_behind = !live
-            && self.drag.is_none()
+        // Other windows changed since they were looked at, and have settled;
+        // not while it is in hand.
+        let moved_behind = self.drag.is_none()
             && self.fling.is_none()
-            && windows_changed().zip(self.behind.as_ref()).is_some_and(|(changed, behind)| {
-                changed > behind.taken && now.saturating_duration_since(changed) >= SETTLED && now.saturating_duration_since(behind.taken) >= RETAKE_EVERY
-            });
-        // Not while the settings window is in front of it: it would be taken
-        // with it (the widget takes it again as it goes).
-        let due = self.behind.is_none() || self.replace.is_some() || elsewhere || stale || retake || moved_behind;
+            && windows_changed().zip(self.arranged).is_some_and(|(changed, arranged)| changed > arranged && now.saturating_duration_since(changed) >= SETTLED);
+        let due = self.behind.is_none() || self.replace.is_some() || elsewhere || retake || moved_behind;
         // None could be taken last time (the lock screen): not again at once.
         let rested = self.failed.is_none_or(|at| now.saturating_duration_since(at) >= RETAKE_EVERY);
         if sees && due && rested && self.pending.is_none() && !self.window.yielding() {
@@ -1758,29 +1754,40 @@ impl Widget {
                 note_sparingly("retake", || format!("widget: the desktop taken again ({why})"));
             }
             self.retake = false;
-            // On another thread: the widget goes on meanwhile (with what it
-            // had), kept out of the capture, and is told as it is done.
-            self.exclude(true);
-            crate::ui::lyric_window::capture_begins();
-            let (send, receiver) = std::sync::mpsc::channel();
-            let (area, flush, hwnd) = (self.backdrop_area(), !live, self.window.hwnd.0 as isize);
-            std::thread::spawn(move || {
-                if flush {
-                    let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
-                }
-                let _ = send.send(Capture::take(area));
-                let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), CAPTURED, WPARAM(0), LPARAM(0)) };
-            });
+            let area = self.backdrop_area();
+            // Nothing behind it yet (a first, or the drawing device changed):
+            // put together anew, which brings a first frame.
+            if self.behind.is_none() || self.replace.is_some() {
+                self.backdrop = None;
+            }
+            if self.backdrop.is_none() {
+                let hwnd = self.window.hwnd.0 as isize;
+                let wake = std::sync::Arc::new(move || {
+                    let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), CAPTURED, WPARAM(0), LPARAM(0)) };
+                });
+                self.backdrop = crate::ui::scene::Scene::new(area, wake);
+            }
+            self.arranged = Some(now);
             // In hand, light or dark holds (measured again as it is let go:
             // see `retone`).
             let moved = (elsewhere && self.drag.is_none()) || self.replace == Some(true);
-            self.pending = Some(Request { receiver, area, started: now, generation: self.generation, moved });
-            // Watched from now (see `Widgets::tick`): what changes there
-            // while it is taken is seen to.
+            match &mut self.backdrop {
+                // (It could not be put together: as when the screen cannot be taken, tried again in a while.)
+                None => self.took(None, moved, now, px),
+                // A frame of it as it is now awaited; nothing changed, what it has stands.
+                Some(scene) => {
+                    if scene.arrange(area, self.window.hwnd) || self.behind.is_none() {
+                        self.pending = Some(Request { area, generation: self.generation, moved });
+                    } else if let Some(behind) = &mut self.behind {
+                        behind.taken = now;
+                        self.replace = None;
+                    }
+                }
+            }
+            // Watched from now (see `Widgets::tick`): what changes there is
+            // seen to.
             WIDGET_AREAS.lock().unwrap().push(area);
         }
-        // Out of captures with live refraction, or while one is taken.
-        self.exclude(live || self.pending.is_some());
         // Let go or come to rest: light or dark as the desktop is where it
         // is now, measured on what was taken there (none under way).
         if self.tone_due && self.drag.is_none() && self.fling.is_none() && self.settle.is_none() && self.pending.is_none() {
