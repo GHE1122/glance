@@ -29,6 +29,8 @@ mod metrics;
 #[cfg(windows)]
 mod mic;
 #[cfg(windows)]
+mod mouse;
+#[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
 mod panel;
@@ -303,11 +305,6 @@ pub fn run() {
     };
     let done = |result: Result<(), elevation::InstallFolder>| std::process::exit(result.map_or_else(code, |_| 0));
     match args.as_slice() {
-        // Glance's elevated half: the sensors, told to the rest over the link (see `sensing`).
-        [_, flag] if flag == elevation::SENSORS => {
-            sensing::run();
-            return;
-        }
         [_, flag, folder] if flag == "--check-install-folder" => {
             std::process::exit(code(elevation::install_folder(std::path::Path::new(folder))))
         }
@@ -363,15 +360,16 @@ pub fn run() {
         }
         _ => {}
     }
-    // Started elevated with Glance running already: by an earlier version's launch task, which started Glance
-    // whole (Glance runs it, for the sensors, till it is made again as it is now): the sensors, then.
+    // Started elevated with Glance running already: by an earlier version's launch task, which started `glance.exe`
+    // (Glance runs it, for the sensors, till their own program makes it again as it is now): the sensors, then, from
+    // their own program.
     if elevation::is_elevated() && already_running() {
-        sensing::run();
+        start_sensors_instead();
         return;
     }
     // Started elevated with no Glance running (a task of 0.3.7 or before, a build run by hand): Glance's windows are
-    // never shown elevated. The desktop's shell is asked to start Glance as the user, and this becomes its sensors.
-    // Only where the shell itself runs elevated (UAC turned off) is there no other way, and Glance runs whole, as
+    // never shown elevated. The desktop's shell is asked to start Glance as the user, and the sensors are started for
+    // it. Only where the shell itself runs elevated (UAC turned off) is there no other way, and Glance runs whole, as
     // it always did; and a start the shell made that is elevated all the same is not handed over again.
     let handed_off = std::env::args().any(|arg| arg == handoff::HANDED_OFF);
     if elevation::is_elevated() && !handed_off {
@@ -385,8 +383,8 @@ pub fn run() {
         }
         match asked {
             Ok(()) => {
-                journal::note("start: started elevated; Glance itself started as the user through the desktop's shell, this process reads the sensors");
-                sensing::run();
+                journal::note("start: started elevated; Glance itself started as the user through the desktop's shell, and its sensors");
+                start_sensors_instead();
                 return;
             }
             Err(handoff::Refused::ShellElevated) => {}
@@ -475,6 +473,14 @@ pub fn run() {
     presents::stop();
 }
 
+/// `glance.exe` started elevated (see `run`): the sensors' own program started in its place, elevated as it is.
+#[cfg(windows)]
+fn start_sensors_instead() {
+    if !elevation::start_sensors_from_here() {
+        journal::note("start: started elevated, and the sensors' program beside it could not be started");
+    }
+}
+
 /// The settings to be written (the latest changed: those changed before it are not written too), and whether some
 /// are being written; on a thread of their own (see `App::change`).
 #[cfg(windows)]
@@ -522,6 +528,22 @@ fn saved_all() {
     while unsaved.0.is_some() || unsaved.1 {
         unsaved = SAVED.wait(unsaved).unwrap();
     }
+}
+
+/// `glance-sensors.exe`: the sensors, told over the link to Glance running as the user (see `sensing`).
+#[cfg(windows)]
+pub fn run_sensors() {
+    // The one multithreaded apartment, as in `run`.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    sensing::run();
+}
+
+/// The sensors have a program of their own on Windows alone.
+#[cfg(not(windows))]
+pub fn run_sensors() {
+    std::process::exit(1);
 }
 
 #[cfg(target_os = "macos")]

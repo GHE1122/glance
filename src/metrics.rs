@@ -323,14 +323,17 @@ impl Sampler {
     /// worth refreshing. Returns `None` when PDH has no valid data for this
     /// interval (it reports that for a tick now and then, e.g. after resume).
     /// A sample now; `refresh_slow`, with what is read less often read
-    /// again; `wsl` and `docker`, with those watched (their modules on).
-    pub fn sample(&mut self, refresh_slow: bool, wsl: bool, docker: bool) -> Option<Sample> {
+    /// again; `wsl` and `docker`, with those watched (their modules on); samples taken every `interval`.
+    pub fn sample(&mut self, refresh_slow: bool, wsl: bool, docker: bool, interval: Duration) -> Option<Sample> {
         // Watched only while asked for: nothing is read for them otherwise.
         if wsl != self.wsl.is_some() {
             self.wsl = wsl.then(crate::wsl::Wsl::new);
         }
         if docker != self.docker.is_some() {
-            self.docker = docker.then(crate::docker::Docker::new);
+            self.docker = docker.then(|| crate::docker::Docker::new(interval));
+        }
+        if let Some(docker) = &self.docker {
+            docker.pace(interval);
         }
         // Counters not collected this time read as absent, not as their
         // last values; what does not depend on them is sampled regardless.
@@ -1406,7 +1409,7 @@ mod tests {
     fn samples_this_machine() {
         let mut sampler = Sampler::new();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        let sample = sampler.sample(true, true, false).expect("a valid sample after one interval");
+        let sample = sampler.sample(true, true, false, std::time::Duration::from_secs(1)).expect("a valid sample after one interval");
         println!("{}", serde_json::to_string_pretty(&sampler.info).unwrap());
         println!("{}", serde_json::to_string_pretty(&sample).unwrap());
         assert_eq!(sample.threads.len(), sampler.info.threads);

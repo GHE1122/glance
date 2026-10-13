@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-    Builds a signed release: glance.exe, then the installer with its
-    uninstaller, each signed through Artifact Signing (see sign.ps1).
+    Builds a signed release: glance.exe and glance-sensors.exe, then the
+    installer with its uninstaller, each signed through Artifact Signing
+    (see sign.ps1).
 
 .DESCRIPTION
     Needs an `az login` session allowed to sign with the account sign.ps1
@@ -27,7 +28,7 @@ $makensis = if ($found) { $found.Source } else { Join-Path $env:LOCALAPPDATA 'ta
 if (-not (Test-Path -LiteralPath $makensis)) { throw 'makensis not found; install NSIS 3.08 or newer' }
 
 if ($Sign) {
-    & (Join-Path $PSScriptRoot 'sign.ps1') -Files (Join-Path $root 'target\release\glance.exe')
+    & (Join-Path $PSScriptRoot 'sign.ps1') -Files (Join-Path $root 'target\release\glance.exe'), (Join-Path $root 'target\release\glance-sensors.exe')
     & (Join-Path $PSScriptRoot 'sign.ps1') -Files (Join-Path $root 'remote\target\release\glance-remote.exe')
     # The installer signs its uninstaller and itself as it is made (glance.nsi).
     & $makensis /V2 /DSIGN 'installer\glance.nsi'

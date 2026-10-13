@@ -60,7 +60,7 @@ notes and dropped files must not run with an administrator's rights.
 ## Threat model
 
 - Any process of the same user can open the pipe, start the genuine
-  `glance.exe` with any arguments, and tamper with the app. Verifying the
+  `glance.exe` or `glance-sensors.exe` with any arguments, and tamper with the app. Verifying the
   client narrows who talks to the service; it does not make requests
   trustworthy. So each capability below states the worst such a process can
   do with it, and is bounded so that worst is acceptable.
@@ -78,7 +78,7 @@ notes and dropped files must not run with an administrator's rights.
 | Process | Rights | How many | Does |
 | --- | --- | --- | --- |
 | `glance.exe` (the app) | the user's, medium integrity | one per account | every window; tray and shortcuts; the readings needing no rights merged with the service's; media, lyrics, covers; Docker, WSL, microphone; the widgets' window watch; update checks; reports; launching and opening; drops; the journal |
-| `glance.exe --sensors` (the service) | elevated, same account | one per app | privileged readings; presented frames; global input observation; the capabilities below |
+| `glance-sensors.exe` (the service) | elevated, same account | one per app | privileged readings; presented frames; global input observation; the capabilities below |
 | `glance-remote.exe` (the phone helper) | the user's | one per machine | the phone's network side, media keys and their key-injection fallback, OpenRGB, ASUS keyboard lighting (HID), the cooler's display, monitor power and brightness, power plans, the screen nudge |
 
 ## The service's capabilities
@@ -381,7 +381,7 @@ the next app. **Now** both write `glance.log`.
   `GetNamedPipeServerProcessId` → `OpenProcess(QUERY_LIMITED | SYNCHRONIZE)`
   (kept); the process unsignalled, its token's user SID the app's, elevated
   and of high integrity, its session the app's, its image this install's
-  `glance.exe`. A squatter can be the app's own user and session, but not
+  `glance-sensors.exe`. A squatter can be the app's own user and session, but not
   elevated: that check is the one that cannot be faked from below.
 
 ### Bootstrap
@@ -485,19 +485,20 @@ Nothing is replayed, except, on a new connection, `Want`, `Edges`,
 ### Starting
 
 - **No path runs the app's UI elevated while UAC is on.** An elevated
-  `glance.exe` started without `--sensors` (a task of ≤ 0.3.7, a build run by
-  hand, the installer): if this account's app runs, it becomes its service;
+  `glance.exe` (a task of ≤ 0.3.7, a build run by
+  hand, the installer): if this account's app runs, it starts the service's
+  own program beside it (elevated as it is) and exits;
   if not, it hands the start to the desktop shell: `IShellWindows::
   FindWindowSW(SWC_DESKTOP)` → the desktop's `IShellBrowser` → its view →
   `IShellFolderViewDual::get_Application` → `IShellDispatch2::ShellExecute(
   "<install>\glance.exe", "--handed-off")` (the existing Explorer's own
   automation object, so the app starts with Explorer's token). Before calling,
   it checks that Explorer's process (the shell window's) is of its own user
-  SID and session and of medium integrity; otherwise it refuses. It then waits
-  up to 20 s for that app to connect as a verified client, and is its service.
+  SID and session and of medium integrity; otherwise it refuses. It then
+  starts the service's own program beside it (elevated as it is) and exits.
   An app started with `--handed-off` that finds itself elevated never hands off
-  again: it exits. With no suitable shell or no connection in 20 s, the
-  elevated process exits without any UI and without retrying.
+  again: it exits. With no suitable shell, the elevated process exits without
+  any UI and without retrying.
 - **UAC off**: for an administrator account the shell is itself elevated and
   there is no medium token; Glance then runs as one elevated process, as up to
   0.3.7, and the split protects nothing. For a standard account UAC off grants
@@ -509,7 +510,7 @@ Nothing is replayed, except, on a new connection, `Want`, `Edges`,
   service's token at registration), `LogonType InteractiveToken`, `RunLevel
   HighestAvailable`; no triggers; `AllowStartOnDemand`, `MultipleInstancesPolicy
   IgnoreNew` (one session per account), no execution time limit; one action
-  `"<install>\glance.exe" --sensors --for <SID>`. It is registered by the
+  `"<install>\glance-sensors.exe" --for <SID>`. It is registered by the
   elevated service with `TASK_DONT_ADD_PRINCIPAL_ACE` and the security
   descriptor `O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;<user SID>)`
   (owner Administrators, so the user has no implicit owner rights; the user may

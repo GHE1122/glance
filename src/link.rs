@@ -1,11 +1,13 @@
-//! Glance in two processes: the sensors, read with administrator rights in a
-//! process of their own (started elevated by Glance's task), and all the
+//! Glance in two processes: the sensors, read with administrator rights by a
+//! program of their own (`glance-sensors.exe`, started elevated by Glance's
+//! task), and all the
 //! rest, running as the user. They speak over two named pipes, one each way,
 //! that only the user (and the system) may open, and that the sensors make:
 //! the sensors tell what they read and what is presented, and are asked only
 //! a few things that need their rights, each of a fixed kind with its fields
 //! checked. The rest checks, before it believes a word, that what answers is
-//! this very program, elevated.
+//! the sensors' program beside it, elevated; the sensors, that what asks is
+//! Glance beside them.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -289,7 +291,7 @@ pub fn ask_on(to: &mut File, asked: &Asked) -> bool {
 
 impl Sensors {
     /// Whether what came is the rest of Glance: one process at the other end of both pipes, of this user and this
-    /// session, running as the user (medium integrity), this very program. Who is at the asking end is read
+    /// session, running as the user (medium integrity), Glance beside these sensors. Who is at the asking end is read
     /// through the pipe itself (at identification level: who, never with the rights of), once something has been
     /// read from it. Why not, if not.
     pub fn check_client(&self) -> Result<u32, String> {
@@ -334,7 +336,7 @@ impl Sensors {
         if integrity != 0x2000 {
             return Err(format!("integrity {integrity:#x}, not the user's ordinary one"));
         }
-        if !is_this_program(told) {
+        if !runs(told, crate::elevation::APP) {
             return Err("another program".into());
         }
         Ok(told)
@@ -362,19 +364,26 @@ fn token_facts(token: HANDLE) -> Option<(String, u32)> {
     }
 }
 
-/// Whether the process `pid` runs this very program.
-fn is_this_program(pid: u32) -> bool {
+/// Whether the process `pid` runs Glance's program `name` (`elevation::APP` or `elevation::SENSORS`) beside this one.
+fn runs(pid: u32, name: &str) -> bool {
     unsafe {
         let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
-        let mut path = vec![0u16; 1024];
-        let mut length = path.len() as u32;
-        let named = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(path.as_mut_ptr()), &mut length).is_ok();
+        let ran = runs_program(process, name);
         let _ = CloseHandle(process);
-        let theirs = std::path::PathBuf::from(String::from_utf16_lossy(&path[..length as usize]));
-        let (Ok(ours), true) = (std::env::current_exe(), named) else { return false };
-        // Both resolved, or no match.
-        matches!((std::fs::canonicalize(&ours), std::fs::canonicalize(&theirs)), (Ok(a), Ok(b)) if a == b)
+        ran
     }
+}
+
+/// Whether `process` runs Glance's program `name` beside this one: both paths resolved, or no match.
+fn runs_program(process: HANDLE, name: &str) -> bool {
+    let mut path = vec![0u16; 1024];
+    let mut length = path.len() as u32;
+    if unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(path.as_mut_ptr()), &mut length) }.is_err() {
+        return false;
+    }
+    let theirs = std::path::PathBuf::from(String::from_utf16_lossy(&path[..length as usize]));
+    let Some(ours) = crate::elevation::beside(name) else { return false };
+    matches!((std::fs::canonicalize(&ours), std::fs::canonicalize(&theirs)), (Ok(a), Ok(b)) if a == b)
 }
 
 // ---- The rest's side ----
@@ -387,7 +396,7 @@ pub struct Link {
 
 impl Link {
     /// Connects to the sensors, waiting up to `patience` for them; none if they are not there, or what answers is
-    /// not this very program, elevated.
+    /// not the sensors' program beside this one, elevated.
     pub fn connect(patience: Duration) -> Option<Link> {
         let (told, asked) = names()?;
         let until = Instant::now() + patience;
@@ -419,11 +428,11 @@ impl Link {
             return None;
         };
         let mut link = unsafe { Link { told: File::from_raw_handle(told.0), asked: File::from_raw_handle(asked.0) } };
-        // Believed only from this very program, elevated, at both ends.
+        // Believed only from the sensors' program, elevated, at both ends.
         let (mut server, mut other) = (0u32, 0u32);
         unsafe { GetNamedPipeServerProcessId(told, &mut server) }.ok()?;
         unsafe { GetNamedPipeServerProcessId(asked, &mut other) }.ok()?;
-        if server != other || !is_us_elevated(server) {
+        if server != other || !is_sensors_elevated(server) {
             return None;
         }
         send(&mut link.asked, &Asked::Hello { version: env!("CARGO_PKG_VERSION").into() }).then_some(link)
@@ -434,13 +443,11 @@ impl Link {
     }
 }
 
-/// Whether the process `pid` runs this very program, elevated.
-fn is_us_elevated(pid: u32) -> bool {
+/// Whether the process `pid` runs Glance's sensors beside this program, elevated.
+fn is_sensors_elevated(pid: u32) -> bool {
     unsafe {
         let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
-        let mut path = vec![0u16; 1024];
-        let mut length = path.len() as u32;
-        let named = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(path.as_mut_ptr()), &mut length).is_ok();
+        let named = runs_program(process, crate::elevation::SENSORS);
         let mut token = HANDLE::default();
         let mut elevated = TOKEN_ELEVATION::default();
         let mut size = 0u32;
@@ -451,9 +458,7 @@ fn is_us_elevated(pid: u32) -> bool {
             let _ = CloseHandle(token);
         }
         let _ = CloseHandle(process);
-        let theirs = std::path::PathBuf::from(String::from_utf16_lossy(&path[..length as usize]));
-        let ours = std::env::current_exe().ok();
-        named && raised && ours.is_some_and(|ours| std::fs::canonicalize(&ours).ok() == std::fs::canonicalize(&theirs).ok())
+        named && raised
     }
 }
 

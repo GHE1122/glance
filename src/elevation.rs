@@ -3,11 +3,11 @@
 //!
 //! The driver only answers administrators. Windows asks the user to confirm
 //! every elevated start, except for scheduled tasks set to run with highest
-//! privileges: so Glance's sensors (`glance.exe --sensors`, see `sensing`),
-//! once elevated, register such a task for themselves, and Glance, which
-//! runs as the user, starts them through it. The user confirms once, on the
-//! first start. Glance itself starts at sign-in through a task that runs it
-//! as the user.
+//! privileges: so Glance's sensors (`glance-sensors.exe`, beside
+//! `glance.exe`; see `sensing`), once elevated, register such a task for
+//! themselves, and Glance, which runs as the user, starts them through it.
+//! The user confirms once, on the first start. Glance itself starts at
+//! sign-in through a task that runs it as the user.
 //!
 //! A task like that runs whatever file is at its path, elevated, whenever
 //! anyone running as the user asks. So Glance only makes one for an
@@ -55,8 +55,13 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Shell::ShellExecuteW;
 
-/// The task an ordinary start hands over to, and the one that starts Glance
-/// when the user signs in.
+/// Glance's two programs, side by side in its folder: Glance itself, which
+/// runs as the user, and its sensors, which run elevated.
+pub const APP: &str = "glance.exe";
+pub const SENSORS: &str = "glance-sensors.exe";
+
+/// The task that starts the sensors, and the one that starts Glance when the
+/// user signs in.
 const LAUNCH_TASK: &str = "Glance";
 const LOGON_TASK: &str = "Glance at sign-in";
 /// The task that runs the phone remote (another program, never elevated)
@@ -211,7 +216,7 @@ fn folders_hold(folder: &Path) -> bool {
 }
 
 /// What an install folder may already hold: an earlier Glance.
-const INSTALLED: [&str; 5] = ["glance.exe", "glance-remote.exe", "uninstall.exe", "resources", "licenses"];
+const INSTALLED: [&str; 6] = [APP, SENSORS, "glance-remote.exe", "uninstall.exe", "resources", "licenses"];
 
 /// What a folder chosen to install into is, or why installing failed.
 #[derive(Debug, PartialEq)]
@@ -628,7 +633,7 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
 }
 
 /// The programs Glance installs that run.
-const PROGRAMS: [&str; 2] = ["glance.exe", "glance-remote.exe"];
+const PROGRAMS: [&str; 3] = [APP, SENSORS, "glance-remote.exe"];
 /// How long a program of Glance's that was ended is waited for to be gone.
 const ENDED_WITHIN_MS: u32 = 15_000;
 
@@ -928,10 +933,15 @@ fn protected(file: &Path) -> bool {
     checked(file).is_some()
 }
 
-/// This executable as Task Scheduler should run it: where it really is,
-/// without the `\\?\` prefix resolution adds.
-fn this_program() -> Option<PathBuf> {
-    Some(plain(&std::fs::canonicalize(std::env::current_exe().ok()?).ok()?))
+/// Glance's program `name` (`APP` or `SENSORS`), beside this one: as given, unresolved.
+pub fn beside(name: &str) -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.with_file_name(name))
+}
+
+/// Glance's program `name` beside this one as Task Scheduler should run it:
+/// where it really is, without the `\\?\` prefix resolution adds.
+fn program(name: &str) -> Option<PathBuf> {
+    Some(plain(&std::fs::canonicalize(beside(name)?).ok()?))
 }
 
 /// A resolved path without the `\\?\` prefix (kept on a network path, which
@@ -941,10 +951,10 @@ fn plain(real: &Path) -> PathBuf {
     text.strip_prefix(r"\\?\").filter(|rest| !rest.starts_with("UNC\\")).map_or(real.to_path_buf(), PathBuf::from)
 }
 
-/// Whether this executable may be started elevated without asking: see the
-/// module's notes.
+/// Whether Glance's programs here may be started without asking, the sensors elevated: see the module's notes. Each
+/// is checked as itself (a protected folder may still hold a file someone else may change).
 pub fn may_start_unasked() -> bool {
-    std::env::current_exe().is_ok_and(|exe| protected(&exe))
+    [APP, SENSORS].iter().all(|name| beside(name).is_some_and(|program| protected(&program)))
 }
 
 /// The current user's security identifier, which names their tasks: each
@@ -1053,62 +1063,62 @@ fn task_is_mine(name: &str) -> bool {
     principal.eq_ignore_ascii_case(&account) || user_sid().is_some_and(|sid| principal.eq_ignore_ascii_case(&sid))
 }
 
-/// What the task `name` passes the program it runs.
-fn task_arguments(name: &str) -> Option<String> {
-    unsafe {
-        let task = task_folder()?.GetTask(&BSTR::from(name)).ok()?;
-        let action: IExecAction = task.Definition().ok()?.Actions().ok()?.get_Item(1).ok()?.cast().ok()?;
-        let mut arguments = BSTR::new();
-        action.Arguments(&mut arguments).ok()?;
-        Some(arguments.to_string())
-    }
-}
-
-/// What the sensors are started with.
-pub const SENSORS: &str = "--sensors";
-
-/// Whether this account's launch task starts this very executable's sensors (an older one started Glance whole).
-fn launches_sensors() -> bool {
-    runs_this(&launch_task()) && task_arguments(&launch_task()).is_some_and(|arguments| arguments.trim() == SENSORS)
-}
-
-/// Starts Glance's sensors, elevated: through the launch task, if it starts this very executable's sensors and
-/// this copy may start unasked; else by asking the user (once: the sensors then make the task). Returns whether
-/// they were started (or asked for).
+/// Starts Glance's sensors, elevated: through the launch task, if it starts this copy's sensors and this copy may
+/// start unasked; else by asking the user (once: the sensors then make the task). Returns whether they were started
+/// (or asked for).
 pub fn start_sensors() -> bool {
     if start_sensors_unasked() {
         return true;
     }
+    let Some(sensors) = beside(SENSORS) else { return false };
     crate::journal::note("sensors: the user asked to let them run as administrator");
-    let exe = std::env::current_exe().expect("own path");
-    let started = unsafe { ShellExecuteW(None, w!("runas"), &HSTRING::from(exe.as_os_str()), &HSTRING::from(SENSORS), PCWSTR::null(), windows::Win32::UI::WindowsAndMessaging::SW_HIDE) };
+    let started = unsafe { ShellExecuteW(None, w!("runas"), &HSTRING::from(sensors.as_os_str()), PCWSTR::null(), PCWSTR::null(), windows::Win32::UI::WindowsAndMessaging::SW_HIDE) };
     // ShellExecute reports success with a value above 32.
     started.0 as usize > 32
 }
 
-/// Starts Glance's sensors through the launch task, if it starts this very executable's sensors and this copy may
-/// start unasked (the user is never asked); whether they were started.
+/// Starts Glance's sensors through the launch task, if it starts this copy's sensors and this copy may start
+/// unasked (the user is never asked); whether they were started.
 pub fn start_sensors_unasked() -> bool {
-    // (An earlier version's launch task starts this executable without the sensors' argument: elevated, with
-    // Glance running, it runs the sensors all the same, and makes the task anew.)
-    if !((launches_sensors() || runs_this(&launch_task())) && may_start_unasked()) {
+    // (An earlier version's launch task starts `glance.exe`: elevated, with Glance running, it starts the sensors'
+    // own program, which makes the task anew.)
+    let launch = launch_task();
+    if !((runs(&launch, SENSORS) || runs(&launch, APP)) && may_start_unasked()) {
         return false;
     }
-    let started = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(launch_task())).ok()?.Run(&VARIANT::default()).ok() });
+    let started = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(launch)).ok()?.Run(&VARIANT::default()).ok() });
     if started.is_some() {
         crate::journal::note("sensors: started through the launch task");
     }
     started.is_some()
 }
 
-/// Whether the task `name` runs this very executable.
-fn runs_this(name: &str) -> bool {
-    let (Some(program), Some(this)) = (task_program(name), this_program()) else { return false };
-    std::fs::canonicalize(&program).is_ok_and(|program| std::fs::canonicalize(&this).is_ok_and(|this| program == this))
+/// Starts the sensors' own program beside this one, elevated as this process is: for `glance.exe` started elevated
+/// by an earlier version's task, or by hand. Only a program as protected as this one is started: from a protected
+/// install, the sensors' file must be too; one run elevated from where anyone may change it was the user's choice,
+/// and its sensors beside it are no less so. Whether they were started.
+pub fn start_sensors_from_here() -> bool {
+    let Some(sensors) = beside(SENSORS) else { return false };
+    let here_protected = std::env::current_exe().is_ok_and(|exe| protected(&exe));
+    let sensors = if here_protected {
+        match trusted(&sensors) {
+            Some(sensors) => sensors,
+            None => return false,
+        }
+    } else {
+        sensors
+    };
+    Command::new(sensors).creation_flags(NO_WINDOW).spawn().is_ok()
 }
 
-/// A task for the current user: the launch task, which starts `exe`'s sensors with highest privileges on demand;
-/// or, `at_sign_in`, the one that starts Glance as the user when the user signs in.
+/// Whether the task `task` runs Glance's program `name` here (`APP` or `SENSORS`).
+fn runs(task: &str, name: &str) -> bool {
+    let (Some(program), Some(ours)) = (task_program(task), program(name)) else { return false };
+    std::fs::canonicalize(&program).is_ok_and(|program| std::fs::canonicalize(&ours).is_ok_and(|ours| program == ours))
+}
+
+/// A task for the current user: the launch task, which starts the sensors' program `exe` with highest privileges on
+/// demand; or, `at_sign_in`, the one that starts Glance (`exe`) as the user when the user signs in.
 fn task_xml(exe: &Path, at_sign_in: bool) -> String {
     let user = std::env::var("USERDOMAIN").map(|domain| format!("{domain}\\")).unwrap_or_default()
         + &std::env::var("USERNAME").unwrap_or_default();
@@ -1137,20 +1147,19 @@ fn task_xml(exe: &Path, at_sign_in: bool) -> String {
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
-    <Exec><Command>{exe}</Command>{arguments}</Exec>
+    <Exec><Command>{exe}</Command></Exec>
   </Actions>
 </Task>"#,
         user = escape(&user),
         exe = escape(&exe.display().to_string()),
         level = if at_sign_in { "LeastPrivilege" } else { "HighestAvailable" },
-        arguments = if at_sign_in { String::new() } else { format!("<Arguments>{SENSORS}</Arguments>") },
     )
 }
 
-/// Registers a task for this executable, handed to Task Scheduler directly
-/// (no file in between). Needs elevation.
+/// Registers a task for this copy's programs (Glance at sign-in, else the sensors), handed to Task Scheduler
+/// directly (no file in between). Needs elevation.
 fn register_task(name: &str, at_sign_in: bool) -> bool {
-    let Some(exe) = this_program() else { return false };
+    let Some(exe) = program(if at_sign_in { APP } else { SENSORS }) else { return false };
     let Some(folder) = task_folder() else { return false };
     let none = VARIANT::default();
     unsafe {
@@ -1174,16 +1183,17 @@ fn delete_task(name: &str) {
     }
 }
 
-/// Keeps the launch task pointing at this executable, if it may start
-/// unasked; else makes sure no task starts it. Needs elevation.
+/// Keeps the launch task pointing at this copy's sensors, if they may start
+/// unasked; else makes sure no task starts this copy. Needs elevation.
 pub fn register_launch_task() {
     if may_start_unasked() {
+        // (An earlier version's, which ran `glance.exe` itself, is made anew.)
         let launches = register_task(&launch_task(), false);
         // Earlier versions' tasks, shared by every account under one name,
         // move to this account's own if they were this account's: starting
         // at sign-in carries over, and each old task goes only once its
         // replacement is registered.
-        let mine = |name: &str| runs_this(name) && task_is_mine(name);
+        let mine = |name: &str| runs(name, APP) && task_is_mine(name);
         if launches && mine(LAUNCH_TASK) {
             delete_task(LAUNCH_TASK);
         }
@@ -1192,14 +1202,14 @@ pub fn register_launch_task() {
         }
         // This account's sign-in task, made by an earlier version to start Glance whole and elevated, starts it as
         // the user now.
-        if runs_this(&logon_task()) {
+        if runs(&logon_task(), APP) {
             register_task(&logon_task(), true);
         }
     } else {
         // A copy that may not start unasked keeps no task that starts it,
         // whose account it is.
         for name in glance_tasks() {
-            if runs_this(&name) {
+            if runs(&name, APP) || runs(&name, SENSORS) {
                 delete_task(&name);
             }
         }
@@ -1208,7 +1218,7 @@ pub fn register_launch_task() {
 
 /// Whether this account starts this copy of Glance at sign-in.
 pub fn autostart_enabled() -> bool {
-    runs_this(&logon_task())
+    runs(&logon_task(), APP)
 }
 
 /// Turns starting at sign-in on or off; returns whether it is now on. Only

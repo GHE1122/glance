@@ -809,7 +809,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         let prefs = Prefs::resolve(&settings.view, &app.controller.known_modules());
         let size = ((work_w as f32 / scale).round(), (work_h as f32 / scale).round());
         let centre = POINT { x: (work.left + work.right) / 2, y: (work.top + work.bottom) / 2 };
-        let screen = crate::screens::all().into_iter().find(|screen| crate::panel::monitor_at(centre).is_some_and(|contact| contact.monitor == screen.monitor)).map(|screen| screen.id);
+        let screen = crate::screens::all().into_iter().find(|screen| crate::mouse::monitor_at(centre).is_some_and(|contact| contact.monitor == screen.monitor)).map(|screen| screen.id);
         // (Its desktop read on another thread: the window shows meanwhile.)
         let stage = Stage { size, screen, work, desktop: None, bitmap: None };
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
@@ -1343,7 +1343,7 @@ impl Ui {
     /// size.
     fn show_screen(&mut self, screen: &str) {
         let Some(m) = self.screens.iter().find(|known| known.id == screen).map(|known| known.monitor) else { return };
-        let Some(contact) = crate::panel::monitor_at(POINT { x: (m.left + m.right) / 2, y: (m.top + m.bottom) / 2 }) else { return };
+        let Some(contact) = crate::mouse::monitor_at(POINT { x: (m.left + m.right) / 2, y: (m.top + m.bottom) / 2 }) else { return };
         let work = contact.work;
         let size = (((work.right - work.left) as f32 / contact.scale).round(), ((work.bottom - work.top) as f32 / contact.scale).round());
         // Shown already, and as it is now (its size, scale and place the same).
@@ -1391,7 +1391,7 @@ impl Ui {
             .iter()
             .filter_map(|known| {
                 let m = known.monitor;
-                let contact = crate::panel::monitor_at(POINT { x: (m.left + m.right) / 2, y: (m.top + m.bottom) / 2 })?;
+                let contact = crate::mouse::monitor_at(POINT { x: (m.left + m.right) / 2, y: (m.top + m.bottom) / 2 })?;
                 let work = contact.work;
                 let size = (((work.right - work.left) as f32 / contact.scale).round(), ((work.bottom - work.top) as f32 / contact.scale).round());
                 Some((known.id.clone(), work, size))
@@ -1423,7 +1423,7 @@ impl Ui {
     /// other pages and until either was.
     fn stage_screen(&self) -> Option<String> {
         let at = |point: POINT| {
-            let here = crate::panel::monitor_at(point)?.monitor;
+            let here = crate::mouse::monitor_at(point)?.monitor;
             self.screens.iter().find(|screen| screen.monitor == here).map(|screen| screen.id.clone())
         };
         let chosen = match self.page {

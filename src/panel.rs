@@ -24,26 +24,18 @@ use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_LAYER_PARAMETERS1};
 use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{CreateWaitableTimerExW, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS};
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
-};
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
-};
-use windows::Win32::UI::Input::{
-    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
-    RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEMOUSE,
-};
+use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
+use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE};
+use windows::Win32::UI::Input::{RegisterRawInputDevices, HRAWINPUT, RAWINPUTDEVICE, RIDEV_INPUTSINK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DispatchMessageW, GetCursorInfo, GetCursorPos, KillTimer, WaitMessage, MsgWaitForMultipleObjects,
-    PeekMessageW, PostMessageW, SetTimer, SystemParametersInfoW, CURSORINFO, CURSOR_SHOWING, HWND_MESSAGE, MSG, PM_REMOVE,
+    CreateWindowExW, DispatchMessageW, KillTimer, WaitMessage, MsgWaitForMultipleObjects,
+    PeekMessageW, PostMessageW, SetTimer, SystemParametersInfoW, HWND_MESSAGE, MSG, PM_REMOVE,
     QS_ALLINPUT, WM_HOTKEY,
     SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
     WM_TIMER,
 };
 
-use crate::detector::Motion;
+use crate::mouse::{cursor_position, cursor_showing, monitor_at, read_mouse, Contact, CORNER_EXCLUSION};
 use crate::reading::{Sample, StaticInfo};
 use crate::overlay::{Choice as OverlayChoice, Overlay};
 use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, Settings, EDGES};
@@ -65,9 +57,6 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 /// The pointer may stray this far outside the panel and still count as on it (DIPs).
 const LEAVE_TOLERANCE: f32 = 10.0;
-/// Strip at each end of the edge that does not trigger (logical px): the
-/// height of a title bar's buttons and of the taskbar, which own the corners.
-const CORNER_EXCLUSION: f64 = 48.0;
 /// The seam between two screens (see `seam_contact`): how far either side
 /// of the line the pointer may be (DIPs; there is no wall to stop it on the
 /// line); how far past it, on the other screen, a pointer that has just
@@ -90,7 +79,6 @@ const TICK_MS: u32 = 16;
 const TRACK_TIMER: usize = 1;
 const WATCH_TIMER: usize = 2;
 const WATCH_MS: u32 = 100;
-const MOUSE_MOVE_ABSOLUTE: u16 = 1;
 /// How soon to try again when drawing failed for want of a device.
 const DEVICE_RETRY: Duration = Duration::from_millis(250);
 /// How often a live backdrop is taken again as it changes (see `widget::LIVE_INTERVAL`).
@@ -973,15 +961,6 @@ enum Phase {
         dragging: bool,
     },
     Closing,
-}
-
-/// A screen: its whole, its work area (physical px), and its scale (physical
-/// px per DIP).
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) struct Contact {
-    pub(crate) monitor: RECT,
-    pub(crate) work: RECT,
-    pub(crate) scale: f32,
 }
 
 /// Where the panel is, for the opening under way.
@@ -2512,18 +2491,13 @@ pub(crate) fn open_drive(place: u16) {
     });
 }
 
-pub(crate) fn cursor_position() -> Option<POINT> {
-    let mut point = POINT::default();
-    unsafe { GetCursorPos(&mut point) }.ok().map(|_| point)
-}
-
 /// Whether a mouse button is down: as the sensors' process says while there is one (it reads them truly whatever
 /// window is in front), else as read here.
 pub(crate) fn buttons_down() -> bool {
     if crate::source::linked() {
         return BUTTONS_DOWN.load(Ordering::Relaxed);
     }
-    [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].iter().any(|key| unsafe { GetAsyncKeyState(key.0 as i32) } < 0)
+    crate::mouse::buttons_held()
 }
 
 /// The buttons as the sensors' process last said: whether one is down, and how many presses it has told.
@@ -2536,62 +2510,6 @@ pub(crate) fn heard_buttons(down: bool, pressed: bool) {
     if pressed {
         PRESSES.fetch_add(1, Ordering::Relaxed);
     }
-}
-
-fn cursor_showing() -> bool {
-    let mut info = CURSORINFO { cbSize: size_of::<CURSORINFO>() as u32, ..Default::default() };
-    unsafe { GetCursorInfo(&mut info) }.is_ok() && info.flags.0 & CURSOR_SHOWING.0 != 0
-}
-
-/// How the mouse moved, as it says itself: to a place, or by so many
-/// counts across and down.
-#[derive(Clone, Copy)]
-pub(crate) enum Moved {
-    To,
-    By(i32, i32),
-}
-
-impl Moved {
-    /// The move as a push into `edge`.
-    pub(crate) fn toward(self, edge: Edge) -> Motion {
-        let Moved::By(x, y) = self else { return Motion::Absolute };
-        let (outward, along) = match edge {
-            Edge::Left => (-x, y),
-            Edge::Right => (x, y),
-            Edge::Top => (-y, x),
-        };
-        Motion::Relative { outward, along }
-    }
-}
-
-/// The raw input's flags for a button going down: the left, the right, the middle, the fourth and the fifth.
-pub(crate) const ANY_BUTTON_DOWN: u16 = 0x0001 | 0x0004 | 0x0010 | 0x0040 | 0x0100;
-
-/// A mouse's raw input: how it moved, and its buttons' flags (what went down and up with it).
-pub(crate) fn read_mouse(handle: HRAWINPUT) -> Option<(Moved, u16)> {
-    let mut raw = RAWINPUT::default();
-    let mut size = size_of::<RAWINPUT>() as u32;
-    let read = unsafe {
-        GetRawInputData(handle, RID_INPUT, Some(&mut raw as *mut _ as *mut _), &mut size, size_of::<RAWINPUTHEADER>() as u32)
-    };
-    if read == u32::MAX || raw.header.dwType != RIM_TYPEMOUSE.0 {
-        return None;
-    }
-    let mouse = unsafe { raw.data.mouse };
-    let buttons = unsafe { mouse.Anonymous.Anonymous.usButtonFlags };
-    if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE != 0 {
-        return Some((Moved::To, buttons));
-    }
-    Some((Moved::By(mouse.lLastX, mouse.lLastY), buttons))
-}
-
-pub(crate) fn monitor_at(point: POINT) -> Option<Contact> {
-    let handle = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
-    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-    unsafe { GetMonitorInfoW(handle, &mut info) }.ok().ok()?;
-    let (mut dpi, mut dpi_y) = (0, 0);
-    unsafe { GetDpiForMonitor(handle, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y) }.ok()?;
-    Some(Contact { monitor: info.rcMonitor, work: info.rcWork, scale: dpi as f32 / 96.0 })
 }
 
 /// The screen to open on when the pointer is on the seam where a screen's
@@ -2636,26 +2554,6 @@ fn seam_contact(cursor: POINT, edge: Edge, came_from: Option<RECT>) -> Option<Co
         Edge::Top => (t.left + corner..t.right - corner).contains(&cursor.x),
     };
     (clear && !buttons_down() && cursor_showing()).then_some(target)
-}
-
-/// Describes the monitor under the cursor if the cursor is pressed against its
-/// trigger edge with intent to point: visible, no button held, clear of the
-/// corners, and where the edge stops it (it does not pass on to another
-/// screen there).
-pub(crate) fn edge_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
-    let contact = monitor_at(cursor)?;
-    let monitor = contact.monitor;
-    let corner = (CORNER_EXCLUSION * contact.scale as f64).round() as i32;
-    let along_height = (monitor.top + corner..monitor.bottom - corner).contains(&cursor.y);
-    let (on_edge, along, clear_of_corners) = match edge {
-        Edge::Left => (cursor.x <= monitor.left, cursor.y, along_height),
-        Edge::Right => (cursor.x >= monitor.right - 1, cursor.y, along_height),
-        Edge::Top => (cursor.y <= monitor.top, cursor.x, (monitor.left + corner..monitor.right - corner).contains(&cursor.x)),
-    };
-    if !on_edge || !clear_of_corners || buttons_down() || !cursor_showing() {
-        return None;
-    }
-    (!crate::screens::passes(monitor, edge, along)).then_some(contact)
 }
 
 /// Whether a mouse move told to a window being dragged says the button it is dragged by is up: what the window is

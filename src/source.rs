@@ -120,12 +120,17 @@ pub fn open() -> (StaticInfo, Source) {
     (sampler.info.clone(), Source::Own { sampler, next: Instant::now(), tick: 0 })
 }
 
-/// `link`, if the sensors at its other end said hello: with what the machine is.
+/// `link`, if the sensors at its other end said hello, and are of this version (another's speaks another tongue): with
+/// what the machine is.
 fn greeted(link: Option<Link>) -> Option<(Link, StaticInfo)> {
     let link = link?;
     // (They may be starting: installing their driver, looking at the hardware first; not waited for for ever.)
     match crate::link::receive_within::<Told>(&link.told, STARTED_WITHIN) {
-        Some(Told::Hello { info, .. }) => Some((link, info)),
+        Some(Told::Hello { version, info, .. }) if version == env!("CARGO_PKG_VERSION") => Some((link, info)),
+        Some(Told::Hello { version, .. }) => {
+            crate::journal::note(format!("readings: the sensors running are of Glance {version}, not {}", env!("CARGO_PKG_VERSION")));
+            None
+        }
         _ => None,
     }
 }
@@ -256,7 +261,7 @@ impl Source {
                 }
                 std::thread::sleep(next.saturating_duration_since(now));
                 *tick += 1;
-                sampler.sample(want.refresh_slow || *tick % crate::HIDDEN_SLOW_TICKS == 0, want.wsl, want.docker)
+                sampler.sample(want.refresh_slow || *tick % crate::HIDDEN_SLOW_TICKS == 0, want.wsl, want.docker, interval)
             }
         }
     }

@@ -46,7 +46,7 @@ pub(crate) fn note_sparingly(kind: &'static str, what: impl FnOnce() -> String) 
         }
     }
 }
-use crate::panel::{cursor_position, monitor_at, Contact};
+use crate::mouse::{cursor_position, monitor_at, Contact};
 use crate::settings::{WidgetAt, WidgetSide};
 use crate::ui::buttons::{self, Button};
 use crate::ui::arrange::{self, Choice, Form, Want};

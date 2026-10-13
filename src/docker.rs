@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,15 +24,19 @@ pub struct Docker {
     stop: Arc<AtomicBool>,
     /// When the request under way began, if one is.
     asking: Arc<Mutex<Option<Instant>>>,
+    /// How often the engine is asked (ms): as often as Glance samples.
+    every: Arc<AtomicU64>,
     worker: std::thread::JoinHandle<()>,
 }
 
 impl Docker {
-    pub fn new() -> Self {
+    /// Asked every `interval` (see `pace`).
+    pub fn new(interval: Duration) -> Self {
         let latest = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let asking = Arc::new(Mutex::new(None));
-        let (shared, stopping, busy) = (latest.clone(), stop.clone(), asking.clone());
+        let every = Arc::new(AtomicU64::new(interval.as_millis() as u64));
+        let (shared, stopping, busy, pace) = (latest.clone(), stop.clone(), asking.clone(), every.clone());
         let worker = std::thread::spawn(move || {
             let mut before: HashMap<String, Counters> = HashMap::new();
             while !stopping.load(Ordering::Relaxed) {
@@ -42,12 +46,16 @@ impl Docker {
                     break;
                 }
                 *shared.lock().unwrap() = Some(sample);
-                // As often as Glance samples.
-                let every = crate::app().settings.lock().unwrap().interval();
+                let every = Duration::from_millis(pace.load(Ordering::Relaxed));
                 std::thread::sleep(every.saturating_sub(started.elapsed()));
             }
         });
-        Docker { latest, stop, asking, worker }
+        Docker { latest, stop, asking, every, worker }
+    }
+
+    /// Asked every `interval` from now on.
+    pub fn pace(&self, interval: Duration) {
+        self.every.store(interval.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// What was read last; none until the first answer. A request under way

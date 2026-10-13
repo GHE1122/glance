@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::POINT;
 
 use crate::detector::{Detector, Motion};
-use crate::panel::{edge_contact, monitor_at, Contact, Moved};
+use crate::mouse::{edge_contact, monitor_at, Contact, Moved};
 use crate::settings::{Edge, Rest, ScreenEdges};
 
 /// Which edges of which screens open the panel to a push, and how hard the

@@ -1,4 +1,4 @@
-//! Glance's elevated half (`glance.exe --sensors`): reads the sensors that
+//! Glance's elevated half (`glance-sensors.exe`): reads the sensors that
 //! only an administrator may (the board's chip, the processor's own
 //! temperatures, the memory's, the drives'), the frames games present, and
 //! tells them over the link to the rest of Glance, which runs as the user.
@@ -86,7 +86,7 @@ pub fn run() {
         let tell = |told: &Told| link::tell(&mut telling.lock().unwrap(), told);
         let hello = Told::Hello { version: env!("CARGO_PKG_VERSION").into(), info: sampler.info.clone(), found: sampler.info.found.clone() };
         let greeted = tell(&hello)
-            && tell(&Told::Buttons { down: crate::panel::buttons_down(), pressed: false })
+            && tell(&Told::Buttons { down: crate::mouse::buttons_held(), pressed: false })
             && tell(&Told::Switched { switch: Switch::Autostart, on: crate::elevation::autostart_enabled() })
             && tell(&Told::Switched { switch: Switch::Remote, on: crate::phone::on() });
         // What it is asked, heard on a thread of its own; a report is said by the reading loop, the rest done here.
@@ -152,7 +152,7 @@ pub fn run() {
                 break;
             }
             *READING_SINCE.lock().unwrap() = Some(Instant::now());
-            let sample = sampler.sample(refresh_slow, wanted.wsl, wanted.docker);
+            let sample = sampler.sample(refresh_slow, wanted.wsl, wanted.docker, interval);
             *READING_SINCE.lock().unwrap() = None;
             if let Some(sample) = sample {
                 if !tell(&Told::Sample(Box::new(sample))) || !tell(&Told::Presenting { games: crate::presents::presenting(), mode: crate::presents::game_mode().into() }) {
@@ -260,7 +260,7 @@ fn watch_edges() {
         say(&Told::Pushed { edge, at: (at.x, at.y) });
     };
     // Whether a button was down as last said.
-    let mut down = crate::panel::buttons_down();
+    let mut down = crate::mouse::buttons_held();
     // What touches the PC, while it is heard: what was heard, and what kind was told when.
     let mut activity: Option<(crate::touch::Heard, Option<(bool, Instant)>)> = None;
     let tell_activity = |heard: &crate::touch::Heard| {
@@ -284,14 +284,14 @@ fn watch_edges() {
             let now = Instant::now();
             match message.message {
                 WM_INPUT => {
-                    if let Some((moved, buttons)) = crate::panel::read_mouse(HRAWINPUT(message.lParam.0 as *mut _)) {
-                        if let Some(cursor) = crate::panel::cursor_position() {
+                    if let Some((moved, buttons)) = crate::mouse::read_mouse(HRAWINPUT(message.lParam.0 as *mut _)) {
+                        if let Some(cursor) = crate::mouse::cursor_position() {
                             tell(pusher.heard(&WATCHED.lock().unwrap(), moved, cursor, now));
                         }
                         // The buttons: a press as the device reports it, whether one is down as read now (this
                         // process reads them truly).
-                        let pressed = buttons & crate::panel::ANY_BUTTON_DOWN != 0;
-                        let now_down = crate::panel::buttons_down();
+                        let pressed = buttons & crate::mouse::ANY_BUTTON_DOWN != 0;
+                        let now_down = crate::mouse::buttons_held();
                         if pressed || now_down != down {
                             down = now_down;
                             say(&Told::Buttons { down, pressed });
@@ -318,12 +318,12 @@ fn watch_edges() {
                             (heard, None)
                         });
                     }
-                    if let Some(cursor) = crate::panel::cursor_position() {
+                    if let Some(cursor) = crate::mouse::cursor_position() {
                         pusher.looked(&WATCHED.lock().unwrap(), cursor, now);
                     }
                 }
                 WM_TIMER if message.wParam.0 == RESTING_TIMER => {
-                    if let Some(cursor) = crate::panel::cursor_position() {
+                    if let Some(cursor) = crate::mouse::cursor_position() {
                         tell(pusher.rested(&WATCHED.lock().unwrap(), cursor, now));
                     }
                 }

@@ -57,7 +57,7 @@ pub fn show(items: &[Item], dark: bool) -> Option<usize> {
 /// `above` (as a menu from the taskbar opens), light or `dark`.
 pub fn show_at(items: &[Item], dark: bool, at: POINT, above: bool) -> Option<usize> {
     let cursor = at;
-    let contact = crate::panel::monitor_at(cursor)?;
+    let contact = crate::mouse::monitor_at(cursor)?;
     let gfx = gfx::current().ok()?;
     let window = Window::activating().ok()?;
     let Ok(mut surface) = Surface::new(&gfx, window.hwnd) else {

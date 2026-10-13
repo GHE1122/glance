@@ -19,6 +19,7 @@ Unicode true
 !define VERSION "0.3.7"
 !define PUBLISHER "lulu-loopp"
 !define EXE "glance.exe"
+!define SENSORS "glance-sensors.exe"
 !define REMOTE "glance-remote.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NAME}"
 !define PAWNIO_KEY "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO"
@@ -225,6 +226,8 @@ Section "Glance"
   ; and gone first. A silent install never installs "anyway".
   SetOutPath "$PLUGINSDIR\payload"
   File "..\target\release\${EXE}"
+  ; Its sensors, which its task starts elevated.
+  File "..\target\release\${SENSORS}"
   ; The phone remote: another program, run only if turned on in the settings, never elevated.
   File "..\remote\target\release\${REMOTE}"
   SetOutPath "$PLUGINSDIR\payload\resources"
