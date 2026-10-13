@@ -100,20 +100,20 @@ pub fn run() {
         let mut next = Instant::now();
         let mut tick = 0u64;
         while greeted {
+            // Till the next reading is due, a report asked for meanwhile is said at once; the listener gone (the
+            // rest of Glance gone with it), the reading ends.
+            let now = Instant::now();
+            if now < next {
+                match report_asked.recv_timeout(next - now) {
+                    Ok(()) if !tell(&Told::Report(crate::diagnostics::sensor_lines())) => break,
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
             let wanted = *want.lock().unwrap();
             let interval = Duration::from_millis(wanted.interval_ms as u64);
-            next += interval;
-            let now = Instant::now();
-            if next + interval < now {
-                next = now;
-            }
-            // (A report asked for meanwhile is said at once.)
-            if report_asked.recv_timeout(next.saturating_duration_since(now)).is_ok() && !tell(&Told::Report(crate::diagnostics::sensor_lines())) {
-                break;
-            }
-            if Instant::now() < next {
-                continue;
-            }
+            // (Fallen behind by more than a reading, it goes on from now.)
+            next = if next + interval < now { now + interval } else { next + interval };
             tick += 1;
             let refresh_slow = wanted.refresh_slow || tick % crate::HIDDEN_SLOW_TICKS == 0;
             if let Some(sample) = sampler.sample(refresh_slow, wanted.wsl, wanted.docker) {
