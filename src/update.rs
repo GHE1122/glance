@@ -3,8 +3,9 @@
 //! release; nothing else of the user's is sent. A newer one
 //! is offered in the settings (and once by the tray), and taken only when
 //! the user asks: its installer is downloaded into a folder of
-//! administrators' alone and run only if it is signed by whoever signed the
-//! Glance that is running.
+//! administrators' alone and run only if it is signed by Glance's publisher
+//! (see `PUBLISHER`), of the version asked for, newer than this one; it is
+//! held open, no one else writing it, till it is done.
 
 use std::cmp::Ordering;
 use std::path::Path;
@@ -20,14 +21,19 @@ use windows::Win32::Networking::WinHttp::{
     WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_FLAG_NUMBER,
     WINHTTP_QUERY_STATUS_CODE,
 };
-use windows::Win32::Security::Cryptography::{CertCompareCertificateName, CERT_CONTEXT, PKCS_7_ASN_ENCODING, X509_ASN_ENCODING};
+use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Security::Cryptography::{
+    CertGetCertificateContextProperty, CertGetEnhancedKeyUsage, CertNameToStrW, CERT_CONTEXT, CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG, CERT_STRING_TYPE, CTL_USAGE,
+    CERT_NAME_STR_REVERSE_FLAG, CERT_SHA256_HASH_PROP_ID, CERT_X500_NAME_STR, X509_ASN_ENCODING,
+};
 use windows::Win32::Security::WinTrust::{
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA,
     WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
 };
-use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO};
+use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO};
 use windows::Win32::System::Com::CoTaskMemFree;
-use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, ShellExecuteW, KF_FLAG_DEFAULT};
+use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, ShellExecuteExW, KF_FLAG_DEFAULT, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use crate::ui::prefs::LanguagePref;
@@ -42,6 +48,26 @@ const SOURCES: [&str; 2] = [
     "https://api.github.com/repos/lulu-loopp/glance/releases/latest",
     "https://gitee.com/api/v5/repos/lulu-loopp/glance/releases/latest",
 ];
+/// Where an installer is taken from: Glance's site, and the releases of its own repositories (each followed
+/// wherever it redirects: what is downloaded is believed only for its signature).
+const INSTALLERS_FROM: [&str; 3] = [
+    "https://glancepc.com/",
+    "https://github.com/lulu-loopp/glance/releases/download/",
+    "https://gitee.com/lulu-loopp/glance/releases/download/",
+];
+
+/// Glance's publisher, as its signing certificates say it (a signing service's certificates last days; these
+/// stay): the identity validated by Microsoft's Artifact Signing (the identity-validated mark, and the
+/// certificate profile's own mark, which no one else's certificates carry), under Microsoft's root for it, for
+/// this subject.
+const PUBLISHER: &str = "CN=Weiyi Shi, O=Weiyi Shi, L=Ann Arbor, S=mi, C=US";
+const PUBLISHER_MARKS: [&str; 2] = ["1.3.6.1.4.1.311.97.1.0", "1.3.6.1.4.1.311.97.921771326.840678362.737210289.98417136"];
+/// Microsoft Identity Verification Root Certificate Authority 2020, its SHA-256.
+const PUBLISHER_ROOT: [u8; 32] = [
+    0x53, 0x67, 0xF2, 0x0C, 0x7A, 0xDE, 0x0E, 0x2B, 0xCA, 0x79, 0x09, 0x15, 0x05, 0x6D, 0x08, 0x6B, 0x72, 0x0C, 0x33, 0xC1, 0xFA, 0x2A, 0x26, 0x61,
+    0xAC, 0xF7, 0x87, 0xE3, 0x29, 0x2E, 0x12, 0x70,
+];
+
 /// How often to ask. Glance asks as soon as it starts; an ask that got no
 /// answer (offline, the network not yet up at sign-in, both sites out of
 /// reach) is made again after each of these in turn, then every last one.
@@ -273,18 +299,9 @@ pub fn set_state(state: crate::link::UpdateState) {
     }
 }
 
-/// The release the rest of Glance asks the sensors to update to, downloaded and run here (see `fetch_and_run`);
-/// its installers taken only from Glance's own site, GitHub and Gitee, over HTTPS.
+/// The release the rest of Glance asks the sensors to update to, downloaded and run here (see `fetch_and_run`).
 pub fn fetch_and_run_sent(release: &crate::link::ReleaseSent) -> crate::link::UpdateState {
-    let ours = |url: &str| {
-        let host = url.strip_prefix("https://").and_then(|rest| rest.split('/').next()).unwrap_or("");
-        ["glancepc.com", "github.com", "gitee.com"].contains(&host)
-    };
-    let installers: Vec<(String, String)> = release.installers.iter().filter(|(_, url)| ours(url)).cloned().collect();
-    if installers.is_empty() {
-        return crate::link::UpdateState::Failed;
-    }
-    match fetch_and_run(&Release { version: release.version.clone(), installers }) {
+    match fetch_and_run(&Release { version: release.version.clone(), installers: release.installers.clone() }) {
         State::Ready => crate::link::UpdateState::Ready,
         State::Downloading => crate::link::UpdateState::Downloading,
         State::Failed => crate::link::UpdateState::Failed,
@@ -315,16 +332,18 @@ fn fetch_and_run(release: &Release) -> State {
         note("the installer could not be written");
         return State::Failed;
     }
-    let Ok(running) = std::env::current_exe() else { return State::Failed };
-    // From each site in turn, until one gives an installer that is what it
-    // should be: signed as this Glance is, of the version that site
-    // announced, and newer than this one. No site is trusted for any of it:
-    // an older signed installer under a newer name would take Glance back,
-    // and a site claiming a version that is not out keeps no other from
-    // being tried.
+    // From each site in turn (only Glance's own: see `INSTALLERS_FROM`), until one gives an installer that is
+    // what it should be: signed by Glance's publisher, of the version that site announced, and newer than this
+    // one. No site is trusted for any of it: an older signed installer under a newer name would take Glance
+    // back, and a site claiming a version that is not out keeps no other from being tried. The installer is
+    // checked as held open, no one else writing it, and so held till it is done.
     let mut chosen = None;
     let mut outcome = State::Failed;
     for (version, url) in &release.installers {
+        if !INSTALLERS_FROM.iter().any(|from| url.starts_with(from)) {
+            note(&format!("{url} is no place of Glance's; not downloaded"));
+            continue;
+        }
         let host = url.trim_start_matches("https://").split('/').next().unwrap_or(url);
         // (Glance's site is told which version takes it: its count of updates.)
         let from = if host == "glancepc.com" { format!("{url}?u={}", env!("CARGO_PKG_VERSION")) } else { url.clone() };
@@ -333,12 +352,13 @@ fn fetch_and_run(release: &Release) -> State {
             continue;
         };
         let installer = path_for(version);
-        if std::fs::write(&installer, bytes).is_err() {
+        let held = std::fs::write(&installer, bytes).and_then(|()| hold(&installer));
+        let Ok(held) = held else {
             note("the installer could not be written");
             return State::Failed;
-        }
-        if !same_signer(&installer, &running) {
-            note(&format!("the installer from {host} is not signed as this Glance is; not run"));
+        };
+        if !by_publisher(&installer, &held) {
+            note(&format!("the installer from {host} is not signed by Glance's publisher; not run"));
             outcome = State::Rejected;
             continue;
         }
@@ -349,10 +369,10 @@ fn fetch_and_run(release: &Release) -> State {
             outcome = State::Rejected;
             continue;
         }
-        chosen = Some(installer);
+        chosen = Some((installer, held));
         break;
     }
-    let Some(installer) = chosen else { return outcome };
+    let Some((installer, held)) = chosen else { return outcome };
     let path = HSTRING::from(installer.as_os_str());
     // Silent, and Glance started again once it is in: the one press in the
     // settings is all an update asks. (Glance runs elevated, and so does the
@@ -360,15 +380,37 @@ fn fetch_and_run(release: &Release) -> State {
     // unprotected all the same: a silent installer cannot ask whether to
     // install there again, and refuses; it shows its pages instead.
     let arguments = if crate::elevation::may_start_unasked() { w!("/S /RESTART") } else { PCWSTR::null() };
-    let started = unsafe { ShellExecuteW(None::<HWND>, w!("open"), &path, arguments, PCWSTR::null(), SW_SHOWNORMAL) };
-    // Above 32: the installer is running.
-    if started.0 as usize > 32 {
-        note("installer started");
-        State::Ready
-    } else {
+    let mut started = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: w!("open"),
+        lpFile: PCWSTR(path.as_ptr()),
+        lpParameters: arguments,
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    if unsafe { ShellExecuteExW(&mut started) }.is_err() || started.hProcess.is_invalid() {
         note("the installer could not be started");
-        State::Failed
+        return State::Failed;
     }
+    note("installer started");
+    // Held till it is done (or till this process is ended by it, which lets it go all the same).
+    let process = started.hProcess.0 as isize;
+    thread::spawn(move || {
+        let process = HANDLE(process as *mut _);
+        unsafe {
+            WaitForSingleObject(process, INFINITE);
+            let _ = CloseHandle(process);
+        }
+        drop(held);
+    });
+    State::Ready
+}
+
+/// `file` opened to be read, as long as it is held: by others too, but neither written nor deleted.
+fn hold(file: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ.0).open(file)
 }
 
 /// The product version an installer carries in its version resource
@@ -598,7 +640,7 @@ fn ask(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<Vec<u8>> {
 }
 
 /// A file's Authenticode signature, verified (the whole chain, revocation
-/// included), held open while its signer's certificate is looked at.
+/// included), held open while its signer's certificates are looked at.
 struct Signature {
     data: WINTRUST_DATA,
     _file: Box<WINTRUST_FILE_INFO>,
@@ -606,12 +648,14 @@ struct Signature {
 }
 
 impl Signature {
-    fn verify(file: &Path) -> Option<Self> {
+    /// That of `file`, read through `opened` (the file as held open).
+    fn verify(file: &Path, opened: &std::fs::File) -> Option<Self> {
+        use std::os::windows::io::AsRawHandle;
         let path = HSTRING::from(file.as_os_str());
         let mut info = Box::new(WINTRUST_FILE_INFO {
             cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32,
             pcwszFilePath: PCWSTR(path.as_ptr()),
-            hFile: HANDLE::default(),
+            hFile: HANDLE(opened.as_raw_handle()),
             pgKnownSubject: std::ptr::null_mut(),
         });
         let mut signature = Signature {
@@ -633,18 +677,18 @@ impl Signature {
         trusted.then_some(signature)
     }
 
-    /// The certificate it was signed with.
-    fn signer(&self) -> Option<&CERT_CONTEXT> {
+    /// The chain it was signed with, as it was verified: the signer's certificate first, the root last.
+    fn chain(&self) -> Vec<&CERT_CONTEXT> {
         unsafe {
             let provider = WTHelperProvDataFromStateData(self.data.hWVTStateData);
             if provider.is_null() {
-                return None;
+                return Vec::new();
             }
             let signer = WTHelperGetProvSignerFromChain(provider, 0, false, 0);
-            if signer.is_null() || (*signer).csCertChain == 0 {
-                return None;
+            if signer.is_null() || (*signer).pasCertChain.is_null() {
+                return Vec::new();
             }
-            (*(*signer).pasCertChain).pCert.as_ref()
+            std::slice::from_raw_parts((*signer).pasCertChain, (*signer).csCertChain as usize).iter().filter_map(|element| element.pCert.as_ref()).collect()
         }
     }
 }
@@ -657,40 +701,89 @@ impl Drop for Signature {
     }
 }
 
-/// Whether `file` and `reference` both carry valid signatures, by
-/// certificates issued to the same subject (a signing service's
-/// certificates last days; the subject they vouch for stays).
-fn same_signer(file: &Path, reference: &Path) -> bool {
-    let (Some(a), Some(b)) = (Signature::verify(file), Signature::verify(reference)) else { return false };
-    let (Some(a), Some(b)) = (a.signer(), b.signer()) else { return false };
-    unsafe { CertCompareCertificateName(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, &(*a.pCertInfo).Subject, &(*b.pCertInfo).Subject) }.as_bool()
+/// Whether `file` (held open as `opened`) carries a valid signature by Glance's publisher (see `PUBLISHER`).
+fn by_publisher(file: &Path, opened: &std::fs::File) -> bool {
+    let Some(signature) = Signature::verify(file, opened) else { return false };
+    let chain = signature.chain();
+    let (Some(signer), Some(root)) = (chain.first(), chain.last()) else { return false };
+    chain.len() > 1
+        && subject(signer).as_deref() == Some(PUBLISHER)
+        && PUBLISHER_MARKS.iter().all(|mark| usages(signer).iter().any(|usage| usage == mark))
+        && sha256(root) == Some(PUBLISHER_ROOT)
+}
+
+/// A certificate's subject, written as `PUBLISHER` is (its most particular part first).
+fn subject(certificate: &CERT_CONTEXT) -> Option<String> {
+    let kind = CERT_STRING_TYPE(CERT_X500_NAME_STR.0 | CERT_NAME_STR_REVERSE_FLAG);
+    let name = unsafe { &(*certificate.pCertInfo).Subject };
+    let length = unsafe { CertNameToStrW(X509_ASN_ENCODING, name, kind, None) };
+    let mut text = vec![0u16; length as usize];
+    let written = unsafe { CertNameToStrW(X509_ASN_ENCODING, name, kind, Some(&mut text)) } as usize;
+    (written > 0).then(|| String::from_utf16_lossy(&text[..written - 1]))
+}
+
+/// The uses a certificate is for (its enhanced key usage), as identifiers.
+fn usages(certificate: &CERT_CONTEXT) -> Vec<String> {
+    let mut size = 0u32;
+    unsafe {
+        if CertGetEnhancedKeyUsage(certificate, CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG.0, None, &mut size).is_err() {
+            return Vec::new();
+        }
+        // (Aligned as the structure that heads it.)
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        let usage = buffer.as_mut_ptr() as *mut CTL_USAGE;
+        if CertGetEnhancedKeyUsage(certificate, CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG.0, Some(usage), &mut size).is_err() || (*usage).rgpszUsageIdentifier.is_null() {
+            return Vec::new();
+        }
+        std::slice::from_raw_parts((*usage).rgpszUsageIdentifier, (*usage).cUsageIdentifier as usize).iter().filter_map(|id: &windows::core::PSTR| id.to_string().ok()).collect()
+    }
+}
+
+/// A certificate's SHA-256.
+fn sha256(certificate: &CERT_CONTEXT) -> Option<[u8; 32]> {
+    let mut hash = [0u8; 32];
+    let mut size = hash.len() as u32;
+    unsafe { CertGetCertificateContextProperty(certificate, CERT_SHA256_HASH_PROP_ID, Some(hash.as_mut_ptr().cast()), &mut size) }.ok()?;
+    (size == 32).then_some(hash)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{get, installer_version, latest, newer, release, same_signer};
+    use super::{by_publisher, get, hold, installer_version, newer, release, INSTALLERS_FROM, SOURCES};
     use std::path::Path;
 
     /// Over the network: the latest release is found, its installer
-    /// downloaded, and its signer matched to the Glance installed here
-    /// (`GLANCE_INSTALLED`, a signed glance.exe), not to another publisher's
-    /// program (`OTHER_SIGNED`).
+    /// downloaded, and found signed by Glance's publisher; another
+    /// publisher's program (`OTHER_SIGNED`) is not.
     #[test]
     #[ignore]
     fn finds_downloads_and_checks_the_latest_release() {
-        let release = latest().expect("latest release");
-        assert_eq!(release.installers.len(), 2, "both sites offer {}", release.version);
-        let (_, mirror) = release.installers.iter().find(|(_, url)| url.starts_with("https://gitee.com/")).expect("the mirror's installer");
+        // (As `latest` asks GitHub and Gitee; Glance's own site is asked only by a running Glance.)
+        let releases: Vec<(String, String)> = SOURCES.iter().map(|url| release(&get(url).expect("an answer")).expect("a release")).collect();
+        assert_eq!(releases[0].0, releases[1].0, "both sites offer the same version");
+        let (_, mirror) = releases.iter().find(|(_, url)| url.starts_with("https://gitee.com/")).expect("the mirror's installer");
+        assert!(releases.iter().all(|(_, url)| INSTALLERS_FROM.iter().any(|from| url.starts_with(from))));
         let bytes = get(mirror).expect("installer from the mirror");
         let file = std::env::temp_dir().join(format!("glance-update-test-{}.exe", std::process::id()));
         std::fs::write(&file, bytes).unwrap();
-        let installed = std::env::var("GLANCE_INSTALLED").unwrap();
         let other = std::env::var("OTHER_SIGNED").unwrap();
-        let ours = same_signer(&file, Path::new(&installed));
-        let theirs = same_signer(&file, Path::new(&other));
+        let ours = by_publisher(&file, &hold(&file).unwrap());
+        let theirs = by_publisher(Path::new(&other), &hold(Path::new(&other)).unwrap());
         std::fs::remove_file(&file).unwrap();
-        assert!(ours, "{} not signed as {installed}", release.version);
+        assert!(ours, "{} not signed by Glance's publisher", releases[0].0);
         assert!(!theirs);
+    }
+
+    /// A released installer (`GLANCE_INSTALLER`) is signed by Glance's publisher; held, it is not written, but
+    /// read by others meanwhile (as its version is).
+    #[test]
+    #[ignore]
+    fn knows_glances_publisher() {
+        let installer = std::env::var("GLANCE_INSTALLER").unwrap();
+        let held = hold(Path::new(&installer)).unwrap();
+        assert!(by_publisher(Path::new(&installer), &held));
+        assert!(std::fs::OpenOptions::new().append(true).open(&installer).is_err());
+        assert!(installer_version(Path::new(&installer)).is_some());
     }
 
     /// The version an installer (`GLANCE_INSTALLER`, a released one) carries.
