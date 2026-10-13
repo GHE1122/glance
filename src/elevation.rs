@@ -618,7 +618,111 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
     if !anyway && !above_holds(&folder) {
         return Err(InstallFolder::Open);
     }
+    // Nothing of Glance's runs from it while its files are replaced, and nothing starts one meanwhile; its tasks
+    // as they were once this is done (or has failed).
+    let _tasks = TasksOff::now();
+    if !end_programs_in(&folder) {
+        return Err(InstallFolder::Failed);
+    }
     copy_into(payload, &folder).map_err(|_| InstallFolder::Failed)
+}
+
+/// The programs Glance installs that run.
+const PROGRAMS: [&str; 2] = ["glance.exe", "glance-remote.exe"];
+/// How long a program of Glance's that was ended is waited for to be gone.
+const ENDED_WITHIN_MS: u32 = 15_000;
+
+/// Ends every program of Glance's running from `folder` (every account's), and waits till each is gone; whether
+/// none is left. Those looked at are only those of Glance's names (no other process is opened, a game's least of
+/// all), and ended only if their file is in `folder`: another copy of Glance elsewhere is left alone. One started
+/// meanwhile is found by the next look.
+fn end_programs_in(folder: &Path) -> bool {
+    use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+    use windows::Win32::Foundation::WAIT_OBJECT_0;
+    let Ok(folder) = std::fs::canonicalize(folder) else { return true };
+    loop {
+        let running = running_from(&folder);
+        if running.is_empty() {
+            return true;
+        }
+        // All ended first, then waited for: none is left a moment to notice another gone (and start it again).
+        // (One already ending refuses to be ended, and is waited for all the same.)
+        for &process in &running {
+            let _ = unsafe { TerminateProcess(process, 1) };
+        }
+        let mut gone = true;
+        for process in running {
+            unsafe {
+                gone &= WaitForSingleObject(process, ENDED_WITHIN_MS) == WAIT_OBJECT_0;
+                let _ = CloseHandle(process);
+            }
+        }
+        if !gone {
+            return false;
+        }
+    }
+}
+
+/// The processes of Glance's programs whose file is in `folder` (as resolved), opened to be ended and waited for.
+fn running_from(folder: &Path) -> Vec<HANDLE> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+    let mut found = Vec::new();
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return found };
+        let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+        while more {
+            let length = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
+            if PROGRAMS.iter().any(|program| program.eq_ignore_ascii_case(&name)) {
+                if let Ok(process) = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, entry.th32ProcessID) {
+                    let mut path = vec![0u16; 1024];
+                    let mut size = path.len() as u32;
+                    let named = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(path.as_mut_ptr()), &mut size).is_ok();
+                    let file = PathBuf::from(String::from_utf16_lossy(&path[..size as usize]));
+                    let ours = named && file.parent().and_then(|parent| std::fs::canonicalize(parent).ok()).is_some_and(|parent| parent == folder);
+                    if ours {
+                        found.push(process);
+                    } else {
+                        let _ = CloseHandle(process);
+                    }
+                }
+            }
+            more = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    found
+}
+
+/// Glance's tasks (every account's) that were on, turned off while Glance's files are replaced (none starts a
+/// Glance meanwhile); on again once this is dropped.
+struct TasksOff(Vec<String>);
+
+impl TasksOff {
+    fn now() -> Self {
+        let Some(folder) = task_folder() else { return TasksOff(Vec::new()) };
+        let off = glance_tasks()
+            .into_iter()
+            .filter(|name| unsafe {
+                let Ok(task) = folder.GetTask(&BSTR::from(name.as_str())) else { return false };
+                task.Enabled().is_ok_and(|on| on.as_bool()) && task.SetEnabled(windows::Win32::Foundation::VARIANT_FALSE).is_ok()
+            })
+            .collect();
+        TasksOff(off)
+    }
+}
+
+impl Drop for TasksOff {
+    fn drop(&mut self) {
+        let Some(folder) = task_folder() else { return };
+        for name in &self.0 {
+            if let Ok(task) = unsafe { folder.GetTask(&BSTR::from(name.as_str())) } {
+                let _ = unsafe { task.SetEnabled(windows::Win32::Foundation::VARIANT_TRUE) };
+            }
+        }
+    }
 }
 
 /// Copies everything in `from` into `to`, folders and all, replacing files
@@ -672,6 +776,10 @@ pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
     }
     if !only_trusted_can(&folder, FOLDER_CHANGES) {
         return Err(InstallFolder::Occupied);
+    }
+    // (Its tasks are gone by now: see `remove_all_tasks`.)
+    if !end_programs_in(&folder) {
+        return Err(InstallFolder::Failed);
     }
     let mut removed = true;
     for name in INSTALLED {
@@ -880,9 +988,9 @@ fn is_glance_task(name: &str) -> bool {
     })
 }
 
-/// Removes every account's Glance tasks: what the uninstaller asks of the
-/// installed, protected copy of Glance, run elevated.
-pub fn remove_all_tasks() {
+/// Removes every account's Glance tasks, then ends every program of Glance's running from `folder`: what the
+/// uninstaller asks of its own copy of Glance, run elevated, before Glance's settings and files are taken away.
+pub fn remove_all_tasks(folder: &Path) -> bool {
     for name in glance_tasks() {
         // (What a task has running is stopped with it: the phone remote runs for as long as its task does.)
         if let Some(task) = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(name.as_str())) }.ok()) {
@@ -890,6 +998,7 @@ pub fn remove_all_tasks() {
         }
         delete_task(&name);
     }
+    end_programs_in(folder)
 }
 
 /// Runs this account's task for the phone remote, if it has one for the

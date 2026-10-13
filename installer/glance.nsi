@@ -85,16 +85,6 @@ LangString SettingsLeft ${LANG_ENGLISH} "Glance's settings file is in use by ano
 LangString RemovePawnIO ${LANG_SIMPCHINESE} "是否同时卸载 PawnIO 驱动？$\r$\n$\r$\nPawnIO 由 Glance 安装，用于读取温度和风扇转速。如果其他硬件监控或风扇控制软件（例如 HWiNFO、FanControl）也在使用它，请选择“否”予以保留。"
 LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver as well?$\r$\n$\r$\nPawnIO was installed by Glance to read temperatures and fan speeds. If other monitoring or fan control software (for example HWiNFO or FanControl) also uses it, choose No to keep it."
 
-; A running Glance holds its files.
-!macro StopGlance
-  ; System tools by their full path: never one that happens to lie beside
-  ; the installer.
-  nsExec::Exec '"$SYSDIR\taskkill.exe" /IM ${EXE} /F'
-  ; The phone remote, if it is running: its file is replaced or removed too.
-  nsExec::Exec '"$SYSDIR\taskkill.exe" /IM ${REMOTE} /F'
-  Sleep 500
-!macroend
-
 ; An update taken from Glance's settings runs silent with /RESTART: Glance
 ; is started again once it is in.
 Function .onInstSuccess
@@ -226,12 +216,13 @@ Function FinishShow
 FunctionEnd
 
 Section "Glance"
-  !insertmacro StopGlance
   !insertmacro Helper
   ; The files are laid out in the plugins folder first; the helper then
   ; pins the install folder (nothing above it can be swapped for a link
   ; while it is held), creates it administrators' if it is new, checks it
-  ; again, and copies them in. A silent install never installs "anyway".
+  ; again, and copies them in: with Glance's tasks off meanwhile, and every
+  ; program of Glance's running from there (the phone remote's too) ended
+  ; and gone first. A silent install never installs "anyway".
   SetOutPath "$PLUGINSDIR\payload"
   File "..\target\release\${EXE}"
   ; The phone remote: another program, run only if turned on in the settings, never elevated.
@@ -290,11 +281,12 @@ Function un.onInit
 FunctionEnd
 
 Section "Uninstall"
-  !insertmacro StopGlance
   !insertmacro Helper
   ; Every account's tasks for Glance, removed through Task Scheduler by the
-  ; uninstaller's own copy of Glance.
-  ExecWait '"$PLUGINSDIR\${EXE}" --remove-tasks'
+  ; uninstaller's own copy of Glance; then every program of Glance's running
+  ; from the folder ended, and gone (none started again meanwhile: its tasks
+  ; are gone).
+  ExecWait '"$PLUGINSDIR\${EXE}" --remove-tasks "$INSTDIR"'
 
   ; The driver goes only if Glance put it there and the user agrees; a
   ; silent uninstall keeps it.

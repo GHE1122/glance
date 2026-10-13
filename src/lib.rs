@@ -288,16 +288,6 @@ pub fn run() {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
-    // The uninstaller, elevated, asks the installed copy to remove every
-    // account's tasks: through Task Scheduler itself, nothing else loaded.
-    if std::env::args().any(|arg| arg == "--remove-tasks") {
-        elevation::remove_all_tasks();
-        // The way through the firewall made for the phone remote.
-        phone::forget();
-        // And an update's installer, if one was left behind.
-        elevation::forget_download();
-        return;
-    }
     // The installer and uninstaller, elevated, have their own copy of Glance
     // do what touches the install folder. Exit codes: 0 done (or, asked
     // what a folder is, Glance could start unasked there), 1 a folder above
@@ -320,6 +310,16 @@ pub fn run() {
         }
         [_, flag, folder] if flag == "--check-install-folder" => {
             std::process::exit(code(elevation::install_folder(std::path::Path::new(folder))))
+        }
+        // The uninstaller, first: every account's tasks removed (through Task Scheduler itself), and every program
+        // of Glance's running from the folder ended.
+        [_, flag, folder] if flag == "--remove-tasks" => {
+            let ended = elevation::remove_all_tasks(std::path::Path::new(folder));
+            // The way through the firewall made for the phone remote.
+            phone::forget();
+            // And an update's installer, if one was left behind.
+            elevation::forget_download();
+            std::process::exit(if ended { 0 } else { 4 })
         }
         [_, flag, folder] if flag == "--uninstall-from" => done(elevation::uninstall_from(std::path::Path::new(folder))),
         [_, flag, folder] if flag == "--remove-settings" => {
