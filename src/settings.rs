@@ -371,9 +371,12 @@ pub struct Settings {
     pub seam: bool,
     pub close_delay_ms: u64,
     pub interval_ms: u64,
-    /// Refresh the desktop behind the glass while the panel is open. The
-    /// panel then hides itself from every screen capture, screenshots too.
+    /// Keep what shows behind the glass up with what changes there (see
+    /// `ui::scene`).
     pub live_backdrop: bool,
+    /// The panel, pulled away from its edge, is torn off as a widget; off,
+    /// pulling it does nothing.
+    pub tear_off: bool,
     /// Ask GitHub once a day whether a newer Glance is out.
     pub check_updates: bool,
     /// The shortcut that opens and closes the panel (Ctrl+Alt+G unless
@@ -442,6 +445,7 @@ impl Default for Settings {
             close_delay_ms: 200,
             interval_ms: 1000,
             live_backdrop: false,
+            tear_off: true,
             check_updates: true,
             shortcut: Some(Shortcut::default()),
             hotkey: None,

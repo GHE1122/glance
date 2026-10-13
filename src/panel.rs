@@ -144,6 +144,7 @@ struct Config {
     edges: crate::push::Edges,
     skin: String,
     live: bool,
+    tear_off: bool,
     anchor: Anchor,
     columns: Option<usize>,
     size: f32,
@@ -163,6 +164,7 @@ fn config_from(settings: &Settings) -> Config {
         edges: crate::push::Edges { screens: settings.screens.clone(), rest: settings.rest(), pressure: settings.sensitivity.pressure() },
         skin: settings.skin.clone(),
         live: settings.live_backdrop,
+        tear_off: settings.tear_off,
         anchor: settings.anchor,
         columns: settings.columns,
         // As far as the settings offer: the file may say anything.
@@ -1860,7 +1862,11 @@ impl<'a> Panel<'a> {
             // Pulled far enough: a widget torn off, the panel as it shows,
             // under the hand where it was taken; the panel goes once the
             // widget is drawn, so that one is on the screen throughout.
+            // (Unless that is turned off: then pulling it does nothing.)
             let _ = held;
+            if !self.controller.config.lock().unwrap().tear_off {
+                return;
+            }
             let Some(opening) = &self.opening else { return };
             let form = Form::Lanes { detail: Detail::Full, columns: opening.layout.columns };
             let at = POINT { x: placement.panel.left + dx, y: placement.panel.top + dy };

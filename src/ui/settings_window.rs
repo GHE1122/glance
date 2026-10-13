@@ -425,6 +425,8 @@ type ButtonRow = (String, String, Vec<(String, Target, Button)>);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Switch {
     Live,
+    /// Whether pulling the panel off its edge tears it off as a widget.
+    TearOff,
     Startup,
     Updates,
     HeatAlert,
@@ -1065,6 +1067,7 @@ impl Ui {
                 Row::Choice(Field::CloseDelay),
                 Row::Shortcut,
                 Row::Choice(Field::OverFullscreen),
+                Row::Switch(Switch::TearOff),
             ]),
             Page::Shown => {
                 rows.push(Row::Choice(Field::Columns));
@@ -1788,6 +1791,11 @@ impl Ui {
                 Some(p("玻璃和亚克力背后的画面随时跟着变；身后有东西在动时会多用一些处理器和显卡", "What shows behind glass and acrylic keeps up as it changes, using more processor and graphics while something there moves")),
                 self.settings.live_backdrop,
             ),
+            Switch::TearOff => (
+                p("拖出面板成为小组件", "Drag the panel off as a widget"),
+                Some(p("按住面板拖离屏幕边缘，它会变成桌面上的小组件；关闭后拖动面板不会有任何反应", "Pulling the panel away from its edge turns it into a widget on the desktop; off, pulling it does nothing")),
+                self.settings.tear_off,
+            ),
             // Only a copy no ordinary program can replace (one the installer
             // put in Program Files) may start elevated unasked.
             Switch::Startup => (
@@ -1873,6 +1881,7 @@ impl Ui {
         let settings = &mut self.settings;
         match switch {
             Switch::Live => settings.live_backdrop ^= true,
+            Switch::TearOff => settings.tear_off ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
             Switch::Overlay => {
