@@ -11,11 +11,14 @@
 //! windows show, those of elevated programs too, and live (a video plays
 //! on in them); not the shadows the system draws around windows.
 //!
-//! A frame is read back (to the pixels, lightness and digest the skins and
-//! themes use) only when one is wanted, on a thread other than the one that
-//! draws: as it comes, or at once if one has come meanwhile. The frames are
-//! made on the device Glance draws with (one device: each costs the
-//! graphics driver's memory), whose use from several threads is guarded.
+//! A frame is taken only when one is wanted, on a thread other than the one
+//! that draws: as it comes, or at once if one has come meanwhile. It stays
+//! on the graphics card, copied out of the capture's own (which it takes
+//! back) into a texture that is drawn from as it is; only how light it is,
+//! a value for each square of two by two pixels (the card averages them),
+//! is read back, for the theme and the frost. The frames are made on the
+//! device Glance draws with (one device: each costs the graphics driver's
+//! memory), whose use from several threads is guarded.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,9 +31,11 @@ use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT,
-    D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
+    D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ, D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::DXGI_ERROR_WAS_STILL_DRAWING;
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DwmRegisterThumbnail, DwmSetWindowAttribute, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties, DWMWA_CLOAK, DWMWA_CLOAKED,
@@ -46,7 +51,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_POPUP,
 };
 
-use super::backdrop::Capture;
+use super::backdrop::{Capture, Texture};
 
 /// The device a scene's frames are made and read back on: the one Glance draws with (see `gfx`), its use from
 /// several threads guarded by the device itself.
@@ -86,15 +91,23 @@ struct Shared {
     /// Tells the thread that draws (see `Scene::new`).
     wake: Arc<dyn Fn() + Send + Sync>,
     device: Device,
-    /// What frames are read back through, kept for the next of the same size.
-    staging: Mutex<Option<Staging>>,
+    /// What a frame's lightness is made and read back through, kept for the next of the same size.
+    halves: Mutex<Option<Halves>>,
+    /// How many frames have been taken: what tells one from another.
+    taken: std::sync::atomic::AtomicU64,
 }
 
-/// A texture the processor may read, and its size.
-struct Staging(ID3D11Texture2D, u32, u32);
+/// For a frame `size`: a texture it is copied into whose second level the card makes of it (each texel the
+/// average of a square of two by two), that level's view, and a texture the processor reads the level from.
+struct Halves {
+    size: (u32, u32),
+    levels: ID3D11Texture2D,
+    view: ID3D11ShaderResourceView,
+    readable: ID3D11Texture2D,
+}
 
 // (Used under its lock only.)
-unsafe impl Send for Staging {}
+unsafe impl Send for Halves {}
 
 impl Shared {
     /// Reads `frame` back (if it is of the area as it is now), for it to be taken; whether it was.
@@ -110,8 +123,9 @@ impl Shared {
                 return None;
             }
             let texture: ID3D11Texture2D = unsafe { frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface() }.ok()?;
-            let pixels = read_back(&self.device, &mut self.staging.lock().unwrap(), &texture, width as u32, height as u32)?;
-            Some(Capture::from_pixels(area, pixels))
+            let (kept, luma) = keep(&self.device, &mut self.halves.lock().unwrap(), &texture, width as u32, height as u32)?;
+            let taken = self.taken.fetch_add(1, Ordering::Relaxed) + 1;
+            Some(Capture::from_texture(area, Texture(kept), luma, taken))
         })();
         let Some(capture) = read else { return false };
         *self.ready.lock().unwrap() = Some(capture);
@@ -120,30 +134,59 @@ impl Shared {
     }
 }
 
-/// The top left `width` × `height` of `texture`, read back through `staging` (made, or made anew, for that size):
-/// BGRA, rows top to bottom, made opaque.
-fn read_back(device: &Device, staging: &mut Option<Staging>, texture: &ID3D11Texture2D, width: u32, height: u32) -> Option<Vec<u8>> {
+/// The top left `width` × `height` of `texture` (a frame of the capture's, taken back by it), kept in a texture of
+/// its own to be drawn from; and how light it is, a value (0–255) for each square of two by two pixels, as
+/// `Capture::from_pixels` makes it (the card averaging each square, through `halves`: made, or made anew, for that
+/// size).
+fn keep(device: &Device, halves: &mut Option<Halves>, texture: &ID3D11Texture2D, width: u32, height: u32) -> Option<(ID3D11Texture2D, Vec<u8>)> {
     unsafe {
-        if staging.as_ref().is_none_or(|Staging(_, w, h)| (*w, *h) != (width, height)) {
-            let mut description = D3D11_TEXTURE2D_DESC::default();
-            texture.GetDesc(&mut description);
-            description.Width = width;
-            description.Height = height;
-            description.Usage = D3D11_USAGE_STAGING;
-            description.BindFlags = 0;
-            description.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-            description.MiscFlags = 0;
+        let make = |description: &D3D11_TEXTURE2D_DESC| -> Option<ID3D11Texture2D> {
             let mut made = None;
-            device.device.CreateTexture2D(&description, None, Some(&mut made)).ok()?;
-            *staging = Some(Staging(made?, width, height));
+            device.device.CreateTexture2D(description, None, Some(&mut made)).ok()?;
+            made
+        };
+        let plain = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ..Default::default()
+        };
+        let kept = make(&plain)?;
+        if halves.as_ref().is_none_or(|halves| halves.size != (width, height)) {
+            let levels = make(&D3D11_TEXTURE2D_DESC {
+                MipLevels: 2,
+                BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+                MiscFlags: D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32,
+                ..plain
+            })?;
+            let mut view = None;
+            device.device.CreateShaderResourceView(&levels, None, Some(&mut view)).ok()?;
+            let readable = make(&D3D11_TEXTURE2D_DESC {
+                Width: (width / 2).max(1),
+                Height: (height / 2).max(1),
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                ..plain
+            })?;
+            *halves = Some(Halves { size: (width, height), levels, view: view?, readable });
         }
-        let Staging(staging, ..) = staging.as_ref()?;
+        let Halves { levels, view, readable, .. } = halves.as_ref()?;
         let region = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
-        let row = width as usize * 4;
-        let mut pixels = Vec::with_capacity(row * height as usize);
         let context = &device.context;
-        context.CopySubresourceRegion(staging, 0, 0, 0, 0, texture, 0, Some(&region));
+        context.CopySubresourceRegion(&kept, 0, 0, 0, 0, texture, 0, Some(&region));
+        context.CopySubresourceRegion(levels, 0, 0, 0, 0, texture, 0, Some(&region));
+        context.GenerateMips(view);
+        // (The second level: subresource 1.)
+        context.CopySubresourceRegion(readable, 0, 0, 0, 0, levels, 1, None);
         context.Flush();
+        let staging = readable;
+        let (row_width, rows) = ((width / 2).max(1) as usize, (height / 2).max(1) as usize);
         // Read once the copy is done, not waited for in the call (the device is the drawing's too, and held
         // meanwhile): tried again till it is, a second at most.
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -157,15 +200,19 @@ fn read_back(device: &Device, staging: &mut Option<Staging>, texture: &ID3D11Tex
                 Err(_) => return None,
             }
         }
-        for y in 0..height as usize {
-            pixels.extend_from_slice(std::slice::from_raw_parts((mapped.pData as *const u8).add(y * mapped.RowPitch as usize), row));
+        // As `Capture::from_pixels` reads it: a square for each two pixels each way, rounded up.
+        let (columns, down) = ((width as usize).div_ceil(2), (height as usize).div_ceil(2));
+        let mut luma = Vec::with_capacity(columns * down);
+        for y in 0..down {
+            let line = std::slice::from_raw_parts((mapped.pData as *const u8).add(y.min(rows - 1) * mapped.RowPitch as usize), row_width * 4);
+            for x in 0..columns {
+                let i = x.min(row_width - 1) * 4;
+                let lightness = (0.2126 * line[i + 2] as f64 + 0.7152 * line[i + 1] as f64 + 0.0722 * line[i] as f64) / 255.0;
+                luma.push((lightness * 255.0).round() as u8);
+            }
         }
         context.Unmap(staging, 0);
-        // (What no window covers is the scene's own window: drawn opaque, as the screen is.)
-        for alpha in pixels.iter_mut().skip(3).step_by(4) {
-            *alpha = 255;
-        }
-        Some(pixels)
+        Some((kept, luma))
     }
 }
 
@@ -244,7 +291,7 @@ impl Scene {
                     return None;
                 }
             };
-            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, staging: Mutex::new(None), resting: AtomicBool::new(false) });
+            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0) });
             let made = (|| {
                 let cloak: BOOL = true.into();
                 DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).ok()?;
@@ -364,7 +411,7 @@ impl Scene {
         self.shared.wanted.store(false, Ordering::Release);
         *self.shared.latest.lock().unwrap() = None;
         *self.shared.ready.lock().unwrap() = None;
-        *self.shared.staging.lock().unwrap() = None;
+        *self.shared.halves.lock().unwrap() = None;
         let least = RECT { left: self.area.left, top: self.area.top, right: self.area.left + 1, bottom: self.area.top + 1 };
         unsafe {
             let _ = SetWindowPos(self.window, None, least.left, least.top, 1, 1, SWP_NOACTIVATE | SWP_NOZORDER);

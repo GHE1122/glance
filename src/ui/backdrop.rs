@@ -1,7 +1,9 @@
 //! What is on screen behind the panel, for skins that draw the desktop
 //! through glass or acrylic.
 
-use windows::core::Result;
+use windows::core::{Interface, Result};
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Dxgi::IDXGISurface;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT, D2D_SIZE_U};
 use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, ID2D1DeviceContext, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1};
@@ -19,14 +21,25 @@ pub struct Capture {
     /// `forget_pixels`).
     pixels: Option<Vec<u8>>,
     /// How light it is, a value (0–255) for each `LUMA_STEP` square of
-    /// pixels: what is read of it once its pixels are let go of.
+    /// pixels: what is read of it once its pixels are let go of (or when it
+    /// had none in memory: see `from_texture`).
     luma: Vec<u8>,
     /// Tells one capture's content from another's.
     pub digest: u64,
+    /// Where it is on the graphics card, when it was never in memory: a
+    /// frame of what is behind (see `scene`), drawn from there as it is.
+    texture: Option<Texture>,
 }
 
+/// A texture of the device Glance draws with, made on another thread (see `scene`) and drawn on the one that draws.
+pub struct Texture(pub ID3D11Texture2D);
+
+// (A Direct3D 11 resource may be handed between threads; it is drawn on the device's.)
+unsafe impl Send for Texture {}
+unsafe impl Sync for Texture {}
+
 /// The side of the squares of pixels the luminance is kept for.
-const LUMA_STEP: i32 = 2;
+pub const LUMA_STEP: i32 = 2;
 
 /// What tells one screenful from another: every pixel, eight bytes at a
 /// time, mixed as FxHash mixes (a screen's worth in a few milliseconds,
@@ -118,13 +131,20 @@ impl Capture {
             }
         }
         let digest = digest(&pixels);
-        Capture { rect, pixels: Some(pixels), luma, digest }
+        Capture { rect, pixels: Some(pixels), luma, digest, texture: None }
+    }
+
+    /// A picture on the graphics card (`texture`, of the device Glance draws with), standing for the screen inside
+    /// `rect`: how light it is (`luma`, a value for each `LUMA_STEP` square, as `from_pixels` makes it), and what tells
+    /// it from another (`frame`, a count of the frames it is one of).
+    pub fn from_texture(rect: RECT, texture: Texture, luma: Vec<u8>, frame: u64) -> Self {
+        Capture { rect, pixels: None, luma, digest: frame, texture: Some(texture) }
     }
 
     /// The same capture without its pixels (what is read of it is from its
     /// luminance): to be lent along with a bitmap already made of it.
     pub fn without_pixels(&self) -> Self {
-        Capture { rect: self.rect, pixels: None, luma: self.luma.clone(), digest: self.digest }
+        Capture { rect: self.rect, pixels: None, luma: self.luma.clone(), digest: self.digest, texture: None }
     }
 
     fn width(&self) -> i32 {
@@ -136,6 +156,7 @@ impl Capture {
     /// a bitmap is not made of it again.
     pub fn forget_pixels(&mut self) {
         self.pixels = None;
+        self.texture = None;
     }
 
     /// The relative luminance (0–1) at (`x`, `y`) from its corner: of the
@@ -150,8 +171,6 @@ impl Capture {
     /// The capture as a bitmap at `px` physical pixels per DIP, so that it
     /// covers its rectangle's size in DIPs.
     pub fn bitmap(&self, dc: &ID2D1DeviceContext, px: f32) -> Result<ID2D1Bitmap1> {
-        let Some(pixels) = &self.pixels else { return Err(windows::Win32::Foundation::E_UNEXPECTED.into()) };
-        let size = D2D_SIZE_U { width: self.width() as u32, height: (self.rect.bottom - self.rect.top) as u32 };
         let properties = D2D1_BITMAP_PROPERTIES1 {
             // Opaque whatever its alpha bytes say (see `take`).
             pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
@@ -160,7 +179,15 @@ impl Capture {
             bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
             ..Default::default()
         };
-        unsafe { dc.CreateBitmap(size, Some(pixels.as_ptr().cast()), (self.width() * 4) as u32, &properties) }
+        match (&self.pixels, &self.texture) {
+            (Some(pixels), _) => {
+                let size = D2D_SIZE_U { width: self.width() as u32, height: (self.rect.bottom - self.rect.top) as u32 };
+                unsafe { dc.CreateBitmap(size, Some(pixels.as_ptr().cast()), (self.width() * 4) as u32, &properties) }
+            }
+            // Drawn from where it is: nothing copied, nothing sent.
+            (None, Some(texture)) => unsafe { dc.CreateBitmapFromDxgiSurface(&texture.0.cast::<IDXGISurface>()?, Some(&properties)) },
+            (None, None) => Err(windows::Win32::Foundation::E_UNEXPECTED.into()),
+        }
     }
 
     /// The relative luminance, as WCAG measures it (its channels made
