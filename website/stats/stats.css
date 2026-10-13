@@ -58,6 +58,7 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
 .chart .d3 { fill: var(--series-3); stroke: var(--surface); stroke-width: 2; }
 h2.part { font-size: 17px; margin: 8px 0 0; }
 tr.pick { cursor: pointer; }
+tr.pick.open td { background: var(--page); font-weight: 600; }
 .report-pictures { display: flex; flex-wrap: wrap; gap: 8px; }
 .report-pictures:not(:empty) { margin: 12px 0 0; }
 .report-pictures img { display: block; max-width: 100%; max-height: 360px; border-radius: 8px; border: 1px solid var(--rule); }

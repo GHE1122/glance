@@ -105,22 +105,31 @@
     table($("[data-staying]"), ["已使用", "电脑·天", "占比"], data.staying.map(function (s) { return [since(s.weeks), fmt(s.asking_days), pct(s.asking_days, days)]; }));
   }
 
-  // The reports users sent, the newest first; one pressed is shown whole.
+  // The reports users sent, the newest first; one pressed is shown whole, and pressed again is put away.
   function reports() {
-    var list = $("[data-reports]"), whole = $("[data-report]"), pictures = $("[data-report-pictures]");
+    var list = $("[data-reports]"), whole = $("[data-report]"), pictures = $("[data-report-pictures]"), open = null;
+    function shut() {
+      whole.textContent = ""; whole.hidden = true; pictures.textContent = ""; open = null;
+      Array.prototype.forEach.call(list.querySelectorAll("tr.open"), function (tr) { tr.classList.remove("open"); });
+    }
     fetch("/api/reports", { headers: { "x-stats-key": key || "" } }).then(function (r) { return r.ok ? r.json() : []; }).then(function (rows) {
       table(list, ["编号", "时间", "版本", "地区", "截图"], rows.map(function (r) { return [r.id, new Date(r.ts).toLocaleString("zh-CN"), r.version, place(r.country), r.pictures ? fmt(r.pictures) : ""]; }));
       Array.prototype.forEach.call(list.querySelectorAll("tr"), function (tr, i) {
         if (!i || !rows.length) return;
         tr.className = "pick";
         tr.addEventListener("click", function () {
-          fetch("/api/reports?id=" + encodeURIComponent(rows[i - 1].id), { headers: { "x-stats-key": key || "" } }).then(function (r) { return r.json(); }).then(function (one) {
+          var id = rows[i - 1].id;
+          if (open === id) { shut(); return; }
+          shut(); open = id; tr.classList.add("open");
+          fetch("/api/reports?id=" + encodeURIComponent(id), { headers: { "x-stats-key": key || "" } }).then(function (r) { return r.json(); }).then(function (one) {
+            // (Another pressed meanwhile, or this one put away: not shown.)
+            if (open !== id) return;
             whole.textContent = one ? one.text : ""; whole.hidden = !one;
             // Its pictures, each asked for with the key (so not by an address alone) and shown as it arrives; pressed, a picture opens whole.
             pictures.textContent = "";
             for (var n = 0; one && n < one.pictures; n++) {
               fetch("/api/reports?id=" + encodeURIComponent(one.id) + "&picture=" + n, { headers: { "x-stats-key": key || "" } }).then(function (r) { return r.ok ? r.blob() : null; }).then(function (blob) {
-                if (!blob) return;
+                if (!blob || open !== id) return;
                 var link = document.createElement("a"), shown = document.createElement("img");
                 link.href = shown.src = URL.createObjectURL(blob); link.target = "_blank";
                 link.appendChild(shown); pictures.appendChild(link);
