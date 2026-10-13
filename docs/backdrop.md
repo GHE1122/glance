@@ -25,12 +25,12 @@ is behind them through a **scene**:
   anything in it changes, none while nothing does.
 - A frame is read back (pixels, lightness, digest: what the skins and themes
   use) only when one is wanted, on another thread: as it comes, or at once if
-  one came meanwhile. With live refraction, one as often as every 250 ms;
+  one came meanwhile. With live refraction, one as often as every 66 ms;
   the one awaited after the scene was arranged anew, at once (without live
   refraction, only that one).
 - The scene is arranged anew when the window moves past its area, goes to
   another screen, or the windows behind change (the widgets' window watch;
-  the panel looks every 250 ms with live refraction). Frames from before an
+  the panel looks every 66 ms with live refraction). Frames from before an
   arrangement are dropped by their time.
 - Windows Glance is taking away are left out of every scene: the panel as a
   widget torn off it takes its place, the hint of where a widget would stick.
@@ -64,3 +64,9 @@ for it.
 Still to see on real machines before live refraction is on by default: a video
 playing behind a widget (the cost), several screens at different scales, and
 animated wallpapers (Wallpaper Engine draws into a window behind the icons).
+
+Measured on the owner's PC (2026-10-13), the Claude window streaming behind
+the widgets, music paused: live refraction at every 250 ms cost about 9 % of a
+core for all of the app, at every 33 ms about 21 %; 66 ms was chosen. With
+music playing, the lyrics' two windows drawn at 60 frames a second cost about
+42 % of a core more (no memory), the largest cost the app has.

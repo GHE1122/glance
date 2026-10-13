@@ -106,9 +106,11 @@ const SLOW_FRAME: Duration = Duration::from_millis(12);
 /// How often a widget at rest is drawn again (its charts step with the
 /// samples).
 const REST_FRAME: Duration = Duration::from_millis(250);
-/// With live refraction, how often the desktop behind is taken again, as
-/// the panel's is.
-const LIVE_INTERVAL: Duration = Duration::from_millis(250);
+/// With live refraction, how often the desktop behind is taken again as it
+/// changes, as the panel's is: fifteen times a second (what shows through
+/// the glass is blurred; faster cost twice the processor for little that
+/// shows).
+const LIVE_INTERVAL: Duration = Duration::from_millis(66);
 /// Without live refraction, how old the desktop taken behind a widget is
 /// before letting go of it takes it again.
 const RETAKE_AFTER: Duration = Duration::from_secs(3);
