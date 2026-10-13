@@ -122,26 +122,6 @@ impl Shared {
             }
             let texture: ID3D11Texture2D = unsafe { frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface() }.ok()?;
             let pixels = read_back(device()?, &mut self.staging.lock().unwrap(), &texture, width as u32, height as u32)?;
-            {
-                static DUMPED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                let n = DUMPED.fetch_add(1, Ordering::Relaxed);
-                if n < 12 {
-                    let (w, h) = (width as usize, height as usize);
-                    let mut out = Vec::new();
-                    out.extend_from_slice(b"BM");
-                    out.extend_from_slice(&((54 + w * h * 4) as u32).to_le_bytes());
-                    out.extend_from_slice(&0u32.to_le_bytes());
-                    out.extend_from_slice(&54u32.to_le_bytes());
-                    out.extend_from_slice(&40u32.to_le_bytes());
-                    out.extend_from_slice(&(w as i32).to_le_bytes());
-                    out.extend_from_slice(&(-(h as i32)).to_le_bytes());
-                    out.extend_from_slice(&1u16.to_le_bytes());
-                    out.extend_from_slice(&32u16.to_le_bytes());
-                    out.extend_from_slice(&[0u8; 24]);
-                    out.extend_from_slice(&pixels);
-                    let _ = std::fs::write(std::env::temp_dir().join(format!("scene-{n}-{}x{}-at{}_{}.bmp", w, h, area.left, area.top)), out);
-                }
-            }
             Some(Capture::from_pixels(area, pixels))
         })();
         let Some(capture) = read else { return false };
