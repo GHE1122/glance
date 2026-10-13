@@ -1084,10 +1084,11 @@ impl Widget {
         }
     }
 
-    /// How long till a frame of what is behind that has come is due to be
-    /// taken (none: none has come).
+    /// With live refraction, how long till a frame of what is behind that
+    /// has come is due to be taken (none: none has come; without, none is
+    /// taken but the one awaited, which wakes it as it is read).
     fn backdrop_wait(&self, live: bool) -> Option<Duration> {
-        self.backdrop.as_ref().filter(|scene| scene.fresh())?;
+        self.backdrop.as_ref().filter(|scene| live && scene.fresh())?;
         Some(self.behind.as_ref().map_or(Duration::ZERO, |behind| Self::backdrop_every(live).saturating_sub(behind.taken.elapsed())))
     }
 

@@ -93,6 +93,8 @@ struct Shared {
     latest: Mutex<Option<Direct3D11CaptureFrame>>,
     /// A frame is wanted: read as it comes.
     wanted: AtomicBool,
+    /// It rests (see `Scene::rest`): what comes meanwhile (the frame of it emptied) is of nothing.
+    resting: AtomicBool,
     /// What was read, to be taken.
     ready: Mutex<Option<Capture>>,
     /// Tells the thread that draws (see `Scene::new`).
@@ -244,7 +246,7 @@ impl Scene {
                     return None;
                 }
             };
-            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, staging: Mutex::new(None) });
+            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, staging: Mutex::new(None), resting: AtomicBool::new(false) });
             let made = (|| {
                 let cloak: BOOL = true.into();
                 DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).ok()?;
@@ -261,6 +263,9 @@ impl Scene {
                             newest = Some(frame);
                         }
                         let Some(frame) = newest else { return Ok(()) };
+                        if shared.resting.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
                         // Wanted, read now (one of what was there before is not, and the next is wanted still); else
                         // kept, the thread that draws told once.
                         if shared.wanted.swap(false, Ordering::AcqRel) {
@@ -351,6 +356,7 @@ impl Scene {
         // is being put in place).
         *self.shared.of.lock().unwrap() = (area, now_100ns());
         *self.shared.latest.lock().unwrap() = None;
+        self.shared.resting.store(false, Ordering::Release);
         true
     }
 
@@ -379,6 +385,7 @@ impl Scene {
     /// Shows nothing till it is arranged again (nor does the compositor put anything together in it meanwhile): for
     /// whoever wants what is behind only as it was when last looked at, not as it changes.
     pub fn rest(&mut self) {
+        self.shared.resting.store(true, Ordering::Release);
         self.forget();
         // (Nor is the frame of it emptied wanted, nor any come meanwhile.)
         self.shared.wanted.store(false, Ordering::Release);
