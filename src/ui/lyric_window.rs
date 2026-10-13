@@ -129,6 +129,9 @@ struct Shown {
     /// The colours the lyrics are drawn in, easing toward the cover's.
     tint: [f32; 3],
     accent: [f32; 3],
+    /// The card's ground (its shadow, the cover blurred, the colour washed over it, what plays), kept and drawn
+    /// again only as it changes: what moves at every frame is drawn over it.
+    ground: super::gfx::Layer,
 }
 
 thread_local! {
@@ -496,6 +499,7 @@ fn make(style: Style) -> Option<Shown> {
             fading: None,
             tint: [1.0, 1.0, 1.0],
             accent: [0.55, 0.65, 1.0],
+            ground: Default::default(),
         })
     }
 }
@@ -746,6 +750,8 @@ impl Shown {
             if let Ok(gfx) = gfx::current() {
                 self.gfx = gfx;
             }
+            // (What was kept was kept on the device before.)
+            self.ground = Default::default();
             self.surface = Surface::new(&self.gfx, self.hwnd).ok();
         }
         let Some(mut surface) = self.surface.take() else { return false };
@@ -801,44 +807,66 @@ impl Shown {
 
     fn card(&mut self, frame: &Frame, moment: &Moment, (w, h): (f32, f32)) {
         let radius = 14.0;
-        frame.shadow(Color::hex(0x000000, 0.4), 0.0, 0.0, w, h, radius, 8.0, 4.0);
-        // All of it inside its rounded corners.
-        let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(0.0, 0.0, w, h), radiusX: radius, radiusY: radius }) }) else { return };
-        let layer = D2D1_LAYER_PARAMETERS1 {
-            contentBounds: rect(0.0, 0.0, w, h),
-            geometricMask: std::mem::ManuallyDrop::new(mask.cast().ok()),
-            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            maskTransform: windows_numerics::Matrix3x2::identity(),
-            opacity: 1.0,
-            ..Default::default()
-        };
-        unsafe { frame.dc.PushLayer(&layer, None) };
-        frame.fill(Color::hex(0x101014, 1.0), 0.0, 0.0, w, h);
-        // The cover, blurred, larger than the card ; the one before fading out.
+        let pad = 26.0;
+        // The cover, blurred, larger than the card; the one before fading out.
         if let Some(cover) = &moment.cover {
             self.backdrop(frame, cover);
         }
-        let grown = 1.35;
-        let (bw, bh) = (w.max(h) * grown, w.max(h) * grown);
-        let place = rect((w - bw) / 2.0, (h - bh) / 2.0, bw, bh);
-        if let Some((_, bitmap)) = &self.backdrop {
-            let shown = self.fading.as_ref().map_or(1.0, |(_, since)| (since.elapsed().as_secs_f32() / 1.2).min(1.0));
-            if let Some((before, _)) = &self.fading {
-                unsafe { frame.dc.DrawBitmap(before, Some(&place), 1.0 - shown, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
-            }
-            unsafe { frame.dc.DrawBitmap(bitmap, Some(&place), shown, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
-            if shown >= 1.0 {
-                self.fading = None;
-            }
+        let shown = self.fading.as_ref().map_or(1.0, |(_, since)| (since.elapsed().as_secs_f32() / 1.2).min(1.0));
+        let before = self.fading.as_ref().map(|(before, _)| before.clone());
+        if shown >= 1.0 {
+            self.fading = None;
         }
-        // Darkened for the words to be read on, the cover's colour washed from a corner, brighter at a beat.
-        frame.fill(Color::hex(0x000000, 0.42), 0.0, 0.0, w, h);
-        frame.fill_shape(&[Point { x: 0.0, y: 0.0 }, Point { x: w, y: 0.0 }, Point { x: w, y: h }, Point { x: 0.0, y: h }], Fill::Down { top: 0.0, from: colour(self.accent, 0.12), bottom: h, to: colour(self.tint, 0.0) });
-        let pad = 26.0;
+        let backdrop = self.backdrop.as_ref().map(|(key, bitmap)| (*key, bitmap.clone()));
         // What plays, along the top.
         let about = [moment.title.as_str(), moment.artist.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("  ·  ");
         let buttons_room = if self.over.is_some() { self.style.buttons().len() as f32 * (buttons::SIZE + buttons::GAP) } else { 0.0 };
-        frame.text(&about, TITLE_FONT, Color::hex(0xFFFFFF, 0.62), pad, 16.0, w - 2.0 * pad - buttons_room, Align::Start);
+        let (accent, tint) = (self.accent, self.tint);
+        // The ground drawn again only as what it shows changes: its size, the cover (and how far the one before has
+        // faded), the colours (to the 255th they are drawn in: they ease toward the cover's, nearer each frame),
+        // what plays, the buttons' room.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (w.to_bits(), h.to_bits(), self.scale.to_bits(), backdrop.as_ref().map(|(key, _)| *key), (shown * 64.0).round() as u32).hash(&mut hasher);
+            accent.iter().chain(&tint).map(|v| (v * 255.0).round() as u8).collect::<Vec<_>>().hash(&mut hasher);
+            (&about, buttons_room.to_bits()).hash(&mut hasher);
+            hasher.finish()
+        };
+        let margin = self.style.margin();
+        let _ = self.ground.draw(frame, key, windows_numerics::Matrix3x2::identity(), (-margin, -margin, w + 2.0 * margin, h + 2.0 * margin), self.scale, None, |frame| {
+            frame.shadow(Color::hex(0x000000, 0.4), 0.0, 0.0, w, h, radius, 8.0, 4.0);
+            // All of it inside its rounded corners.
+            let mask = unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(0.0, 0.0, w, h), radiusX: radius, radiusY: radius }) }?;
+            let layer = D2D1_LAYER_PARAMETERS1 {
+                contentBounds: rect(0.0, 0.0, w, h),
+                geometricMask: std::mem::ManuallyDrop::new(mask.cast().ok()),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: windows_numerics::Matrix3x2::identity(),
+                opacity: 1.0,
+                ..Default::default()
+            };
+            unsafe { frame.dc.PushLayer(&layer, None) };
+            frame.fill(Color::hex(0x101014, 1.0), 0.0, 0.0, w, h);
+            let grown = 1.35;
+            let (bw, bh) = (w.max(h) * grown, w.max(h) * grown);
+            let place = rect((w - bw) / 2.0, (h - bh) / 2.0, bw, bh);
+            if let Some((_, bitmap)) = &backdrop {
+                if let Some(before) = &before {
+                    unsafe { frame.dc.DrawBitmap(before, Some(&place), 1.0 - shown, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+                }
+                unsafe { frame.dc.DrawBitmap(bitmap, Some(&place), shown, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+            }
+            // Darkened for the words to be read on, the cover's colour washed from a corner.
+            frame.fill(Color::hex(0x000000, 0.42), 0.0, 0.0, w, h);
+            frame.fill_shape(&[Point { x: 0.0, y: 0.0 }, Point { x: w, y: 0.0 }, Point { x: w, y: h }, Point { x: 0.0, y: h }], Fill::Down { top: 0.0, from: colour(accent, 0.12), bottom: h, to: colour(tint, 0.0) });
+            frame.text(&about, TITLE_FONT, Color::hex(0xFFFFFF, 0.62), pad, 16.0, w - 2.0 * pad - buttons_room, Align::Start);
+            unsafe { frame.dc.PopLayer() };
+            drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+            Ok(())
+        });
+        // What moves, over it, inside the card (the lines and the spectrum keep clear of its rounded corners).
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(0.0, 0.0, w, h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         // The spectrum, along the bottom.
         let bars = 40;
         let floor = h - 14.0;
@@ -864,8 +892,7 @@ impl Shown {
                 frame.text_wrapped(&said, UNDER_FONT, Color::hex(0xFFFFFF, 0.7), pad, (top + bottom - height) / 2.0, width);
             }
         }
-        unsafe { frame.dc.PopLayer() };
-        drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+        unsafe { frame.dc.PopAxisAlignedClip() };
     }
 
     /// The lines before and after the one sung now, smaller and fainter the farther they are from it, the rail
