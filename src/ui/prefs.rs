@@ -90,6 +90,17 @@ const GAME: [Item; 9] = [
     item("mic", true),
 ];
 
+/// Whether the lyrics are offered in the settings (their module, and the
+/// line the time module shows): not yet, till what plays is known from
+/// every player (NetEase's own says it only with a plugin). Turned on before,
+/// they show as they were.
+pub const LYRICS_OFFERED: bool = false;
+
+/// Whether module `module` is offered in the settings (see `LYRICS_OFFERED`).
+pub fn offered(module: &str) -> bool {
+    LYRICS_OFFERED || module != "lyrics"
+}
+
 /// The items of module `module` ("cpu", "gpu:1", …), in the order the
 /// settings list them.
 pub fn items(module: &str) -> &'static [Item] {

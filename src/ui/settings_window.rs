@@ -1087,7 +1087,8 @@ impl Ui {
                         rows.extend(module_fields(id).iter().map(|field| Row::ModuleChoice(id.to_string(), *field)));
                     }
                 };
-                let (folded, listed): (Vec<&prefs::ModuleEntry>, Vec<&prefs::ModuleEntry>) = self.prefs.modules.iter().partition(|entry| self.folded(&entry.id));
+                let (folded, listed): (Vec<&prefs::ModuleEntry>, Vec<&prefs::ModuleEntry>) =
+                    self.prefs.modules.iter().filter(|entry| prefs::offered(&entry.id)).partition(|entry| self.folded(&entry.id));
                 for entry in listed {
                     module(&mut rows, &entry.id);
                 }
@@ -2142,6 +2143,7 @@ impl Ui {
                 ("disk", "drives") => !seen.drives.is_empty() || info.drives.len() > 1,
                 ("disk", "active") => seen.disk_active,
                 ("storage", "volumes") => !seen.volumes.is_empty(),
+                ("time", "lyrics") => prefs::LYRICS_OFFERED,
                 _ => true,
             })
             .flat_map(|name| match (id, name) {
@@ -2602,7 +2604,7 @@ impl Ui {
         if folded(id) {
             return;
         }
-        let skip: Vec<String> = self.prefs.modules.iter().filter(|entry| folded(&entry.id)).map(|entry| entry.id.clone()).collect();
+        let skip: Vec<String> = self.prefs.modules.iter().filter(|entry| folded(&entry.id) || !prefs::offered(&entry.id)).map(|entry| entry.id.clone()).collect();
         let (list, bare) = self.list(id);
         let Some(at) = list.iter().position(|entry| entry.id == bare) else { return };
         let mut to = at;
@@ -3318,7 +3320,7 @@ impl Ui {
         frame.place(Matrix3x2::rotation_around(turn, Vector2 { X: cx, Y: cy }));
         text_centred(frame, glyph, chevron, palette.text2, cx - glyph_w / 2.0, cy, glyph_w + 4.0, Align::Start);
         frame.origin(0.0, 0.0);
-        let names: Vec<String> = self.prefs.modules.iter().filter(|entry| self.folded(&entry.id)).map(|entry| self.module(&entry.id).0).collect();
+        let names: Vec<String> = self.prefs.modules.iter().filter(|entry| self.folded(&entry.id) && prefs::offered(&entry.id)).map(|entry| self.module(&entry.id).0).collect();
         let title = if self.lang == Lang::Zh { format!("更多模块（{count}）") } else { format!("More modules ({count})") };
         let text_left = left + ITEM_INSET;
         field_label_line(frame, palette, &title, Some(&names.join(pick(self.lang, "、", ", "))), label, hint, text_left, cy, cx - 24.0 - text_left);
