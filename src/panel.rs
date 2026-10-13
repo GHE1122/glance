@@ -730,11 +730,7 @@ impl Controller {
                     draw_overlay(&mut overlay, &panel)
                 }
                 // The pinned panel dragged by its bar.
-                WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => {
-                    panel.release_owed = false;
-                    panel.press(lparam_point(msg.lParam))
-                }
-                WM_LBUTTONUP if msg.hwnd == panel.window.hwnd && std::mem::take(&mut panel.release_owed) => {}
+                WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => panel.press(lparam_point(msg.lParam)),
                 WM_TIMER if msg.hwnd == panel.window.hwnd && panel.held() => {
                     panel.dragged(now);
                     if let Some((form, scale, at, grab)) = panel.tear.take() {
@@ -755,9 +751,11 @@ impl Controller {
                         }
                     }
                 }
-                // The desktop widgets: pressed, let go, their menu.
+                // The desktop widgets: pressed, let go (or found let go as the pointer moves: the button up unheard,
+                // let go before it was torn off), their menu.
                 WM_LBUTTONDOWN if widgets.owns(msg.hwnd) => widgets.press(msg.hwnd, lparam_point(msg.lParam)),
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if widgets.owns(msg.hwnd) => widgets.release(msg.hwnd, now),
+                WM_MOUSEMOVE if widgets.owns(msg.hwnd) && widgets.held(msg.hwnd) && let_go(&msg) => widgets.release(msg.hwnd, now),
                 WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam), panel.lang),
                 WM_RBUTTONUP if widgets.owns(msg.hwnd) => {
                     // (What comes for this thread while the menu is up waits:
@@ -767,10 +765,13 @@ impl Controller {
                         crate::show_settings();
                     }
                 }
-                WM_LBUTTONUP | WM_TIMER | crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.drag.is_some() => {
+                // Let go: the button up, the capture lost, or the pointer moved with the button up (its going up
+                // told to another window).
+                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST | WM_MOUSEMOVE
+                    if msg.hwnd == panel.window.hwnd && panel.drag.is_some() && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
+                {
                     // Kept here, in the order things happened (an unpin just
                     // after stands).
-                    panel.release_owed = msg.message == WM_TIMER;
                     let kept = panel.let_go(now);
                     if std::mem::take(&mut panel.screens_missed) {
                         panel.screens_changed(0, now);
@@ -788,24 +789,34 @@ impl Controller {
                         });
                     }
                 }
-                // The sound's track let go (or the button up unheard, or the capture lost).
-                WM_LBUTTONUP | WM_TIMER | crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.sliding => panel.slid(),
+                // The sound's track let go (or the button found up as the pointer moves, or the capture lost).
+                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST | WM_MOUSEMOVE
+                    if msg.hwnd == panel.window.hwnd && panel.sliding && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
+                {
+                    panel.slid()
+                }
+                // Let go of the panel after a widget was torn off it (the button went up before the widget took
+                // the pointer): the widget is let go.
+                WM_LBUTTONUP if msg.hwnd == panel.window.hwnd && widgets.torn_in_hand().is_some() => {
+                    let torn = widgets.torn_in_hand().unwrap();
+                    widgets.release(torn, now)
+                }
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
                 // The overlay dragged into place.
                 WM_LBUTTONDOWN if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().press(),
+                // Let go: the button up, the capture lost, or the pointer moved with the button up.
+                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST | WM_MOUSEMOVE
+                    if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd && o.held()) && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
+                {
+                    if let Some(placed) = overlay.as_mut().unwrap().release() {
+                        std::thread::spawn(move || crate::app().place_overlay(placed));
+                    }
+                }
                 WM_MOUSEMOVE if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().moved(),
                 WM_TIMER if msg.wParam.0 == crate::overlay::SAID_TIMER && overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().hush(),
                 // Followed while dragged, wherever the pointer is.
                 WM_TIMER if msg.wParam.0 == crate::overlay::FOLLOW_TIMER && overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd && o.held()) => {
                     overlay.as_mut().unwrap().moved()
-                }
-                // Let go (where the overlay may not hear of it), or the
-                // capture taken away mid-drag (the lock screen, another
-                // program): it stays where it was put.
-                WM_LBUTTONUP | WM_TIMER | crate::ui::window::CAPTURE_LOST if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
-                    if let Some(placed) = overlay.as_mut().unwrap().release() {
-                        std::thread::spawn(move || crate::app().place_overlay(placed));
-                    }
                 }
                 WM_MOUSEMOVE if overlay.as_ref().is_some_and(|o| o.owns_bar(msg.hwnd)) => overlay.as_mut().unwrap().bar_hover(),
                 // Its menu, or one of its buttons: the same is done.
@@ -1184,7 +1195,6 @@ struct Panel<'a> {
     screens_missed: bool,
     /// A drag ended with the button already up (seen by the timer): the
     /// button's release, still to come, is the drag's, not a click.
-    release_owed: bool,
     last_frame: Instant,
     /// When the panel is next drawn: at once while anything on it is in
     /// motion beyond the charts' creep.
@@ -1240,7 +1250,6 @@ impl<'a> Panel<'a> {
             failed_behind: None,
             excluded: false,
             screens_missed: false,
-            release_owed: false,
             last_frame: Instant::now(),
             next_frame: Instant::now(),
         };
@@ -1784,9 +1793,9 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// Whether it is being dragged (or the sound's track is), the button still down.
+    /// Whether it is being dragged (or the sound's track is): till its window is told the button went up.
     fn held(&self) -> bool {
-        (self.drag.is_some() || self.sliding) && crate::overlay::primary_down()
+        self.drag.is_some() || self.sliding
     }
 
     /// The sound as loud as where `client` is along its track (the pointer may have left the track: as far as it goes).
@@ -2581,4 +2590,11 @@ pub(crate) fn edge_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
         return None;
     }
     (!crate::screens::passes(monitor, edge, along)).then_some(contact)
+}
+
+/// Whether a mouse move told to a window being dragged says the button it is dragged by is up: what the window is
+/// told, which it is told under its capture whatever window is in front (an elevated one too, where reading the
+/// button's state would say "up" all along).
+fn let_go(message: &MSG) -> bool {
+    message.message == WM_MOUSEMOVE && message.wParam.0 & windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize == 0
 }

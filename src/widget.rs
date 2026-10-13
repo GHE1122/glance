@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_LAYER_PARAMETERS1};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WM_APP};
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -529,6 +529,16 @@ impl Widgets {
         true
     }
 
+    /// Whether the widget `hwnd` is in hand (moved, sized, or its sound's track slid).
+    pub fn held(&self, hwnd: HWND) -> bool {
+        self.list.iter().any(|widget| widget.window.hwnd == hwnd && widget.drag.is_some())
+    }
+
+    /// The widget torn off the panel and in hand still, if one is.
+    pub fn torn_in_hand(&self) -> Option<HWND> {
+        self.list.iter().find(|widget| matches!(widget.drag, Some(Drag::Move { torn: true, .. }))).map(|widget| widget.window.hwnd)
+    }
+
     /// Whether the widget torn off last is on the screen yet.
     pub fn torn_shown(&self) -> bool {
         self.list.last().is_some_and(|widget| widget.shown_once)
@@ -821,7 +831,6 @@ impl Widgets {
         SHOWN.store(self.list.len(), std::sync::atomic::Ordering::Relaxed);
         let mut due = REST_FRAME;
         let mut gone = Vec::new();
-        let mut dropped = Vec::new();
         for (index, widget) in self.list.iter_mut().enumerate() {
             // (Letting clicks through, but for the one on its button.)
             let through = widget.click_through && !widget.reached;
@@ -841,12 +850,6 @@ impl Widgets {
                 due = due.min(widget.next_frame.saturating_duration_since(now));
                 continue;
             }
-            // In hand with the button up (let go before it was torn off,
-            // where it could not hear of it): let go now.
-            if widget.drag.is_some() && !primary_held() {
-                dropped.push(widget.window.hwnd);
-                continue;
-            }
             if widget.drag.is_some() {
                 widget.follow(now);
             }
@@ -862,9 +865,6 @@ impl Widgets {
                     due = due.min(rest);
                 }
             }
-        }
-        for hwnd in dropped {
-            self.release(hwnd, now);
         }
         // Where they came to rest, kept.
         let rested = self.list.iter_mut().fold(false, |any, widget| std::mem::take(&mut widget.unsaved) | any);
@@ -2034,14 +2034,6 @@ pub(crate) fn menu_items(lang: Lang, pinned: bool, through: bool, above: bool) -
         item("收起", "Put away", Icon::Close, false, false),
         item("设置…", "Settings…", Icon::Settings, false, true),
     ]
-}
-
-/// Whether the primary mouse button is down (the right one, swapped).
-fn primary_held() -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LBUTTON, VK_RBUTTON};
-    let swapped = unsafe { GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_SWAPBUTTON) } != 0;
-    let key = if swapped { VK_RBUTTON } else { VK_LBUTTON };
-    (unsafe { GetAsyncKeyState(key.0 as i32) }) < 0
 }
 
 /// The least rectangle holding both.

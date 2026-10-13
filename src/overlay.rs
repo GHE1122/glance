@@ -13,8 +13,8 @@ use std::time::Instant;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_RBUTTON};
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, KillTimer, SetTimer, SM_SWAPBUTTON, IDC_ARROW};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, KillTimer, SetTimer, IDC_ARROW};
 
 use std::collections::VecDeque;
 
@@ -161,12 +161,6 @@ fn room(screen: RECT, size: (i32, i32), scale: f32) -> (i32, i32, i32, i32) {
     (screen.left + inset, screen.top + inset, across, down)
 }
 
-/// Whether the primary button is down (the left one, or the right where
-/// they are swapped): the one a drag is made with.
-pub fn primary_down() -> bool {
-    let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
-    (unsafe { GetAsyncKeyState(button.0 as i32) }) < 0
-}
 
 /// The timer that ends the overlay's saying how clear its glass was made,
 /// and how long after it was last changed (as the panel's size is said
@@ -620,9 +614,9 @@ impl Overlay {
         self.draw();
     }
 
-    /// Whether the button it is dragged by is still down.
+    /// Whether it is being dragged: till it is told the button went up.
     pub fn held(&self) -> bool {
-        self.grab.is_some() && primary_down()
+        self.grab.is_some()
     }
 
     /// The pointer moved over it, or while it is dragged: it moves, or grows
