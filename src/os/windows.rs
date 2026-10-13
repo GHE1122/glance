@@ -11,8 +11,53 @@ pub fn speaks_chinese() -> bool {
     (unsafe { GetUserDefaultUILanguage() } & 0x3FF) == 0x04
 }
 
-/// Whether the system's apps are dark.
+/// Whether the system's apps are dark: as last read, read again as it is changed (it is asked for at every frame of
+/// every widget; read each time, the registry was).
 pub fn apps_dark() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0: not read yet; 1 light; 2 dark.
+    static DARK: AtomicU8 = AtomicU8::new(0);
+    match DARK.load(Ordering::Relaxed) {
+        0 => {
+            let dark = read_apps_dark();
+            if DARK.compare_exchange(0, if dark { 2 } else { 1 }, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                std::thread::Builder::new().name("glance: theme watched".into()).spawn(move || watch_apps_dark(&DARK)).expect("a thread started");
+            }
+            dark
+        }
+        known => known == 2,
+    }
+}
+
+/// Keeps `dark` as the system has it, told by the registry as the key changes (watched before it is read again:
+/// no change goes unseen).
+fn watch_apps_dark(dark: &std::sync::atomic::AtomicU8) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Registry::{RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, KEY_NOTIFY, KEY_READ, REG_NOTIFY_CHANGE_LAST_SET};
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+    let mut key = HKEY::default();
+    if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"), None, KEY_NOTIFY | KEY_READ, &mut key) }.is_err() {
+        return;
+    }
+    let Ok(changed) = (unsafe { CreateEventW(None, false, false, None) }) else {
+        let _ = unsafe { RegCloseKey(key) };
+        return;
+    };
+    loop {
+        if unsafe { RegNotifyChangeKeyValue(key, false, REG_NOTIFY_CHANGE_LAST_SET, Some(changed), true) }.is_err() {
+            break;
+        }
+        dark.store(if read_apps_dark() { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+        unsafe { WaitForSingleObject(changed, INFINITE) };
+    }
+    unsafe {
+        let _ = CloseHandle(changed);
+        let _ = RegCloseKey(key);
+    }
+}
+
+/// Whether the system's apps are dark, read now.
+fn read_apps_dark() -> bool {
     let mut light = 1u32;
     let mut size = 4u32;
     let read = unsafe {
