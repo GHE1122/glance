@@ -119,7 +119,7 @@ const SETTLED: Duration = Duration::from_millis(300);
 const RETAKE_EVERY: Duration = Duration::from_secs(1);
 
 /// When another program's window last changed on the desktop (see
-/// `watch_windows`), as milliseconds since `EPOCH`; 0 for never.
+/// `WindowWatch`), as milliseconds since `EPOCH`; 0 for never.
 static WINDOWS_CHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Where the widgets are on the screens (physical px): a window changing
 /// elsewhere changes nothing behind them.
@@ -153,7 +153,7 @@ fn behind_changed() {
 }
 
 /// One of Glance's own windows (the panel) came or went at `rect`: the
-/// system does not say so (see `watch_windows`), and a widget that took the
+/// system does not say so (see `WindowWatch`), and a widget that took the
 /// desktop with it there shows it still.
 pub fn own_window_changed(rect: RECT) {
     if meets_a_widget(rect) {
@@ -162,27 +162,73 @@ pub fn own_window_changed(rect: RECT) {
 }
 static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
-/// Has the system say whenever another program's window moves, is sized,
+/// The system saying whenever another program's window moves, is sized,
 /// comes to the front, opens, closes or is minimized (each widget's
 /// backdrop may have changed), and whenever the windows' order changes (the
-/// widgets kept on the desktop follow it). Out of context: called on this thread, as
-/// its messages are taken.
-fn watch_windows() -> Option<windows::Win32::UI::Accessibility::HWINEVENTHOOK> {
-    use windows::Win32::UI::Accessibility::SetWinEventHook;
-    use windows::Win32::UI::WindowsAndMessaging::{EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS};
-    EPOCH.get_or_init(Instant::now);
-    // Where the windows already up are: one moving away from behind a
-    // widget, the first time, is seen to.
-    unsafe extern "system" fn seen(window: HWND, _: LPARAM) -> windows::core::BOOL {
-        let mut r = RECT::default();
-        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(window) }.as_bool() && unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(window, &mut r) }.is_ok() {
-            WINDOW_PLACES.lock().unwrap().insert(window.0 as isize, r);
+/// widgets kept on the desktop follow it): heard on a thread of its own, for
+/// as long as this is kept. Only those events are asked for: each one asked
+/// for comes, from every program, as a call to this process that takes the
+/// system's lock for windows; asked for all of them (a busy program's list
+/// raises thousands a second), a thread that hears them hears nothing else,
+/// and holds up every program's windows meanwhile.
+struct WindowWatch {
+    thread: u32,
+}
+
+impl WindowWatch {
+    fn start() -> Option<WindowWatch> {
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, EVENT_OBJECT_DESTROY, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
+            EVENT_SYSTEM_MOVESIZEEND, MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+        };
+        EPOCH.get_or_init(Instant::now);
+        // Where the windows already up are: one moving away from behind a
+        // widget, the first time, is seen to.
+        unsafe extern "system" fn seen(window: HWND, _: LPARAM) -> windows::core::BOOL {
+            let mut r = RECT::default();
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(window) }.as_bool() && unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(window, &mut r) }.is_ok() {
+                WINDOW_PLACES.lock().unwrap().insert(window.0 as isize, r);
+            }
+            true.into()
         }
-        true.into()
+        let (started, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::EnumWindows(Some(seen), LPARAM(0));
+            // The events `window_changed` takes, and no others: (destroyed, shown, hidden, reordered are one run).
+            let asked = [
+                (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+                (EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND),
+                (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
+                (EVENT_OBJECT_DESTROY, EVENT_OBJECT_REORDER),
+                (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
+            ];
+            let hooks: Vec<_> = asked
+                .iter()
+                .map(|&(first, last)| SetWinEventHook(first, last, None, Some(window_changed), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS))
+                .filter(|hook| !hook.is_invalid())
+                .collect();
+            let _ = started.send((hooks.len() == asked.len()).then(|| GetCurrentThreadId()));
+            // (Out of context, the events are heard as messages are waited for.)
+            let mut message = MSG::default();
+            while hooks.len() == asked.len() && GetMessageW(&mut message, None, 0, 0).as_bool() {
+                DispatchMessageW(&message);
+            }
+            for hook in hooks {
+                let _ = UnhookWinEvent(hook);
+            }
+            WINDOW_PLACES.lock().unwrap().clear();
+        });
+        heard.recv().ok().flatten().map(|thread| WindowWatch { thread })
     }
-    let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::EnumWindows(Some(seen), LPARAM(0)) };
-    let hook = unsafe { SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_OBJECT_LOCATIONCHANGE, None, Some(window_changed), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS) };
-    (!hook.is_invalid()).then_some(hook)
+}
+
+impl Drop for WindowWatch {
+    fn drop(&mut self) {
+        use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+        let _ = unsafe { PostThreadMessageW(self.thread, WM_QUIT, WPARAM(0), LPARAM(0)) };
+    }
 }
 
 unsafe extern "system" fn window_changed(
@@ -200,8 +246,9 @@ unsafe extern "system" fn window_changed(
     };
     // The system says so of the screen's own window, whose children the
     // windows are.
-    if event == EVENT_OBJECT_REORDER && window == unsafe { windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow() } {
-        ORDER_CHANGED.store(true, std::sync::atomic::Ordering::Relaxed);
+    // (The widgets' thread woken for it: they follow at once.)
+    if event == EVENT_OBJECT_REORDER && window == unsafe { windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow() } && !ORDER_CHANGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        crate::app().controller.wake();
     }
     // A window gone: let go of, from where it was last (it may be gone
     // past asking about it).
@@ -483,8 +530,8 @@ pub struct Widgets {
     /// Widgets to add as they are (see `adopt`).
     adopted: Vec<WidgetAt>,
     /// The system saying when other programs' windows change (see
-    /// `watch_windows`), while there are widgets.
-    watching: Option<windows::Win32::UI::Accessibility::HWINEVENTHOOK>,
+    /// `WindowWatch`), while there are widgets.
+    watching: Option<WindowWatch>,
     /// Where each widget was last (its window, physical px), shown.
     areas: Vec<(isize, RECT)>,
     /// Live refraction, as the widgets were last drawn (see `Look::live`).
@@ -773,15 +820,12 @@ impl Widgets {
             self.restore(kept);
         }
         if self.list.is_empty() {
-            if let Some(hook) = self.watching.take() {
-                let _ = unsafe { windows::Win32::UI::Accessibility::UnhookWinEvent(hook) };
-                WINDOW_PLACES.lock().unwrap().clear();
-            }
+            self.watching = None;
             SHOWN.store(0, std::sync::atomic::Ordering::Relaxed);
             return None;
         }
         if self.watching.is_none() {
-            self.watching = watch_windows();
+            self.watching = WindowWatch::start();
         }
         // Those kept on the desktop, just above it again wherever it went.
         if ORDER_CHANGED.swap(false, std::sync::atomic::Ordering::Relaxed) {

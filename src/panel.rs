@@ -132,6 +132,8 @@ const LYRIC: u32 = WM_APP + 13;
 const PUSHED: u32 = WM_APP + 14;
 /// The sensors' process went: the mouse is heard here, and the edges watched, from now on.
 const HEAR_OWN: u32 = WM_APP + 15;
+/// Something this thread looks at changed elsewhere (it takes it up as it wakes: see `Controller::wake`).
+const WAKE: u32 = WM_APP + 16;
 
 /// The panel thread's own hotkey: Escape, while the panel is open.
 const ESCAPE_HOTKEY: i32 = 1;
@@ -253,6 +255,11 @@ impl Controller {
     /// Which edges open the panel, as the settings have them now.
     pub fn edges(&self) -> crate::push::Edges {
         self.config.lock().unwrap().edges.clone()
+    }
+
+    /// Wakes the panel's thread, for what it looks at as it wakes (from any thread).
+    pub fn wake(&self) {
+        self.post(WAKE);
     }
 
     /// The line of the lyrics sung has changed (from any thread).
