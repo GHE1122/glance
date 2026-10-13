@@ -460,7 +460,14 @@ fn make(style: Style) -> Option<Shown> {
                 let_through(hwnd, true);
             }
         }
+        // Made where it was kept, on a screen whose scale may be another than the main one's it was sized at: sized
+        // again at its own (else what it draws, at that scale, would not fit in it).
+        let made_at = scale;
         let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+        if scale != made_at {
+            let (pw, ph) = (((w + 2.0 * margin) * scale) as i32, ((h + 2.0 * margin) * scale) as i32);
+            let _ = SetWindowPos(hwnd, None, 0, 0, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE);
+        }
         let surface = Surface::new(&gfx, hwnd).ok();
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         if style == Style::Subtitle {
