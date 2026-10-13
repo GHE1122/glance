@@ -97,7 +97,15 @@ struct Shared {
     ready: Mutex<Option<Capture>>,
     /// Tells the thread that draws (see `Scene::new`).
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// What frames are read back through, kept for the next of the same size.
+    staging: Mutex<Option<Staging>>,
 }
+
+/// A texture the processor may read, and its size.
+struct Staging(ID3D11Texture2D, u32, u32);
+
+// (Used under its lock only.)
+unsafe impl Send for Staging {}
 
 impl Shared {
     /// Reads `frame` back (if it is of the area as it is now), for it to be taken; whether it was.
@@ -113,7 +121,7 @@ impl Shared {
                 return None;
             }
             let texture: ID3D11Texture2D = unsafe { frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface() }.ok()?;
-            let pixels = read_back(device()?, &texture, width as u32, height as u32)?;
+            let pixels = read_back(device()?, &mut self.staging.lock().unwrap(), &texture, width as u32, height as u32)?;
             Some(Capture::from_pixels(area, pixels))
         })();
         let Some(capture) = read else { return false };
@@ -123,32 +131,36 @@ impl Shared {
     }
 }
 
-/// The top left `width` × `height` of `texture`, read back: BGRA, rows top to bottom, made opaque.
-fn read_back(device: &Device, texture: &ID3D11Texture2D, width: u32, height: u32) -> Option<Vec<u8>> {
+/// The top left `width` × `height` of `texture`, read back through `staging` (made, or made anew, for that size):
+/// BGRA, rows top to bottom, made opaque.
+fn read_back(device: &Device, staging: &mut Option<Staging>, texture: &ID3D11Texture2D, width: u32, height: u32) -> Option<Vec<u8>> {
     unsafe {
-        let mut description = D3D11_TEXTURE2D_DESC::default();
-        texture.GetDesc(&mut description);
-        description.Width = width;
-        description.Height = height;
-        description.Usage = D3D11_USAGE_STAGING;
-        description.BindFlags = 0;
-        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-        description.MiscFlags = 0;
-        let mut staging = None;
-        device.device.CreateTexture2D(&description, None, Some(&mut staging)).ok()?;
-        let staging = staging?;
+        if staging.as_ref().is_none_or(|Staging(_, w, h)| (*w, *h) != (width, height)) {
+            let mut description = D3D11_TEXTURE2D_DESC::default();
+            texture.GetDesc(&mut description);
+            description.Width = width;
+            description.Height = height;
+            description.Usage = D3D11_USAGE_STAGING;
+            description.BindFlags = 0;
+            description.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            description.MiscFlags = 0;
+            let mut made = None;
+            device.device.CreateTexture2D(&description, None, Some(&mut made)).ok()?;
+            *staging = Some(Staging(made?, width, height));
+        }
+        let Staging(staging, ..) = staging.as_ref()?;
         let region = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
         let row = width as usize * 4;
         let mut pixels = Vec::with_capacity(row * height as usize);
         {
             let context = device.context.lock().unwrap();
-            context.CopySubresourceRegion(&staging, 0, 0, 0, 0, texture, 0, Some(&region));
+            context.CopySubresourceRegion(staging, 0, 0, 0, 0, texture, 0, Some(&region));
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).ok()?;
+            context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).ok()?;
             for y in 0..height as usize {
                 pixels.extend_from_slice(std::slice::from_raw_parts((mapped.pData as *const u8).add(y * mapped.RowPitch as usize), row));
             }
-            context.Unmap(&staging, 0);
+            context.Unmap(staging, 0);
         }
         // (What no window covers is the scene's own window: drawn opaque, as the screen is.)
         for alpha in pixels.iter_mut().skip(3).step_by(4) {
@@ -232,7 +244,7 @@ impl Scene {
                     return None;
                 }
             };
-            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake });
+            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, staging: Mutex::new(None) });
             let made = (|| {
                 let cloak: BOOL = true.into();
                 DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).ok()?;
