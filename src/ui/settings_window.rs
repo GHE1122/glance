@@ -229,6 +229,20 @@ fn windows_build() -> u32 {
     metrics::reg_string(w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"), w!("CurrentBuild")).parse().unwrap_or(0)
 }
 
+/// The switches turned on another thread (see `Ui::switching`).
+#[derive(Clone, Copy)]
+enum SwitchAsked {
+    Startup,
+    Remote,
+}
+
+/// What the diagnostics are put together for.
+#[derive(Clone, Copy)]
+enum ReportFor {
+    Copy,
+    Send,
+}
+
 /// The window's own colours: Windows 11's, whatever skin the panel wears.
 #[derive(Clone)]
 struct Palette {
@@ -632,6 +646,12 @@ struct Ui {
     remote_screens: bool,
     fetching: Option<std::thread::JoinHandle<bool>>,
     fetch_failed: bool,
+    /// A switch that needs the sensors' rights, being turned (on another thread: their process is asked, and
+    /// answers when the system has done it); what it is then.
+    switching: Option<(SwitchAsked, std::thread::JoinHandle<bool>)>,
+    /// The diagnostics being put together (on another thread: the sensors' part is asked of their process), and
+    /// what for.
+    reporting: Option<(ReportFor, std::thread::JoinHandle<String>)>,
     code: Option<(crate::phone::Code, CodeFor)>,
     phones: Vec<crate::phone::Phone>,
     phones_at: Instant,
@@ -773,6 +793,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             remote_screens: crate::phone::screens_kept(),
             fetching: None,
             fetch_failed: false,
+            switching: None,
+            reporting: None,
             code: None,
             phones: crate::phone::phones(),
             phones_at: Instant::now(),
@@ -1880,24 +1902,61 @@ impl Ui {
                 return;
             }
             Switch::Remote => {
-                // What the system then reports, not what was asked.
-                if self.remote_there {
-                    self.remote = crate::source::switch(crate::link::Switch::Remote, !self.remote);
-                    self.web_address = crate::phone::web_address();
-                    self.code = None;
-                    self.phones = crate::phone::phones();
+                // What the system then reports, not what was asked (see `tick`).
+                if self.remote_there && self.switching.is_none() {
+                    let on = !self.remote;
+                    self.switching = Some((SwitchAsked::Remote, std::thread::spawn(move || crate::source::switch(crate::link::Switch::Remote, on))));
                 }
                 self.next_frame = Instant::now();
                 return;
             }
             Switch::Startup => {
-                // What the system then reports, not what was asked.
-                self.autostart = crate::source::switch(crate::link::Switch::Autostart, !self.autostart);
+                // What the system then reports, not what was asked (see `tick`).
+                if self.switching.is_none() {
+                    let on = !self.autostart;
+                    self.switching = Some((SwitchAsked::Startup, std::thread::spawn(move || crate::source::switch(crate::link::Switch::Autostart, on))));
+                }
                 self.next_frame = Instant::now();
                 return;
             }
         }
         self.save();
+    }
+
+    /// The diagnostics put together: shown whole, with room for the user's own words and pictures, and sent if
+    /// they agree.
+    fn send_report(&mut self, report: String) {
+        let lang = self.lang;
+        let asked = super::ask::Asked {
+            title: pick(lang, "发送诊断信息", "Send diagnostics"),
+            intro: pick(
+                lang,
+                "下面是将要发送给 Glance（glancepc.com）的全部内容：你写的话、你添加的截图，和最下面的诊断信息（这台电脑的硬件、Glance 读到的数值和它最近的日志）。不包含你的文件、账号或网络地址。",
+                "Below is all that would be sent to Glance (glancepc.com): what you write, the pictures you add, and the diagnostics at the bottom (this PC's hardware, what Glance reads of it, and Glance's recent log). Nothing of your files, accounts or network address.",
+            ),
+            own: Some(super::ask::Own {
+                words: pick(lang, "你想说的话（可不填）", "Your own words (may be left empty)"),
+                hint: pick(lang, "比如：主板温度没有显示；风扇转速和别的软件里看到的不一样", "For instance: the board's temperature is missing; a fan's speed is not what another program shows"),
+                pictures: pick(lang, "截图（可不添，最多 3 张）", "Pictures (if you like, up to 3)"),
+                add: pick(lang, "添加截图", "Add a picture"),
+                ways: pick(lang, "点击选择、拖进窗口，或按 Ctrl+V 粘贴", "Click to choose one, drop it here, or paste it with Ctrl+V"),
+                paste: pick(lang, "粘贴剪贴板里的截图", "Paste the clipboard's"),
+                waiting: pick(lang, "剪贴板里有截图，按 Ctrl+V 即可粘贴", "There is a picture on the clipboard: Ctrl+V pastes it"),
+                kinds: pick(lang, "图片", "Pictures"),
+            }),
+            sent: Some((pick(lang, "诊断信息", "Diagnostics"), &report)),
+            yes: pick(lang, "发送", "Send"),
+            no: pick(lang, "取消", "Cancel"),
+            dark: self.dark,
+        };
+        if let Some(said) = super::ask::show(self.hwnd, &asked) {
+            // (Their words first, set off from what Glance says of the PC.)
+            let report = if said.words.is_empty() { report } else { format!("The user says: {}
+
+{report}", said.words) };
+            self.sent = None;
+            self.sending = Some(std::thread::spawn(move || crate::diagnostics::send(&report, &said.pictures)));
+        }
     }
 
     /// A module's title and what it describes on this machine.
@@ -2300,47 +2359,11 @@ impl Ui {
                 }
             }
             Target::Update => update::install(),
-            Target::Diagnostics => {
-                if crate::diagnostics::copy(self.hwnd, &crate::diagnostics::report()) {
-                    self.copied_at = Some(Instant::now());
-                }
-            }
+            Target::Diagnostics if self.reporting.is_none() => self.reporting = Some((ReportFor::Copy, std::thread::spawn(crate::diagnostics::report))),
+            Target::Diagnostics => {}
             Target::Quit => crate::quit(),
-            // Shown whole first, every part of it: nothing leaves this PC that was not read and agreed to.
-            Target::SendReport if self.sending.is_none() => {
-                let report = crate::diagnostics::report();
-                let lang = self.lang;
-                let asked = super::ask::Asked {
-                    title: pick(lang, "发送诊断信息", "Send diagnostics"),
-                    intro: pick(
-                        lang,
-                        "下面是将要发送给 Glance（glancepc.com）的全部内容：你写的话、你添加的截图，和最下面的诊断信息（这台电脑的硬件、Glance 读到的数值和它最近的日志）。不包含你的文件、账号或网络地址。",
-                        "Below is all that would be sent to Glance (glancepc.com): what you write, the pictures you add, and the diagnostics at the bottom (this PC's hardware, what Glance reads of it, and Glance's recent log). Nothing of your files, accounts or network address.",
-                    ),
-                    own: Some(super::ask::Own {
-                        words: pick(lang, "你想说的话（可不填）", "Your own words (may be left empty)"),
-                        hint: pick(lang, "比如：主板温度没有显示；风扇转速和别的软件里看到的不一样", "For instance: the board's temperature is missing; a fan's speed is not what another program shows"),
-                        pictures: pick(lang, "截图（可不添，最多 3 张）", "Pictures (if you like, up to 3)"),
-                        add: pick(lang, "添加截图", "Add a picture"),
-                        ways: pick(lang, "点击选择、拖进窗口，或按 Ctrl+V 粘贴", "Click to choose one, drop it here, or paste it with Ctrl+V"),
-                        paste: pick(lang, "粘贴剪贴板里的截图", "Paste the clipboard's"),
-                        waiting: pick(lang, "剪贴板里有截图，按 Ctrl+V 即可粘贴", "There is a picture on the clipboard: Ctrl+V pastes it"),
-                        kinds: pick(lang, "图片", "Pictures"),
-                    }),
-                    sent: Some((pick(lang, "诊断信息", "Diagnostics"), &report)),
-                    yes: pick(lang, "发送", "Send"),
-                    no: pick(lang, "取消", "Cancel"),
-                    dark: self.dark,
-                };
-                if let Some(said) = super::ask::show(self.hwnd, &asked) {
-                    // (Their words first, set off from what Glance says of the PC.)
-                    let report = if said.words.is_empty() { report } else { format!("The user says: {}
-
-{report}", said.words) };
-                    self.sent = None;
-                    self.sending = Some(std::thread::spawn(move || crate::diagnostics::send(&report, &said.pictures)));
-                }
-            }
+            // Put together first (see `tick`), then shown whole: nothing leaves this PC that was not read and agreed to.
+            Target::SendReport if self.sending.is_none() && self.reporting.is_none() => self.reporting = Some((ReportFor::Send, std::thread::spawn(crate::diagnostics::report))),
             Target::SendReport => {}
             // (Pressed again, its code is put away.)
             Target::GetApp if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) => self.code = None,
@@ -2797,6 +2820,39 @@ impl Ui {
         }
         if self.sending.is_some() {
             self.next_frame = now + Duration::from_millis(300);
+        }
+        // A switch turned: as it is now.
+        if self.switching.as_ref().is_some_and(|(_, turning)| turning.is_finished()) {
+            let (what, turning) = self.switching.take().unwrap();
+            let on = turning.join().unwrap_or(false);
+            match what {
+                SwitchAsked::Startup => self.autostart = on,
+                SwitchAsked::Remote => {
+                    self.remote = on;
+                    self.web_address = crate::phone::web_address();
+                    self.code = None;
+                    self.phones = crate::phone::phones();
+                }
+            }
+            self.next_frame = now;
+        }
+        // The diagnostics put together: copied, or shown to be sent.
+        if self.reporting.as_ref().is_some_and(|(_, putting)| putting.is_finished()) {
+            let (what, putting) = self.reporting.take().unwrap();
+            if let Ok(report) = putting.join() {
+                match what {
+                    ReportFor::Copy => {
+                        if crate::diagnostics::copy(self.hwnd, &report) {
+                            self.copied_at = Some(Instant::now());
+                        }
+                    }
+                    ReportFor::Send => self.send_report(report),
+                }
+            }
+            self.next_frame = now;
+        }
+        if self.switching.is_some() || self.reporting.is_some() {
+            self.next_frame = self.next_frame.min(now + Duration::from_millis(100));
         }
         // The lights' program fetched (or taken away): how that went, once it is over.
         if self.fetching.as_ref().is_some_and(|fetching| fetching.is_finished()) {
