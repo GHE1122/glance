@@ -1747,8 +1747,8 @@ impl<'a> Panel<'a> {
 
     /// What a press at `client` (physical px in the window) would do to the
     /// open panel: size it by the edges it is on, or move it, from anywhere
-    /// on it that takes no click or wheel of its own; nothing, pinned (it
-    /// stays as it is).
+    /// on it that takes no press of its own (the process list too, which
+    /// takes only the wheel); nothing, pinned (it stays as it is).
     fn grip_at(&self, client: POINT) -> Option<Edges> {
         let px = match &self.placement {
             Some(placement) if !self.pinned && self.is_open() => placement.px,
@@ -1759,7 +1759,7 @@ impl<'a> Panel<'a> {
         if edges.any() {
             return Some(edges);
         }
-        self.hit_at(client).is_none().then_some(edges)
+        self.hit_at(client).is_none_or(|hit| !hit.takes_press()).then_some(edges)
     }
 
     /// Whether `client` (physical px in the window) is on the panel's bar.

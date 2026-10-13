@@ -163,6 +163,12 @@ pub enum Hit {
 }
 
 impl Hit {
+    /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
+    /// cells only scroll and show, under the wheel and the pointer.
+    pub fn takes_press(self) -> bool {
+        !matches!(self, Hit::Processes(_) | Hit::Thread(_))
+    }
+
     /// How far the process list scrolls, for a hit on it.
     pub fn max_scroll(self) -> Option<f32> {
         match self {
