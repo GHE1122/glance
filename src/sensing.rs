@@ -95,6 +95,7 @@ pub fn run() {
         let tell = |told: &Told| link::tell(&mut telling.lock().unwrap(), told);
         let hello = Told::Hello { version: env!("CARGO_PKG_VERSION").into(), info: sampler.info.clone(), found: sampler.info.found.clone() };
         let greeted = tell(&hello)
+            && tell(&Told::Buttons { down: crate::panel::buttons_down(), pressed: false })
             && tell(&Told::Switched { switch: Switch::Autostart, on: crate::elevation::autostart_enabled() })
             && tell(&Told::Switched { switch: Switch::Remote, on: crate::phone::on() });
         // What it is asked, heard on a thread of its own; a report is said by the reading loop, the rest done here.
@@ -231,12 +232,17 @@ fn watch_edges() {
         }
         unsafe { DefWindowProcW(window, message, wparam, lparam) }
     }
-    let tell = |pushed: Option<crate::push::Pushed>| {
-        let Some((at, _, edge)) = pushed else { return };
+    let say = |told: &Told| {
         if let Some(telling) = PUSHES_TO.lock().unwrap().as_ref() {
-            let _ = link::tell(&mut telling.lock().unwrap(), &Told::Pushed { edge, at: (at.x, at.y) });
+            let _ = link::tell(&mut telling.lock().unwrap(), told);
         }
     };
+    let tell = |pushed: Option<crate::push::Pushed>| {
+        let Some((at, _, edge)) = pushed else { return };
+        say(&Told::Pushed { edge, at: (at.x, at.y) });
+    };
+    // Whether a button was down as last said.
+    let mut down = crate::panel::buttons_down();
     unsafe {
         let Ok(module) = GetModuleHandleW(None) else { return };
         let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: w!("GlanceEdges"), ..Default::default() };
@@ -254,8 +260,17 @@ fn watch_edges() {
             let now = Instant::now();
             match message.message {
                 WM_INPUT => {
-                    if let (Some(moved), Some(cursor)) = (crate::panel::read_motion(HRAWINPUT(message.lParam.0 as *mut _)), crate::panel::cursor_position()) {
+                    let Some((moved, buttons)) = crate::panel::read_mouse(HRAWINPUT(message.lParam.0 as *mut _)) else { continue };
+                    if let Some(cursor) = crate::panel::cursor_position() {
                         tell(pusher.heard(&WATCHED.lock().unwrap(), moved, cursor, now));
+                    }
+                    // The buttons: a press as the device reports it, whether one is down as read now (this process
+                    // reads them truly).
+                    let pressed = buttons & crate::panel::ANY_BUTTON_DOWN != 0;
+                    let now_down = crate::panel::buttons_down();
+                    if pressed || now_down != down {
+                        down = now_down;
+                        say(&Told::Buttons { down, pressed });
                     }
                 }
                 WM_TIMER if message.wParam.0 == LOOK_TIMER => {

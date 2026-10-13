@@ -46,6 +46,11 @@ pub enum Told {
     Updating(UpdateState),
     /// A line for Glance's log (the sensors' process writes none of its own).
     Note(String),
+    /// The mouse's buttons, as they hear them whatever window is in front (the rest, running as the user, reads
+    /// them as up throughout over an elevated one): whether any is down now, and whether one was pressed since
+    /// they last said (a press let go again before they said is told so). Said as the rest comes, and as they
+    /// change.
+    Buttons { down: bool, pressed: bool },
 }
 
 /// The switches that need the sensors' rights to be turned: Glance starting at sign-in (its task was made

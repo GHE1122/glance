@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::f32::consts::E;
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -869,7 +869,7 @@ impl Controller {
                     if let Some(cursor) = cursor_position() {
                         on_seam(cursor, &mut panel);
                     }
-                    if let (Some(moved), Some(cursor)) = (read_motion(HRAWINPUT(msg.lParam.0 as *mut _)), cursor_position()) {
+                    if let (Some((moved, _)), Some(cursor)) = (read_mouse(HRAWINPUT(msg.lParam.0 as *mut _)), cursor_position()) {
                         let pushed = pusher.heard(&self.config.lock().unwrap().edges, moved, cursor, now);
                         if let Some(pushed) = pushed {
                             open_pushed(pushed, &mut panel);
@@ -1167,6 +1167,9 @@ struct Panel<'a> {
     tear: Option<(Form, f32, POINT, POINT)>,
     /// Torn off: to go once the widget is drawn.
     torn: bool,
+    /// The presses the sensors' process had told when the panel last looked (one told since is a press, however
+    /// short, as the panel is open).
+    presses_seen: u64,
     /// A drag of the pinned panel under way.
     drag: Option<PanelDrag>,
     /// The largest size the panel still grows to on its screen (see
@@ -1240,6 +1243,7 @@ impl<'a> Panel<'a> {
             bar: view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             tear: None,
             torn: false,
+            presses_seen: 0,
             drag: None,
             largest: SIZES.1,
             sizing: None,
@@ -1555,7 +1559,9 @@ impl<'a> Panel<'a> {
         let on_panel = contains(&placement.panel, cursor);
         let in_reach = contains(&placement.reach, cursor);
         let close_delay = self.controller.config.lock().unwrap().close_delay;
-        let held = buttons_down();
+        // Down now, or pressed (and perhaps let go) since it last looked.
+        let presses = PRESSES.load(Ordering::Relaxed);
+        let held = buttons_down() || std::mem::replace(&mut self.presses_seen, presses) != presses;
         if !on_panel && self.hover.take().is_some() {
             self.next_frame = now;
         }
@@ -1590,6 +1596,9 @@ impl<'a> Panel<'a> {
     fn tick(&mut self, now: Instant) {
         if self.is_open() {
             self.track(now);
+        } else {
+            // (What was pressed before it opened is not a press elsewhere.)
+            self.presses_seen = PRESSES.load(Ordering::Relaxed);
         }
         // Not while it gives way to the settings: they are in front of it,
         // and would be taken as what is behind it.
@@ -2473,8 +2482,25 @@ pub(crate) fn cursor_position() -> Option<POINT> {
     unsafe { GetCursorPos(&mut point) }.ok().map(|_| point)
 }
 
-fn buttons_down() -> bool {
+/// Whether a mouse button is down: as the sensors' process says while there is one (it reads them truly whatever
+/// window is in front), else as read here.
+pub(crate) fn buttons_down() -> bool {
+    if crate::source::linked() {
+        return BUTTONS_DOWN.load(Ordering::Relaxed);
+    }
     [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].iter().any(|key| unsafe { GetAsyncKeyState(key.0 as i32) } < 0)
+}
+
+/// The buttons as the sensors' process last said: whether one is down, and how many presses it has told.
+static BUTTONS_DOWN: AtomicBool = AtomicBool::new(false);
+static PRESSES: AtomicU64 = AtomicU64::new(0);
+
+/// What the sensors' process says of the buttons (see `Told::Buttons`).
+pub(crate) fn heard_buttons(down: bool, pressed: bool) {
+    BUTTONS_DOWN.store(down, Ordering::Relaxed);
+    if pressed {
+        PRESSES.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn cursor_showing() -> bool {
@@ -2503,7 +2529,11 @@ impl Moved {
     }
 }
 
-pub(crate) fn read_motion(handle: HRAWINPUT) -> Option<Moved> {
+/// The raw input's flags for a button going down: the left, the right, the middle, the fourth and the fifth.
+pub(crate) const ANY_BUTTON_DOWN: u16 = 0x0001 | 0x0004 | 0x0010 | 0x0040 | 0x0100;
+
+/// A mouse's raw input: how it moved, and its buttons' flags (what went down and up with it).
+pub(crate) fn read_mouse(handle: HRAWINPUT) -> Option<(Moved, u16)> {
     let mut raw = RAWINPUT::default();
     let mut size = size_of::<RAWINPUT>() as u32;
     let read = unsafe {
@@ -2513,10 +2543,11 @@ pub(crate) fn read_motion(handle: HRAWINPUT) -> Option<Moved> {
         return None;
     }
     let mouse = unsafe { raw.data.mouse };
+    let buttons = unsafe { mouse.Anonymous.Anonymous.usButtonFlags };
     if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE != 0 {
-        return Some(Moved::To);
+        return Some((Moved::To, buttons));
     }
-    Some(Moved::By(mouse.lLastX, mouse.lLastY))
+    Some((Moved::By(mouse.lLastX, mouse.lLastY), buttons))
 }
 
 pub(crate) fn monitor_at(point: POINT) -> Option<Contact> {

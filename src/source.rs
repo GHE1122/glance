@@ -204,6 +204,7 @@ impl Source {
                         }
                         Some(Told::Updating(state)) => crate::update::set_state(state),
                         Some(Told::Note(line)) => crate::journal::note(line),
+                        Some(Told::Buttons { down, pressed }) => crate::panel::heard_buttons(down, pressed),
                         Some(Told::Hello { .. }) => {}
                         None => {
                             LINKED.store(false, Ordering::Relaxed);
