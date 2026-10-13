@@ -98,6 +98,9 @@ pub struct Gfx {
     /// maps, by size, radius and scale): kept while frames keep drawing
     /// them, as text is.
     made: RefCell<HashMap<[u32; 4], (ID2D1Bitmap1, Instant)>>,
+    /// The two colours each gradient fades between, as made for them (a resource of the device, any of its
+    /// contexts draws with), and when each was last used.
+    stops: RefCell<HashMap<[u32; 8], (windows::Win32::Graphics::Direct2D::ID2D1GradientStopCollection, Instant)>>,
 }
 
 /// How much contrast grayscale text's edges are given by `crisp_text` (the
@@ -202,6 +205,7 @@ impl Gfx {
             icons,
             formats: RefCell::new(HashMap::new()),
             made: RefCell::new(HashMap::new()),
+            stops: RefCell::new(HashMap::new()),
             layouts: RefCell::new(HashMap::new()),
             round: round.into(),
             dashed: dashed.into(),
@@ -312,6 +316,7 @@ impl Gfx {
     pub fn trim(&self) {
         self.layouts.borrow_mut().clear();
         self.made.borrow_mut().clear();
+        self.stops.borrow_mut().clear();
         unsafe {
             self.device.ClearResources(0);
             self.dxgi.Trim();
@@ -323,6 +328,7 @@ impl Gfx {
         self.layouts.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
         self.formats.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
         self.made.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
+        self.stops.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
     }
 
     /// The bitmap `key` stands for: the one made for it before, else made
@@ -684,9 +690,26 @@ impl<'a> Frame<'a> {
 
     /// A brush fading from `from` at `start` to `to` at `end`.
     pub(super) fn gradient(&self, start: Vector2, from: Color, end: Vector2, to: Color) -> Option<windows::Win32::Graphics::Direct2D::ID2D1Brush> {
-        let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: from.d2d() }, D2D1_GRADIENT_STOP { position: 1.0, color: to.d2d() }];
+        // The colours' stops, made once for them while they are drawn with.
+        let key = [from.r, from.g, from.b, from.a, to.r, to.g, to.b, to.a].map(f32::to_bits);
+        let now = Instant::now();
+        let collection = match self.gfx.stops.borrow_mut().get_mut(&key) {
+            Some((collection, used)) => {
+                *used = now;
+                Some(collection.clone())
+            }
+            None => None,
+        };
+        let collection = match collection {
+            Some(collection) => collection,
+            None => {
+                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: from.d2d() }, D2D1_GRADIENT_STOP { position: 1.0, color: to.d2d() }];
+                let made = unsafe { ID2D1RenderTarget::CreateGradientStopCollection(&self.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) }.ok()?;
+                self.gfx.stops.borrow_mut().insert(key, (made.clone(), now));
+                made
+            }
+        };
         unsafe {
-            let collection = ID2D1RenderTarget::CreateGradientStopCollection(&self.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()?;
             let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: start, endPoint: end };
             self.dc.CreateLinearGradientBrush(&line, None, &collection).ok()?.cast().ok()
         }
