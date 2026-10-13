@@ -25,9 +25,9 @@ is behind them through a **scene**:
   anything in it changes, none while nothing does.
 - A frame is read back (pixels, lightness, digest: what the skins and themes
   use) only when one is wanted, on another thread: as it comes, or at once if
-  one came meanwhile. Widgets want one as often as every 250 ms with live
-  refraction, every second without; the one awaited after the scene was
-  arranged anew, at once.
+  one came meanwhile. With live refraction, one as often as every 250 ms;
+  the one awaited after the scene was arranged anew, at once (without live
+  refraction, only that one).
 - The scene is arranged anew when the window moves past its area, goes to
   another screen, or the windows behind change (the widgets' window watch;
   the panel looks every 250 ms with live refraction). Frames from before an
