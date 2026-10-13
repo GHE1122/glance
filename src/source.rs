@@ -35,6 +35,8 @@ static ASKING: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static LINKED: AtomicBool = AtomicBool::new(false);
 /// Since when the link there is has been there.
 static LINKED_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+/// How many links there have been (one asked something before the latest knows nothing of it).
+static LINKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// What the sensors last said for a report, as it came.
 static REPORTED: Mutex<Option<Vec<String>>> = Mutex::new(None);
 /// What was last asked of them (asked again only when it changes): the readings, and the edges they watch.
@@ -135,7 +137,18 @@ fn linked_to(link: &Link) {
     *WANTED.lock().unwrap() = None;
     *EDGES.lock().unwrap() = None;
     *LINKED_SINCE.lock().unwrap() = Some(Instant::now());
+    LINKS.fetch_add(1, Ordering::Relaxed);
     LINKED.store(true, Ordering::Relaxed);
+}
+
+/// The link there is now, by its count (see `LINKS`); none, there is none.
+pub fn link() -> Option<u64> {
+    linked().then(|| LINKS.load(Ordering::Relaxed))
+}
+
+/// Asks the sensors' process to hear what touches the PC, or no longer.
+pub fn hear_activity(on: bool) {
+    ask(&Asked::Activity(on));
 }
 
 /// Whether the readings come from the sensors' process.
@@ -205,6 +218,7 @@ impl Source {
                         Some(Told::Updating(state)) => crate::update::set_state(state),
                         Some(Told::Note(line)) => crate::journal::note(line),
                         Some(Told::Buttons { down, pressed }) => crate::panel::heard_buttons(down, pressed),
+                        Some(Told::Activity { touched, nothing }) => crate::touches::heard(touched, nothing),
                         Some(Told::Hello { .. }) => {}
                         None => {
                             LINKED.store(false, Ordering::Relaxed);

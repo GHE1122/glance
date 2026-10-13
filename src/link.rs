@@ -51,7 +51,14 @@ pub enum Told {
     /// they last said (a press let go again before they said is told so). Said as the rest comes, and as they
     /// change.
     Buttons { down: bool, pressed: bool },
+    /// What touches the PC, while the rest asks (see `Asked::Activity`): the last touch, and the last report that
+    /// said nothing was moved or pressed, each by the device it came from (at most `DEVICE_MOST` characters) and
+    /// when (`GetTickCount`); none, nothing heard yet.
+    Activity { touched: Option<(String, u32)>, nothing: Option<(String, u32)> },
 }
+
+/// The most of a device's name told in `Told::Activity`.
+pub const DEVICE_MOST: usize = 256;
 
 /// The switches that need the sensors' rights to be turned: Glance starting at sign-in (its task was made
 /// elevated), and the phone remote (its task, and its way through the firewall).
@@ -85,6 +92,8 @@ pub enum Asked {
     /// The first thing the rest says, as it comes: its version (the sensors serve only their own version's rest:
     /// another's makes them go, for the rest to start its own).
     Hello { version: String },
+    /// Whether to hear what touches the PC (for the phone remote, while it has the screens out), and tell it.
+    Activity(bool),
     /// How often to read, and what besides the plain readings.
     Want(Want),
     /// Whether a game shows, as the user set it.

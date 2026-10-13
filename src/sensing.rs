@@ -126,6 +126,7 @@ pub fn run() {
                             tell(&Told::Updating(crate::update::fetch_and_run_sent(&release)));
                         }
                         Asked::Edges(edges) => *WATCHED.lock().unwrap() = edges.checked(),
+                        Asked::Activity(on) => HEARING_ACTIVITY.store(on, std::sync::atomic::Ordering::Relaxed),
                     }
                 }
             }
@@ -170,6 +171,7 @@ pub fn run() {
         // till it says again which.
         *PUSHES_TO.lock().unwrap() = None;
         *WATCHED.lock().unwrap() = Edges::none();
+        HEARING_ACTIVITY.store(false, std::sync::atomic::Ordering::Relaxed);
         drop(telling);
         drop(asked);
         pipes.let_go();
@@ -206,6 +208,11 @@ fn watch_readings() {
 /// The edges watched, as the rest last said; and where each push seen is told (none: the rest is not there).
 static WATCHED: Mutex<Edges> = Mutex::new(Edges::none());
 static PUSHES_TO: Mutex<Option<Arc<Mutex<std::fs::File>>>> = Mutex::new(None);
+/// Whether the rest wants to hear what touches the PC (see `Asked::Activity`).
+static HEARING_ACTIVITY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What is heard of what touches the PC is told at most this often (a mouse reports a thousand times a second), and
+/// at once when its kind changes (a touch after a report that said nothing, or the other way).
+const ACTIVITY_EVERY: Duration = Duration::from_millis(50);
 
 /// How often the pointer is looked at (for one that moves without the mouse's motion being heard: see
 /// `Pusher::looked`), and how often again while it rests on an edge.
@@ -215,11 +222,15 @@ const LOOK_TIMER: usize = 1;
 const RESTING_TIMER: usize = 2;
 
 /// Watches the edges that open the panel, on a thread of its own: the mouse's own motion (raw input, which reaches
-/// an elevated process whatever window is in front) and the pointer's place; each push seen told to the rest.
+/// an elevated process whatever window is in front) and the pointer's place; each push seen told to the rest. And
+/// the mouse's buttons, told as they change; and, while the rest asks, what touches the PC (every kind of device the
+/// phone remote wakes the screens for), all heard by the one window (a process hears a kind of device at one
+/// window only).
 fn watch_edges() {
     use windows::core::w;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::SystemInformation::GetTickCount;
     use windows::Win32::UI::Input::{RegisterRawInputDevices, HRAWINPUT, RAWINPUTDEVICE, RIDEV_INPUTSINK};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, RegisterClassW, SetTimer, MSG, WINDOW_STYLE, WM_DISPLAYCHANGE, WM_INPUT, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
@@ -243,13 +254,20 @@ fn watch_edges() {
     };
     // Whether a button was down as last said.
     let mut down = crate::panel::buttons_down();
+    // What touches the PC, while it is heard: what was heard, and what kind was told when.
+    let mut activity: Option<(crate::touch::Heard, Option<(bool, Instant)>)> = None;
+    let tell_activity = |heard: &crate::touch::Heard| {
+        let named = |heard: &Option<(String, u32)>| heard.as_ref().map(|(device, at)| (device.chars().take(link::DEVICE_MOST).collect(), *at));
+        say(&Told::Activity { touched: named(&heard.touched), nothing: named(&heard.nothing) });
+    };
     unsafe {
         let Ok(module) = GetModuleHandleW(None) else { return };
         let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: w!("GlanceEdges"), ..Default::default() };
         RegisterClassW(&class);
         let Ok(window) = CreateWindowExW(WS_EX_TOOLWINDOW, class.lpszClassName, w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, None, None, Some(module.into()), None) else { return };
         let mouse = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: window };
-        if RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32).is_err() {
+        let hear_mouse = || RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32).is_ok();
+        if !hear_mouse() {
             return;
         }
         SetTimer(Some(window), LOOK_TIMER, LOOK_MS, None);
@@ -260,20 +278,46 @@ fn watch_edges() {
             let now = Instant::now();
             match message.message {
                 WM_INPUT => {
-                    let Some((moved, buttons)) = crate::panel::read_mouse(HRAWINPUT(message.lParam.0 as *mut _)) else { continue };
-                    if let Some(cursor) = crate::panel::cursor_position() {
-                        tell(pusher.heard(&WATCHED.lock().unwrap(), moved, cursor, now));
+                    if let Some((moved, buttons)) = crate::panel::read_mouse(HRAWINPUT(message.lParam.0 as *mut _)) {
+                        if let Some(cursor) = crate::panel::cursor_position() {
+                            tell(pusher.heard(&WATCHED.lock().unwrap(), moved, cursor, now));
+                        }
+                        // The buttons: a press as the device reports it, whether one is down as read now (this
+                        // process reads them truly).
+                        let pressed = buttons & crate::panel::ANY_BUTTON_DOWN != 0;
+                        let now_down = crate::panel::buttons_down();
+                        if pressed || now_down != down {
+                            down = now_down;
+                            say(&Told::Buttons { down, pressed });
+                        }
                     }
-                    // The buttons: a press as the device reports it, whether one is down as read now (this process
-                    // reads them truly).
-                    let pressed = buttons & crate::panel::ANY_BUTTON_DOWN != 0;
-                    let now_down = crate::panel::buttons_down();
-                    if pressed || now_down != down {
-                        down = now_down;
-                        say(&Told::Buttons { down, pressed });
+                    if let Some((heard, last)) = &mut activity {
+                        if let Some(said) = heard.take(message.lParam, GetTickCount()) {
+                            if last.is_none_or(|(kind, at)| kind != said || now.duration_since(at) >= ACTIVITY_EVERY) {
+                                tell_activity(heard);
+                                *last = Some((said, now));
+                            }
+                        }
                     }
                 }
                 WM_TIMER if message.wParam.0 == LOOK_TIMER => {
+                    // What touches the PC heard from now on, or no longer, as the rest asks; each time anew (what
+                    // was heard the last time is not of this one).
+                    let wanted = HEARING_ACTIVITY.load(std::sync::atomic::Ordering::Relaxed);
+                    if wanted != activity.is_some() {
+                        if wanted {
+                            if crate::touch::hear(window, true).is_ok() {
+                                let heard = crate::touch::Heard::default();
+                                tell_activity(&heard);
+                                activity = Some((heard, None));
+                            }
+                        } else {
+                            // (Taking the other kinds away takes the mouse too: heard again at once.)
+                            let _ = crate::touch::hear(window, false);
+                            hear_mouse();
+                            activity = None;
+                        }
+                    }
                     if let Some(cursor) = crate::panel::cursor_position() {
                         pusher.looked(&WATCHED.lock().unwrap(), cursor, now);
                     }

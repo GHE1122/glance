@@ -1,12 +1,15 @@
 //! What touches the PC while the phone remote has the screens out, heard
-//! here for the remote: it is not elevated, and Windows lets it hear
-//! nothing of what goes to a window of a program that is (see `touch`);
-//! Glance is, and hears it all. The remote says when it has the screens
-//! out (an event of its own making, set meanwhile); only then does Glance
-//! listen, and what it hears (which device, when, and whether it said
-//! anything was moved or pressed: never what) it leaves in a piece of
-//! memory shared by name, as it leaves its readings.
+//! for the remote: it runs as the user, and Windows lets it hear nothing of
+//! what goes to a window of a program that is elevated (see `touch`). The
+//! sensors' process is, and hears it all: while there is one, it is asked
+//! to listen; without one, Glance listens itself, and hears what it can.
+//! The remote says when it has the screens out (an event of its own making,
+//! set meanwhile); only then is anything listened for, and what is heard
+//! (which device, when, and whether it said anything was moved or pressed:
+//! never what) is left in a piece of memory shared by name, as Glance
+//! leaves its readings.
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -22,16 +25,18 @@ use crate::touch::Heard;
 
 /// How often the remote is asked whether it has the screens out.
 const ASKED_EVERY: Duration = Duration::from_secs(1);
-/// What is heard is left for the remote at most this often (a mouse
+/// What is heard here is left for the remote at most this often (a mouse
 /// reports a thousand times a second), and at once when its kind changes
 /// (a touch after a report that said nothing, or the other way).
 const TOLD_EVERY: Duration = Duration::from_millis(50);
 
-/// What has been heard since listening began, where it is left for the
-/// remote, and what of it the remote was last told (what kind, and when).
+/// Where what is heard is left for the remote.
+static SHARED: Mutex<Option<crate::remote::Shared>> = Mutex::new(None);
+
+/// What has been heard here since listening began, and what of it the
+/// remote was last told (what kind, and when).
 struct Listening {
     heard: Heard,
-    shared: crate::remote::Shared,
     last: Option<(bool, Instant)>,
 }
 
@@ -47,9 +52,17 @@ fn out() -> bool {
     out
 }
 
-fn tell(heard: &Heard, shared: &mut crate::remote::Shared) {
+/// Leaves for the remote the last touch and the last report that said nothing (none: nothing heard).
+fn tell(touched: &Option<(String, u32)>, nothing: &Option<(String, u32)>) {
     let one = |heard: &Option<(String, u32)>| heard.as_ref().map(|(device, at)| json!([device, at]));
-    shared.write(json!({ "touched": one(&heard.touched), "nothing": one(&heard.nothing) }).to_string().as_bytes());
+    if let Some(shared) = SHARED.lock().unwrap().as_mut() {
+        shared.write(json!({ "touched": one(touched), "nothing": one(nothing) }).to_string().as_bytes());
+    }
+}
+
+/// What the sensors' process heard (see `link::Told::Activity`), left for the remote.
+pub fn heard(touched: Option<(String, u32)>, nothing: Option<(String, u32)>) {
+    tell(&touched, &nothing);
 }
 
 unsafe extern "system" fn told(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -58,7 +71,7 @@ unsafe extern "system" fn told(window: HWND, message: u32, wparam: WPARAM, lpara
             if let Some(said) = listening.heard.take(lparam, unsafe { GetTickCount() }) {
                 let now = Instant::now();
                 if listening.last.is_none_or(|(kind, at)| kind != said || now.duration_since(at) >= TOLD_EVERY) {
-                    tell(&listening.heard, &mut listening.shared);
+                    tell(&listening.heard.touched, &listening.heard.nothing);
                     listening.last = Some((said, now));
                 }
             }
@@ -69,31 +82,54 @@ unsafe extern "system" fn told(window: HWND, message: u32, wparam: WPARAM, lpara
 
 /// Listens, on a thread of its own, for as long as Glance runs; nothing
 /// is heard (and Windows is asked for nothing) but while the remote has
-/// the screens out.
+/// the screens out: by the sensors' process while there is one, else here.
 pub fn start() {
     std::thread::spawn(|| unsafe {
         let Some(shared) = crate::remote::Shared::open(w!("Local\\Glance.Touches")) else { return };
-        HEARD.set(Listening { heard: Heard::default(), shared, last: None });
+        *SHARED.lock().unwrap() = Some(shared);
+        HEARD.set(Listening { heard: Heard::default(), last: None });
         let class = WNDCLASSW { lpfnWndProc: Some(told), lpszClassName: w!("GlanceTouches"), ..Default::default() };
         RegisterClassW(&class);
         let Ok(window) = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None) else { return };
+        // Whether it is heard here; what the sensors' process was last asked, and over which link.
         let mut hearing = false;
-        let mut asked = Instant::now() - ASKED_EVERY;
+        let mut asked: Option<(bool, u64)> = None;
+        let mut looked = Instant::now() - ASKED_EVERY;
         loop {
-            if asked.elapsed() >= ASKED_EVERY {
-                asked = Instant::now();
+            if looked.elapsed() >= ASKED_EVERY {
+                looked = Instant::now();
                 let wanted = out();
-                if wanted != hearing && crate::touch::hear(window, wanted).is_ok() {
-                    hearing = wanted;
-                    // (Each time anew: what was heard the last time is not of this one.)
-                    HEARD.with_borrow_mut(|listening| {
-                        listening.heard = Heard::default();
-                        listening.last = None;
-                        tell(&listening.heard, &mut listening.shared);
-                    });
+                match crate::source::link() {
+                    Some(link) => {
+                        if hearing && crate::touch::hear(window, false).is_ok() {
+                            hearing = false;
+                        }
+                        // Asked again on a new link (it knows nothing of what the last was asked); nothing heard
+                        // of what it is asked for till it says.
+                        if asked != Some((wanted, link)) {
+                            crate::source::hear_activity(wanted);
+                            asked = Some((wanted, link));
+                            tell(&None, &None);
+                        }
+                    }
+                    None => {
+                        // The link gone: nothing it heard stands.
+                        if asked.take().is_some() {
+                            tell(&None, &None);
+                        }
+                        if wanted != hearing && crate::touch::hear(window, wanted).is_ok() {
+                            hearing = wanted;
+                            // (Each time anew: what was heard the last time is not of this one.)
+                            HEARD.with_borrow_mut(|listening| {
+                                listening.heard = Heard::default();
+                                listening.last = None;
+                                tell(&None, &None);
+                            });
+                        }
+                    }
                 }
             }
-            MsgWaitForMultipleObjects(None, false, ASKED_EVERY.saturating_sub(asked.elapsed()).as_millis() as u32, QS_ALLINPUT);
+            MsgWaitForMultipleObjects(None, false, ASKED_EVERY.saturating_sub(looked.elapsed()).as_millis() as u32, QS_ALLINPUT);
             let mut message = MSG::default();
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
                 DispatchMessageW(&message);

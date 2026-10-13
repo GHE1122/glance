@@ -8,8 +8,8 @@
 //! Both Glance and its remote hear of it, the same way (this file is part
 //! of each): Windows lets a program hear nothing of what goes to a window
 //! of a program run with more rights than its own, so the remote, which
-//! has none, is deaf while such a window is in front; Glance, elevated, is
-//! not, and tells the remote what it heard.
+//! has none, is deaf while such a window is in front; Glance's sensors'
+//! process, elevated, is not, and Glance tells the remote what it heard.
 
 use windows::Win32::Devices::HumanInterfaceDevice::{
     HidP_GetButtonCaps, HidP_GetCaps, HidP_GetUsageValue, HidP_GetUsages, HidP_GetValueCaps, HidP_Input, HidP_MaxUsageListLength, HIDP_BUTTON_CAPS, HIDP_CAPS, HIDP_STATUS_SUCCESS, HIDP_VALUE_CAPS, PHIDP_PREPARSED_DATA,
