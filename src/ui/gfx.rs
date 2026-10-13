@@ -150,6 +150,10 @@ impl Gfx {
             .map(|_| d3d.unwrap())
         };
         let d3d = create(D3D_DRIVER_TYPE_HARDWARE).or_else(|_| create(D3D_DRIVER_TYPE_WARP))?;
+        // Its context guarded: the frames of what is behind are read back on it from other threads (see `scene`).
+        if let Ok(guarded) = d3d.cast::<windows::Win32::Graphics::Direct3D11::ID3D11Multithread>() {
+            let _ = unsafe { guarded.SetMultithreadProtected(true) };
+        }
         let dxgi: IDXGIDevice = d3d.cast()?;
         let factory: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, None)? };
         let device: ID2D1Device = unsafe { factory.CreateDevice(&dxgi)? };
@@ -203,6 +207,11 @@ impl Gfx {
             dashed: dashed.into(),
             icon_paths: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// The Direct3D device it draws on.
+    pub fn d3d(&self) -> Result<ID3D11Device> {
+        self.dxgi.cast()
     }
 
     fn format(&self, font: Font) -> IDWriteTextFormat3 {

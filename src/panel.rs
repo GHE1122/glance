@@ -1646,7 +1646,7 @@ impl<'a> Panel<'a> {
     fn take_behind(&mut self, area: RECT, afresh: bool) {
         if self.backdrop.is_none() {
             let wake = std::sync::Arc::new(|| crate::app().controller.wake());
-            self.backdrop = crate::ui::scene::Scene::new(area, wake);
+            self.backdrop = crate::ui::scene::Scene::new(area, wake, &self.gfx);
         }
         let Some(scene) = &mut self.backdrop else {
             // (It could not be put together: as when the screen cannot be read, tried again in a while.)
@@ -1679,7 +1679,9 @@ impl<'a> Panel<'a> {
         // Without live refraction, what is behind is as it was when taken, till it is taken again: the scene rests
         // meanwhile.
         if !self.live {
-            scene.rest();
+            if let Some(scene) = &mut self.backdrop {
+                scene.rest();
+            }
         }
         let capture = Some(capture);
         let request = self.capturing.take().unwrap_or(PanelRequest { generation: self.generation, menus: crate::ui::menu::SHOWN.load(Ordering::Relaxed), afresh: false });
@@ -2063,9 +2065,14 @@ impl<'a> Panel<'a> {
         self.surface = Some(surface);
         self.gfx = current;
         self.layers.release();
-        // A desktop already made a bitmap on the lost device is gone with it.
+        // A desktop already made a bitmap on the lost device is gone with it, and what is behind is put together on
+        // the new one as it is next taken.
         if let Some(behind) = &mut self.behind {
             behind.bitmap = None;
+        }
+        if self.backdrop.take().is_some() {
+            self.capturing = None;
+            self.recapture = true;
         }
         true
     }

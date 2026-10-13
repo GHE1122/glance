@@ -13,10 +13,12 @@
 //!
 //! A frame is read back (to the pixels, lightness and digest the skins and
 //! themes use) only when one is wanted, on a thread other than the one that
-//! draws: as it comes, or at once if one has come meanwhile.
+//! draws: as it comes, or at once if one has come meanwhile. The frames are
+//! made on the device Glance draws with (one device: each costs the
+//! graphics driver's memory), whose use from several threads is guarded.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use windows::core::{w, Interface, BOOL};
 use windows::Foundation::TypedEventHandler;
@@ -24,12 +26,12 @@ use windows::Graphics::Capture::{Direct3D11CaptureFrame, Direct3D11CaptureFrameP
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT,
+    D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
+use windows::Win32::Graphics::Dxgi::DXGI_ERROR_WAS_STILL_DRAWING;
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DwmRegisterThumbnail, DwmSetWindowAttribute, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties, DWMWA_CLOAK, DWMWA_CLOAKED,
     DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_VISIBLE,
@@ -46,42 +48,26 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::backdrop::Capture;
 
-/// The Direct3D device every scene's frames are made and read back on (one for all: making one takes a while),
-/// its context used by one reading at a time.
+/// The device a scene's frames are made and read back on: the one Glance draws with (see `gfx`), its use from
+/// several threads guarded by the device itself.
 struct Device {
     device: ID3D11Device,
-    context: Mutex<ID3D11DeviceContext>,
+    context: ID3D11DeviceContext,
     direct3d: IDirect3DDevice,
 }
 
-// (A Direct3D 11 device may be used from any thread; its context is behind the lock.)
+// (A Direct3D 11 device may be used from any thread; its context is guarded: see `gfx::Gfx::new`.)
 unsafe impl Send for Device {}
 unsafe impl Sync for Device {}
 
-static DEVICE: OnceLock<Option<Device>> = OnceLock::new();
-
-/// The scenes' device: the graphics card's, or Windows' own renderer where there is none.
-fn device() -> Option<&'static Device> {
-    DEVICE
-        .get_or_init(|| {
-            [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP].into_iter().find_map(|kind| {
-                let (mut device, mut context) = (None, None);
-                unsafe { D3D11CreateDevice(None, kind, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)) }.ok()?;
-                let (device, context): (ID3D11Device, ID3D11DeviceContext) = (device?, context?);
-                let dxgi: IDXGIDevice = device.cast().ok()?;
-                let direct3d: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.ok()?.cast().ok()?;
-                Some(Device { device, context: Mutex::new(context), direct3d })
-            })
-        })
-        .as_ref()
-}
-
-/// Makes the scenes' device on another thread now, for the first scene not to wait for it on the thread that
-/// draws.
-pub fn prepare() {
-    std::thread::spawn(|| {
-        device();
-    });
+impl Device {
+    fn of(gfx: &super::gfx::Gfx) -> Option<Device> {
+        let device = gfx.d3d().ok()?;
+        let context = unsafe { device.GetImmediateContext() }.ok()?;
+        let dxgi: IDXGIDevice = device.cast().ok()?;
+        let direct3d: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.ok()?.cast().ok()?;
+        Some(Device { device, context, direct3d })
+    }
 }
 
 /// What a scene's frames meet as they come, on whatever thread they come on.
@@ -93,12 +79,13 @@ struct Shared {
     latest: Mutex<Option<Direct3D11CaptureFrame>>,
     /// A frame is wanted: read as it comes.
     wanted: AtomicBool,
-    /// It rests (see `Scene::rest`): what comes meanwhile (the frame of it emptied) is of nothing.
+    /// It rests (see `Scene::rest`): what comes meanwhile is of nothing.
     resting: AtomicBool,
     /// What was read, to be taken.
     ready: Mutex<Option<Capture>>,
     /// Tells the thread that draws (see `Scene::new`).
     wake: Arc<dyn Fn() + Send + Sync>,
+    device: Device,
     /// What frames are read back through, kept for the next of the same size.
     staging: Mutex<Option<Staging>>,
 }
@@ -123,7 +110,7 @@ impl Shared {
                 return None;
             }
             let texture: ID3D11Texture2D = unsafe { frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface() }.ok()?;
-            let pixels = read_back(device()?, &mut self.staging.lock().unwrap(), &texture, width as u32, height as u32)?;
+            let pixels = read_back(&self.device, &mut self.staging.lock().unwrap(), &texture, width as u32, height as u32)?;
             Some(Capture::from_pixels(area, pixels))
         })();
         let Some(capture) = read else { return false };
@@ -154,16 +141,26 @@ fn read_back(device: &Device, staging: &mut Option<Staging>, texture: &ID3D11Tex
         let region = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
         let row = width as usize * 4;
         let mut pixels = Vec::with_capacity(row * height as usize);
-        {
-            let context = device.context.lock().unwrap();
-            context.CopySubresourceRegion(staging, 0, 0, 0, 0, texture, 0, Some(&region));
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).ok()?;
-            for y in 0..height as usize {
-                pixels.extend_from_slice(std::slice::from_raw_parts((mapped.pData as *const u8).add(y * mapped.RowPitch as usize), row));
+        let context = &device.context;
+        context.CopySubresourceRegion(staging, 0, 0, 0, 0, texture, 0, Some(&region));
+        context.Flush();
+        // Read once the copy is done, not waited for in the call (the device is the drawing's too, and held
+        // meanwhile): tried again till it is, a second at most.
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        let began = std::time::Instant::now();
+        loop {
+            match context.Map(staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32, Some(&mut mapped)) {
+                Ok(()) => break,
+                Err(error) if error.code() == DXGI_ERROR_WAS_STILL_DRAWING && began.elapsed() < std::time::Duration::from_secs(1) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1))
+                }
+                Err(_) => return None,
             }
-            context.Unmap(staging, 0);
         }
+        for y in 0..height as usize {
+            pixels.extend_from_slice(std::slice::from_raw_parts((mapped.pData as *const u8).add(y * mapped.RowPitch as usize), row));
+        }
+        context.Unmap(staging, 0);
         // (What no window covers is the scene's own window: drawn opaque, as the screen is.)
         for alpha in pixels.iter_mut().skip(3).step_by(4) {
             *alpha = 255;
@@ -229,10 +226,11 @@ fn meet(a: RECT, b: RECT) -> bool {
 }
 
 impl Scene {
-    /// A scene standing for `area`, empty till it is arranged; `wake` is called (on another thread) as a frame
-    /// wanted has been read (see `ready`), and as one comes unwanted after none had (see `fresh`).
-    pub fn new(area: RECT, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Scene> {
-        let device = device()?;
+    /// A scene standing for `area`, its frames made on `gfx`'s device, empty till it is arranged; `wake` is called
+    /// (on another thread) as a frame wanted has been read (see `ready`), and as one comes unwanted after none had
+    /// (see `fresh`).
+    pub fn new(area: RECT, wake: Arc<dyn Fn() + Send + Sync>, gfx: &super::gfx::Gfx) -> Option<Scene> {
+        let device = Device::of(gfx)?;
         unsafe {
             let module = GetModuleHandleW(None).ok()?;
             let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: w!("GlanceScene"), ..Default::default() };
@@ -246,14 +244,14 @@ impl Scene {
                     return None;
                 }
             };
-            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, staging: Mutex::new(None), resting: AtomicBool::new(false) });
+            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, staging: Mutex::new(None), resting: AtomicBool::new(false) });
             let made = (|| {
                 let cloak: BOOL = true.into();
                 DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).ok()?;
                 let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
                 let item: GraphicsCaptureItem = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().ok()?.CreateForWindow(window).ok()?;
                 let size = item.Size().ok()?;
-                let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).ok()?;
+                let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).ok()?;
                 pool.FrameArrived(&TypedEventHandler::new({
                     let shared = shared.clone();
                     move |pool: windows::core::Ref<Direct3D11CaptureFramePool>, _| {
@@ -322,20 +320,17 @@ impl Scene {
         if same_windows && area == self.area && behind.iter().zip(&self.shown).all(|((_, a), (.., b))| a == b) {
             return false;
         }
+        let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
         if area != self.area {
-            let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
             unsafe {
                 let _ = SetWindowPos(self.window, None, area.left, area.top, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
             }
             self.area = area;
-            let size = SizeInt32 { Width: width, Height: height };
-            if size != self.size {
-                if let Some(device) = device() {
-                    if self.pool.Recreate(&device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).is_ok() {
-                        self.size = size;
-                    }
-                }
-            }
+        }
+        // (Its frames a pixel each while it rested.)
+        let size = SizeInt32 { Width: width, Height: height };
+        if size != self.size && self.pool.Recreate(&self.shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).is_ok() {
+            self.size = size;
         }
         // The thumbnails are drawn in the order they were made in: another order, or other windows, and they are
         // made anew, bottom first; the same windows, only moved, are moved.
@@ -360,6 +355,27 @@ impl Scene {
         true
     }
 
+    /// Holds nothing till it is arranged again: no thumbnails (the compositor puts nothing together in it), and its
+    /// window and frames a pixel each (what they took given back). For whoever wants what is behind only as it was
+    /// when last looked at, not as it changes; arranged again, it is as it was, and as quickly.
+    pub fn rest(&mut self) {
+        self.shared.resting.store(true, Ordering::Release);
+        self.forget();
+        self.shared.wanted.store(false, Ordering::Release);
+        *self.shared.latest.lock().unwrap() = None;
+        *self.shared.ready.lock().unwrap() = None;
+        *self.shared.staging.lock().unwrap() = None;
+        let least = RECT { left: self.area.left, top: self.area.top, right: self.area.left + 1, bottom: self.area.top + 1 };
+        unsafe {
+            let _ = SetWindowPos(self.window, None, least.left, least.top, 1, 1, SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+        self.area = least;
+        let size = SizeInt32 { Width: 1, Height: 1 };
+        if self.pool.Recreate(&self.shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).is_ok() {
+            self.size = size;
+        }
+    }
+
     /// The thumbnail `index` shown where its window is, `rect`, within the area.
     fn place(&mut self, index: usize, rect: RECT) {
         let (_, thumbnail, at) = &mut self.shown[index];
@@ -380,17 +396,6 @@ impl Scene {
         for (_, thumbnail, _) in self.shown.drain(..) {
             let _ = unsafe { DwmUnregisterThumbnail(thumbnail) };
         }
-    }
-
-    /// Shows nothing till it is arranged again (nor does the compositor put anything together in it meanwhile): for
-    /// whoever wants what is behind only as it was when last looked at, not as it changes.
-    pub fn rest(&mut self) {
-        self.shared.resting.store(true, Ordering::Release);
-        self.forget();
-        // (Nor is the frame of it emptied wanted, nor any come meanwhile.)
-        self.shared.wanted.store(false, Ordering::Release);
-        *self.shared.latest.lock().unwrap() = None;
-        *self.shared.ready.lock().unwrap() = None;
     }
 
     /// Whether a frame has come that was not wanted as it came (and is not read yet).

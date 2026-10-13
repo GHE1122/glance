@@ -1778,7 +1778,7 @@ impl Widget {
                 let wake = std::sync::Arc::new(move || {
                     let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), CAPTURED, WPARAM(0), LPARAM(0)) };
                 });
-                self.backdrop = crate::ui::scene::Scene::new(area, wake);
+                self.backdrop = crate::ui::scene::Scene::new(area, wake, &self.gfx);
             }
             self.arranged = Some(now);
             // In hand, light or dark holds (measured again as it is let go:
@@ -1848,11 +1848,13 @@ impl Widget {
             self.layers.release();
             self.morph_layer.release();
             // Its bitmap went with the device; its pixels are let go of:
-            // the desktop is taken again.
+            // the desktop is taken again (what is behind made on the new one).
             if self.behind.is_some() {
                 note("widget: the drawing device changed; the desktop taken again");
             }
             self.behind = None;
+            self.backdrop = None;
+            self.pending = None;
         }
         let px = self.contact.scale * self.zoom;
         let margin = self.margin;

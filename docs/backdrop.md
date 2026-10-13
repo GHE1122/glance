@@ -34,6 +34,16 @@ is behind them through a **scene**:
   arrangement are dropped by their time.
 - Windows Glance is taking away are left out of every scene: the panel as a
   widget torn off it takes its place, the hint of where a widget would stick.
+- Without live refraction a scene is looked at only as it is arranged anew,
+  and then rests: no thumbnails (the compositor puts nothing together for
+  it), its window and frames a pixel each, nothing kept of what came; it is
+  arranged again as quickly as before. (Measured on the owner's PC with the
+  Claude window streaming behind two widgets: reading every change once a
+  second cost about 4 % of a core and 2 % more of dwm's GPU time.)
+- Frames are made and read back on the device Glance draws with (each
+  device costs the graphics driver's memory: on the owner's PC a second one
+  was about 19 MB); its context is made safe for several threads, and a read
+  waits for its copy without holding the device.
 
 Found by trying (VM, 2026-10-13):
 
