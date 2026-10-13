@@ -122,8 +122,9 @@ pub fn open() -> (StaticInfo, Source) {
 
 /// `link`, if the sensors at its other end said hello: with what the machine is.
 fn greeted(link: Option<Link>) -> Option<(Link, StaticInfo)> {
-    let mut link = link?;
-    match link.receive() {
+    let link = link?;
+    // (They may be starting: installing their driver, looking at the hardware first; not waited for for ever.)
+    match crate::link::receive_within::<Told>(&link.told, STARTED_WITHIN) {
         Some(Told::Hello { info, .. }) => Some((link, info)),
         _ => None,
     }
@@ -233,6 +234,9 @@ impl Source {
                                 }
                             }
                             crate::journal::note("readings: the sensors' process went; Glance reads what it can itself");
+                            // What it said last is not so any more: the games it saw, an update it was taking.
+                            crate::presents::forget_mirrored();
+                            crate::update::link_lost();
                             crate::app().controller.hear_own();
                             let sampler = Sampler::new();
                             crate::presents::start();

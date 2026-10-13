@@ -219,6 +219,11 @@ pub fn mirror(games: Vec<Presenting>, mode: GameMode) {
     set_game_mode(mode);
 }
 
+/// The sensors' process gone: the games it saw are not what is seen here from now on.
+pub fn forget_mirrored() {
+    *MIRRORED.lock().unwrap() = None;
+}
+
 /// Every program presenting frames now, by its topmost window, topmost
 /// first; programs that have stopped presenting are forgotten. Looked at
 /// through their windows alone: no program's process is opened.

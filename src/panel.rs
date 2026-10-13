@@ -587,7 +587,9 @@ impl Controller {
                         MsgWaitForMultipleObjects(Some(&[refresh]), false, INFINITE, QS_ALLINPUT);
                     },
                     Some(wait) => unsafe {
-                        MsgWaitForMultipleObjects(None, false, wait.as_millis() as u32, QS_ALLINPUT);
+                        // (In whole milliseconds, rounded up: what is less than one would be none, and the loop would
+                        // go round without waiting till it is due.)
+                        MsgWaitForMultipleObjects(None, false, wait.as_micros().div_ceil(1000) as u32, QS_ALLINPUT);
                     },
                     None => unsafe {
                         let _ = WaitMessage();
@@ -756,8 +758,11 @@ impl Controller {
                 // The desktop widgets: pressed, let go (or found let go as the pointer moves: the button up unheard,
                 // let go before it was torn off), their menu.
                 WM_LBUTTONDOWN if widgets.owns(msg.hwnd) => widgets.press(msg.hwnd, lparam_point(msg.lParam)),
-                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if widgets.owns(msg.hwnd) => widgets.release(msg.hwnd, now),
-                WM_MOUSEMOVE if widgets.owns(msg.hwnd) && widgets.held(msg.hwnd) && let_go(&msg) => widgets.release(msg.hwnd, now),
+                WM_LBUTTONUP if widgets.owns(msg.hwnd) => widgets.release(msg.hwnd, now, false),
+                // Its capture taken (a UAC prompt, the lock screen, another program): no press completed, nothing
+                // pressed is done.
+                crate::ui::window::CAPTURE_LOST if widgets.owns(msg.hwnd) => widgets.release(msg.hwnd, now, true),
+                WM_MOUSEMOVE if widgets.owns(msg.hwnd) && widgets.held(msg.hwnd) && let_go(&msg) => widgets.release(msg.hwnd, now, false),
                 WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam), panel.lang),
                 WM_RBUTTONUP if widgets.owns(msg.hwnd) => {
                     // (What comes for this thread while the menu is up waits:
@@ -801,7 +806,7 @@ impl Controller {
                 // the pointer): the widget is let go.
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd && widgets.torn_in_hand().is_some() => {
                     let torn = widgets.torn_in_hand().unwrap();
-                    widgets.release(torn, now)
+                    widgets.release(torn, now, false)
                 }
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
                 // The overlay dragged into place.
@@ -1646,6 +1651,10 @@ impl<'a> Panel<'a> {
     /// changed; `afresh`, the theme follows what comes. The panel goes on
     /// with what it had meanwhile; nothing changed, that stands.
     fn take_behind(&mut self, area: RECT, afresh: bool) {
+        // (Without the system's capture, Windows 10 before 1903: what was taken as it opened stands.)
+        if !crate::ui::scene::supported() {
+            return;
+        }
         if self.backdrop.is_none() {
             let wake = std::sync::Arc::new(|| crate::app().controller.wake());
             self.backdrop = crate::ui::scene::Scene::new(area, wake, &self.gfx);

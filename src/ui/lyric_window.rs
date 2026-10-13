@@ -172,6 +172,9 @@ pub fn tick(now: Instant) -> Option<Duration> {
             one.follow_pointer(now);
             if now >= one.next_frame {
                 let busy = one.draw(now);
+                // (Text laid out and not drawn again lately let go of, as every window that draws does: drawn by
+                // the lyrics alone, it would only grow.)
+                one.gfx.sweep();
                 one.next_frame = now + if busy { PLAYING_FRAME } else { REST_FRAME };
             }
             // (The pointer over it is followed closely.)
@@ -750,8 +753,10 @@ impl Shown {
             if let Ok(gfx) = gfx::current() {
                 self.gfx = gfx;
             }
-            // (What was kept was kept on the device before.)
+            // (What was kept was kept on the device before: made again from the cover on the new one.)
             self.ground = Default::default();
+            self.backdrop = None;
+            self.fading = None;
             self.surface = Surface::new(&self.gfx, self.hwnd).ok();
         }
         let Some(mut surface) = self.surface.take() else { return false };

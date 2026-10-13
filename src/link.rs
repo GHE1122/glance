@@ -261,6 +261,27 @@ pub fn heard(from: &mut File) -> Option<Asked> {
     receive(from)
 }
 
+/// What comes on `from` within `within`, read on a thread of its own: none if nothing whole came by then (or the pipe
+/// broke). The read given up on is cancelled, again and again till that thread has ended: a read may be issued
+/// just after one is cancelled (a message comes in parts), and that one is not cancelled with it.
+pub fn receive_within<T: for<'de> Deserialize<'de> + Send + 'static>(from: &File, within: Duration) -> Option<T> {
+    use std::os::windows::io::AsRawHandle;
+    let mut reading = from.try_clone().ok()?;
+    let (said, came) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let _ = said.send(receive::<T>(&mut reading));
+    });
+    let got = came.recv_timeout(within).ok().flatten();
+    while !reader.is_finished() {
+        unsafe {
+            let _ = windows::Win32::System::IO::CancelSynchronousIo(HANDLE(reader.as_raw_handle()));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = reader.join();
+    got
+}
+
 /// Asks the sensors `asked`, on the rest's asking end.
 pub fn ask_on(to: &mut File, asked: &Asked) -> bool {
     send(to, asked)

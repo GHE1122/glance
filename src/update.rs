@@ -279,12 +279,79 @@ pub fn install() {
         crate::source::install(crate::link::ReleaseSent { version: release.version.clone(), installers: release.installers.clone() });
         return;
     }
+    // Without the sensors' process, the update is taken by this program run elevated for it (the user is asked,
+    // having asked for the update), unless this one is elevated already.
     thread::spawn(move || {
-        let outcome = fetch_and_run(&release);
+        let outcome = if crate::elevation::is_elevated() { fetch_and_run(&release) } else { fetch_and_run_elevated(&release) };
         if let Some((_, state)) = FOUND.lock().unwrap().as_mut() {
             *state = outcome;
         }
     });
+}
+
+/// The sensors' process went: an update it was taking (its outcome never to be told) may be asked for again.
+pub fn link_lost() {
+    if let Some((_, state)) = FOUND.lock().unwrap().as_mut() {
+        if *state == State::Downloading {
+            *state = State::Failed;
+        }
+    }
+}
+
+/// What `--update` is given: the release's version, then each installer's version and where it is.
+const UPDATE: &str = "--update";
+
+/// Takes `release` in this program run elevated (`UPDATE`), the user asked to let it; how that went.
+fn fetch_and_run_elevated(release: &Release) -> State {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    let Ok(exe) = std::env::current_exe() else { return State::Failed };
+    let arguments = std::iter::once(UPDATE.to_string())
+        .chain(std::iter::once(release.version.clone()))
+        .chain(release.installers.iter().flat_map(|(version, url)| [version.clone(), url.clone()]))
+        .map(|argument| format!("\"{argument}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (file, arguments) = (HSTRING::from(exe.as_os_str()), HSTRING::from(arguments));
+    let mut started = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: w!("runas"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(arguments.as_ptr()),
+        nShow: windows::Win32::UI::WindowsAndMessaging::SW_HIDE.0,
+        ..Default::default()
+    };
+    // (Refused by the user, or not started: as one that could not be downloaded, to be tried again.)
+    if unsafe { ShellExecuteExW(&mut started) }.is_err() || started.hProcess.is_invalid() {
+        return State::Failed;
+    }
+    let mut code = 1u32;
+    unsafe {
+        WaitForSingleObject(started.hProcess, INFINITE);
+        let _ = GetExitCodeProcess(started.hProcess, &mut code);
+        let _ = CloseHandle(started.hProcess);
+    }
+    match code {
+        0 => State::Ready,
+        2 => State::Rejected,
+        _ => State::Failed,
+    }
+}
+
+/// Run as `UPDATE` (elevated, see `fetch_and_run_elevated`): takes the release its arguments name, and ends saying
+/// how that went (0 the installer runs, 2 none was as it should be, 1 none could be had). None: not so run.
+pub fn run_asked(arguments: &[String]) -> Option<i32> {
+    let [flag, version, rest @ ..] = arguments else { return None };
+    if flag != UPDATE || rest.len() % 2 != 0 {
+        return None;
+    }
+    let installers = rest.chunks(2).map(|pair| (pair[0].clone(), pair[1].clone())).collect();
+    Some(match fetch_and_run(&Release { version: version.clone(), installers }) {
+        State::Ready => 0,
+        State::Rejected => 2,
+        State::Failed | State::Downloading => 1,
+    })
 }
 
 /// Where an update asked of the sensors stands, as they tell it.
@@ -327,8 +394,9 @@ fn fetch_and_run(release: &Release) -> State {
         note("no folder of administrators' alone could be made in ProgramData");
         return State::Failed;
     };
-    let path_for = |version: &str| folder.path().join(format!("Glance_{version}_x64-setup.exe"));
-    if !crate::elevation::remember_download(&path_for(&release.version)) {
+    // One file whichever site's it is (each tried in turn written over the one before): the one noted, and taken away.
+    let installer = folder.path().join("Glance-setup.exe");
+    if !crate::elevation::remember_download(&installer) {
         note("the installer could not be written");
         return State::Failed;
     }
@@ -351,7 +419,6 @@ fn fetch_and_run(release: &Release) -> State {
             note(&format!("the installer could not be downloaded from {host}"));
             continue;
         };
-        let installer = path_for(version);
         let held = std::fs::write(&installer, bytes).and_then(|()| hold(&installer));
         let Ok(held) = held else {
             note("the installer could not be written");

@@ -716,12 +716,12 @@ impl Widgets {
         widget.window.point(shape);
     }
 
-    /// Let go of a press on a widget, or its capture lost.
-    pub fn release(&mut self, hwnd: HWND, now: Instant) {
+    /// Let go of a press on a widget, or (`cancelled`) its capture lost: then no press is completed.
+    pub fn release(&mut self, hwnd: HWND, now: Instant, cancelled: bool) {
         let Some(index) = self.list.iter().position(|w| w.window.hwnd == hwnd) else { return };
         let widget = &mut self.list[index];
         widget.next_frame = now;
-        match widget.release(now) {
+        match widget.release(now, cancelled) {
             Released::Closed => self.put_away_at(index),
             Released::Changed => {}
             Released::Settings => {
@@ -1296,7 +1296,9 @@ impl Widget {
         }
     }
 
-    fn release(&mut self, now: Instant) -> Released {
+    /// Let go: a press where it was is a click (on a button, what it does); a move, flung if fast enough. Cancelled
+    /// (the capture taken away), neither: what was pressed is not done, and it stays where it was.
+    fn release(&mut self, now: Instant, cancelled: bool) -> Released {
         let _ = unsafe { ReleaseCapture() };
         // Back where it is kept, let go.
         self.window.lift(false);
@@ -1306,7 +1308,7 @@ impl Widget {
         match drag {
             // The sound's track let go: as loud as it was left, and looked at again.
             Drag::Slide { .. } => {
-                if let Some(level) = crate::playing::now().and_then(|now| now.volume) {
+                if let Some(level) = crate::playing::now().and_then(|now| now.volume).filter(|_| !cancelled) {
                     crate::playing::act(crate::playing::Act::Volume(level));
                 }
                 Released::Nothing
@@ -1324,6 +1326,9 @@ impl Widget {
                 Released::Changed
             }
             Drag::Move { trail, torn, moved, .. } => {
+                if !moved && cancelled {
+                    return Released::Nothing;
+                }
                 if !moved {
                     // A press let go where it was: a button, if it was on one.
                     let px = self.contact.scale * self.zoom;
@@ -1364,7 +1369,7 @@ impl Widget {
                 // A fling: fast enough as it was let go (a tear is put down).
                 let scale = self.contact.scale;
                 let recent: Vec<&(Instant, POINT)> = trail.iter().filter(|(at, _)| now.duration_since(*at) <= FLING_SPAN).collect();
-                if let (false, Some(first), Some(last)) = (torn, recent.first(), recent.last()) {
+                if let (false, false, Some(first), Some(last)) = (torn, cancelled, recent.first(), recent.last()) {
                     let ms = last.0.duration_since(first.0).as_secs_f32() * 1000.0;
                     if ms > 10.0 {
                         let (vx, vy) = ((last.1.x - first.1.x) as f32 / scale / ms, (last.1.y - first.1.y) as f32 / scale / ms);
@@ -1732,6 +1737,9 @@ impl Widget {
         // before it first shows (the theme follows it), and arranged anew as
         // it moves past it, goes onto another screen, or the windows there
         // change; taken as it changes (see `collect`).
+        // (On the device that draws now, before what is behind is awaited: one waited for on a device gone never
+        // comes.)
+        self.follow_device();
         let sees = look.skin.sees_backdrop();
         let live = look.live && sees;
         if !sees {
@@ -1780,7 +1788,7 @@ impl Widget {
             if self.behind.is_none() || self.replace.is_some() {
                 self.backdrop = None;
             }
-            if self.backdrop.is_none() {
+            if self.backdrop.is_none() && crate::ui::scene::supported() {
                 let hwnd = self.window.hwnd.0 as isize;
                 let wake = std::sync::Arc::new(move || {
                     let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), CAPTURED, WPARAM(0), LPARAM(0)) };
@@ -1792,6 +1800,16 @@ impl Widget {
             // see `retone`).
             let moved = (elsewhere && self.drag.is_none()) || self.replace == Some(true);
             match &mut self.backdrop {
+                // Without the system's capture (Windows 10 before 1903): the screen copied as it is, once, for a
+                // widget that has nothing behind it yet (not shown yet, it is not in it); after, what it has stands.
+                None if !crate::ui::scene::supported() => {
+                    if self.behind.is_none() {
+                        self.took(Capture::take(area), moved, now, px);
+                    } else if let Some(behind) = &mut self.behind {
+                        behind.taken = now;
+                        self.replace = None;
+                    }
+                }
                 // (It could not be put together: as when the screen cannot be taken, tried again in a while.)
                 None => self.took(None, moved, now, px),
                 // A frame of it as it is now awaited; nothing changed, what it has stands.
@@ -1842,9 +1860,11 @@ impl Widget {
         if moving || crate::playing::gliding() { Frame::Moving } else { Frame::Rest }
     }
 
-    fn draw(&mut self, theme: &Theme, scene: &Scene, now: Instant) {
-        let Some(shown) = self.last.clone() else { return };
-        let Ok(current) = gfx::current() else { return };
+    /// On the device that draws now, if it is not (a driver reset, a device lost): its surface made anew, what it
+    /// kept on the one before let go of, the desktop behind taken again (what is behind put together on the new
+    /// one). Whether it has a surface.
+    fn follow_device(&mut self) -> bool {
+        let Ok(current) = gfx::current() else { return false };
         if !Rc::ptr_eq(&current, &self.gfx) || self.surface.is_none() {
             self.surface = None;
             self.surface = Surface::new(&current, self.window.hwnd).ok();
@@ -1854,8 +1874,6 @@ impl Widget {
             self.gfx = current;
             self.layers.release();
             self.morph_layer.release();
-            // Its bitmap went with the device; its pixels are let go of:
-            // the desktop is taken again (what is behind made on the new one).
             if self.behind.is_some() {
                 note("widget: the drawing device changed; the desktop taken again");
             }
@@ -1863,6 +1881,12 @@ impl Widget {
             self.backdrop = None;
             self.pending = None;
         }
+        self.surface.is_some()
+    }
+
+    fn draw(&mut self, theme: &Theme, scene: &Scene, now: Instant) {
+        let Some(shown) = self.last.clone() else { return };
+        self.follow_device();
         let px = self.contact.scale * self.zoom;
         let margin = self.margin;
         let size = self.surface_size;

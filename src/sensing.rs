@@ -32,6 +32,10 @@ pub fn run() {
     let Some(pipes) = link::Sensors::open() else { return };
     // Its lines go to the rest of Glance, which writes the log (two processes writing one file lose lines).
     crate::journal::hold_for_the_app();
+    // Watched from now: starting (the driver's installer, the first look at the hardware) as each reading is, the
+    // rest waiting on it meanwhile.
+    std::thread::Builder::new().name("glance sensors: readings watched".into()).spawn(watch_readings).expect("a thread started");
+    *READING_SINCE.lock().unwrap() = Some(Instant::now());
     // What an elevated start of Glance has always done: its task kept for later starts, the driver in place.
     crate::elevation::register_launch_task();
     crate::elevation::forget_download();
@@ -39,9 +43,9 @@ pub fn run() {
         crate::elevation::ensure_pawnio(&exe.with_file_name("resources").join("PawnIO_setup.exe"));
     }
     let mut sampler = Sampler::new();
+    *READING_SINCE.lock().unwrap() = None;
     crate::presents::start();
     std::thread::Builder::new().name("glance sensors: edges".into()).spawn(watch_edges).expect("a thread started");
-    std::thread::Builder::new().name("glance sensors: readings watched".into()).spawn(watch_readings).expect("a thread started");
     let want = Arc::new(Mutex::new(Want { interval_ms: 1000, refresh_slow: true, wsl: false, docker: false }));
     let pipes = Arc::new(pipes);
     loop {
@@ -55,33 +59,20 @@ pub fn run() {
         });
         let Ok(Some((told, asked))) = came.recv_timeout(WAITED_FOR) else { break };
         // What came says who it is first, within a few seconds (what says nothing is let go: it would keep the
-        // rest out); it is checked (through the pipe) before it is told anything.
-        let (said, hello) = mpsc::channel();
-        let hearing = std::thread::spawn({
-            let mut asked = asked.try_clone().ok();
-            move || {
-                let _ = said.send(asked.as_mut().and_then(link::heard));
-            }
-        });
-        let first = hello.recv_timeout(HELLO_WITHIN).ok().flatten();
-        if !hearing.is_finished() {
-            unsafe {
-                use std::os::windows::io::AsRawHandle;
-                let _ = windows::Win32::System::IO::CancelSynchronousIo(windows::Win32::Foundation::HANDLE(hearing.as_raw_handle()));
-            }
-        }
-        let _ = hearing.join();
+        // rest out); it is checked (through the pipe) before anything it says is heeded, its version too, or it is
+        // told anything.
+        let first = link::receive_within::<Asked>(&asked, HELLO_WITHIN);
         let checked = match first {
-            Some(Asked::Hello { version }) if version == env!("CARGO_PKG_VERSION") => pipes.check_client(),
-            // Another version's Glance: it starts the sensors of its own version once these have gone.
-            Some(Asked::Hello { version }) => {
-                crate::journal::note(format!("sensors: Glance {version} came, these are {}: going, for its own", env!("CARGO_PKG_VERSION")));
-                break;
-            }
+            Some(Asked::Hello { version }) => pipes.check_client().map(|pid| (pid, version)),
             _ => Err("it said nothing first".into()),
         };
         let pid = match checked {
-            Ok(pid) => pid,
+            Ok((pid, version)) if version == env!("CARGO_PKG_VERSION") => pid,
+            // Another version's Glance: it starts the sensors of its own version once these have gone.
+            Ok((_, version)) => {
+                crate::journal::note(format!("sensors: Glance {version} came, these are {}: going, for its own", env!("CARGO_PKG_VERSION")));
+                break;
+            }
             Err(why) => {
                 crate::journal::note(format!("sensors: what came is not taken ({why})"));
                 drop((told, asked));
@@ -121,9 +112,14 @@ pub fn run() {
                         Asked::Switch { switch: Switch::Remote, on } => {
                             tell(&Told::Switched { switch: Switch::Remote, on: crate::phone::turn(on) });
                         }
+                        // On a thread of its own (a download may take a while): what else is asked meanwhile is done.
                         Asked::Install(release) => {
                             tell(&Told::Updating(UpdateState::Downloading));
-                            tell(&Told::Updating(crate::update::fetch_and_run_sent(&release)));
+                            let telling = telling.clone();
+                            std::thread::spawn(move || {
+                                let state = crate::update::fetch_and_run_sent(&release);
+                                link::tell(&mut telling.lock().unwrap(), &Told::Updating(state));
+                            });
                         }
                         Asked::Edges(edges) => *WATCHED.lock().unwrap() = edges.checked(),
                         Asked::Activity(on) => HEARING_ACTIVITY.store(on, std::sync::atomic::Ordering::Relaxed),
@@ -195,10 +191,19 @@ fn watch_readings() {
         std::thread::sleep(STUCK_AFTER / 6);
         let since = *READING_SINCE.lock().unwrap();
         if since.is_some_and(|since| since.elapsed() > STUCK_AFTER) {
-            let why = format!("sensors: a reading has taken over {} s; ending, to be started again", STUCK_AFTER.as_secs());
-            // (Not waited for: a pipe the rest has stopped reading may hold it.)
-            if let Some(Ok(mut telling)) = PUSHES_TO.lock().unwrap().as_ref().map(|telling| telling.try_lock()) {
-                let _ = link::tell(&mut telling, &Told::Note(why));
+            let why = format!("sensors: starting or a reading has taken over {} s; ending, to be started again", STUCK_AFTER.as_secs());
+            // Told on a thread of its own, waited for a second at most (a pipe the rest has stopped reading holds
+            // whoever writes to it): the end comes either way.
+            let telling = PUSHES_TO.try_lock().ok().and_then(|pushes| pushes.clone());
+            if let Some(telling) = telling {
+                let (told, done) = mpsc::channel();
+                std::thread::spawn(move || {
+                    if let Ok(mut telling) = telling.try_lock() {
+                        let _ = link::tell(&mut telling, &Told::Note(why));
+                    }
+                    let _ = told.send(());
+                });
+                let _ = done.recv_timeout(Duration::from_secs(1));
             }
             std::process::exit(1);
         }
@@ -243,8 +248,10 @@ fn watch_edges() {
         }
         unsafe { DefWindowProcW(window, message, wparam, lparam) }
     }
+    // (Where it is told taken first: what writes is not held by the list of where, which others look at.)
     let say = |told: &Told| {
-        if let Some(telling) = PUSHES_TO.lock().unwrap().as_ref() {
+        let telling = PUSHES_TO.lock().unwrap().clone();
+        if let Some(telling) = telling {
             let _ = link::tell(&mut telling.lock().unwrap(), told);
         }
     };

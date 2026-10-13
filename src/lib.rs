@@ -155,9 +155,9 @@ impl App {
         {
             let mut held = self.settings.lock().unwrap();
             change(&mut held);
-            if let Err(error) = held.save(&self.config) {
-                journal::note(format!("could not save settings: {error}"));
-            }
+            // Written to the disk on another thread: whoever changed them goes on (the settings window, every
+            // window's thread), and the lock is not held while the disk is.
+            save_later(held.clone(), self.config.clone());
             // Still under the lock: two changes at once reach the panel in
             // the order they were made, the later last.
             self.controller.apply(&held);
@@ -322,6 +322,8 @@ pub fn run() {
             std::process::exit(if ended { 0 } else { 4 })
         }
         [_, flag, folder] if flag == "--uninstall-from" => done(elevation::uninstall_from(std::path::Path::new(folder))),
+        // An update taken elevated for a Glance without its sensors (see `update`).
+        [_, flag, ..] if flag == "--update" => std::process::exit(if elevation::is_elevated() { update::run_asked(&args[1..]).unwrap_or(1) } else { 1 }),
         [_, flag, folder] if flag == "--remove-settings" => {
             // (First what the phone remote fetched: by the remote, while its configuration is still there.)
             phone::forget_fetched(std::path::Path::new(folder));
@@ -468,7 +470,58 @@ pub fn run() {
         }
     });
     tray::run();
+    // (What was changed last is on the disk before Glance goes.)
+    saved_all();
     presents::stop();
+}
+
+/// The settings to be written (the latest changed: those changed before it are not written too), and whether some
+/// are being written; on a thread of their own (see `App::change`).
+#[cfg(windows)]
+static UNSAVED: Mutex<(Option<(settings::Settings, PathBuf)>, bool)> = Mutex::new((None, false));
+#[cfg(windows)]
+static SAVED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// Writes `settings` to `dir` on the thread that writes them, after those before.
+#[cfg(windows)]
+fn save_later(settings: settings::Settings, dir: PathBuf) {
+    let mut unsaved = UNSAVED.lock().unwrap();
+    let idle = unsaved.0.is_none() && !unsaved.1;
+    unsaved.0 = Some((settings, dir));
+    if !idle {
+        return;
+    }
+    thread::Builder::new()
+        .name("glance: settings saved".into())
+        .spawn(|| loop {
+            let (settings, dir) = {
+                let mut unsaved = UNSAVED.lock().unwrap();
+                match unsaved.0.take() {
+                    Some(next) => {
+                        unsaved.1 = true;
+                        next
+                    }
+                    None => {
+                        unsaved.1 = false;
+                        SAVED.notify_all();
+                        return;
+                    }
+                }
+            };
+            if let Err(error) = settings.save(&dir) {
+                journal::note(format!("could not save settings: {error}"));
+            }
+        })
+        .expect("a thread started");
+}
+
+/// Waits till every change is written.
+#[cfg(windows)]
+fn saved_all() {
+    let mut unsaved = UNSAVED.lock().unwrap();
+    while unsaved.0.is_some() || unsaved.1 {
+        unsaved = SAVED.wait(unsaved).unwrap();
+    }
 }
 
 #[cfg(target_os = "macos")]

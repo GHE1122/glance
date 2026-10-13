@@ -70,6 +70,8 @@ impl Color {
 
 /// Devices and factories shared by every surface.
 pub struct Gfx {
+    /// Whether its device's immediate context may be used from several threads (see `new`).
+    pub guarded: bool,
     pub factory: ID2D1Factory1,
     pub(super) device: ID2D1Device,
     dxgi: IDXGIDevice3,
@@ -153,10 +155,14 @@ impl Gfx {
             .map(|_| d3d.unwrap())
         };
         let d3d = create(D3D_DRIVER_TYPE_HARDWARE).or_else(|_| create(D3D_DRIVER_TYPE_WARP))?;
-        // Its context guarded: the frames of what is behind are read back on it from other threads (see `scene`).
-        if let Ok(guarded) = d3d.cast::<windows::Win32::Graphics::Direct3D11::ID3D11Multithread>() {
-            let _ = unsafe { guarded.SetMultithreadProtected(true) };
-        }
+        // Its immediate context guarded (the context, not the device, answers for that): the frames of what is
+        // behind are read back on it from other threads (see `scene`), which they are not unless it is.
+        let guarded = unsafe { d3d.GetImmediateContext() }
+            .and_then(|context| context.cast::<windows::Win32::Graphics::Direct3D11::ID3D11Multithread>())
+            .is_ok_and(|guard| unsafe {
+                let _ = guard.SetMultithreadProtected(true);
+                guard.GetMultithreadProtected().as_bool()
+            });
         let dxgi: IDXGIDevice = d3d.cast()?;
         let factory: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, None)? };
         let device: ID2D1Device = unsafe { factory.CreateDevice(&dxgi)? };
@@ -194,6 +200,7 @@ impl Gfx {
             )?
         };
         Ok(Gfx {
+            guarded,
             factory,
             device,
             dxgi: dxgi.cast()?,

@@ -66,7 +66,11 @@ unsafe impl Send for Device {}
 unsafe impl Sync for Device {}
 
 impl Device {
+    /// `gfx`'s, if its context may be used from the threads frames are read on.
     fn of(gfx: &super::gfx::Gfx) -> Option<Device> {
+        if !gfx.guarded {
+            return None;
+        }
         let device = gfx.d3d().ok()?;
         let context = unsafe { device.GetImmediateContext() }.ok()?;
         let dxgi: IDXGIDevice = device.cast().ok()?;
@@ -128,6 +132,10 @@ impl Shared {
             Some(Capture::from_texture(area, Texture(kept), luma, taken))
         })();
         let Some(capture) = read else { return false };
+        // Arranged anew (or rested) while it was read: of what was there before, not taken.
+        if self.of.lock().unwrap().1 != arranged {
+            return false;
+        }
         *self.ready.lock().unwrap() = Some(capture);
         (self.wake)();
         true
@@ -253,6 +261,12 @@ unsafe extern "system" fn each(window: HWND, found: LPARAM) -> BOOL {
 fn cloaked(window: HWND) -> bool {
     let mut cloaked = 0u32;
     unsafe { DwmGetWindowAttribute(window, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4) }.is_ok() && cloaked != 0
+}
+
+/// Whether the system can capture a window (Windows.Graphics.Capture: Windows 10 1903 and later).
+pub fn supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| GraphicsCaptureSession::IsSupported().unwrap_or(false))
 }
 
 /// Glance's windows left out of every scene, while they are: what is not part of what is behind (the panel as a
@@ -397,6 +411,8 @@ impl Scene {
         // Frames from before all of it was in place are not of what is there now (one may be put together while it
         // is being put in place).
         *self.shared.of.lock().unwrap() = (area, now_100ns());
+        // (Nor what was read of it before and not taken yet.)
+        *self.shared.ready.lock().unwrap() = None;
         *self.shared.latest.lock().unwrap() = None;
         self.shared.resting.store(false, Ordering::Release);
         true
@@ -417,6 +433,8 @@ impl Scene {
             let _ = SetWindowPos(self.window, None, least.left, least.top, 1, 1, SWP_NOACTIVATE | SWP_NOZORDER);
         }
         self.area = least;
+        // (A frame being read meanwhile is of what was there.)
+        *self.shared.of.lock().unwrap() = (least, now_100ns());
         let size = SizeInt32 { Width: 1, Height: 1 };
         if self.pool.Recreate(&self.shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).is_ok() {
             self.size = size;
