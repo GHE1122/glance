@@ -9,6 +9,8 @@ mod battery;
 mod detector;
 #[cfg(windows)]
 mod push;
+#[cfg(windows)]
+mod handoff;
 mod frames;
 #[cfg(windows)]
 mod diagnostics;
@@ -101,7 +103,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(windows)]
 use std::thread;
 #[cfg(windows)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use windows::core::{w, PCWSTR};
@@ -364,6 +366,33 @@ pub fn run() {
     if elevation::is_elevated() && already_running() {
         sensing::run();
         return;
+    }
+    // Started elevated with no Glance running (a task of 0.3.7 or before, a build run by hand): Glance's windows are
+    // never shown elevated. The desktop's shell is asked to start Glance as the user, and this becomes its sensors.
+    // Only where the shell itself runs elevated (UAC turned off) is there no other way, and Glance runs whole, as
+    // it always did; and a start the shell made that is elevated all the same is not handed over again.
+    let handed_off = std::env::args().any(|arg| arg == handoff::HANDED_OFF);
+    if elevation::is_elevated() && !handed_off {
+        let exe = std::env::current_exe().expect("own path");
+        let mut asked = handoff::start_as_user(&exe.to_string_lossy(), handoff::HANDED_OFF);
+        // At sign-in the shell may not be up yet.
+        let until = Instant::now() + Duration::from_secs(30);
+        while asked == Err(handoff::Refused::NoShell) && Instant::now() < until {
+            thread::sleep(Duration::from_secs(1));
+            asked = handoff::start_as_user(&exe.to_string_lossy(), handoff::HANDED_OFF);
+        }
+        match asked {
+            Ok(()) => {
+                journal::note("start: started elevated; Glance itself started as the user through the desktop's shell, this process reads the sensors");
+                sensing::run();
+                return;
+            }
+            Err(handoff::Refused::ShellElevated) => {}
+            Err(why) => {
+                journal::note(format!("start: started elevated, and the start could not be handed to the desktop's shell ({why:?}): nothing shown"));
+                return;
+            }
+        }
     }
     // One Glance at a time: starting it again opens its settings.
     if already_running() {
