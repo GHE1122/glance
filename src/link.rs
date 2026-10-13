@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use windows::core::{HSTRING, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, LocalFree, GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND};
@@ -75,6 +75,9 @@ pub struct ReleaseSent {
 /// What the sensors are asked.
 #[derive(Serialize, Deserialize)]
 pub enum Asked {
+    /// The first thing the rest says, as it comes: its version (the sensors serve only their own version's rest:
+    /// another's makes them go, for the rest to start its own).
+    Hello { version: String },
     /// How often to read, and what besides the plain readings.
     Want(Want),
     /// Whether a game shows, as the user set it.
@@ -179,8 +182,11 @@ impl Sensors {
     pub fn open() -> Option<Self> {
         let (told, asked) = names()?;
         let sid = crate::elevation::user_sid()?;
-        // This user and the system, and the user's ordinary (medium integrity) processes as well as its elevated ones.
-        let sddl = HSTRING::from(format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})S:(ML;;NW;;;ME)"));
+        // Owned by the Administrators (an owner may always change who may do what: the user may not); the system
+        // and the Administrators all; the user, ordinary (medium integrity) processes too, only reading and
+        // writing data (FILE_GENERIC_READ | FILE_WRITE_DATA: no further instance of the pipe made, no change to
+        // who may use it).
+        let sddl = HSTRING::from(format!("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0012008B;;;{sid})S:(ML;;NW;;;ME)"));
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&sddl, SDDL_REVISION_1, &mut descriptor, None) }.ok()?;
         let attributes = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor.0, bInheritHandle: false.into() };
@@ -244,11 +250,94 @@ pub fn ask_on(to: &mut File, asked: &Asked) -> bool {
     send(to, asked)
 }
 
-/// The process at the other end of the sensors' telling pipe (the rest of Glance).
-pub fn client_of(sensors: &Sensors) -> Option<u32> {
-    let mut pid = 0u32;
-    unsafe { windows::Win32::System::Pipes::GetNamedPipeClientProcessId(sensors.told, &mut pid) }.ok()?;
-    Some(pid)
+impl Sensors {
+    /// Whether what came is the rest of Glance: one process at the other end of both pipes, of this user and this
+    /// session, running as the user (medium integrity), this very program. Who is at the asking end is read
+    /// through the pipe itself (at identification level: who, never with the rights of), once something has been
+    /// read from it. Why not, if not.
+    pub fn check_client(&self) -> Result<u32, String> {
+        use windows::Win32::Security::RevertToSelf;
+        use windows::Win32::System::Pipes::ImpersonateNamedPipeClient;
+        use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeClientSessionId};
+        use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+        use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThread, OpenThreadToken};
+        let (mut told, mut asked, mut session) = (0u32, 0u32, u32::MAX);
+        unsafe {
+            GetNamedPipeClientProcessId(self.told, &mut told).map_err(|e| format!("its process on one pipe: {e}"))?;
+            GetNamedPipeClientProcessId(self.asked, &mut asked).map_err(|e| format!("its process on the other: {e}"))?;
+            GetNamedPipeClientSessionId(self.asked, &mut session).map_err(|e| format!("its session: {e}"))?;
+        }
+        if told != asked {
+            return Err(format!("two processes, {told} and {asked}"));
+        }
+        let mut ours = u32::MAX;
+        unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut ours) }.map_err(|e| format!("our session: {e}"))?;
+        if session != ours {
+            return Err(format!("session {session}, not {ours}"));
+        }
+        // Who it is, through the pipe; back to ourselves whatever happens.
+        unsafe { ImpersonateNamedPipeClient(self.asked) }.map_err(|e| format!("identifying it: {e}"))?;
+        let mut token = HANDLE::default();
+        let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) };
+        let reverted = unsafe { RevertToSelf() };
+        if reverted.is_err() {
+            // Still someone else: nothing more is done by this process.
+            std::process::exit(1);
+        }
+        opened.map_err(|e| format!("its token: {e}"))?;
+        let facts = token_facts(token);
+        unsafe {
+            let _ = CloseHandle(token);
+        }
+        let (user, integrity) = facts.ok_or("its token's facts")?;
+        if Some(user) != crate::elevation::user_sid() {
+            return Err("another user".into());
+        }
+        // SECURITY_MANDATORY_MEDIUM_RID: the user's ordinary processes.
+        if integrity != 0x2000 {
+            return Err(format!("integrity {integrity:#x}, not the user's ordinary one"));
+        }
+        if !is_this_program(told) {
+            return Err("another program".into());
+        }
+        Ok(told)
+    }
+}
+
+/// A token's user (as a SID string) and integrity level (its RID).
+fn token_facts(token: HANDLE) -> Option<(String, u32)> {
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetSidSubAuthority, GetSidSubAuthorityCount, TokenIntegrityLevel, TokenUser, TOKEN_MANDATORY_LABEL, TOKEN_USER};
+    unsafe {
+        let mut buffer = vec![0u8; 512];
+        let mut size = 0u32;
+        GetTokenInformation(token, TokenUser, Some(buffer.as_mut_ptr().cast()), buffer.len() as u32, &mut size).ok()?;
+        let mut text = PWSTR::null();
+        ConvertSidToStringSidW((*(buffer.as_ptr() as *const TOKEN_USER)).User.Sid, &mut text).ok()?;
+        let user = text.to_string().ok();
+        let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+        let mut label = vec![0u8; 512];
+        GetTokenInformation(token, TokenIntegrityLevel, Some(label.as_mut_ptr().cast()), label.len() as u32, &mut size).ok()?;
+        let sid = (*(label.as_ptr() as *const TOKEN_MANDATORY_LABEL)).Label.Sid;
+        let count = *GetSidSubAuthorityCount(sid) as u32;
+        let integrity = *GetSidSubAuthority(sid, count.checked_sub(1)?);
+        Some((user?, integrity))
+    }
+}
+
+/// Whether the process `pid` runs this very program.
+fn is_this_program(pid: u32) -> bool {
+    unsafe {
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        let mut path = vec![0u16; 1024];
+        let mut length = path.len() as u32;
+        let named = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(path.as_mut_ptr()), &mut length).is_ok();
+        let _ = CloseHandle(process);
+        let theirs = std::path::PathBuf::from(String::from_utf16_lossy(&path[..length as usize]));
+        let (Ok(ours), true) = (std::env::current_exe(), named) else { return false };
+        // Both resolved, or no match.
+        matches!((std::fs::canonicalize(&ours), std::fs::canonicalize(&theirs)), (Ok(a), Ok(b)) if a == b)
+    }
 }
 
 // ---- The rest's side ----
@@ -265,9 +354,12 @@ impl Link {
     pub fn connect(patience: Duration) -> Option<Link> {
         let (told, asked) = names()?;
         let until = Instant::now() + patience;
+        // Only as much as each end needs (the pipes give the user no more), and the sensors allowed to learn who
+        // this is, never to act as it (SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION).
+        let identification_only = windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x0011_0000);
         let open = |name: &str, access: u32| -> Option<HANDLE> {
             loop {
-                let opened = unsafe { CreateFileW(&HSTRING::from(name), access, FILE_SHARE_NONE, None, OPEN_EXISTING, Default::default(), None) };
+                let opened = unsafe { CreateFileW(&HSTRING::from(name), access, FILE_SHARE_NONE, None, OPEN_EXISTING, identification_only, None) };
                 if let Ok(handle) = opened {
                     return Some(handle);
                 }
@@ -281,18 +373,23 @@ impl Link {
                 std::thread::sleep(Duration::from_millis(100));
             }
         };
-        let told = open(&told, GENERIC_READ.0)?;
-        let Some(asked) = open(&asked, GENERIC_WRITE.0) else {
+        // FILE_GENERIC_READ; FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE.
+        let told = open(&told, 0x0012_0089)?;
+        let Some(asked) = open(&asked, 0x0010_0082) else {
             unsafe {
                 let _ = CloseHandle(told);
             }
             return None;
         };
-        let link = unsafe { Link { told: File::from_raw_handle(told.0), asked: File::from_raw_handle(asked.0) } };
-        // Believed only from this very program, elevated.
-        let mut server = 0u32;
+        let mut link = unsafe { Link { told: File::from_raw_handle(told.0), asked: File::from_raw_handle(asked.0) } };
+        // Believed only from this very program, elevated, at both ends.
+        let (mut server, mut other) = (0u32, 0u32);
         unsafe { GetNamedPipeServerProcessId(told, &mut server) }.ok()?;
-        is_us_elevated(server).then_some(link)
+        unsafe { GetNamedPipeServerProcessId(asked, &mut other) }.ok()?;
+        if server != other || !is_us_elevated(server) {
+            return None;
+        }
+        send(&mut link.asked, &Asked::Hello { version: env!("CARGO_PKG_VERSION").into() }).then_some(link)
     }
 
     pub fn receive(&mut self) -> Option<Told> {

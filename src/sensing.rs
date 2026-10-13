@@ -17,6 +17,8 @@ use crate::metrics::Sampler;
 
 /// How long the rest may be gone (restarting, updating) before the sensors go too.
 const WAITED_FOR: Duration = Duration::from_secs(20);
+/// How long what came has to say who it is.
+const HELLO_WITHIN: Duration = Duration::from_secs(5);
 
 /// Runs the sensors till the rest has gone for good. Not elevated, or with the sensors already running for
 /// this user, it does nothing.
@@ -46,10 +48,43 @@ pub fn run() {
             }
         });
         let Ok(Some((told, asked))) = came.recv_timeout(WAITED_FOR) else { break };
-        // (The rest's windows are no game's.)
-        if let Some(pid) = link::client_of(&pipes) {
-            crate::presents::set_partner(pid);
+        // What came says who it is first, within a few seconds (what says nothing is let go: it would keep the
+        // rest out); it is checked (through the pipe) before it is told anything.
+        let (said, hello) = mpsc::channel();
+        let hearing = std::thread::spawn({
+            let mut asked = asked.try_clone().ok();
+            move || {
+                let _ = said.send(asked.as_mut().and_then(link::heard));
+            }
+        });
+        let first = hello.recv_timeout(HELLO_WITHIN).ok().flatten();
+        if !hearing.is_finished() {
+            unsafe {
+                use std::os::windows::io::AsRawHandle;
+                let _ = windows::Win32::System::IO::CancelSynchronousIo(windows::Win32::Foundation::HANDLE(hearing.as_raw_handle()));
+            }
         }
+        let _ = hearing.join();
+        let checked = match first {
+            Some(Asked::Hello { version }) if version == env!("CARGO_PKG_VERSION") => pipes.check_client(),
+            // Another version's Glance: it starts the sensors of its own version once these have gone.
+            Some(Asked::Hello { version }) => {
+                crate::journal::note(format!("sensors: Glance {version} came, these are {}: going, for its own", env!("CARGO_PKG_VERSION")));
+                break;
+            }
+            _ => Err("it said nothing first".into()),
+        };
+        let pid = match checked {
+            Ok(pid) => pid,
+            Err(why) => {
+                crate::journal::note(format!("sensors: what came is not taken ({why})"));
+                drop((told, asked));
+                pipes.let_go();
+                continue;
+            }
+        };
+        // (The rest's windows are no game's.)
+        crate::presents::set_partner(pid);
         let telling = Arc::new(Mutex::new(told));
         let tell = |told: &Told| link::tell(&mut telling.lock().unwrap(), told);
         let hello = Told::Hello { version: env!("CARGO_PKG_VERSION").into(), info: sampler.info.clone(), found: sampler.info.found.clone() };
@@ -66,6 +101,8 @@ pub fn run() {
                 let tell = |told: &Told| link::tell(&mut telling.lock().unwrap(), told);
                 while let Some(asking) = asked.as_mut().and_then(link::heard) {
                     match asking {
+                        // (Said once, first; heard again, it is nothing.)
+                        Asked::Hello { .. } => {}
                         Asked::Want(wanted) => *want.lock().unwrap() = wanted.checked(),
                         Asked::GameMode(mode) => crate::presents::set_game_mode(mode.into()),
                         Asked::Report => {

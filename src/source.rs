@@ -87,16 +87,32 @@ pub fn install(release: crate::link::ReleaseSent) {
 /// failing that, it reads what it can itself.
 pub fn open() -> (StaticInfo, Source) {
     if !crate::elevation::is_elevated() {
-        let linked = Link::connect(Duration::from_millis(300)).or_else(|| crate::elevation::start_sensors().then(|| Link::connect(STARTED_WITHIN)).flatten());
-        if let Some(mut link) = linked {
-            if let Some(Told::Hello { info, .. }) = link.receive() {
-                if let Ok(asking) = link.asked.try_clone() {
-                    *ASKING.lock().unwrap() = Some(asking);
-                }
-                LINKED.store(true, Ordering::Relaxed);
-                crate::journal::note("readings: from the sensors' process");
-                return (info, Source::Linked(link));
+        // The sensors running, and of this version; else (none running, or another version's, which goes as it
+        // hears this one) this version's started.
+        let greeted = |link: Option<Link>| -> Option<(Link, StaticInfo)> {
+            let mut link = link?;
+            match link.receive() {
+                Some(Told::Hello { info, .. }) => Some((link, info)),
+                _ => None,
             }
+        };
+        let running = Link::connect(Duration::from_millis(300));
+        let turned_away = running.is_some();
+        let mut linked = greeted(running);
+        if linked.is_none() {
+            if turned_away {
+                // (Its pipes free once it has gone.)
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            linked = crate::elevation::start_sensors().then(|| greeted(Link::connect(STARTED_WITHIN))).flatten();
+        }
+        if let Some((link, info)) = linked {
+            if let Ok(asking) = link.asked.try_clone() {
+                *ASKING.lock().unwrap() = Some(asking);
+            }
+            LINKED.store(true, Ordering::Relaxed);
+            crate::journal::note("readings: from the sensors' process");
+            return (info, Source::Linked(link));
         }
         crate::journal::note("readings: Glance's own, without administrator rights (the sensors' process was not had)");
     }
