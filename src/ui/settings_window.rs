@@ -1788,12 +1788,12 @@ impl Ui {
         let (name, hint, on) = match switch {
             Switch::Live => (
                 p("背景实时刷新", "Live backdrop"),
-                Some(p("玻璃和亚克力背后的画面随时跟着变；身后有东西在动时会多用一些处理器和显卡", "What shows behind glass and acrylic keeps up as it changes, using more processor and graphics while something there moves")),
+                Some(p("玻璃与亚克力材质背后的画面将实时更新；背景变化时，会占用一定的处理器与显卡资源", "What shows behind glass and acrylic is updated in real time; while the background changes, some processor and graphics resources are used")),
                 self.settings.live_backdrop,
             ),
             Switch::TearOff => (
                 p("拖出面板成为小组件", "Drag the panel off as a widget"),
-                Some(p("按住面板拖离屏幕边缘，它会变成桌面上的小组件；关闭后拖动面板不会有任何反应", "Pulling the panel away from its edge turns it into a widget on the desktop; off, pulling it does nothing")),
+                Some(p("按住面板拖离屏幕边缘，即可将其转为桌面小组件；关闭后，拖动面板将不再生效", "Drag the panel away from the screen edge to turn it into a desktop widget; when off, dragging the panel has no effect")),
                 self.settings.tear_off,
             ),
             // Only a copy no ordinary program can replace (one the installer
