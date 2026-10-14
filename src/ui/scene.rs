@@ -29,7 +29,7 @@ use windows::Graphics::Capture::{Direct3D11CaptureFrame, Direct3D11CaptureFrameP
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
     D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ, D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_TEXTURE2D_DESC,
@@ -407,10 +407,10 @@ impl Scene {
         let want = ((area.right - area.left).max(1) as u32, (area.bottom - area.top).max(1) as u32);
         let have = (self.size.Width as u32, self.size.Height as u32);
         let (width, height) = super::gfx::room(Some(have), want).unwrap_or(have);
-        // The room to spare on its screen (what reaches past it is of no screen; one taken past it looks like one of
-        // another screen to whoever asked): on whichever side there is room, all of what was asked held. Against
-        // the screen's edge (a panel, a widget stuck to it), it spares room towards the middle.
-        let screen = crate::mouse::monitor_at(POINT { x: (area.left + area.right) / 2, y: (area.top + area.bottom) / 2 }).map(|contact| contact.monitor);
+        // The room to spare on the desktop (what reaches past it is of no screen): on whichever side there is room,
+        // all of what was asked held. Against the desktop's edge (a panel, a widget stuck to it), it spares room
+        // towards the middle. Not on one screen alone: what is behind a window across two is behind it on both.
+        let screen = Some(crate::mouse::desktop());
         let span = |from: i32, to: i32, length: i32, low: Option<i32>, high: Option<i32>| {
             // As far as it goes from `from`, moved back from the screen's far side, never past where it begins.
             let start = high.map_or(from, |high| from.min(high - length));
@@ -535,11 +535,11 @@ impl Scene {
         self.shared.spare.0.lock().unwrap().clear();
     }
 
-    /// Its frames made large enough for `size` from now on, on a screen of `screen`'s size (none: not known);
+    /// Its frames made large enough for `size` from now on, on a desktop of `screen`'s size (none: not known);
     /// whether they are. Each pool of frames made is memory the system keeps for good (till Glance ends, whatever is
     /// let go of: measured, a frame's worth each time): so it is made only larger, never smaller, and a quarter
-    /// larger than asked, as large as the screen at most (what a scene stands for is on one screen); for a window
-    /// moved and sized about, it is made a few times at most, then serves.
+    /// larger than asked, as large as the desktop at most (what a scene stands for is on it); for a window moved
+    /// and sized about, it is made a few times at most, then serves.
     fn fit(&mut self, size: SizeInt32, screen: Option<SizeInt32>) -> bool {
         if size.Width <= self.size.Width && size.Height <= self.size.Height {
             return true;

@@ -1172,12 +1172,13 @@ impl Widget {
 
     /// What is taken of the desktop behind it: round it by half its width
     /// across and half its height up and down (room to be moved in, and for
-    /// the blur past its edges), on its screen.
+    /// the blur past its edges), on every screen it is on (across two, the
+    /// half on the other has what is behind it too).
     fn backdrop_area(&self) -> RECT {
         let r = self.rect();
         let least = (64.0 * self.contact.scale) as i32;
         let (across, down) = (((r.right - r.left) / 2).max(least), ((r.bottom - r.top) / 2).max(least));
-        clip(RECT { left: r.left - across, top: r.top - down, right: r.right + across, bottom: r.bottom + down }, self.contact.monitor)
+        clip(RECT { left: r.left - across, top: r.top - down, right: r.right + across, bottom: r.bottom + down }, crate::mouse::desktop())
     }
 
     /// Its surface on the screen (physical px).

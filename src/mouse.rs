@@ -85,6 +85,14 @@ pub(crate) fn read_mouse(handle: HRAWINPUT) -> Option<(Moved, u16)> {
     Some((Moved::By(mouse.lLastX, mouse.lLastY), buttons))
 }
 
+/// The whole desktop, every screen within it (physical px): the bounds of what is on any screen.
+pub(crate) fn desktop() -> RECT {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN};
+    let (left, top) = unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN)) };
+    let (width, height) = unsafe { (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)) };
+    RECT { left, top, right: left + width, bottom: top + height }
+}
+
 pub(crate) fn monitor_at(point: POINT) -> Option<Contact> {
     let handle = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
     let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
