@@ -368,9 +368,18 @@ impl Held {
     }
 }
 
-/// Holds `folder` open, if it is a folder and not a link.
+/// Holds `folder` open, if it is a folder and not a link, able to delete it: for a folder made here (see
+/// `create_held`), or one deleted by its handle.
 fn pin(folder: &Path) -> Option<Held> {
     Held::open(folder).filter(Held::is_folder)
+}
+
+/// Holds `folder` open, if it is a folder and not a link, without the right to delete it: for a folder that was
+/// there already. Held so, it can be neither moved nor deleted by anyone else (it shares no deletion), and holding it
+/// is not refused because another program has it open as it may (as its current folder: the Glance an install
+/// replaces, a console), which asking to delete it is (ERROR_SHARING_VIOLATION).
+fn hold(folder: &Path) -> Option<Held> {
+    Held::open_to_hold(folder).filter(Held::is_folder)
 }
 
 /// Rights over a folder that would let someone change what is in it, or
@@ -478,7 +487,7 @@ impl Private {
 /// above it (`folders_hold`): then no one else can move the new folder
 /// aside, from the moment it is made until long after it is let go.
 pub fn private_folder(parent: &Path, name: &str) -> Option<Private> {
-    let parent_held = pin(parent)?;
+    let parent_held = hold(parent)?;
     let real = plain(&parent_held.place()?);
     if !folders_hold(&real) {
         return None;
@@ -597,7 +606,7 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
     }
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
     let existing = folder.ancestors().find(|dir| dir.exists()).ok_or(InstallFolder::Failed)?.to_path_buf();
-    let mut held = vec![pin(&existing).ok_or(InstallFolder::Indirect)?];
+    let mut held = vec![hold(&existing).ok_or(InstallFolder::Indirect)?];
     if !same_path(&held[0].place().ok_or(InstallFolder::Failed)?, &existing) {
         return Err(InstallFolder::Indirect);
     }
@@ -775,7 +784,7 @@ fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
 /// then the folder itself, by its handle, if nothing else is left.
 pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
-    let held = pin(&folder).ok_or(InstallFolder::Indirect)?;
+    let held = hold(&folder).ok_or(InstallFolder::Indirect)?;
     if direct(&folder).is_none() || !held.place().is_some_and(|place| same_path(&place, &folder)) {
         return Err(InstallFolder::Indirect);
     }
@@ -797,8 +806,12 @@ pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
         };
         removed &= gone.is_ok();
     }
-    // Gone once let go, if nothing else is in it.
-    held.delete();
+    // Gone, if nothing else is in it: by a handle able to delete it, if it is still the one held (which is let go
+    // first: it shares no deletion).
+    drop(held);
+    if let Some(deletable) = pin(&folder).filter(|again| again.place().is_some_and(|place| same_path(&place, &folder))) {
+        deletable.delete();
+    }
     removed.then_some(()).ok_or(InstallFolder::Failed)
 }
 
