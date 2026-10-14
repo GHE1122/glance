@@ -134,11 +134,15 @@ impl Shared {
             Some(Capture::from_texture(area, Texture { texture: kept, spare: self.spare.clone() }, luma, taken))
         })();
         let Some(capture) = read else { return false };
-        // Arranged anew (or rested) while it was read: of what was there before, not taken.
-        if self.of.lock().unwrap().1 != arranged {
+        // Arranged anew (or rested) while it was read: of what was there before, not taken. (Looked at and handed on
+        // under one lock: what arranges or rests it marks it so before it clears what was handed on, so that one
+        // handed on meanwhile is cleared too, never left behind.)
+        let of = self.of.lock().unwrap();
+        if of.1 != arranged {
             return false;
         }
         *self.ready.lock().unwrap() = Some(capture);
+        drop(of);
         (self.wake)();
         true
     }
@@ -481,6 +485,9 @@ impl Scene {
     /// wants what is behind only as it was when last looked at, not as it changes, or is hidden (see `life`);
     /// arranged again, it is as it was, and as quickly.
     pub fn rest(&mut self) {
+        let least = RECT { left: self.area.left, top: self.area.top, right: self.area.left + 1, bottom: self.area.top + 1 };
+        // (A frame being read meanwhile is of what was there: marked so first, see `Shared::read`.)
+        *self.shared.of.lock().unwrap() = (least, now_100ns());
         self.shared.resting.store(true, Ordering::Release);
         self.forget();
         self.shared.wanted.store(false, Ordering::Release);
@@ -488,14 +495,12 @@ impl Scene {
         *self.shared.ready.lock().unwrap() = None;
         *self.shared.halves.lock().unwrap() = None;
         self.shared.spare.0.lock().unwrap().clear();
-        let least = RECT { left: self.area.left, top: self.area.top, right: self.area.left + 1, bottom: self.area.top + 1 };
         unsafe {
             let _ = SetWindowPos(self.window, None, least.left, least.top, 1, 1, SWP_NOACTIVATE | SWP_NOZORDER);
         }
         self.area = least;
-        // (A frame being read meanwhile is of what was there.) Its pool of frames stays as it is (see `fit`): made
-        // smaller, and larger again as it is arranged, would be two more the system keeps.
-        *self.shared.of.lock().unwrap() = (least, now_100ns());
+        // (Its pool of frames stays as it is, see `fit`: made smaller, and larger again as it is arranged, would be
+        // two more the system keeps.)
     }
 
     /// The thumbnail `index` shown where its window is, `rect`, within the area.
