@@ -42,6 +42,23 @@ object Update {
         data object Failed : State
     }
 
+    /** Who is told how the taking stands, for what the system's installer answers in the end (see [Installed]). */
+    @Volatile
+    private var telling: ((State) -> Unit)? = null
+
+    /**
+     * What the system's installer answered in the end, other than asking the user: given up by the user, it is offered
+     * again; refused (another signer, no room, an older version), it failed. Installed, this app is replaced, and
+     * nothing is left to tell.
+     */
+    internal fun answered(status: Int) {
+        when (status) {
+            PackageInstaller.STATUS_SUCCESS, PackageInstaller.STATUS_PENDING_USER_ACTION -> return
+            PackageInstaller.STATUS_FAILURE_ABORTED -> telling?.invoke(State.Offered)
+            else -> telling?.invoke(State.Failed)
+        }
+    }
+
     /** Whether [url] is one a newer app may be downloaded from. */
     fun allowed(url: String) = FROM.matches(url)
 
@@ -57,6 +74,7 @@ object Update {
      */
     fun take(context: Context, url: String, told: (State) -> Unit) {
         if (!allowed(url)) return told(State.Failed)
+        telling = told
         val file = File(context.cacheDir, "update.apk")
         try {
             download(url, file) { percent -> told(State.Downloading(percent)) }
@@ -112,26 +130,36 @@ object Update {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED)
         }
         val id = installer.createSession(params)
-        installer.openSession(id).use { session ->
-            file.inputStream().use { input ->
-                session.openWrite("app.apk", 0, file.length()).use { output ->
-                    input.copyTo(output)
-                    session.fsync(output)
+        try {
+            installer.openSession(id).use { session ->
+                file.inputStream().use { input ->
+                    session.openWrite("app.apk", 0, file.length()).use { output ->
+                        input.copyTo(output)
+                        session.fsync(output)
+                    }
                 }
+                val answered = PendingIntent.getBroadcast(
+                    context, id, Intent(context, Installed::class.java).setPackage(context.packageName),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+                )
+                session.commit(answered.intentSender)
             }
-            val answered = PendingIntent.getBroadcast(
-                context, id, Intent(context, Installed::class.java).setPackage(context.packageName),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-            )
-            session.commit(answered.intentSender)
+        } catch (failed: Exception) {
+            // (What was written of it goes with the session, not left to the system: closing it only lets go of it.)
+            installer.abandonSession(id)
+            throw failed
         }
     }
 }
 
-/** What the system's installer answers: asking the user first, it hands back the page that asks, shown here. */
+/**
+ * What the system's installer answers: asking the user first, it hands back the page that asks, shown here; its last
+ * answer is told to whoever took the update (see [Update.answered]).
+ */
 class Installed : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE) != PackageInstaller.STATUS_PENDING_USER_ACTION) return
+        val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
+        if (status != PackageInstaller.STATUS_PENDING_USER_ACTION) return Update.answered(status)
         val asking = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
         } else {
