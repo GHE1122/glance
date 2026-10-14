@@ -82,6 +82,8 @@ fn heat(celsius: i64) -> String {
 /// Night mode: the power plan to go back to.
 struct Night {
     power: Option<power::Before>,
+    /// Whether night muted the sound (it was not muted already): unmuted again as night ends.
+    muted: bool,
 }
 
 #[derive(Default)]
@@ -194,6 +196,13 @@ impl Helper {
             other => other?,
         }
         self.state.lock().unwrap().lights = Some(on);
+        let _ = Config::change(|config| config.lit = Some(on));
+        // Set, the lights stay as they are: the OpenRGB started for them goes (left running, it wakes the processor
+        // thousands of times a second, some 7 W on a Ryzen 9 9950X sitting idle). Not while they follow the heat:
+        // they are set again as it changes.
+        if !(on && light.effect == Effect::Heat) {
+            lights::afresh();
+        }
         Ok(())
     }
 
@@ -349,9 +358,10 @@ impl Helper {
         let _ = self.keep_held();
     }
 
-    /// Night: the lights out, the power-saving plan, the screens off. Day
-    /// again: the plan there was and the lights on (the screens come on at
-    /// the touch that ends it, or stay off till one).
+    /// Night: the lights out, the sound muted, the power-saving plan, the
+    /// screens off. Day again: the plan there was, the sound as it was, and
+    /// the lights on (the screens come on at the touch that ends it, or stay
+    /// off till one).
     fn night(&self, on: bool) -> Result<(), String> {
         let _one = self.nighting.lock().unwrap();
         if on {
@@ -360,15 +370,20 @@ impl Helper {
             }
             // The lights first: they may take OpenRGB a while to reach.
             let lit = self.lights(false);
+            // Muted, if it is not already (then it stays so after: it was muted before night).
+            let muted = actions::volume().is_some_and(|(_, muted)| !muted) && actions::set_volume(None, Some(true)).is_ok();
             let power = power::save();
             let dark = self.screens_off();
-            self.state.lock().unwrap().night = Some(Night { power });
+            self.state.lock().unwrap().night = Some(Night { power, muted });
             journal::note(format!("night began (lights: {}; screens: {})", lit.as_ref().map_or_else(|error| error.as_str(), |_| "out"), dark.as_ref().map_or_else(|error| error.as_str(), |_| "out")));
             lit.and(dark)
         } else {
             let Some(night) = self.state.lock().unwrap().night.take() else { return Ok(()) };
             if let Some(power) = night.power {
                 power::restore(power);
+            }
+            if night.muted {
+                let _ = actions::set_volume(None, Some(false));
             }
             self.screens_on();
             let lit = self.lights(true);
@@ -991,8 +1006,8 @@ fn main() -> std::io::Result<()> {
     let session = sign::hex(&session);
     // (Kept once as this version keeps it: each phone with what it is told from the others by.)
     let _ = Config::change(|_| {});
-    // (Whether the lights are on, as OpenRGB has them if it is running.)
-    let state = State { lights: lights::lit(), ..State::default() };
+    // (Whether the lights are on, as OpenRGB has them if it is running; else as they were last set.)
+    let state = State { lights: lights::lit().or(config.lit), ..State::default() };
     let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), colours: Mutex::new(config.colours.clone()), keys: Mutex::new(config.keys), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false), nighting: Mutex::new(()), session, callers: Mutex::default() });
     let following = helper.clone();
     std::thread::spawn(move || {
