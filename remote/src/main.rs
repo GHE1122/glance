@@ -197,12 +197,8 @@ impl Helper {
         }
         self.state.lock().unwrap().lights = Some(on);
         let _ = Config::change(|config| config.lit = Some(on));
-        // Set, the lights stay as they are: the OpenRGB started for them goes (left running, it wakes the processor
-        // thousands of times a second, some 7 W on a Ryzen 9 9950X sitting idle). Not while they follow the heat:
-        // they are set again as it changes.
-        if !(on && light.effect == Effect::Heat) {
-            lights::afresh();
-        }
+        // (The OpenRGB that set them stays: some devices fall back to their own light once it goes, OpenRGB having
+        // kept them as it set them.)
         Ok(())
     }
 

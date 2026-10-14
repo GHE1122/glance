@@ -285,9 +285,8 @@ fn server(config: &Config) -> std::io::Result<Client> {
 /// after Gigabyte Control Center, and after OpenRGB was started afresh.)
 pub const RIVALS: [&str; 1] = ["GCC.exe"];
 
-/// Stops the OpenRGB this helper started (the lights set, or taken by a
-/// maker's program from it), so that the next asking starts one afresh;
-/// whether there was one of its own to stop. One the user started is left.
+/// Stops the OpenRGB this helper started, so that the next asking starts
+/// one afresh; whether there was one of its own to stop.
 pub fn afresh() -> bool {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};

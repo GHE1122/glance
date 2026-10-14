@@ -82,8 +82,8 @@ pub struct Config {
     /// to stop and start afresh (one the user started is not).
     pub openrgb_started: Option<u32>,
     /// Whether the lights were last put on or out by this helper: what it
-    /// says of them while no OpenRGB runs to be asked (it lets go of the one
-    /// it started once they are set: see `Helper::lights`).
+    /// says of them while no OpenRGB runs to be asked (as the PC has started
+    /// and nothing has asked for it yet).
     pub lit: Option<bool>,
     /// The key this PC's own Glance asks by (its settings show the phone's
     /// page, to be used there as on a phone): taken from this PC alone.
