@@ -23,6 +23,14 @@ pub const SCREENS_CHANGED: u32 = WM_APP + 6;
 /// from it (or let go).
 pub const CAPTURE_LOST: u32 = WM_APP + 8;
 
+/// The window goes with it: one let go of, however (with what owned it, put away, merged), is never left on the
+/// screen (as where a widget would stick was, the widget put away as it was dragged).
+impl Drop for Window {
+    fn drop(&mut self) {
+        let _ = unsafe { DestroyWindow(self.hwnd) };
+    }
+}
+
 pub struct Window {
     pub hwnd: HWND,
     click_through: bool,
@@ -310,9 +318,8 @@ impl Window {
     }
 
     /// Gone for good (one made for nothing: its content could not be).
-    pub fn destroy(self) {
-        let _ = unsafe { DestroyWindow(self.hwnd) };
-    }
+    /// Destroys it (as letting go of it does: see `Drop`).
+    pub fn destroy(self) {}
 
     pub fn hide(&self) {
         unsafe {
