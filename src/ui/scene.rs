@@ -29,7 +29,7 @@ use windows::Graphics::Capture::{Direct3D11CaptureFrame, Direct3D11CaptureFrameP
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
     D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ, D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_TEXTURE2D_DESC,
@@ -51,7 +51,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_POPUP,
 };
 
-use super::backdrop::{Capture, Texture};
+use super::backdrop::{Capture, Spare, Texture};
 
 /// The device a scene's frames are made and read back on: the one Glance draws with (see `gfx`), its use from
 /// several threads guarded by the device itself.
@@ -97,6 +97,8 @@ struct Shared {
     device: Device,
     /// What a frame's lightness is made and read back through, kept for the next of the same size.
     halves: Mutex<Option<Halves>>,
+    /// Textures frames were kept in, let go of: written again for the next (see `backdrop::Texture`).
+    spare: Arc<Spare>,
     /// How many frames have been taken: what tells one from another.
     taken: std::sync::atomic::AtomicU64,
 }
@@ -127,9 +129,9 @@ impl Shared {
                 return None;
             }
             let texture: ID3D11Texture2D = unsafe { frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface() }.ok()?;
-            let (kept, luma) = keep(&self.device, &mut self.halves.lock().unwrap(), &texture, width as u32, height as u32)?;
+            let (kept, luma) = keep(&self.device, &mut self.halves.lock().unwrap(), &self.spare, &texture, width as u32, height as u32)?;
             let taken = self.taken.fetch_add(1, Ordering::Relaxed) + 1;
-            Some(Capture::from_texture(area, Texture(kept), luma, taken))
+            Some(Capture::from_texture(area, Texture { texture: kept, spare: self.spare.clone() }, luma, taken))
         })();
         let Some(capture) = read else { return false };
         // Arranged anew (or rested) while it was read: of what was there before, not taken.
@@ -143,10 +145,10 @@ impl Shared {
 }
 
 /// The top left `width` × `height` of `texture` (a frame of the capture's, taken back by it), kept in a texture of
-/// its own to be drawn from; and how light it is, a value (0–255) for each square of two by two pixels, as
-/// `Capture::from_pixels` makes it (the card averaging each square, through `halves`: made, or made anew, for that
-/// size).
-fn keep(device: &Device, halves: &mut Option<Halves>, texture: &ID3D11Texture2D, width: u32, height: u32) -> Option<(ID3D11Texture2D, Vec<u8>)> {
+/// its own to be drawn from (one let go of before, of that size, from `spare`; else a new one); and how light it is,
+/// a value (0–255) for each square of two by two pixels, as `Capture::from_pixels` makes it (the card averaging each
+/// square, through `halves`: made, or made anew, for that size).
+fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Spare, texture: &ID3D11Texture2D, width: u32, height: u32) -> Option<(ID3D11Texture2D, Vec<u8>)> {
     unsafe {
         let make = |description: &D3D11_TEXTURE2D_DESC| -> Option<ID3D11Texture2D> {
             let mut made = None;
@@ -164,7 +166,22 @@ fn keep(device: &Device, halves: &mut Option<Halves>, texture: &ID3D11Texture2D,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             ..Default::default()
         };
-        let kept = make(&plain)?;
+        // (Those of another size are let go of: the scene's size has changed.)
+        let reused = {
+            let mut spare = spare.0.lock().unwrap();
+            spare.retain(|texture| {
+                let mut description = D3D11_TEXTURE2D_DESC::default();
+                texture.GetDesc(&mut description);
+                description.Width == width && description.Height == height
+            });
+            spare.pop()
+        };
+        let kept = match reused {
+            Some(texture) => texture,
+            None => {
+                make(&plain)?
+            }
+        };
         if halves.as_ref().is_none_or(|halves| halves.size != (width, height)) {
             let levels = make(&D3D11_TEXTURE2D_DESC {
                 MipLevels: 2,
@@ -224,6 +241,49 @@ fn keep(device: &Device, halves: &mut Option<Halves>, texture: &ID3D11Texture2D,
     }
 }
 
+/// A capture of `item` (a scene's window) at `size`: its frame pool, made on the scene's device, each frame met as it
+/// comes (see `Shared`), and its session, started.
+fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) -> Option<(Direct3D11CaptureFramePool, GraphicsCaptureSession, i64)> {
+    let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).ok()?;
+    let arrived = pool.FrameArrived(&TypedEventHandler::new({
+        let shared = shared.clone();
+        move |pool: windows::core::Ref<Direct3D11CaptureFramePool>, _| {
+            let Ok(pool) = pool.ok() else { return Ok(()) };
+            let mut newest: Option<Direct3D11CaptureFrame> = None;
+            while let Ok(frame) = pool.TryGetNextFrame() {
+                // (Those passed over closed.)
+                close(newest.replace(frame));
+            }
+            let Some(frame) = newest else { return Ok(()) };
+            if shared.resting.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            // Wanted, read now (one of what was there before is not, and the next is wanted still); else
+            // kept, the thread that draws told once.
+            if shared.wanted.swap(false, Ordering::AcqRel) {
+                if !shared.read(&frame) {
+                    shared.wanted.store(true, Ordering::Release);
+                }
+                close(Some(frame));
+            } else {
+                let older = shared.latest.lock().unwrap().replace(frame);
+                if older.is_none() {
+                    (shared.wake)();
+                }
+                close(older);
+            }
+            Ok(())
+        }
+    }))
+    .ok()?;
+    let session = pool.CreateCaptureSession(item).ok()?;
+    // (Not on every system: a border no one sees is drawn then.)
+    let _ = session.SetIsBorderRequired(false);
+    let _ = session.SetIsCursorCaptureEnabled(false);
+    session.StartCapture().ok()?;
+    Some((pool, session, arrived))
+}
+
 /// A window of Glance's own that no one sees, the windows behind an area put together in it, and its capture.
 pub struct Scene {
     owner: HWND,
@@ -234,9 +294,18 @@ pub struct Scene {
     shown: Vec<(HWND, isize, RECT)>,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
+    /// Its handler of frames as they come, as the pool has it.
+    arrived: i64,
     /// The size the frames are made at.
     size: SizeInt32,
     shared: Arc<Shared>,
+}
+
+/// A frame done with, closed: its buffer back in its pool at once, not once the last reference to it goes.
+fn close(frame: Option<Direct3D11CaptureFrame>) {
+    if let Some(frame) = frame {
+        let _ = frame.Close();
+    }
 }
 
 /// The system's clock of frames, now (100 ns).
@@ -305,59 +374,50 @@ impl Scene {
                     return None;
                 }
             };
-            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0) });
+            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), spare: Arc::default(), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0) });
             let made = (|| {
                 let cloak: BOOL = true.into();
                 DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).ok()?;
                 let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
                 let item: GraphicsCaptureItem = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().ok()?.CreateForWindow(window).ok()?;
                 let size = item.Size().ok()?;
-                let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).ok()?;
-                pool.FrameArrived(&TypedEventHandler::new({
-                    let shared = shared.clone();
-                    move |pool: windows::core::Ref<Direct3D11CaptureFramePool>, _| {
-                        let Ok(pool) = pool.ok() else { return Ok(()) };
-                        let mut newest = None;
-                        while let Ok(frame) = pool.TryGetNextFrame() {
-                            newest = Some(frame);
-                        }
-                        let Some(frame) = newest else { return Ok(()) };
-                        if shared.resting.load(Ordering::Acquire) {
-                            return Ok(());
-                        }
-                        // Wanted, read now (one of what was there before is not, and the next is wanted still); else
-                        // kept, the thread that draws told once.
-                        if shared.wanted.swap(false, Ordering::AcqRel) {
-                            if !shared.read(&frame) {
-                                shared.wanted.store(true, Ordering::Release);
-                            }
-                        } else if shared.latest.lock().unwrap().replace(frame).is_none() {
-                            (shared.wake)();
-                        }
-                        Ok(())
-                    }
-                }))
-                .ok()?;
-                let session = pool.CreateCaptureSession(&item).ok()?;
-                // (Not on every system: a border no one sees is drawn then.)
-                let _ = session.SetIsBorderRequired(false);
-                let _ = session.SetIsCursorCaptureEnabled(false);
-                session.StartCapture().ok()?;
-                Some((pool, session, size))
+                let (pool, session, arrived) = capture(&shared, &item, size)?;
+                Some((pool, session, arrived, size))
             })();
-            let Some((pool, session, size)) = made else {
+            let Some((pool, session, arrived, size)) = made else {
                 let _ = DestroyWindow(window);
                 let _ = DestroyWindow(owner);
                 return None;
             };
-            Some(Scene { owner, window, area, shown: Vec::new(), pool, session, size, shared })
+            Some(Scene { owner, window, area, shown: Vec::new(), pool, session, arrived, size, shared })
         }
     }
 
     /// Puts together in it, for `area`, the windows behind `over` (one of Glance's: those under it, the desktop's
     /// own among them) that meet the area, as they are now; what has not changed is left as it is. Whether anything
-    /// had (then a frame of it as it is now comes).
+    /// had (then a frame of it as it is now comes). What it stands for, and its frames, may reach past `area` (see
+    /// `gfx::room`): a capture says where it was taken.
     pub fn arrange(&mut self, area: RECT, over: HWND) -> bool {
+        // As large as it is while that serves, else with room to spare (see `gfx::room`): a window sized pixel by
+        // pixel makes its frames, and what they are read through and kept in, anew a few times, not at each size.
+        let want = ((area.right - area.left).max(1) as u32, (area.bottom - area.top).max(1) as u32);
+        let have = (self.size.Width as u32, self.size.Height as u32);
+        let (width, height) = super::gfx::room(Some(have), want).unwrap_or(have);
+        // The room to spare on its screen (what reaches past it is of no screen; one taken past it looks like one of
+        // another screen to whoever asked): on whichever side there is room, all of what was asked held. Against
+        // the screen's edge (a panel, a widget stuck to it), it spares room towards the middle.
+        let screen = crate::mouse::monitor_at(POINT { x: (area.left + area.right) / 2, y: (area.top + area.bottom) / 2 }).map(|contact| contact.monitor);
+        let span = |from: i32, to: i32, length: i32, low: Option<i32>, high: Option<i32>| {
+            // As far as it goes from `from`, moved back from the screen's far side, never past where it begins.
+            let start = high.map_or(from, |high| from.min(high - length));
+            let start = low.map_or(start, |low| start.max(low)).min(from);
+            // (Larger than the screen: as far as the screen goes.)
+            let end = high.map_or(start + length, |high| (start + length).min(high.max(to)));
+            (start, end.max(to))
+        };
+        let (left, right) = span(area.left, area.right, width as i32, screen.map(|s| s.left), screen.map(|s| s.right));
+        let (top, bottom) = span(area.top, area.bottom, height as i32, screen.map(|s| s.top), screen.map(|s| s.bottom));
+        let area = RECT { left, top, right, bottom };
         let mut all: Vec<HWND> = Vec::new();
         unsafe {
             let _ = EnumWindows(Some(each), LPARAM(&mut all as *mut _ as isize));
@@ -388,11 +448,9 @@ impl Scene {
             }
             self.area = area;
         }
-        // (Its frames a pixel each while it rested.)
-        let size = SizeInt32 { Width: width, Height: height };
-        if size != self.size && self.pool.Recreate(&self.shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).is_ok() {
-            self.size = size;
-        }
+        let screen_size = screen.map(|s| SizeInt32 { Width: s.right - s.left, Height: s.bottom - s.top });
+        // (Not made larger, the frames that come are too small, and are not taken: see `Shared::read`.)
+        let _ = self.fit(SizeInt32 { Width: width, Height: height }, screen_size);
         // The thumbnails are drawn in the order they were made in: another order, or other windows, and they are
         // made anew, bottom first; the same windows, only moved, are moved.
         if !same_windows {
@@ -413,32 +471,31 @@ impl Scene {
         *self.shared.of.lock().unwrap() = (area, now_100ns());
         // (Nor what was read of it before and not taken yet.)
         *self.shared.ready.lock().unwrap() = None;
-        *self.shared.latest.lock().unwrap() = None;
+        close(self.shared.latest.lock().unwrap().take());
         self.shared.resting.store(false, Ordering::Release);
         true
     }
 
-    /// Holds nothing till it is arranged again: no thumbnails (the compositor puts nothing together in it), and its
-    /// window and frames a pixel each (what they took given back). For whoever wants what is behind only as it was
-    /// when last looked at, not as it changes; arranged again, it is as it was, and as quickly.
+    /// Holds nothing till it is arranged again: no thumbnails (the compositor puts nothing together in it), its window
+    /// a pixel, and what its frames were read through given back (its pool of frames kept: see `fit`). For whoever
+    /// wants what is behind only as it was when last looked at, not as it changes, or is hidden (see `life`);
+    /// arranged again, it is as it was, and as quickly.
     pub fn rest(&mut self) {
         self.shared.resting.store(true, Ordering::Release);
         self.forget();
         self.shared.wanted.store(false, Ordering::Release);
-        *self.shared.latest.lock().unwrap() = None;
+        close(self.shared.latest.lock().unwrap().take());
         *self.shared.ready.lock().unwrap() = None;
         *self.shared.halves.lock().unwrap() = None;
+        self.shared.spare.0.lock().unwrap().clear();
         let least = RECT { left: self.area.left, top: self.area.top, right: self.area.left + 1, bottom: self.area.top + 1 };
         unsafe {
             let _ = SetWindowPos(self.window, None, least.left, least.top, 1, 1, SWP_NOACTIVATE | SWP_NOZORDER);
         }
         self.area = least;
-        // (A frame being read meanwhile is of what was there.)
+        // (A frame being read meanwhile is of what was there.) Its pool of frames stays as it is (see `fit`): made
+        // smaller, and larger again as it is arranged, would be two more the system keeps.
         *self.shared.of.lock().unwrap() = (least, now_100ns());
-        let size = SizeInt32 { Width: 1, Height: 1 };
-        if self.pool.Recreate(&self.shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).is_ok() {
-            self.size = size;
-        }
     }
 
     /// The thumbnail `index` shown where its window is, `rect`, within the area.
@@ -463,6 +520,40 @@ impl Scene {
         }
     }
 
+    /// Its pool's handler taken away, and what it holds of its frames let go of: the handler holds `shared`, which
+    /// may hold a frame of the pool's (which holds the pool).
+    fn unhook(&mut self) {
+        let _ = self.pool.RemoveFrameArrived(self.arrived);
+        close(self.shared.latest.lock().unwrap().take());
+        *self.shared.ready.lock().unwrap() = None;
+        *self.shared.halves.lock().unwrap() = None;
+        self.shared.spare.0.lock().unwrap().clear();
+    }
+
+    /// Its frames made large enough for `size` from now on, on a screen of `screen`'s size (none: not known);
+    /// whether they are. Each pool of frames made is memory the system keeps for good (till Glance ends, whatever is
+    /// let go of: measured, a frame's worth each time): so it is made only larger, never smaller, and a quarter
+    /// larger than asked, as large as the screen at most (what a scene stands for is on one screen); for a window
+    /// moved and sized about, it is made a few times at most, then serves.
+    fn fit(&mut self, size: SizeInt32, screen: Option<SizeInt32>) -> bool {
+        if size.Width <= self.size.Width && size.Height <= self.size.Height {
+            return true;
+        }
+        let grown = |want: i32, have: i32, most: Option<i32>| {
+            let roomy = want + want / 4;
+            have.max(most.map_or(roomy, |most| roomy.min(most.max(want))))
+        };
+        let made = SizeInt32 {
+            Width: grown(size.Width, self.size.Width, screen.map(|screen| screen.Width)),
+            Height: grown(size.Height, self.size.Height, screen.map(|screen| screen.Height)),
+        };
+        if self.pool.Recreate(&self.shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, made).is_err() {
+            return false;
+        }
+        self.size = made;
+        true
+    }
+
     /// Whether a frame has come that was not wanted as it came (and is not read yet).
     pub fn fresh(&self) -> bool {
         self.shared.latest.lock().unwrap().is_some()
@@ -481,6 +572,7 @@ impl Scene {
                     if !shared.read(&frame) {
                         shared.wanted.store(true, Ordering::Release);
                     }
+                    close(Some(frame));
                 });
             }
             None => self.shared.wanted.store(true, Ordering::Release),
@@ -495,6 +587,7 @@ impl Scene {
 
 impl Drop for Scene {
     fn drop(&mut self) {
+        self.unhook();
         let _ = self.session.Close();
         let _ = self.pool.Close();
         self.forget();

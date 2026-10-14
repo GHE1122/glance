@@ -57,6 +57,7 @@ use crate::ui::gfx::{self, Gfx, Layer, Surface};
 use crate::ui::icons::Icon;
 use crate::ui::morph::{self, Part};
 use crate::ui::prefs::Prefs;
+use crate::ui::life::Lives;
 use crate::ui::render::{self, PanelLayers};
 use crate::ui::seen::Seen;
 use crate::ui::skins;
@@ -130,15 +131,6 @@ static WIDGET_AREAS: std::sync::Mutex<Vec<RECT>> = std::sync::Mutex::new(Vec::ne
 /// have moved among the others (Win+D brings it in front of them, after the
 /// front has changed), and the widgets kept on it are put back just above it.
 static ORDER_CHANGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// How many widgets are on the desktop, shown: while there are, the device
-/// they draw with keeps what it holds (see `any_shown`).
-static SHOWN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Whether a widget is on the desktop, shown.
-pub fn any_shown() -> bool {
-    SHOWN.load(std::sync::atomic::Ordering::Relaxed) > 0
-}
-
 /// Whether `r` meets a widget (physical px).
 fn meets_a_widget(r: RECT) -> bool {
     WIDGET_AREAS.lock().unwrap().iter().any(|a| r.left < a.right && a.left < r.right && r.top < a.bottom && a.top < r.bottom)
@@ -356,13 +348,51 @@ struct Behind {
     /// The capture as a bitmap, at the scale of the screen (physical px a
     /// DIP) it was made for.
     bitmap: Option<(ID2D1Bitmap1, f32)>,
+    /// The bitmap the capture before was drawn into: its memory written
+    /// again for this one (see `Capture::bitmap_into`).
+    former: Option<ID2D1Bitmap1>,
     tone: (f32, f32),
     taken: Instant,
+}
+
+impl crate::ui::life::Lives for Widget {
+    fn device(&self) -> &Rc<Gfx> {
+        &self.gfx
+    }
+
+    fn showing(&mut self) -> &mut Option<crate::ui::life::Showing> {
+        &mut self.showing
+    }
+
+    /// Its surface, its layers (and a turn between forms), where it would stick, the desktop behind it; its scene
+    /// rests.
+    fn let_go_of_shown(&mut self) {
+        if let Some(surface) = &mut self.surface {
+            surface.release(&self.gfx);
+        }
+        self.layers.release();
+        self.morph = None;
+        self.morph_layer.release();
+        self.hide_hint();
+        self.behind = None;
+        self.pending = None;
+        if let Some(scene) = &mut self.backdrop {
+            scene.rest();
+        }
+    }
+
+    /// Its scene of what is behind it, and its surface.
+    fn let_go_of_kept(&mut self) {
+        self.backdrop = None;
+        self.surface = None;
+    }
 }
 
 struct Widget {
     window: Window,
     gfx: Rc<Gfx>,
+    /// Counted as shown on its device while it is (see `life`).
+    showing: Option<crate::ui::life::Showing>,
     surface: Option<Surface>,
     layers: PanelLayers,
     /// The screen it is on.
@@ -410,6 +440,8 @@ struct Widget {
     morph: Option<(Instant, Before)>,
     drawn: Vec<Part>,
     morph_layer: Layer,
+    /// Sized by hand in a frame since it was last drawn at rest (see `Gfx::settle`).
+    was_sized: bool,
     hint: Option<Hint>,
     /// What is behind it, put together live where no one sees it (see
     /// `scene`): while it sees the desktop and shows.
@@ -447,6 +479,8 @@ struct Widget {
     taken: Option<arrange::Shown>,
     /// The pointer is over it (its buttons show).
     hover: bool,
+    /// What a press would do something with under the pointer (see `view::Hit::takes_press`): lit as it is drawn.
+    hit_hover: Option<view::Hit>,
     /// Letting clicks through: since when the pointer has been over it, and
     /// whether it is on the button that ends that (the window then takes
     /// the click).
@@ -523,7 +557,7 @@ impl Widgets {
         });
         widget.torn_from = Some((side, contact.monitor));
         if let Some(Lent { capture, bitmap, tone }) = lent {
-            widget.behind = Some(Behind { capture, bitmap: Some(bitmap), tone, taken: Instant::now() });
+            widget.behind = Some(Behind { capture, bitmap: Some(bitmap), former: None, tone, taken: Instant::now() });
             widget.replace = Some(false);
         }
         widget.window.yield_to(self.settings);
@@ -707,7 +741,30 @@ impl Widgets {
                 _ => crate::ui::tip::hide(),
             }
         }
-        let shape = if over.is_some() {
+        // What a press there would open or do, lit (a drive's row, a player's button).
+        let (lx, ly) = (x - widget.hits_from.0, y - widget.hits_from.1);
+        let hit = widget.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4).filter(|hit| hit.takes_press());
+        if hit != widget.hit_hover {
+            // A drive's row says what a press on it does, under it (its buttons' own said over it).
+            match hit {
+                Some(view::Hit::Drive(place)) if over.is_none() => {
+                    let found = widget.hits.iter().find(|one| one.4 == view::Hit::Drive(place)).map(|one| (one.0, one.1, one.2, one.3));
+                    if let (Some((hx, hy, hw, hh)), Some(name)) = (found, crate::app().controller.seen.lock().unwrap().volumes.get(place as usize).cloned()) {
+                        let on_screen = |dx: f32, dy: f32| {
+                            // (Its surface's corner is at `at`; the window's margin is before it.)
+                            ((widget.at.x as f32 + (widget.hits_from.0 + dx) * px).round() as i32, (widget.at.y as f32 + (widget.hits_from.1 + dy) * px).round() as i32)
+                        };
+                        let ((left, top), (right, bottom)) = (on_screen(hx, hy), on_screen(hx + hw, hy + hh));
+                        crate::ui::tip::show(&crate::panel::opens_drive(&name, lang), RECT { left, top, right, bottom }, crate::os::apps_dark());
+                    }
+                }
+                _ if matches!(widget.hit_hover, Some(view::Hit::Drive(_))) && over.is_none() => crate::ui::tip::hide(),
+                _ => {}
+            }
+            widget.hit_hover = hit;
+            widget.next_frame = Instant::now();
+        }
+        let shape = if over.is_some() || hit.is_some() {
             windows::Win32::UI::WindowsAndMessaging::IDC_HAND
         } else {
             let (left, right, top, bottom) = edges_at(x, y, w, h);
@@ -776,7 +833,6 @@ impl Widgets {
         }
         if self.list.is_empty() {
             self.watching = None;
-            SHOWN.store(0, std::sync::atomic::Ordering::Relaxed);
             return None;
         }
         if self.watching.is_none() {
@@ -820,7 +876,6 @@ impl Widgets {
             behind_changed();
         }
         self.areas = areas;
-        SHOWN.store(self.list.len(), std::sync::atomic::Ordering::Relaxed);
         let mut due = REST_FRAME;
         let mut gone = Vec::new();
         for (index, widget) in self.list.iter_mut().enumerate() {
@@ -830,9 +885,8 @@ impl Widgets {
             let hidden = widget.game_only && !playing;
             if hidden {
                 widget.window.hide();
-                // Nothing behind it looked at meanwhile: as it shows again, again.
-                widget.backdrop = None;
-                widget.pending = None;
+                // (Nothing behind it looked at meanwhile: as it shows again, again.)
+                widget.hidden();
                 continue;
             }
             // Drawn when it is due: in hand, flung or turning, at once; else
@@ -876,10 +930,13 @@ impl Widgets {
     /// under the pointer gone with it (the pointer, no longer over it, would never take it away).
     fn put_away_at(&mut self, index: usize) {
         let widget = self.list.remove(index);
-        if widget.tip.is_some() {
+        if widget.tip.is_some() || matches!(widget.hit_hover, Some(view::Hit::Drive(_))) {
             crate::ui::tip::hide();
         }
         self.put_away.push(widget.kept());
+        // (All it drew with goes with its window: see `life`.)
+        let mut widget = widget;
+        widget.gone();
         widget.window.destroy();
     }
 }
@@ -891,6 +948,15 @@ pub enum WidgetChoice {
     AboveOthers,
     Close,
     Settings,
+}
+
+/// Where a widget's buttons are (see `Widget::rack`).
+#[derive(Clone, Copy, PartialEq)]
+enum Rack {
+    Above,
+    Under,
+    Right,
+    Left,
 }
 
 enum Released {
@@ -931,6 +997,7 @@ impl Widget {
             gfx,
             surface,
             layers: PanelLayers::default(),
+            showing: None,
             contact,
             at,
             choice,
@@ -955,6 +1022,7 @@ impl Widget {
             morph: None,
             drawn: Vec::new(),
             morph_layer: Layer::default(),
+            was_sized: false,
             hint: None,
             backdrop: None,
             arranged: None,
@@ -970,6 +1038,7 @@ impl Widget {
             frame_took: gfx::Took::default(),
             taken: None,
             hover: false,
+            hit_hover: None,
             lingered: None,
             reached: false,
             tip: None,
@@ -1040,7 +1109,9 @@ impl Widget {
                     Some(behind) if !moved => behind.tone,
                     _ => capture.luminance(self.rect(), px),
                 };
-                self.behind = Some(Behind { capture, bitmap: None, tone, taken: now });
+                // (The one before's, or what it had from its own before, if it was not drawn.)
+                let former = self.behind.take().and_then(|behind| behind.bitmap.map(|(bitmap, _)| bitmap).or(behind.former));
+                self.behind = Some(Behind { capture, bitmap: None, former, tone, taken: now });
             }
             (None, _) => {}
         }
@@ -1129,9 +1200,32 @@ impl Widget {
     fn buttons(&self) -> [(Point, Button); 5] {
         let (w, h) = self.surface_size;
         let r = BUTTON / 2.0;
-        let y = if self.buttons_under() { h + BUTTON_INSET + r } else { -BUTTON_INSET - r };
         let count = buttons::ALL.len();
-        std::array::from_fn(|place| (Point { x: w - r - (count - 1 - place) as f32 * (BUTTON + buttons::GAP), y }, buttons::ALL[place]))
+        let step = BUTTON + buttons::GAP;
+        match self.rack() {
+            Rack::Above | Rack::Under => {
+                let y = if self.rack() == Rack::Under { h + BUTTON_INSET + r } else { -BUTTON_INSET - r };
+                std::array::from_fn(|place| (Point { x: w - r - (count - 1 - place) as f32 * step, y }, buttons::ALL[place]))
+            }
+            Rack::Right | Rack::Left => {
+                let x = if self.rack() == Rack::Right { w + BUTTON_INSET + r } else { -BUTTON_INSET - r };
+                std::array::from_fn(|place| (Point { x, y: r + place as f32 * step }, buttons::ALL[place]))
+            }
+        }
+    }
+
+    /// Where its buttons are: in a row over its right end (under it, where its screen has no room above it); or,
+    /// narrower than the row and tall enough, in a column down its right side (its left, where its screen has no
+    /// room on the right).
+    fn rack(&self) -> Rack {
+        let count = buttons::ALL.len() as f32;
+        let row = count * BUTTON + (count - 1.0) * buttons::GAP;
+        let (w, h) = self.surface_size;
+        if w >= row || h < row {
+            return if self.buttons_under() { Rack::Under } else { Rack::Above };
+        }
+        let reach = ((BUTTON + 2.0 * BUTTON_INSET) * self.contact.scale * self.zoom) as i32;
+        if self.rect().right + reach <= self.contact.work.right { Rack::Right } else { Rack::Left }
     }
 
     /// The buttons that show now: all of them, the pointer over it; while
@@ -1528,6 +1622,10 @@ impl Widget {
 
     /// Lays it out, places its window and draws it.
     fn frame(&mut self, now: Instant, look: &Look, history: &[Sample], seen: &Seen, controller: &crate::panel::Controller) -> Frame {
+        // (What it draws and takes from behind it is sized as it is: see `gfx::room`.)
+        // (Settling to its size after it is let go, too.)
+        let sizing = matches!(self.drag, Some(Drag::Size { .. })) || self.settle.is_some();
+        let _sizing = gfx::sizing(sizing);
         let dt = now.duration_since(self.last_frame).as_secs_f32() * 1000.0;
         self.last_frame = now;
         // Each part of a frame timed, and a slow one noted.
@@ -1584,7 +1682,7 @@ impl Widget {
         let theme = Theme::new(look.skin, dark);
         // Room round it for its shadow, and above it for its buttons.
         self.margin = theme.margin.max(BUTTON + 2.0 * BUTTON_INSET);
-        let scene = crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen);
+        let scene = view::Scene { hover: self.hit_hover, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -1675,11 +1773,16 @@ impl Widget {
         }
         // The pointer over it, or (its buttons showing) over them.
         let reach = if self.hover { ((BUTTON + 2.0 * BUTTON_INSET) * px) as i32 } else { 0 };
-        let (above, under) = if self.buttons_under() { (0, reach) } else { (reach, 0) };
+        let (above, under, left, right) = match self.rack() {
+            Rack::Above => (reach, 0, 0, 0),
+            Rack::Under => (0, reach, 0, 0),
+            Rack::Left => (0, 0, reach, 0),
+            Rack::Right => (0, 0, 0, reach),
+        };
         let cursor = cursor_position();
         let hovered = cursor.is_some_and(|c| {
             let r = self.rect();
-            (r.left..r.right).contains(&c.x) && (r.top - above..r.bottom + under).contains(&c.y)
+            (r.left - left..r.right + right).contains(&c.x) && (r.top - above..r.bottom + under).contains(&c.y)
         });
         // Its buttons come or go: a widget that took the desktop with them
         // there takes it again.
@@ -1695,6 +1798,15 @@ impl Widget {
         self.reached = self.click_through && cursor.is_some_and(|c| self.button_at((c.x - self.at.x) as f32 / px, (c.y - self.at.y) as f32 / px) == Some(Button::Through));
         if !hovered && self.tip.take().is_some() {
             crate::ui::tip::hide();
+        }
+        if !hovered {
+            if let Some(was) = self.hit_hover.take() {
+                // (What a drive's row said under it goes with it.)
+                if matches!(was, view::Hit::Drive(_)) {
+                    crate::ui::tip::hide();
+                }
+                self.next_frame = now;
+            }
         }
         // Moved near an edge, not stuck: where it would stick, as it would
         // be there, nearer and firmer the nearer it is.
@@ -1754,14 +1866,17 @@ impl Widget {
         // the time it gets past (taken on another thread, the widget kept out
         // of it, nothing of it shows).
         let on_screen = clip(self.rect(), self.contact.monitor);
-        let elsewhere = self.behind.as_ref().is_some_and(|behind| {
+        // Not while it is sized by hand (or settles to its size after): what was taken serves meanwhile (twice its
+        // size each way, mirrored past its edges), and it is taken again once, as it comes to rest. Taken again at
+        // each size, all that a capture is read through and kept in is made again at each size too.
+        let elsewhere = !sizing && self.behind.as_ref().is_some_and(|behind| {
             let taken = behind.capture.rect;
             let ahead = if self.drag.is_some() { (on_screen.right - on_screen.left).max(on_screen.bottom - on_screen.top) / 6 } else { 0 };
             let past = on_screen.left - ahead < taken.left || on_screen.top - ahead < taken.top || on_screen.right + ahead > taken.right || on_screen.bottom + ahead > taken.bottom;
             let other_screen = clip(taken, self.contact.monitor) != taken;
             other_screen || past
         });
-        let retake = self.retake && self.drag.is_none();
+        let retake = self.retake && self.drag.is_none() && !sizing;
         // Other windows changed since they were looked at, and have settled;
         // not while it is in hand.
         let moved_behind = self.drag.is_none()
@@ -1783,11 +1898,8 @@ impl Widget {
             }
             self.retake = false;
             let area = self.backdrop_area();
-            // Nothing behind it yet (a first, or the drawing device changed):
-            // put together anew, which brings a first frame.
-            if self.behind.is_none() || self.replace.is_some() {
-                self.backdrop = None;
-            }
+            // Its scene made once, and kept for its life (see `life`): arranged anew, as here, it brings a frame of
+            // what is there now.
             if self.backdrop.is_none() && crate::ui::scene::supported() {
                 let hwnd = self.window.hwnd.0 as isize;
                 let wake = std::sync::Arc::new(move || {
@@ -1844,9 +1956,15 @@ impl Widget {
         // been taken: a first frame drawn before that would show the other.
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| sees));
         let theme = if dark == theme.dark { theme } else { Theme::new(look.skin, dark) };
-        let scene = crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen);
+        let scene = view::Scene { hover: self.hit_hover, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, now);
+        // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
+        if sizing {
+            self.was_sized = true;
+        } else if std::mem::take(&mut self.was_sized) {
+            self.gfx.settle();
+        }
         let whole = started.elapsed();
         if whole > SLOW_FRAME {
             let ms = |d: Duration| d.as_secs_f32() * 1000.0;
@@ -1866,27 +1984,27 @@ impl Widget {
     fn follow_device(&mut self) -> bool {
         let Ok(current) = gfx::current() else { return false };
         if !Rc::ptr_eq(&current, &self.gfx) || self.surface.is_none() {
-            self.surface = None;
+            if self.behind.is_some() {
+                note("widget: the drawing device changed; the desktop taken again");
+            }
+            // All it drew with, and kept, was the other device's (see `life`). (A window has one composition target:
+            // the old one goes first.)
+            self.gone();
             self.surface = Surface::new(&current, self.window.hwnd).ok();
             if self.surface.is_none() {
                 gfx::lost();
             }
             self.gfx = current;
-            self.layers.release();
-            self.morph_layer.release();
-            if self.behind.is_some() {
-                note("widget: the drawing device changed; the desktop taken again");
-            }
-            self.behind = None;
-            self.backdrop = None;
-            self.pending = None;
         }
         self.surface.is_some()
     }
 
     fn draw(&mut self, theme: &Theme, scene: &Scene, now: Instant) {
         let Some(shown) = self.last.clone() else { return };
-        self.follow_device();
+        if !self.follow_device() {
+            return;
+        }
+        self.shown();
         let px = self.contact.scale * self.zoom;
         let margin = self.margin;
         let size = self.surface_size;
@@ -1946,7 +2064,7 @@ impl Widget {
                 // Made once, at its screen's scale; its pixels then let go of
                 // (a screen's worth of memory).
                 if behind.bitmap.is_none() {
-                    if let Ok(bitmap) = behind.capture.bitmap(&frame.dc, contact_scale) {
+                    if let Ok(bitmap) = behind.capture.bitmap_into(&frame.dc, contact_scale, behind.former.take().as_ref()) {
                         behind.bitmap = Some((bitmap, contact_scale));
                         behind.capture.forget_pixels();
                     }

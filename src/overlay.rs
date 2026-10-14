@@ -25,6 +25,7 @@ use crate::ui::buttons::{self, Button};
 use crate::ui::canvas::{Color, Point};
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::glass::Frosted;
+use crate::ui::life::{Lives, Showing};
 use crate::ui::overlay::{self, Glass, Hand, Layout, Metrics, Shape, Tone, INSET, MARGIN};
 use crate::ui::text::Lang;
 use crate::ui::window::Window;
@@ -38,8 +39,37 @@ pub enum Choice {
     Settings,
 }
 
+impl Lives for Overlay {
+    fn device(&self) -> &Rc<Gfx> {
+        &self.gfx
+    }
+
+    fn showing(&mut self) -> &mut Option<Showing> {
+        &mut self.showing
+    }
+
+    /// What its glass, its shadow and its buttons' surfaces hold.
+    fn let_go_of_shown(&mut self) {
+        self.surface.release();
+        if let Some((gfx, surface)) = &mut self.shade_surface {
+            surface.release(gfx);
+        }
+        if let Some((gfx, surface)) = &mut self.bar_surface {
+            surface.release(gfx);
+        }
+    }
+
+    /// Its shadow's and its buttons' surfaces.
+    fn let_go_of_kept(&mut self) {
+        self.shade_surface = None;
+        self.bar_surface = None;
+    }
+}
+
 pub struct Overlay {
     gfx: Rc<Gfx>,
+    /// Counted as shown on its device while it is (see `life`).
+    showing: Option<Showing>,
     /// Where it was last placed, with its shadow (physical px).
     placed: std::cell::Cell<RECT>,
     pub window: Window,
@@ -216,6 +246,7 @@ impl Overlay {
             surface,
             shade,
             shade_surface: None,
+            showing: None,
             shown: false,
             placed: std::cell::Cell::new(RECT::default()),
             locked: false,
@@ -372,7 +403,12 @@ impl Overlay {
     fn draw(&mut self) {
         // This thread's device: a new one after the last was lost.
         let Ok(gfx) = gfx::current() else { return };
-        self.gfx = gfx;
+        // (What it drew with on another device goes with it: see `life`.)
+        if !Rc::ptr_eq(&gfx, &self.gfx) {
+            self.gone();
+            self.gfx = gfx;
+        }
+        self.shown();
         // Placed above all again each time (a game may have taken the top),
         // but for the open panel.
         self.place();
@@ -751,10 +787,7 @@ impl Overlay {
         }
         crate::widget::own_window_changed(self.shadow_rect());
         self.placed.set(RECT::default());
-        // The drawing memory is given back while it is away.
-        self.surface.release();
-        if let Some((gfx, surface)) = &mut self.shade_surface {
-            surface.release(gfx);
-        }
+        // (What it draws with given back while it is away: see `life`.)
+        self.hidden();
     }
 }

@@ -353,6 +353,15 @@ pub fn run() {
             }
             std::process::exit(0);
         }
+        // And measures the graphics card's memory a window sized frame by frame takes, each way it may be drawn.
+        #[cfg(feature = "studio")]
+        [_, flag, way] if flag == "--surface-memory" => {
+            if let Err(error) = studio::surface_memory(way) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
         [_, flag, folder, payload] if flag == "--install" || flag == "--install-anyway" => {
             // "anyway": the user chose an unprotected place all the same.
             let anyway = flag == "--install-anyway";
@@ -467,6 +476,14 @@ pub fn run() {
             }
         }
     });
+    // The desktops the settings' preview shows, read once Glance has settled: the settings open on them.
+    thread::Builder::new()
+        .name("glance: desktops read for the settings".into())
+        .spawn(|| {
+            thread::sleep(Duration::from_secs(5));
+            ui::settings_window::read_desktops_ahead();
+        })
+        .expect("a thread started");
     tray::run();
     // (What was changed last is on the disk before Glance goes.)
     saved_all();

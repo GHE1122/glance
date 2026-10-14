@@ -735,6 +735,33 @@ Declined, five deaths, a standard account, or another account's credentials:
   thread, hooked out of context for most event types, did nothing but take
   those callbacks for over a minute (trace of 2026-10-12); polling replaced it.
 
+## What drawing holds, and for how long
+
+Every window that draws (the panel, a widget, the settings, the overlay, the
+lyrics' windows, a dialog, a menu, a tip) follows one set of rules
+(`src/ui/life.rs`), not rules of its own:
+
+| What | Lives | Made | Let go of |
+|---|---|---|---|
+| The device and its caches (text laid out, effects' textures, bitmaps made from their keys) | the thread (`gfx::current`) | as the thread first draws | by the device itself: what painting layers took, once no layer has been painted anew for 3 s; everything, 3 s after the last window it counts as shown hides |
+| A window's surface, its layers, a bitmap of the desktop behind it | while it is shown | as it shows | as it hides (`Lives::hidden`) |
+| A window's scene of what is behind it (`scene`) | the window's life | as it first needs what is behind | as it goes, or its device does (`Lives::gone`); hidden, it rests |
+| What one action needs (room while sized by hand, a turn between layouts) | the action | as it begins | as it ends (`Gfx::settle`) |
+
+A window shown holds a `life::Showing` of its device: the device knows how
+many windows show, and gives back what it holds once none does. No window
+decides that by itself.
+
+The scene is kept for the window's life because of what the system does
+with captures (measured 2026-10-14, `glance --surface-memory scene`): each
+pool of frames Windows.Graphics.Capture makes, or makes anew at another
+size, leaves about a frame's worth of graphics memory charged to the
+process until it exits, whatever is closed or let go of. So a scene is made
+once a window, rests rather than goes while the window is hidden, and its
+pool is made only larger (a quarter more than asked, the screen's size at
+most), never smaller: arranged 80 times over ten sizes, it holds 22 MB, where
+made anew at each size it held 239 MB and went on growing.
+
 ## Verification
 
 ### Conditions

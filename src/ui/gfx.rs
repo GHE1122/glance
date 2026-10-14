@@ -2,7 +2,7 @@
 //! Coordinates are in device-independent pixels (DIPs); the surface is in
 //! physical pixels and the context scales between them.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -100,6 +100,21 @@ pub struct Gfx {
     /// maps, by size, radius and scale): kept while frames keep drawing
     /// them, as text is.
     made: RefCell<HashMap<[u32; 4], (ID2D1Bitmap1, Instant)>>,
+    /// Bitmaps drawn on that were let go of (see `made`), to be drawn on again for what is made next (see
+    /// `drawn_on`), as much as `MADE_BUDGET` of them.
+    spare: RefCell<Vec<ID2D1Bitmap1>>,
+    /// When a window last drew with it, and whether what drawing holds has been given back since (see
+    /// `trim_when_idle`).
+    last_drawn: Cell<Option<Instant>>,
+    trimmed: Cell<bool>,
+    /// When a layer was last painted anew, and whether what painting it took has been given back since (see
+    /// `let_go_once_settled`).
+    last_painted: Cell<Option<Instant>>,
+    settled: Cell<bool>,
+    /// How many windows show what they draw with it now (see `life::Showing`).
+    showing: Cell<usize>,
+    /// The thread's timer that gives back what drawing holds once it is due (see `tend`), while one runs.
+    tending: Cell<usize>,
     /// The two colours each gradient fades between, as made for them (a resource of the device, any of its
     /// contexts draws with), and when each was last used.
     stops: RefCell<HashMap<[u32; 8], (windows::Win32::Graphics::Direct2D::ID2D1GradientStopCollection, Instant)>>,
@@ -114,6 +129,9 @@ type LayoutKey = (String, FontKey, u32, bool, bool);
 
 impl Drop for Gfx {
     fn drop(&mut self) {
+        if self.tending.get() != 0 {
+            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::KillTimer(None, self.tending.get()) };
+        }
         let _ = unsafe { self.write.UnregisterFontFileLoader(&self.loader) };
     }
 }
@@ -166,6 +184,10 @@ impl Gfx {
         let dxgi: IDXGIDevice = d3d.cast()?;
         let factory: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, None)? };
         let device: ID2D1Device = unsafe { factory.CreateDevice(&dxgi)? };
+        // What Direct2D keeps of the textures its effects draw through (the frost's blur, shadows), past which it
+        // lets go of those not in use: each size a window is drawn at has its own, and a window sized pixel by pixel
+        // would otherwise keep one of each.
+        unsafe { device.SetMaximumTextureMemory(EFFECTS_KEPT) };
         // Made from the Direct2D device, composition surfaces hand out device
         // contexts already aimed at themselves.
         let dcomp: IDCompositionDesktopDevice = unsafe { DCompositionCreateDevice2(&device)? };
@@ -212,6 +234,13 @@ impl Gfx {
             icons,
             formats: RefCell::new(HashMap::new()),
             made: RefCell::new(HashMap::new()),
+            spare: RefCell::new(Vec::new()),
+            last_drawn: Cell::new(None),
+            trimmed: Cell::new(true),
+            last_painted: Cell::new(None),
+            settled: Cell::new(true),
+            showing: Cell::new(0),
+            tending: Cell::new(0),
             stops: RefCell::new(HashMap::new()),
             layouts: RefCell::new(HashMap::new()),
             round: round.into(),
@@ -319,22 +348,110 @@ impl Gfx {
         unsafe { self.device.ClearResources(0) };
     }
 
+    /// A window sized by hand has come to rest, and been drawn so (call after that frame): what was made for it
+    /// frame by frame as it was sized is let go, and the graphics driver gives back the memory let go of meanwhile
+    /// (a few hundred megabytes, else held a while, or for good).
+    pub fn settle(&self) {
+        self.made.borrow_mut().clear();
+        self.spare.borrow_mut().clear();
+        unsafe { self.dxgi.Trim() };
+    }
+
+    /// One more window shows what it draws with this device (see `life::Showing`).
+    pub(super) fn show_one(&self) {
+        self.showing.set(self.showing.get() + 1);
+    }
+
+    /// One window fewer shows what it draws with this device. The last gone, what drawing holds is given back now,
+    /// and again once nothing has drawn for `IDLE` (what the windows let go of is the driver's to give back only once
+    /// the card has done with it).
+    pub(super) fn hide_one(&self) {
+        self.showing.set(self.showing.get().saturating_sub(1));
+        if self.showing.get() == 0 {
+            self.trim_now_and_again();
+            self.tend();
+        }
+    }
+
+    /// What drawing holds given back as it falls due, on a timer of the thread's (see `tended`): what painting
+    /// layers took, once they have stayed as they are (`let_go_once_settled`); everything, once nothing is shown
+    /// (`trim_when_idle`). The timer runs while either is still due.
+    fn tend(&self) {
+        if self.tending.get() != 0 {
+            return;
+        }
+        let timer = unsafe { windows::Win32::UI::WindowsAndMessaging::SetTimer(None, 0, TEND_EVERY.as_millis() as u32, Some(tended)) };
+        self.tending.set(timer);
+    }
+
+    /// Gives back what drawing holds on to (see `trim`) once no window has drawn with it for `IDLE`, if one has
+    /// since it was last given back: whatever was drawn last (the panel as it went, a widget closed, the settings
+    /// closed, what was measured as Glance started), the graphics driver keeps what it let go of till it is told to
+    /// give it back.
+    pub fn trim_when_idle(&self) {
+        if self.showing.get() == 0 && !self.trimmed.get() && self.last_drawn.get().is_some_and(|at| at.elapsed() >= IDLE) {
+            self.trim();
+        }
+    }
+
+    /// What painting a layer anew took (its effects' textures, the bitmaps made for it from their keys alone) given
+    /// back once no layer has been painted anew for `IDLE`, if one has since it was last given back: a panel or a
+    /// widget that stays up redraws each second only what is not kept in its layers, and what painted those is
+    /// otherwise held for good (a large glass widget's, tens of megabytes). Painted anew, they are made again.
+    pub fn let_go_once_settled(&self) {
+        if self.settled.get() || self.last_painted.get().is_none_or(|at| at.elapsed() < IDLE) {
+            return;
+        }
+        self.settled.set(true);
+        self.made.borrow_mut().clear();
+        self.spare.borrow_mut().clear();
+        unsafe {
+            self.device.ClearResources(0);
+            if let Ok(context) = self.d3d().and_then(|device| device.GetImmediateContext()) {
+                context.Flush();
+            }
+            self.dxgi.Trim();
+        }
+    }
+
     /// Gives back what drawing holds on to while nothing is on screen.
     pub fn trim(&self) {
+        self.trimmed.set(true);
         self.layouts.borrow_mut().clear();
         self.made.borrow_mut().clear();
+        self.spare.borrow_mut().clear();
         self.stops.borrow_mut().clear();
         unsafe {
             self.device.ClearResources(0);
+            // What was let go of is destroyed only once the card has done what was asked of it before: asked to be
+            // done now, so that the driver has it to give back.
+            if let Ok(context) = self.d3d().and_then(|device| device.GetImmediateContext()) {
+                context.Flush();
+            }
             self.dxgi.Trim();
         }
+    }
+
+    /// As `trim`, now, and again once nothing has drawn for a while (see `trim_when_idle`): for a window that has
+    /// just gone, what it let go of may still be in the card's hands now.
+    pub fn trim_now_and_again(&self) {
+        self.trim();
+        self.trimmed.set(false);
     }
 
     /// Forgets the text, and the fonts, no window has drawn for a while.
     pub fn sweep(&self) {
         self.layouts.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
         self.formats.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
-        self.made.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
+        let mut gone = Vec::new();
+        self.made.borrow_mut().retain(|_, (bitmap, used)| {
+            let kept = used.elapsed() < TEXT_KEPT;
+            if !kept {
+                gone.push(bitmap.clone());
+            }
+            kept
+        });
+        gone.into_iter().for_each(|bitmap| self.let_go(bitmap));
         self.stops.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
     }
 
@@ -355,13 +472,69 @@ impl Gfx {
             size.width as usize * size.height as usize * 4
         };
         let mut total: usize = made.values().map(|(bitmap, _)| bytes(bitmap)).sum();
+        let mut gone = Vec::new();
         while total > MADE_BUDGET && made.len() > 1 {
             let Some(oldest) = made.iter().filter(|(k, _)| **k != key).min_by_key(|(_, (_, used))| *used).map(|(k, _)| *k) else { break };
             if let Some((bitmap, _)) = made.remove(&oldest) {
                 total -= bytes(&bitmap);
+                gone.push(bitmap);
             }
         }
+        drop(made);
+        gone.into_iter().for_each(|bitmap| self.let_go(bitmap));
         Ok(bitmap)
+    }
+
+    /// Keeps `bitmap`, let go of, to be drawn on again (see `drawn_on`), if it is one drawn on and there is room
+    /// for it within `MADE_BUDGET`.
+    fn let_go(&self, bitmap: ID2D1Bitmap1) {
+        if unsafe { bitmap.GetOptions() }.0 & D2D1_BITMAP_OPTIONS_TARGET.0 == 0 {
+            return;
+        }
+        let bytes = |bitmap: &ID2D1Bitmap1| {
+            let size = unsafe { bitmap.GetPixelSize() };
+            size.width as usize * size.height as usize * 4
+        };
+        let mut spare = self.spare.borrow_mut();
+        if spare.iter().map(bytes).sum::<usize>() + bytes(&bitmap) <= MADE_BUDGET {
+            spare.push(bitmap);
+        }
+    }
+
+    /// A bitmap to draw on, at least `pixels` large, at `dpi`: one let go of before (see `made`) that holds that
+    /// many pixels and no more than twice as many each way, its memory taken at `dpi`; else a new one. What is
+    /// made for keys anew frame by frame (a window sized by hand) draws on the same memory, not on new memory
+    /// each frame (each new one is the graphics card's, given back only a while after it is let go).
+    pub fn drawn_on(&self, dc: &ID2D1DeviceContext, pixels: D2D_SIZE_U, dpi: f32) -> Result<ID2D1Bitmap1> {
+        let properties = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: dpi,
+            dpiY: dpi,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            ..Default::default()
+        };
+        let found = {
+            let mut spare = self.spare.borrow_mut();
+            let serves = |bitmap: &ID2D1Bitmap1| {
+                let have = unsafe { bitmap.GetPixelSize() };
+                have.width >= pixels.width && have.height >= pixels.height && have.width <= 2 * pixels.width.max(16) && have.height <= 2 * pixels.height.max(16)
+            };
+            spare.iter().position(serves).map(|index| spare.swap_remove(index))
+        };
+        unsafe {
+            match found {
+                Some(bitmap) => {
+                    let mut had = (0.0, 0.0);
+                    bitmap.GetDpi(&mut had.0, &mut had.1);
+                    if had.0 == dpi {
+                        Ok(bitmap)
+                    } else {
+                        dc.CreateBitmapFromDxgiSurface(&bitmap.GetSurface()?, Some(&properties))
+                    }
+                }
+                None => dc.CreateBitmap(pixels, None, 0, &properties),
+            }
+        }
     }
 
     /// How far below the top of its line box `text`'s ink starts and ends.
@@ -831,15 +1004,96 @@ impl<'a> Frame<'a> {
 /// `Gfx::made`).
 const MADE_BUDGET: usize = 32 << 20;
 
-/// The step a surface's size is made in (physical px; see `Surface::draw`).
+/// How long no window draws before what drawing holds is given back (see `Gfx::trim_when_idle`): longer than
+/// anything shown waits between frames (a widget draws each sample, a second apart).
+const IDLE: Duration = Duration::from_secs(3);
+
+/// How often the thread's timer looks whether giving back what drawing holds is due (see `Gfx::tend`).
+const TEND_EVERY: Duration = Duration::from_secs(1);
+
+/// The thread's timer (see `Gfx::tend`): what is due given back, and the timer stopped once nothing more is.
+unsafe extern "system" fn tended(_: HWND, _: u32, timer: usize, _: u32) {
+    // (A device lost and made anew has a timer of its own, if any.)
+    let Some(gfx) = CURRENT.with(|cell| cell.borrow().clone()).filter(|gfx| gfx.tending.get() == timer) else {
+        let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::KillTimer(None, timer) };
+        return;
+    };
+    gfx.let_go_once_settled();
+    gfx.trim_when_idle();
+    let idle_due = gfx.showing.get() == 0 && !gfx.trimmed.get();
+    if gfx.settled.get() && !idle_due {
+        let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::KillTimer(None, timer) };
+        gfx.tending.set(0);
+    }
+}
+
+/// How much of the graphics card's memory Direct2D keeps for its effects' textures (bytes; see `Gfx::new`): a few
+/// of a large panel's.
+const EFFECTS_KEPT: u64 = 96 << 20;
+
+/// The step a surface's size is made in (physical px; see `room`).
 const SURFACE_STEP: u32 = 128;
 
-/// A window's content: a composition surface the size of the window.
+thread_local! {
+    /// Whether what this thread draws now is being sized by hand (see `room`).
+    static SIZING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// What this thread draws while the returned guard is held is being sized by hand (a panel, a widget or the
+/// settings held by their edges), or is not; once it is dropped, what is drawn is not (another window drawn on the
+/// thread after it is drawn as it is).
+#[must_use]
+pub fn sizing(on: bool) -> Sizing {
+    SIZING.with(|sizing| sizing.set(on));
+    Sizing
+}
+
+/// See `sizing`.
+pub struct Sizing;
+
+impl Drop for Sizing {
+    fn drop(&mut self) {
+        SIZING.with(|sizing| sizing.set(false));
+    }
+}
+
+/// How much larger than asked room at rest may be (physical px each way), and the grain it is made in.
+const AT_REST_SLACK: u32 = 64;
+const AT_REST_GRAIN: u32 = 16;
+
+/// Room for drawing that is sized as it is used (a window's surface, a layer, what is behind a window): whether
+/// what was made `have` (physical px) still serves for `want`, and if not, how large to make it anew. While what is
+/// drawn is sized by hand (see `sizing`), it serves while it holds `want` and is no more than twice as large, give
+/// or take a step, each way, and is made anew with a quarter more than `want`, in steps: a window sized pixel by
+/// pixel makes its room anew a few times, not at each size (each made anew is memory of the card's, given back
+/// only a while after it is let go). At rest, it is as large as asked, near enough: a large window holds a dozen
+/// such, and room to spare in each would be a third as much again of the card's memory.
+pub fn room(have: Option<(u32, u32)>, want: (u32, u32)) -> Option<(u32, u32)> {
+    let sizing = SIZING.with(Cell::get);
+    let serves = |have: u32, want: u32| have >= want && if sizing { have <= 2 * want + SURFACE_STEP } else { have - want < AT_REST_SLACK };
+    if have.is_some_and(|have| serves(have.0, want.0) && serves(have.1, want.1)) {
+        return None;
+    }
+    let made = |want: u32| {
+        if sizing {
+            (want.max(1) + want / 4).div_ceil(SURFACE_STEP) * SURFACE_STEP
+        } else {
+            want.max(1).div_ceil(AT_REST_GRAIN) * AT_REST_GRAIN
+        }
+    };
+    Some((made(want.0), made(want.1)))
+}
+
+/// A window's content: a composition surface the size of the window, or of
+/// the part of it drawn in (see `offset`).
 pub struct Surface {
     _target: IDCompositionTarget,
     visual: IDCompositionVisual2,
     surface: Option<IDCompositionSurface>,
     size: (u32, u32),
+    /// Where in the window it is drawn (physical px), and where it was last.
+    at: (i32, i32),
+    placed: (i32, i32),
     /// How long the last frame drawn on it took, part by part.
     pub took: Took,
 }
@@ -859,25 +1113,39 @@ impl Surface {
         let target = unsafe { gfx.dcomp.CreateTargetForHwnd(hwnd, true)? };
         let visual: IDCompositionVisual2 = unsafe { gfx.dcomp.CreateVisual()? };
         unsafe { target.SetRoot(&visual)? };
-        Ok(Surface { _target: target, visual, surface: None, size: (0, 0), took: Default::default() })
+        Ok(Surface { _target: target, visual, surface: None, size: (0, 0), at: (0, 0), placed: (0, 0), took: Default::default() })
+    }
+
+    /// Draws from now on at `at` (physical px) in its window, with the next
+    /// frame: a window larger than what is drawn in it (a panel being sized)
+    /// has only that much surface, and it is moved with what it shows, in
+    /// the same frame of the compositor's.
+    pub fn offset(&mut self, at: (i32, i32)) {
+        self.at = at;
     }
 
     /// Draws one frame, at `scale` physical pixels per DIP, on a surface
     /// `size` physical pixels large.
     pub fn draw(&mut self, gfx: &Gfx, size: (u32, u32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<()> {
-        // Made a little larger than asked, in steps, and kept while it holds
-        // what is asked without being much larger: a window sized frame by
-        // frame (a widget settling, sticking) draws on one surface, not a
-        // new one each frame. What lies past the window is not shown.
-        let step = |v: u32| v.max(1).div_ceil(SURFACE_STEP) * SURFACE_STEP;
-        let holds = self.size.0 >= size.0 && self.size.1 >= size.1 && self.size.0 <= step(size.0) + 2 * SURFACE_STEP && self.size.1 <= step(size.1) + 2 * SURFACE_STEP;
-        if self.surface.is_none() || !holds {
-            let made = (step(size.0), step(size.1));
+        // Made with room to spare, and kept while it serves (see `room`): a
+        // window sized frame by frame (a widget settling, sticking, sized)
+        // draws on one surface, not a new one each frame. What lies past the
+        // window is not shown.
+        if let Some(made) = room(self.surface.as_ref().map(|_| self.size), size) {
             let surface = unsafe { gfx.dcomp.CreateSurface(made.0, made.1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED)? };
             unsafe { self.visual.SetContent(&surface)? };
             self.surface = Some(surface);
             self.size = made;
         }
+        if self.at != self.placed {
+            unsafe {
+                self.visual.SetOffsetX2(self.at.0 as f32)?;
+                self.visual.SetOffsetY2(self.at.1 as f32)?;
+            }
+            self.placed = self.at;
+        }
+        gfx.last_drawn.set(Some(Instant::now()));
+        gfx.trimmed.set(false);
         let surface = self.surface.as_ref().unwrap();
         let mut offset = POINT::default();
         let began = std::time::Instant::now();
@@ -903,6 +1171,16 @@ impl Surface {
             }
         }
     }
+}
+
+/// The faint one-unit glow `halo` rings what `drawn` draws with (as CSS's `text-shadow: 0 0 1px`; see `Layer::draw`).
+unsafe fn glow(dc: &ID2D1DeviceContext, drawn: &windows::Win32::Graphics::Direct2D::ID2D1CommandList, halo: Color) -> Result<ID2D1Image> {
+    let glow = dc.CreateEffect(&CLSID_D2D1Shadow)?;
+    glow.SetInput(0, drawn, true);
+    glow.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &0.5f32.to_ne_bytes())?;
+    let rgba = [halo.r, halo.g, halo.b, halo.a];
+    glow.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+    glow.GetOutput()
 }
 
 /// Drawing kept in a bitmap of its own and painted again only when what it
@@ -932,33 +1210,43 @@ impl Layer {
         let (left, top, width, height) = area;
         let size = (width, height);
         let dc = &frame.dc;
+        // Being sized by hand (see `sizing`), what it shows changes each frame, and keeping it keeps nothing: it is
+        // drawn where it shows, and its bitmap let go (a window's size of the card's memory, each layer), to be made
+        // again at the size it comes to rest at.
+        if SIZING.with(Cell::get) {
+            self.bitmap = None;
+            return unsafe { Self::draw_through(frame, local, area, halo, paint) };
+        }
         if self.bitmap.as_ref().is_none_or(|(shown, _)| *shown != key) {
             let pixels = D2D_SIZE_U { width: (size.0 * scale).ceil() as u32, height: (size.1 * scale).ceil() as u32 };
-            // The same bitmap serves while it holds the size without being
-            // much larger: made in steps (as surfaces are), a layer sized
-            // frame by frame keeps one bitmap, not one for each size.
-            let step = |v: u32| v.max(1).div_ceil(SURFACE_STEP) * SURFACE_STEP;
-            let reusable = self.bitmap.take().map(|(_, bitmap)| bitmap).filter(|bitmap| {
-                let have = unsafe { bitmap.GetPixelSize() };
-                let mut dpi = (0.0, 0.0);
-                unsafe { bitmap.GetDpi(&mut dpi.0, &mut dpi.1) };
-                let holds = have.width >= pixels.width && have.height >= pixels.height;
-                let near = have.width <= step(pixels.width) + 2 * SURFACE_STEP && have.height <= step(pixels.height) + 2 * SURFACE_STEP;
-                holds && near && dpi.0 == 96.0 * scale
-            });
-            let pixels = D2D_SIZE_U { width: step(pixels.width), height: step(pixels.height) };
+            // The same pixels serve while they serve (see `room`): a layer
+            // sized frame by frame keeps one bitmap's memory, not one for
+            // each size; at another scale (a panel sized is drawn larger),
+            // the same memory is taken at the new one.
+            let had = self.bitmap.take().map(|(_, bitmap)| bitmap);
+            let made = room(had.as_ref().map(|bitmap| unsafe { bitmap.GetPixelSize() }).map(|have| (have.width, have.height)), (pixels.width, pixels.height));
+            let reusable = had.filter(|_| made.is_none());
+            let pixels = made.map_or(pixels, |(width, height)| D2D_SIZE_U { width, height });
+            let properties = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0 * scale,
+                dpiY: 96.0 * scale,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+                ..Default::default()
+            };
             let bitmap = match reusable {
-                Some(bitmap) => bitmap,
-                None => unsafe {
-                    let properties = D2D1_BITMAP_PROPERTIES1 {
-                        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-                        dpiX: 96.0 * scale,
-                        dpiY: 96.0 * scale,
-                        bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
-                        ..Default::default()
-                    };
-                    dc.CreateBitmap(pixels, None, 0, &properties)?
-                },
+                Some(bitmap) => {
+                    let mut dpi = (0.0, 0.0);
+                    unsafe { bitmap.GetDpi(&mut dpi.0, &mut dpi.1) };
+                    if dpi.0 == 96.0 * scale {
+                        bitmap
+                    } else {
+                        unsafe { dc.CreateBitmapFromDxgiSurface(&bitmap.GetSurface()?, Some(&properties))? }
+                    }
+                }
+                None => {
+                    unsafe { dc.CreateBitmap(pixels, None, 0, &properties)? }
+                }
             };
             unsafe {
                 // A new target brings its own DPI to the context; the
@@ -975,7 +1263,23 @@ impl Layer {
                 // Its bitmap may be larger than asked (see above): what is
                 // drawn stays inside what was.
                 dc.PushAxisAlignedClip(&rect(left, top, width, height), D2D1_ANTIALIAS_MODE_ALIASED);
-                let painted = paint(frame);
+                // Ringed by a halo, the halo is painted in with it, once (not each time the layer is drawn): what is
+                // drawn recorded, then drawn over its glow.
+                let painted = match halo {
+                    None => paint(frame),
+                    Some(color) => {
+                        let list = dc.CreateCommandList()?;
+                        dc.SetTarget(&list);
+                        // (Setting a target can change the context's DPI: the layer's, as it is painted at.)
+                        dc.SetDpi(96.0 * scale, 96.0 * scale);
+                        let painted = paint(frame);
+                        list.Close()?;
+                        dc.SetTarget(&bitmap);
+                        dc.DrawImage(&glow(dc, &list, color)?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                        dc.DrawImage(&list, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                        painted
+                    }
+                };
                 dc.PopAxisAlignedClip();
                 dc.SetTarget(&target);
                 dc.SetDpi(dpi.0, dpi.1);
@@ -983,6 +1287,9 @@ impl Layer {
                 painted?;
             }
             self.bitmap = Some((key, bitmap));
+            frame.gfx.last_painted.set(Some(Instant::now()));
+            frame.gfx.settled.set(false);
+            frame.gfx.tend();
         }
         let image: ID2D1Image = self.bitmap.as_ref().unwrap().1.cast()?;
         let at = windows_numerics::Vector2 { X: left, Y: top };
@@ -990,18 +1297,51 @@ impl Layer {
         unsafe { dc.GetTransform(&mut parent) };
         unsafe {
             dc.SetTransform(&(local * parent));
-            if let Some(color) = halo {
-                let glow = dc.CreateEffect(&CLSID_D2D1Shadow)?;
-                glow.SetInput(0, &effect_input(dc, &self.bitmap.as_ref().unwrap().1)?, true);
-                glow.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &0.5f32.to_ne_bytes())?;
-                let rgba = [color.r, color.g, color.b, color.a];
-                glow.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
-                dc.DrawImage(&glow.GetOutput()?, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-            }
             dc.DrawImage(&image, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
             dc.SetTransform(&parent);
         }
         Ok(())
+    }
+
+    /// As `draw`, kept nowhere: drawn where it shows, through what `paint` draws recorded (a command list, not a
+    /// bitmap) when it is ringed by a `halo`.
+    unsafe fn draw_through(frame: &Frame, local: Matrix3x2, area: (f32, f32, f32, f32), halo: Option<Color>, paint: impl FnOnce(&Frame) -> Result<()>) -> Result<()> {
+        let dc = &frame.dc;
+        let (left, top, width, height) = area;
+        let mut parent = Matrix3x2::default();
+        dc.GetTransform(&mut parent);
+        let placed = local * parent;
+        let painted = match halo {
+            None => {
+                dc.SetTransform(&placed);
+                dc.PushAxisAlignedClip(&rect(left, top, width, height), D2D1_ANTIALIAS_MODE_ALIASED);
+                let painted = paint(frame);
+                dc.PopAxisAlignedClip();
+                painted
+            }
+            Some(color) => {
+                let list = dc.CreateCommandList()?;
+                let target = dc.GetTarget()?;
+                // (Setting a target can change the context's DPI; it is put back.)
+                let mut dpi = (0.0, 0.0);
+                dc.GetDpi(&mut dpi.0, &mut dpi.1);
+                dc.SetTarget(&list);
+                dc.SetDpi(dpi.0, dpi.1);
+                dc.SetTransform(&Matrix3x2::identity());
+                dc.PushAxisAlignedClip(&rect(left, top, width, height), D2D1_ANTIALIAS_MODE_ALIASED);
+                let painted = paint(frame);
+                dc.PopAxisAlignedClip();
+                list.Close()?;
+                dc.SetTarget(&target);
+                dc.SetDpi(dpi.0, dpi.1);
+                dc.SetTransform(&placed);
+                dc.DrawImage(&glow(dc, &list, color)?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                dc.DrawImage(&list, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                painted
+            }
+        };
+        dc.SetTransform(&parent);
+        painted
     }
 
     pub fn release(&mut self) {
@@ -1029,4 +1369,32 @@ pub fn effect_input(dc: &ID2D1DeviceContext, bitmap: &ID2D1Bitmap1) -> Result<ID
 
 pub fn rect(left: f32, top: f32, width: f32, height: f32) -> D2D_RECT_F {
     D2D_RECT_F { left, top, right: left + width, bottom: top + height }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::room;
+
+    #[test]
+    fn room_is_made_anew_a_few_times_as_a_window_is_sized() {
+        // Grown pixel by pixel from 300 to 2000 wide, then back: made anew a few times each way, not at each size.
+        let sizing = super::sizing(true);
+        let mut have = None;
+        let mut made = 0;
+        for width in (300..=2000).chain((300..2000).rev()) {
+            if let Some(new) = room(have, (width, 400)) {
+                have = Some(new);
+                made += 1;
+            }
+            let (w, h) = have.unwrap();
+            assert!(w >= width && h >= 400, "it holds what is asked");
+            assert!(w <= 2 * width + 128, "it is never much larger than asked");
+        }
+        assert!(made <= 16, "made {made} times");
+        // At rest: as large as asked, near enough.
+        drop(sizing);
+        let (w, h) = room(have, (1000, 400)).expect("made anew at rest");
+        assert!(w >= 1000 && w < 1000 + 64 && h >= 400 && h < 400 + 64);
+        assert_eq!(room(Some((w, h)), (1000, 400)), None);
+    }
 }

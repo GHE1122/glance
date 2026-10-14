@@ -43,6 +43,7 @@ use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::arrange::{self, Form, GAP};
 use crate::ui::seen::Seen;
+use crate::ui::life::Lives;
 use crate::ui::render::{self, PanelLayers};
 use crate::ui::motion::{Easing, Transition, LINEAR};
 use crate::ui::prefs::Prefs;
@@ -732,8 +733,9 @@ impl Controller {
                         panel.exclude();
                         // The panel's desktop and its look, lent to the widget
                         // till it has taken its own.
-                        let lent = panel.behind.as_ref().and_then(|behind| {
-                            Some(crate::widget::Lent { capture: behind.capture.without_pixels(), bitmap: behind.bitmap.as_ref()?.clone(), tone: behind.tone })
+                        // (Given, not shared: the panel writes no later capture into it.)
+                        let lent = panel.behind.as_mut().and_then(|behind| {
+                            Some(crate::widget::Lent { capture: behind.capture.without_pixels(), bitmap: behind.bitmap.take()?, tone: behind.tone })
                         });
                         // The edge it was at, unless it had been moved away.
                         let from = panel.placement.as_ref().filter(|placement| placement.floating.is_none()).map(|_| panel.edge);
@@ -970,6 +972,9 @@ struct Placement {
     /// opened, or the middle of the work area.
     anchor: POINT,
     window: RECT,
+    /// What is drawn in the window: the panel and its shadow's room (all of the window, but while it is sized: see
+    /// `place`).
+    painted: RECT,
     /// The panel at rest, and the pointer's leeway around it (physical px).
     panel: RECT,
     reach: RECT,
@@ -1032,6 +1037,10 @@ impl Edges {
 /// How near its edge the pointer sizes the pinned panel rather than
 /// pressing what is there (DIPs).
 const EDGE: f32 = 6.0;
+/// How far along an edge from a corner the pointer sizes the panel by both
+/// of the corner's edges at once (DIPs): a corner is easier to take than a
+/// square of `EDGE` each way.
+const CORNER: f32 = 20.0;
 
 /// How far the pointer moves a pressed panel before the panel moves with it
 /// (DIPs): a press that wanders less is a press.
@@ -1080,14 +1089,23 @@ struct Behind {
     /// The capture as drawn, and the physical pixels per DIP it was made
     /// for: made again when the zoom changes, or the device was lost.
     bitmap: Option<(ID2D1Bitmap1, f32)>,
+    /// The bitmap the capture before was drawn into: its memory written
+    /// again for this one (see `Capture::bitmap_into`).
+    former: Option<ID2D1Bitmap1>,
     taken: Instant,
 }
 
 impl Behind {
-    fn new(capture: Capture, placement: &Placement, now: Instant) -> Self {
+    fn new(capture: Capture, placement: &Placement, now: Instant, former: Option<ID2D1Bitmap1>) -> Self {
         let tone = capture.luminance(placement.panel, placement.px);
-        Behind { digest: capture.digest, tone, capture, bitmap: None, taken: now }
+        Behind { digest: capture.digest, tone, capture, bitmap: None, former, taken: now }
     }
+}
+
+/// What a turn between layouts starts from: a layout shown (at its zoom), or what a turn under way drew last.
+enum Before {
+    Shown(Layout, f32),
+    Drawn(Vec<crate::ui::morph::Part>),
 }
 
 /// A capture of the desktop behind the panel, asked for: for which
@@ -1100,10 +1118,45 @@ struct PanelRequest {
     afresh: bool,
 }
 
+impl crate::ui::life::Lives for Panel<'_> {
+    fn device(&self) -> &Rc<Gfx> {
+        &self.gfx
+    }
+
+    fn showing(&mut self) -> &mut Option<crate::ui::life::Showing> {
+        &mut self.showing
+    }
+
+    /// Its surface, its layers (and the turn from one layout into another: opened again, it is laid out afresh), the
+    /// desktop behind it; its scene rests.
+    fn let_go_of_shown(&mut self) {
+        if let Some(surface) = &mut self.surface {
+            surface.release(&self.gfx);
+        }
+        self.layers.release();
+        self.last_layout = None;
+        self.turning = None;
+        self.turned.clear();
+        self.turn_layer.release();
+        self.behind = None;
+        if let Some(scene) = &mut self.backdrop {
+            scene.rest();
+        }
+    }
+
+    /// Its scene of what is behind it, and its surface.
+    fn let_go_of_kept(&mut self) {
+        self.backdrop = None;
+        self.surface = None;
+    }
+}
+
 /// The panel and its window, owned by the input thread.
 struct Panel<'a> {
     controller: &'a Controller,
     gfx: Rc<Gfx>,
+    /// Counted as shown on its device while it is (see `life`).
+    showing: Option<crate::ui::life::Showing>,
     window: Window,
     /// None after the device was lost, until it is made again on the new one.
     surface: Option<Surface>,
@@ -1149,6 +1202,15 @@ struct Panel<'a> {
     /// where that corner is in the window (DIPs).
     hits: Vec<HitBox>,
     corner: (f32, f32),
+    /// Sized by hand in a frame since it was last drawn at rest (see `Gfx::settle`).
+    was_sized: bool,
+    /// The layout drawn last, at its zoom: laid out anew in other columns, it turns into the new one (see `morph`).
+    last_layout: Option<(Layout, f32)>,
+    /// Turning from one layout into the next: since when, and from what; what the turn drew last (where a turn
+    /// that turns again starts from); and the layer it is drawn in.
+    turning: Option<(Instant, Before)>,
+    turned: Vec<crate::ui::morph::Part>,
+    turn_layer: gfx::Layer,
     /// The bar, from the panel's corner (DIPs): a pinned panel is dragged by it.
     bar: view::Rect,
     /// Torn off as it was dragged: the widget to make (its form, scale and
@@ -1205,6 +1267,7 @@ impl<'a> Panel<'a> {
             window,
             surface,
             layers: PanelLayers::default(),
+            showing: None,
             phase: Phase::Hidden,
             shift: Transition::settled(1.0),
             opacity: Transition::settled(0.0),
@@ -1230,6 +1293,11 @@ impl<'a> Panel<'a> {
             style: String::new(),
             hits: Vec::new(),
             corner: (0.0, 0.0),
+            was_sized: false,
+            last_layout: None,
+            turning: None,
+            turned: Vec::new(),
+            turn_layer: gfx::Layer::default(),
             bar: view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             tear: None,
             torn: false,
@@ -1368,6 +1436,7 @@ impl<'a> Panel<'a> {
                 contact,
                 anchor,
                 window: RECT::default(),
+                painted: RECT::default(),
                 panel: RECT::default(),
                 reach: RECT::default(),
                 px: contact.scale,
@@ -1395,7 +1464,7 @@ impl<'a> Panel<'a> {
                     (None, Edge::Top) => RECT { left: monitor.left, right: monitor.right, ..placement.window },
                 };
                 let taken = Instant::now();
-                self.behind = Capture::take(area).map(|capture| Behind::new(capture, placement, now));
+                self.behind = Capture::take(area).map(|capture| Behind::new(capture, placement, now, None));
                 taking = taken.elapsed();
                 // None readable (the lock screen): taken again once a second
                 // has passed.
@@ -1499,6 +1568,9 @@ impl<'a> Panel<'a> {
             return;
         }
         self.end_drag();
+        if matches!(self.hover.take(), Some(Hit::Drive(_))) {
+            crate::ui::tip::hide();
+        }
         self.recapture = false;
         self.generation += 1;
         self.torn = false;
@@ -1510,17 +1582,8 @@ impl<'a> Panel<'a> {
             crate::widget::own_window_changed(placement.window);
         }
         self.exclude();
-        self.backdrop = None;
         self.capturing = None;
-        // The drawing memory is given back while the panel is away.
-        if let Some(surface) = &mut self.surface {
-            surface.release(&self.gfx);
-        }
-        self.layers.release();
-        self.behind = None;
-        if !crate::widget::any_shown() {
-            self.gfx.trim();
-        }
+        self.hidden();
         self.placement = None;
         self.controller.shown.store(false, Ordering::Relaxed);
     }
@@ -1540,8 +1603,14 @@ impl<'a> Panel<'a> {
         // Down now, or pressed (and perhaps let go) since it last looked.
         let presses = PRESSES.load(Ordering::Relaxed);
         let held = buttons_down() || std::mem::replace(&mut self.presses_seen, presses) != presses;
-        if !on_panel && self.hover.take().is_some() {
-            self.next_frame = now;
+        if !on_panel {
+            if let Some(was) = self.hover.take() {
+                // (What a drive's row said under it goes with it.)
+                if matches!(was, Hit::Drive(_)) {
+                    crate::ui::tip::hide();
+                }
+                self.next_frame = now;
+            }
         }
         // Around the panel the window is only shadow; clicks there belong
         // to whatever is underneath.
@@ -1572,6 +1641,8 @@ impl<'a> Panel<'a> {
     /// Follows the pointer, takes the desktop behind the glass again when
     /// it is live, and draws the panel if a frame is due.
     fn tick(&mut self, now: Instant) {
+        // (What it draws and takes from behind it is sized as it is: see `gfx::room`.)
+        let _sizing = gfx::sizing(self.drag.is_some_and(|drag| drag.edges.any()));
         if self.is_open() {
             self.track(now);
         } else {
@@ -1587,7 +1658,7 @@ impl<'a> Panel<'a> {
         // (dragged, sized, laid out afresh), takes it again; with live
         // refraction it is taken again anyway.
         if !self.live && self.drag.is_none() && self.skin.sees_backdrop() {
-            let window = self.placement.as_ref().map(|placement| placement.window);
+            let window = self.placement.as_ref().map(|placement| placement.painted);
             let taken = self.behind.as_ref().map(|behind| behind.capture.rect);
             if let (Some(window), Some(taken)) = (window, taken) {
                 self.recapture |= !covers(taken, window);
@@ -1612,7 +1683,7 @@ impl<'a> Panel<'a> {
             return;
         }
         self.tried_behind = now;
-        let area = placement.window;
+        let area = placement.painted;
         self.take_behind(area, false);
     }
 
@@ -1620,7 +1691,7 @@ impl<'a> Panel<'a> {
     /// (see `collect_behind`).
     fn recapture_behind(&mut self) {
         let Some(placement) = &self.placement else { return };
-        let area = placement.window;
+        let area = placement.painted;
         self.recapture = false;
         self.take_behind(area, true);
     }
@@ -1696,7 +1767,9 @@ impl<'a> Panel<'a> {
             }
             return;
         }
-        let behind = Behind::new(capture, placement, now);
+        // (The one before's, or what it had from its own before, if it was not drawn.)
+        let former = self.behind.take().and_then(|behind| behind.bitmap.map(|(bitmap, _)| bitmap).or(behind.former));
+        let behind = Behind::new(capture, placement, now, former);
         if request.afresh {
             self.behind = Some(behind);
             self.dress();
@@ -1742,7 +1815,16 @@ impl<'a> Panel<'a> {
     fn edges_at(&self, x: f32, y: f32) -> Edges {
         let Some(opening) = &self.opening else { return Edges::default() };
         let (width, height) = (opening.layout.width(), opening.layout.height());
-        Edges { left: x < EDGE, right: x >= width - EDGE, top: y < EDGE, bottom: y >= height - EDGE }
+        let edges = Edges { left: x < EDGE, right: x >= width - EDGE, top: y < EDGE, bottom: y >= height - EDGE };
+        // On an edge near a corner: the corner's other edge too.
+        let across = edges.left || edges.right;
+        let down = edges.top || edges.bottom;
+        Edges {
+            left: edges.left || (down && x < CORNER),
+            right: edges.right || (down && x >= width - CORNER),
+            top: edges.top || (across && y < CORNER),
+            bottom: edges.bottom || (across && y >= height - CORNER),
+        }
     }
 
     /// What a press at `client` (physical px in the window) would do to the
@@ -1928,6 +2010,10 @@ impl<'a> Panel<'a> {
     /// sized (its size).
     fn let_go(&mut self, now: Instant) -> Option<(Kept, Option<f32>)> {
         let drag = self.end_drag()?;
+        // Sized: its window back to its size (see `place`).
+        if drag.edges.any() {
+            self.arrange();
+        }
         let size = drag.sized.then_some(self.size);
         // Moved or sized, the desktop behind is taken again for what it now covers.
         let moved = self.placement.as_ref().is_some_and(|placement| placement.held.is_some());
@@ -2037,8 +2123,9 @@ impl<'a> Panel<'a> {
         let lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &opening.seen));
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
         drop(history);
+        let sizing = self.drag.is_some_and(|drag| drag.edges.any());
         let placement = self.placement.as_mut().unwrap();
-        place(placement, &self.window, self.edge, &self.theme, (layout.width(), layout.height()), zoom);
+        place(placement, &self.window, self.edge, &self.theme, (layout.width(), layout.height()), zoom, sizing);
         (lanes, layout)
     }
 
@@ -2050,21 +2137,21 @@ impl<'a> Panel<'a> {
         if Rc::ptr_eq(&current, &self.gfx) && self.surface.is_some() {
             return true;
         }
-        // A window has one composition target: the old one goes first.
-        self.surface = None;
+        // All it drew with, and kept, was the lost device's (see `life`); what was read of the desktop behind (how
+        // light it is, which the theme follows) stands without its bitmap, and what is behind is put together on the
+        // new one as it is next taken.
+        let behind = self.behind.take();
+        let had_scene = self.backdrop.is_some();
+        // (A window has one composition target: the old one goes first.)
+        self.gone();
+        self.behind = behind.map(|behind| Behind { bitmap: None, former: None, ..behind });
         let Ok(surface) = Surface::new(&current, self.window.hwnd) else {
             gfx::lost();
             return false;
         };
         self.surface = Some(surface);
         self.gfx = current;
-        self.layers.release();
-        // A desktop already made a bitmap on the lost device is gone with it, and what is behind is put together on
-        // the new one as it is next taken.
-        if let Some(behind) = &mut self.behind {
-            behind.bitmap = None;
-        }
-        if self.backdrop.take().is_some() {
+        if had_scene {
             self.capturing = None;
             self.recapture = true;
         }
@@ -2073,6 +2160,8 @@ impl<'a> Panel<'a> {
 
     /// Draws the panel as it is at `now`, and finishes a closing that is done.
     fn frame(&mut self, now: Instant) {
+        let by_hand = self.drag.is_some_and(|drag| drag.edges.any());
+        let _sizing = gfx::sizing(by_hand);
         if matches!(self.phase, Phase::Closing) && self.shift.done(now) && self.opacity.done(now) {
             // Closed: a game the panel sent to the background comes back.
             let game = self.game.take();
@@ -2084,15 +2173,40 @@ impl<'a> Panel<'a> {
             self.next_frame = now + DEVICE_RETRY;
             return;
         }
+        if self.is_shown() {
+            self.shown();
+        }
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
         self.scroll += (self.scroll_target - self.scroll) * (1.0 - E.powf(-dt / SCROLL_EASE));
 
         let (lanes, layout) = self.arrange();
+        let zoom = self.opening.as_ref().map_or(1.0, |opening| opening.zoom);
+        // Laid out in other columns (sized, or the readings grown): it turns into the new layout, each reading moved
+        // from where it was to where it goes, as a widget turns between its forms. One turning already turns on from
+        // where it got to.
+        if let Some((last, last_zoom)) = self.last_layout.take() {
+            if last.columns != layout.columns && !reduced_motion() {
+                let before = match self.turning.take() {
+                    Some(_) => Before::Drawn(std::mem::take(&mut self.turned)),
+                    None => Before::Shown(last, last_zoom),
+                };
+                self.turning = Some((now, before));
+            }
+        }
+        self.last_layout = Some((layout.clone(), zoom));
+        if self.turning.as_ref().is_some_and(|(since, _)| now.duration_since(*since) >= crate::widget::MORPH) {
+            self.turning = None;
+            self.turned.clear();
+            self.turn_layer.release();
+        }
+        let turn = self.turning.as_ref().map(|(since, _)| crate::ui::morph::ease(now.duration_since(*since).as_secs_f32() / crate::widget::MORPH.as_secs_f32()));
         let placement = self.placement.as_ref().unwrap();
         let px = placement.px;
-        let window = placement.window;
+        // Drawn in what it is painted in (the window, but while it is sized), placed in the window there.
+        let window = placement.painted;
         let size = ((window.right - window.left) as u32, (window.bottom - window.top) as u32);
+        let offset = (window.left - placement.window.left, window.top - placement.window.top);
         let (width, height) = (layout.width(), layout.height());
         // Where the panel rests in the window, and where it is now, slid
         // out by `shift` of the way it comes in.
@@ -2115,10 +2229,19 @@ impl<'a> Panel<'a> {
         let seen = &self.opening.as_ref().unwrap().seen;
         let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous(), seen);
         let edge = (!self.floating()).then_some(self.edge);
+        // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
+        let (keeps_right, keeps_bottom) = match placement.held {
+            Some(held) => (held.right, held.bottom),
+            None => (placement.floating.is_none() && self.edge == Edge::Right, false),
+        };
+        let centred = placement.held.is_none() && placement.floating.is_none() && self.edge == Edge::Top;
+        let halo = (self.theme.skin == Skin::Glass).then_some(self.theme.legibility);
+        let (before, turned, turn_layer) = (self.turning.as_mut().map(|(_, before)| before), &mut self.turned, &mut self.turn_layer);
         let (layers, behind, frost) = (&mut self.layers, &mut self.behind, self.frost);
         let (sizing, lang, theme) = (self.sizing, self.lang, &self.theme);
         let mut drawn = None;
         let surface = self.surface.as_mut().unwrap();
+        surface.offset(offset);
         let painted = surface.draw(&self.gfx, size, px, |frame| {
             frame.origin(0.0, 0.0);
             if opacity < 1.0 {
@@ -2128,7 +2251,17 @@ impl<'a> Panel<'a> {
             }
             let backdrop = behind.as_mut().and_then(|behind| {
                 if behind.bitmap.as_ref().is_none_or(|(_, made_for)| *made_for != px) {
-                    behind.bitmap = behind.capture.bitmap(&frame.dc, px).ok().map(|bitmap| (bitmap, px));
+                    // At another zoom, the same pixels; else made into what the capture before was.
+                    behind.bitmap = match behind.bitmap.take() {
+                        Some((made, _)) => behind.capture.at_scale(&frame.dc, &made, px),
+                        None => behind.capture.bitmap_into(&frame.dc, px, behind.former.take().as_ref()),
+                    }
+                    .ok()
+                    .map(|bitmap| (bitmap, px));
+                    // (Copied: what it was taken in is the next capture's to be taken in.)
+                    if behind.bitmap.is_some() {
+                        behind.capture.forget_texture();
+                    }
                 }
                 // Aligned with the screen where the panel rests: the window
                 // may have moved or grown since the capture was taken.
@@ -2140,7 +2273,34 @@ impl<'a> Panel<'a> {
                 Some((&behind.bitmap.as_ref()?.0, at, behind.digest, px))
             });
             let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (width, height), at: (0.0, 0.0), edge, backdrop, frost, rough: false };
-            drawn = Some(layers.draw(frame, &picture, Matrix3x2::translation(x, y), px));
+            let local = Matrix3x2::translation(x, y);
+            drawn = Some(match (turn, before) {
+                (Some(t), Some(before)) => (|| {
+                    // Turning: the skin's ground as it is now, and over it each reading between where it was and
+                    // where it goes.
+                    let grounded = layers.draw_ground(frame, &picture, local, px)?;
+                    if let Before::Shown(old, old_zoom) = before {
+                        let k = *old_zoom / zoom;
+                        let (old_w, old_h) = (old.width() * k, old.height() * k);
+                        let old_at = (
+                            if keeps_right { width - old_w } else if centred { (width - old_w) / 2.0 } else { 0.0 },
+                            if keeps_bottom { height - old_h } else { 0.0 },
+                        );
+                        *before = Before::Drawn(render::record(frame, &scene, &lanes, old, None, k, old_at));
+                    }
+                    let now_drawn = render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0));
+                    let Before::Drawn(from) = before else { unreachable!() };
+                    let parts = crate::ui::morph::between(from, &now_drawn, t);
+                    turn_layer.draw(frame, t.to_bits() as u64 + 1, local, (0.0, 0.0, width, height), px, halo, |frame| {
+                        crate::ui::morph::draw(frame, &parts);
+                        Ok(())
+                    })?;
+                    *turned = parts;
+                    // (Nothing to press mid-turn: where each thing is comes as it ends.)
+                    Ok(render::Drawn { hits: None, grounded })
+                })(),
+                _ => layers.draw(frame, &picture, local, px),
+            });
             if let Some((size, limit)) = sizing {
                 frame.place(Matrix3x2::translation(x, y));
                 size_badge(frame, theme, size, limit, lang, (width, height));
@@ -2162,6 +2322,12 @@ impl<'a> Panel<'a> {
         };
         let (hits, grounded) = (drawn.hits, drawn.grounded);
         self.gfx.sweep();
+        // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
+        if by_hand {
+            self.was_sized = true;
+        } else if std::mem::take(&mut self.was_sized) {
+            self.gfx.settle();
+        }
         // The effects that drew the ground are not needed again until it
         // changes; what they hold is let go.
         if grounded {
@@ -2170,12 +2336,13 @@ impl<'a> Panel<'a> {
         if let Some(hits) = hits {
             self.hits = hits;
         }
-        self.corner = (x, y);
+        // (In the window: where it is painted in it, and where in that.)
+        self.corner = (x + offset.0 as f32 / px, y + offset.1 as f32 / px);
         self.bar = layout.bar();
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel.
-        let moving = !self.shift.done(now) || !self.opacity.done(now) || (self.scroll_target - self.scroll).abs() > 0.05 || crate::playing::gliding();
+        let moving = !self.shift.done(now) || !self.opacity.done(now) || (self.scroll_target - self.scroll).abs() > 0.05 || crate::playing::gliding() || self.turning.is_some();
         self.next_frame = if moving {
             now
         } else {
@@ -2197,10 +2364,25 @@ impl<'a> Panel<'a> {
         // rest moves it too, under the reader's arrow).
         match self.drag.map(|drag| drag.edges).or_else(|| self.grip_at(client).filter(|edges| edges.any() || self.on_bar(client))) {
             Some(edges) => point_at(&self.window, edges),
+            // Over what a press does something with (a button, a drive's row): a hand.
+            None if self.hit_at(client).is_some_and(|hit| hit.takes_press()) => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_HAND),
             None => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_ARROW),
         }
         let hover = self.hit_at(client).filter(|hit| hit.max_scroll().is_none());
         if hover != self.hover {
+            // A drive's row says what a press on it does, under it.
+            match (hover, self.placement.as_ref()) {
+                (Some(Hit::Drive(place)), Some(placement)) => {
+                    let found = self.hits.iter().find(|hit| hit.4 == Hit::Drive(place));
+                    if let (Some(&(x, y, w, h, _)), Some(name)) = (found, self.controller.seen.lock().unwrap().volumes.get(place as usize).cloned()) {
+                        let on_screen = |dx: f32, dy: f32| ((placement.window.left as f32 + (self.corner.0 + dx) * placement.px).round() as i32, (placement.window.top as f32 + (self.corner.1 + dy) * placement.px).round() as i32);
+                        let ((left, top), (right, bottom)) = (on_screen(x, y), on_screen(x + w, y + h));
+                        crate::ui::tip::show(&opens_drive(&name, self.lang), RECT { left, top, right, bottom }, crate::os::apps_dark());
+                    }
+                }
+                _ if matches!(self.hover, Some(Hit::Drive(_))) => crate::ui::tip::hide(),
+                _ => {}
+            }
             self.hover = hover;
             self.next_frame = Instant::now();
         }
@@ -2300,7 +2482,8 @@ unsafe extern "system" fn sink_procedure(hwnd: HWND, message: u32, wparam: WPARA
 
 /// Positions the panel for a layout `size` DIPs large, and moves the window
 /// if that changed it.
-fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &Theme, size: (f32, f32), zoom: f32) {
+/// `sizing`: the panel is being sized by its edges (see `place`'s window).
+fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &Theme, size: (f32, f32), zoom: f32, sizing: bool) {
     let Contact { monitor, work, scale } = placement.contact;
     let px = scale * zoom;
     let (width, height) = ((size.0 * px).round() as i32, (size.1 * px).round() as i32);
@@ -2330,6 +2513,19 @@ fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &T
             bottom: window.bottom.min(monitor.bottom),
         };
     }
+    // While it is sized, its window holds its whole screen (and all of it, if it reaches past), not moved or sized
+    // with it: each size is then one frame of the compositor's. A window moved under it shows the frame before at
+    // its new place for a moment, and the panel shakes as it grows towards that side. What is drawn, and taken from
+    // behind it, is still only the panel and its shadow's room, placed in the window by the compositor.
+    let painted = window;
+    if sizing {
+        window = RECT {
+            left: window.left.min(monitor.left),
+            top: window.top.min(monitor.top),
+            right: window.right.max(monitor.right),
+            bottom: window.bottom.max(monitor.bottom),
+        };
+    }
     let tolerance = (LEAVE_TOLERANCE * scale).round() as i32;
     let mut reach = RECT {
         left: panel.left - tolerance,
@@ -2346,6 +2542,7 @@ fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &T
         }
     }
     placement.panel = panel;
+    placement.painted = painted;
     placement.reach = reach;
     placement.px = px;
     if placement.window != window {
@@ -2476,6 +2673,14 @@ fn fullscreen_game() -> bool {
 /// background.
 fn exclusive_fullscreen() -> bool {
     unsafe { SHQueryUserNotificationState() }.is_ok_and(|state| state == QUNS_RUNNING_D3D_FULL_SCREEN)
+}
+
+/// What a press on the row of the drive `name` does, said.
+pub(crate) fn opens_drive(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Zh => format!("打开 {name}"),
+        Lang::En => format!("Open {name}"),
+    }
 }
 
 /// Opens the drive seen at `place` (see `Hit::Drive`) where the user browses files, on another thread (the shell may

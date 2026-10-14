@@ -10,7 +10,7 @@ use windows::Win32::Graphics::Direct2D::{
     CLSID_D2D12DAffineTransform, CLSID_D2D1Blend, CLSID_D2D1Border, CLSID_D2D1ColorMatrix, CLSID_D2D1Crop,
     CLSID_D2D1DisplacementMap, CLSID_D2D1Flood, CLSID_D2D1GaussianBlur, CLSID_D2D1Shadow, ID2D1Bitmap1, ID2D1Effect,
     ID2D1Geometry, ID2D1Image, D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, ID2D1RenderTarget,
+    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, ID2D1RenderTarget,
     D2D1_BLEND_PROP_MODE, D2D1_BORDER_EDGE_MODE_MIRROR, D2D1_BORDER_PROP_EDGE_MODE_X, D2D1_BORDER_PROP_EDGE_MODE_Y,
     D2D1_CHANNEL_SELECTOR_G, D2D1_CHANNEL_SELECTOR_R, D2D1_COLORMATRIX_PROP_COLOR_MATRIX, D2D1_CROP_PROP_RECT,
     D2D1_DISPLACEMENTMAP_PROP_SCALE, D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT, D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
@@ -170,39 +170,175 @@ fn draw_image(frame: &Frame, image: &ID2D1Image, offset: Vector2) {
     }
 }
 
-/// Box shadows cast by `shapes`, as CSS draws them outside a box.
+/// Box shadows cast by `shapes`, as CSS draws them outside a box. (Each
+/// shape's own: where two meet, they lie over each other as two shadows do,
+/// a shade lighter than one blur of both would be.)
 pub fn shadows(frame: &Frame, shapes: &[(Rect, f32)], specs: &[Shadow]) -> Result<()> {
     for shadow in specs {
-        let shape = picture(frame, || {
-            for (r, radius) in shapes {
-                let grown = grow(*r, shadow.spread);
-                unsafe { frame.dc.FillRoundedRectangle(&rounded(grown, radius + shadow.spread), frame.brush(Color { a: 1.0, ..shadow.color })) };
+        for (r, radius) in shapes {
+            let (grown, radius) = (grow(*r, shadow.spread), radius + shadow.spread);
+            // CSS's blur radius is twice the Gaussian's standard deviation.
+            let deviation = shadow.blur / 2.0;
+            let reach = reach(deviation);
+            // Along an edge, past the rounded corner and as far again as the
+            // blur reaches, the shadow is the same all along (see `sliced`).
+            let cut = radius + 2.0 * reach;
+            let at = Rect { x: grown.x - reach, y: grown.y - reach + shadow.y, w: grown.w + 2.0 * reach, h: grown.h + 2.0 * reach };
+            let key = (*b"SHDW", [radius.to_bits(), deviation.to_bits(), 0, color_bits(shadow.color)]);
+            let drawn = sliced(frame, at, (cut, cut), key, |frame, at| outer_blurred(frame, shrink(at, reach), radius, deviation, 0.0, shadow.color))?;
+            if !drawn {
+                outer_blurred(frame, grown, radius, deviation, shadow.y, shadow.color)?;
             }
-        })?;
-        let blur = effect(frame, &CLSID_D2D1Shadow, &shape)?;
-        // CSS's blur radius is twice the Gaussian's standard deviation.
-        prop(&blur, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0, D2D1_PROPERTY_TYPE_FLOAT, &(shadow.blur / 2.0))?;
-        prop(&blur, D2D1_SHADOW_PROP_COLOR.0, D2D1_PROPERTY_TYPE_VECTOR4, &vector(shadow.color))?;
-        draw_image(frame, &output(&blur)?, Vector2 { X: 0.0, Y: shadow.y });
+        }
     }
+    Ok(())
+}
+
+/// How far a Gaussian of `deviation` reaches before what it adds no longer shows (DIPs, whole).
+fn reach(deviation: f32) -> f32 {
+    (3.0 * deviation).ceil()
+}
+
+fn shrink(r: Rect, by: f32) -> Rect {
+    grow(r, -by)
+}
+
+/// A colour as bits, for a key.
+fn color_bits(c: Color) -> u32 {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    byte(c.r) << 24 | byte(c.g) << 16 | byte(c.b) << 8 | byte(c.a)
+}
+
+/// The shadow of the rounded box `r`, blurred as it is (a Gaussian of
+/// `deviation`), moved down by `y`.
+fn outer_blurred(frame: &Frame, r: Rect, radius: f32, deviation: f32, y: f32, color: Color) -> Result<()> {
+    let shape = picture(frame, || unsafe { frame.dc.FillRoundedRectangle(&rounded(r, radius), frame.brush(Color { a: 1.0, ..color })) })?;
+    let blur = effect(frame, &CLSID_D2D1Shadow, &shape)?;
+    prop(&blur, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0, D2D1_PROPERTY_TYPE_FLOAT, &deviation)?;
+    prop(&blur, D2D1_SHADOW_PROP_COLOR.0, D2D1_PROPERTY_TYPE_VECTOR4, &vector(color))?;
+    draw_image(frame, &output(&blur)?, Vector2 { X: 0.0, Y: y });
     Ok(())
 }
 
 /// A shadow cast inward from a box's edge, as CSS's `inset` box shadow:
 /// what lies outside the box, offset and blurred, seen through the box.
 fn inset_shadow(frame: &Frame, r: Rect, radius: f32, y: f32, blur: f32, color: Color) -> Result<()> {
+    let deviation = blur / 2.0;
+    let reach = reach(deviation);
+    // Inside an edge, past the rounded corner, the blur's reach and the
+    // offset, the shadow is the same all along (see `sliced`).
+    let cut = (radius + reach, radius + reach + y.abs().ceil());
+    let key = (*b"INST", [radius.to_bits(), deviation.to_bits(), y.to_bits(), color_bits(color)]);
+    if !sliced(frame, r, cut, key, |frame, at| inset_blurred(frame, at, radius, y, deviation, color))? {
+        inset_blurred(frame, r, radius, y, deviation, color)?;
+    }
+    Ok(())
+}
+
+/// `inset_shadow`, blurred as it is.
+fn inset_blurred(frame: &Frame, r: Rect, radius: f32, y: f32, deviation: f32, color: Color) -> Result<()> {
     let outside = picture(frame, || unsafe {
         let factory = &frame.gfx.factory;
-        let reach = grow(r, blur + y.abs() + 1.0);
+        let reach = grow(r, 2.0 * deviation + y.abs() + 1.0);
         let around: ID2D1Geometry = factory.CreateRectangleGeometry(&D2D_RECT_F { left: reach.x, top: reach.y, right: reach.x + reach.w, bottom: reach.y + reach.h }).unwrap().cast().unwrap();
         let inside = geometry(frame, r, radius).unwrap();
         let ring = factory.CreateGeometryGroup(D2D1_FILL_MODE_ALTERNATE, &[Some(around), Some(inside)]).unwrap();
         frame.dc.FillGeometry(&ring, frame.brush(Color { a: 1.0, ..color }), None);
     })?;
     let blurred = effect(frame, &CLSID_D2D1Shadow, &outside)?;
-    prop(&blurred, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0, D2D1_PROPERTY_TYPE_FLOAT, &(blur / 2.0))?;
+    prop(&blurred, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0, D2D1_PROPERTY_TYPE_FLOAT, &deviation)?;
     prop(&blurred, D2D1_SHADOW_PROP_COLOR.0, D2D1_PROPERTY_TYPE_VECTOR4, &vector(color))?;
     within(frame, r, radius, || draw_image(frame, &output(&blurred).unwrap(), Vector2 { X: 0.0, Y: y }))
+}
+
+/// Draws over `at` what `paint` draws over a rectangle (given it, in its own
+/// DIPs) that is the same all along its middle: past `cut` DIPs in from each
+/// side (across, down), every column (row) is the same as the next (a box's
+/// shadow past its corners). It is drawn once, small, into a bitmap kept by
+/// `key` (see `Gfx::made`); its corners are drawn as they are, the strips
+/// between drawn out along `at`'s sides, and its middle over `at`'s middle.
+/// Made a few pixels across its middle, whatever `at`'s size, it costs the
+/// same for a window of any size, and needs nothing made again as a window
+/// is sized but itself.
+///
+/// It is made at the frame's scale, and starting at the same fraction of a
+/// pixel as `at` does, and ending as `at` does: each of its pixels is one of
+/// the frame's, nothing in it moved by a fraction of a pixel (a rim a pixel
+/// wide is drawn as sharp as if it were drawn at `at` itself). Whether it was
+/// drawn: not where `at` is too small to have a middle, or the frame is
+/// turned or stretched; then the caller draws it as it is.
+fn sliced(frame: &Frame, at: Rect, cut: (f32, f32), key: ([u8; 4], [u32; 4]), paint: impl FnOnce(&Frame, Rect) -> Result<()>) -> Result<bool> {
+    let dc = &frame.dc;
+    let mut transform = Matrix3x2::default();
+    let mut dpi = (0.0, 0.0);
+    unsafe {
+        dc.GetTransform(&mut transform);
+        dc.GetDpi(&mut dpi.0, &mut dpi.1);
+    }
+    if at.w < 2.0 * cut.0 + 2.0 || at.h < 2.0 * cut.1 + 2.0 || transform.M12 != 0.0 || transform.M21 != 0.0 || transform.M11 != transform.M22 || transform.M11 <= 0.0 {
+        return Ok(false);
+    }
+    // Physical pixels a DIP, and where `at`'s sides fall on the frame's pixels.
+    let px = dpi.0 / 96.0 * transform.M11;
+    let device = |v: f32, offset: f32| (v * transform.M11 + offset) * dpi.0 / 96.0;
+    let phase = |v: f32| v.rem_euclid(1.0);
+    let (left, top) = (phase(device(at.x, transform.M31)), phase(device(at.y, transform.M32)));
+    let (right, bottom) = (phase(device(at.x + at.w, transform.M31)), phase(device(at.y + at.h, transform.M32)));
+    // Its size in pixels: room for the corners and a few pixels between, and
+    // ending at the fraction of a pixel `at` ends at.
+    let length = |cut: f32, start: f32, end: f32| (2.0 * cut * px).ceil() + 2.0 + (end - start).rem_euclid(1.0);
+    let size = (length(cut.0, left, right), length(cut.1, top, bottom));
+    let (tag, parts) = key;
+    let mut mixed = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&(parts, px.to_bits(), [left, top, right, bottom].map(f32::to_bits), cut.0.to_bits(), cut.1.to_bits()), &mut mixed);
+    let mixed = std::hash::Hasher::finish(&mixed);
+    let made_key = [u32::from_be_bytes(tag), (size.0 as u32) << 16 | size.1 as u32, mixed as u32, (mixed >> 32) as u32];
+    // In its own DIPs (at `px`): where what stands for `at` is in it.
+    let inner = Rect { x: left / px, y: top / px, w: size.0 / px, h: size.1 / px };
+    let sample = frame.gfx.made(made_key, || unsafe {
+        let properties = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0 * px,
+            dpiY: 96.0 * px,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            ..Default::default()
+        };
+        let pixels = D2D_SIZE_U { width: (left + size.0).ceil() as u32, height: (top + size.1).ceil() as u32 };
+        let bitmap = frame.gfx.drawn_on(dc, pixels, properties.dpiX)?;
+        // Drawn on it, the frame's target, scale and place put back after.
+        let target = dc.GetTarget()?;
+        dc.SetTarget(&bitmap);
+        dc.SetDpi(96.0 * px, 96.0 * px);
+        dc.SetTransform(&Matrix3x2::identity());
+        dc.Clear(Some(&windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F::default()));
+        let painted = paint(frame, inner);
+        dc.SetTarget(&target);
+        dc.SetDpi(dpi.0, dpi.1);
+        dc.SetTransform(&transform);
+        painted.map(|_| bitmap)
+    })?;
+    // Its pieces and `at`'s, cut at the same distances in from each side; the
+    // outer ones out to whole pixels (the pixels `at` covers a part of are
+    // drawn, as they were drawn into it, each in part).
+    let from = |start: f32, length: f32, cut: f32, before: f32, after: f32| [start - before, start + cut, start + length - cut, start + length + after];
+    let after = |start: f32, length: f32| ((start + length).ceil() - (start + length)) / px;
+    let (sx, sy) = (from(inner.x, inner.w, cut.0, left / px, after(left, size.0)), from(inner.y, inner.h, cut.1, top / px, after(top, size.1)));
+    let (dx, dy) = (from(at.x, at.w, cut.0, left / px, after(left, size.0)), from(at.y, at.h, cut.1, top / px, after(top, size.1)));
+    unsafe {
+        // Pieces meeting edge to edge: each pixel drawn by one of them, none
+        // twice (at a seam's half-covered pixels) or not at all.
+        let mode = dc.GetAntialiasMode();
+        dc.SetAntialiasMode(windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED);
+        for row in 0..3 {
+            for column in 0..3 {
+                let source = D2D_RECT_F { left: sx[column], top: sy[row], right: sx[column + 1], bottom: sy[row + 1] };
+                let target = D2D_RECT_F { left: dx[column], top: dy[row], right: dx[column + 1], bottom: dy[row + 1] };
+                dc.DrawBitmap(&sample, Some(&target), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, Some(&source), None);
+            }
+        }
+        dc.SetAntialiasMode(mode);
+    }
+    Ok(true)
 }
 
 /// Draws what `paint` draws, seen only inside the rounded box.
@@ -443,9 +579,14 @@ fn lens(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2, f32), piece: Rect, rad
 /// edge, as a convex edge of glass bends light. Red is the x shift and green
 /// the y shift, half meaning none.
 fn displacement_map(frame: &Frame, piece: Rect, radius: f32) -> Result<ID2D1Bitmap1> {
-    let mut dpi = (0.0, 0.0);
-    unsafe { frame.dc.GetDpi(&mut dpi.0, &mut dpi.1) };
-    let px = dpi.0 / 96.0;
+    let mut drawn = (0.0, 0.0);
+    unsafe { frame.dc.GetDpi(&mut drawn.0, &mut drawn.1) };
+    // Made at a whole number of pixels a DIP, no coarser than it is drawn at
+    // (it is a smooth field: drawn finer or coarser, it is sampled), so that
+    // a panel drawn at every zoom as it is sized makes one or two, not one
+    // for each zoom.
+    let px = (drawn.0 / 96.0).ceil().max(1.0);
+    let dpi = (96.0 * px, 96.0 * px);
     let (w, h) = ((piece.w * px).round() as usize, (piece.h * px).round() as usize);
     // The same for every piece of this size, wherever it is: made once
     // (not for each frame of a widget moved over the desktop).

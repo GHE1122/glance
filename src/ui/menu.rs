@@ -59,6 +59,8 @@ pub fn show_at(items: &[Item], dark: bool, at: POINT, above: bool) -> Option<usi
     let cursor = at;
     let contact = crate::mouse::monitor_at(cursor)?;
     let gfx = gfx::current().ok()?;
+    // Shown till it returns (see `life`): counted before its surface is made, so that it is let go of after it.
+    let _showing = super::life::Showing::of(&gfx);
     let window = Window::activating().ok()?;
     let Ok(mut surface) = Surface::new(&gfx, window.hwnd) else {
         window.destroy();

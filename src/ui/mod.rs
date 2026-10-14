@@ -9,6 +9,7 @@ pub mod buttons;
 pub mod canvas;
 #[cfg(windows)]
 pub mod gfx;
+pub mod life;
 pub mod forms;
 #[cfg(windows)]
 pub mod glass;

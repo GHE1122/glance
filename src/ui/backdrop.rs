@@ -6,7 +6,7 @@ use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Dxgi::IDXGISurface;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT, D2D_SIZE_U};
-use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, ID2D1DeviceContext, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1};
+use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, ID2D1DeviceContext, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetDC, ReleaseDC, SelectObject, BITMAPINFO,
@@ -31,12 +31,35 @@ pub struct Capture {
     texture: Option<Texture>,
 }
 
-/// A texture of the device Glance draws with, made on another thread (see `scene`) and drawn on the one that draws.
-pub struct Texture(pub ID3D11Texture2D);
+/// A texture of the device Glance draws with, made on another thread (see `scene`) and drawn on the one that draws:
+/// copied from, never drawn from where it is (see `Capture::bitmap`), so that once let go it is no one's, and goes
+/// back to `spare` to be written again.
+pub struct Texture {
+    pub texture: ID3D11Texture2D,
+    pub spare: std::sync::Arc<Spare>,
+}
+
+/// Textures let go of, to be written again, the most recent last: a few at most (see `SPARE_MOST`).
+#[derive(Default)]
+pub struct Spare(pub std::sync::Mutex<Vec<ID3D11Texture2D>>);
+
+/// How many textures are kept spare: the one written next (one more is the capture's, till it is drawn).
+const SPARE_MOST: usize = 1;
+
+impl Drop for Texture {
+    fn drop(&mut self) {
+        let mut spare = self.spare.0.lock().unwrap();
+        if spare.len() < SPARE_MOST {
+            spare.push(self.texture.clone());
+        }
+    }
+}
 
 // (A Direct3D 11 resource may be handed between threads; it is drawn on the device's.)
 unsafe impl Send for Texture {}
 unsafe impl Sync for Texture {}
+unsafe impl Send for Spare {}
+unsafe impl Sync for Spare {}
 
 /// The side of the squares of pixels the luminance is kept for.
 pub const LUMA_STEP: i32 = 2;
@@ -141,6 +164,18 @@ impl Capture {
         Capture { rect, pixels: None, luma, digest: frame, texture: Some(texture) }
     }
 
+    /// Lets go of the texture it was taken in, once it is a bitmap (see `bitmap_into`), for the next capture to be
+    /// taken in; what was taken from memory (see `take`) is kept.
+    pub fn forget_texture(&mut self) {
+        self.texture = None;
+    }
+
+    /// A copy of a capture taken into memory (see `take`, `from_pixels`): none of one on the graphics card.
+    pub fn copied(&self) -> Option<Self> {
+        let pixels = self.pixels.clone()?;
+        Some(Capture { rect: self.rect, pixels: Some(pixels), luma: self.luma.clone(), digest: self.digest, texture: None })
+    }
+
     /// The same capture without its pixels (what is read of it is from its
     /// luminance): to be lent along with a bitmap already made of it.
     pub fn without_pixels(&self) -> Self {
@@ -171,6 +206,33 @@ impl Capture {
     /// The capture as a bitmap at `px` physical pixels per DIP, so that it
     /// covers its rectangle's size in DIPs.
     pub fn bitmap(&self, dc: &ID2D1DeviceContext, px: f32) -> Result<ID2D1Bitmap1> {
+        self.bitmap_into(dc, px, None)
+    }
+
+    /// `made`, a bitmap made of this capture (see `bitmap_into`), at `px` physical pixels per DIP: the same pixels,
+    /// nothing copied (a panel sized is drawn at another zoom at each step). Made again from the capture if its
+    /// pixels cannot be taken at another scale (made from memory, not on the card).
+    pub fn at_scale(&self, dc: &ID2D1DeviceContext, made: &ID2D1Bitmap1, px: f32) -> Result<ID2D1Bitmap1> {
+        let mut dpi = (0.0, 0.0);
+        unsafe { made.GetDpi(&mut dpi.0, &mut dpi.1) };
+        if dpi.0 == 96.0 * px {
+            return Ok(made.clone());
+        }
+        let properties = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
+            dpiX: 96.0 * px,
+            dpiY: 96.0 * px,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            ..Default::default()
+        };
+        unsafe { made.GetSurface().and_then(|surface| dc.CreateBitmapFromDxgiSurface(&surface, Some(&properties))) }.or_else(|_| self.bitmap(dc, px))
+    }
+
+    /// As `bitmap`; a frame on the graphics card copied into `into` if it is
+    /// of the same size (one made before for the same place, at this scale
+    /// or another: its memory written again, not another taken for each
+    /// frame, or for each scale a panel is sized through).
+    pub fn bitmap_into(&self, dc: &ID2D1DeviceContext, px: f32, into: Option<&ID2D1Bitmap1>) -> Result<ID2D1Bitmap1> {
         let properties = D2D1_BITMAP_PROPERTIES1 {
             // Opaque whatever its alpha bytes say (see `take`).
             pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
@@ -179,13 +241,38 @@ impl Capture {
             bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
             ..Default::default()
         };
+        // (A target's memory is a surface of the card's, which may be taken again at another scale.)
+        let copies = D2D1_BITMAP_PROPERTIES1 { bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET, ..properties.clone() };
         match (&self.pixels, &self.texture) {
             (Some(pixels), _) => {
                 let size = D2D_SIZE_U { width: self.width() as u32, height: (self.rect.bottom - self.rect.top) as u32 };
                 unsafe { dc.CreateBitmap(size, Some(pixels.as_ptr().cast()), (self.width() * 4) as u32, &properties) }
             }
-            // Drawn from where it is: nothing copied, nothing sent.
-            (None, Some(texture)) => unsafe { dc.CreateBitmapFromDxgiSurface(&texture.0.cast::<IDXGISurface>()?, Some(&properties)) },
+            // Copied on the card (nothing sent to or from it): the texture is then no one's but the capture's, and
+            // goes back to be written again as the capture goes (see `Texture`).
+            (None, Some(texture)) => unsafe {
+                let frame = dc.CreateBitmapFromDxgiSurface(&texture.texture.cast::<IDXGISurface>()?, Some(&properties))?;
+                let size = frame.GetPixelSize();
+                let bitmap = match into.filter(|bitmap| {
+                    let have = bitmap.GetPixelSize();
+                    have.width == size.width && have.height == size.height
+                }) {
+                    Some(bitmap) => {
+                        let mut dpi = (0.0, 0.0);
+                        bitmap.GetDpi(&mut dpi.0, &mut dpi.1);
+                        if dpi.0 == 96.0 * px {
+                            bitmap.clone()
+                        } else {
+                            dc.CreateBitmapFromDxgiSurface(&bitmap.GetSurface()?, Some(&copies))?
+                        }
+                    }
+                    None => {
+                        dc.CreateBitmap(size, None, 0, &copies)?
+                    }
+                };
+                bitmap.CopyFromBitmap(None, &frame, None)?;
+                Ok(bitmap)
+            },
             (None, None) => Err(windows::Win32::Foundation::E_UNEXPECTED.into()),
         }
     }

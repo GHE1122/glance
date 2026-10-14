@@ -10,13 +10,40 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font};
 use super::gfx::{self, Gfx, Surface};
+use super::life::{Lives, Showing};
 use super::window::Window;
 
 struct Tip {
     window: Window,
-    surface: Option<(Rc<Gfx>, Surface)>,
+    /// The device it draws with, and its surface on it.
+    gfx: Rc<Gfx>,
+    surface: Option<Surface>,
+    /// Counted as shown on its device while it is (see `life`).
+    showing: Option<Showing>,
     /// What it says where (empty: away), not drawn again for the same.
     said: (String, RECT),
+}
+
+impl Lives for Tip {
+    fn device(&self) -> &Rc<Gfx> {
+        &self.gfx
+    }
+
+    fn showing(&mut self) -> &mut Option<Showing> {
+        &mut self.showing
+    }
+
+    /// What its surface holds.
+    fn let_go_of_shown(&mut self) {
+        if let Some(surface) = &mut self.surface {
+            surface.release(&self.gfx);
+        }
+    }
+
+    /// Its surface.
+    fn let_go_of_kept(&mut self) {
+        self.surface = None;
+    }
 }
 
 thread_local! {
@@ -39,9 +66,14 @@ pub fn show(text: &str, about: RECT, dark: bool) {
         if kept.is_none() {
             let Ok(mut window) = Window::new() else { return };
             window.set_click_through(true);
-            *kept = Some(Tip { window, surface: None, said: (String::new(), RECT::default()) });
+            *kept = Some(Tip { window, gfx: gfx.clone(), surface: None, showing: None, said: (String::new(), RECT::default()) });
         }
         let tip = kept.as_mut().unwrap();
+        // (What it drew with on another device goes with it: see `life`.)
+        if !Rc::ptr_eq(&tip.gfx, &gfx) {
+            tip.gone();
+            tip.gfx = gfx.clone();
+        }
         // Its screen, and how many pixels a DIP is there.
         let monitor = unsafe { MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST) };
         let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -63,10 +95,11 @@ pub fn show(text: &str, about: RECT, dark: bool) {
             return;
         }
         let surface = match tip.surface.take() {
-            Some((made_on, surface)) if Rc::ptr_eq(&made_on, &gfx) => Ok(surface),
-            _ => Surface::new(&gfx, tip.window.hwnd),
+            Some(surface) => Ok(surface),
+            None => Surface::new(&gfx, tip.window.hwnd),
         };
         let Ok(mut surface) = surface else { return };
+        tip.shown();
         let (plate, rim, ink) = if dark { (Color::hex(0x2B2B2B, 0.98), Color::hex(0xFFFFFF, 0.16), Color::hex(0xFFFFFF, 0.92)) } else { (Color::hex(0xF9F9F9, 0.98), Color::hex(0x000000, 0.14), Color::hex(0x1A1A1A, 1.0)) };
         let drawn = surface.draw(&gfx, (width as u32, height as u32), scale, |frame| {
             frame.fill_rounded(plate, 0.0, 0.0, wide, tall, 6.0);
@@ -74,7 +107,7 @@ pub fn show(text: &str, about: RECT, dark: bool) {
             let (ink_top, ink_bottom) = frame.ink(text, font);
             frame.text(text, font, ink, PAD, tall / 2.0 - (ink_top + ink_bottom) / 2.0, wide - 2.0 * PAD + 2.0, Align::Start);
         });
-        tip.surface = Some((gfx.clone(), surface));
+        tip.surface = Some(surface);
         if drawn.is_err() {
             gfx::lost();
             return;
@@ -101,9 +134,7 @@ pub fn hide() {
         if let Some(tip) = kept.borrow_mut().as_mut().filter(|tip| !tip.said.0.is_empty()) {
             tip.window.hide();
             tip.said.0.clear();
-            if let Some((gfx, surface)) = &mut tip.surface {
-                surface.release(gfx);
-            }
+            tip.hidden();
         }
     });
 }

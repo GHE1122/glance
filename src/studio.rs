@@ -91,6 +91,9 @@ struct Shot {
     loads: Vec<(f32, f32)>,
     /// The lanes shown, in order; all of this machine's but "system" if absent.
     modules: Option<Vec<String>>,
+    /// The pointer on the row of the drive at this place among those seen (see `view::Hit::Drive`).
+    #[serde(default)]
+    hover_drive: Option<u16>,
     /// A game being played, by its name, if one is.
     game: Option<String>,
     /// When the game starts (from the start, if absent).
@@ -559,7 +562,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             seen: &seen,
             pen_ms: now_ms - interval - PEN_LAG_MS,
             process_scroll: 0.0,
-            hover: None,
+            hover: shot.hover_drive.map(view::Hit::Drive),
             pinned: false,
             overlay: false,
             buttons: true, newer: false,
@@ -1080,5 +1083,224 @@ pub fn phone_page(out: &Path) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         save_png(&out.join(format!("{name}.png")), w, h, &pixels).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// The graphics card's memory this process uses now (its local segment, MB), as Task Manager's "dedicated GPU
+/// memory" shows it.
+fn card_memory() -> u64 {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory1, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO};
+    let adapter: Option<IDXGIAdapter3> = unsafe { CreateDXGIFactory1::<IDXGIFactory1>().ok().and_then(|f| f.EnumAdapters1(0).ok()).and_then(|a| a.cast().ok()) };
+    let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+    adapter.and_then(|a| unsafe { a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }.ok()).map_or(0, |_| info.CurrentUsage >> 20)
+}
+
+/// A window (cloaked: nothing shows) sized frame by frame for six seconds as a hand sizes one, drawn `way`: as Glance
+/// draws (`now`), on a surface made once at its largest (`fixed`), or as it is drawn while sized by hand
+/// (`sizing`); its window not sized, only what is drawn (`unmoved`). The graphics card's memory, before, at most,
+/// and after.
+pub fn surface_memory(way: &str) -> Result<(), String> {
+    use std::time::{Duration, Instant};
+    use windows::core::w;
+    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE};
+    let gfx = Gfx::new().map_err(|e| e.to_string())?;
+    let window = unsafe { CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, w!("STATIC"), None, WS_POPUP | WS_VISIBLE, 100, 100, 800, 600, None, None, None, None) }.map_err(|e| e.to_string())?;
+    unsafe {
+        let cloak: windows::core::BOOL = true.into();
+        let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(window, windows::Win32::Graphics::Dwm::DWMWA_CLOAK, &cloak as *const _ as *const _, 4);
+    }
+    let mut surface = crate::ui::gfx::Surface::new(&gfx, window).map_err(|e| e.to_string())?;
+    let px = 1.5;
+    let largest = (2600u32, 1500u32);
+    let sizing = crate::ui::gfx::sizing(way == "sizing");
+    let draw = |surface: &mut crate::ui::gfx::Surface, size: (u32, u32)| {
+        let drawn = if way == "fixed" { largest } else { size };
+        surface.draw(&gfx, drawn, px, |frame| {
+            let (w, h) = (size.0 as f32 / px, size.1 as f32 / px);
+            let canvas: &dyn crate::ui::canvas::Canvas = frame;
+            canvas.fill_rounded(crate::ui::canvas::Color::hex(0x2040A0, 0.9), 10.0, 10.0, w - 20.0, h - 20.0, 16.0);
+            canvas.fill(crate::ui::canvas::Color::hex(0xFFFFFF, 0.5), 40.0, 40.0, w / 2.0, 30.0);
+        })
+    };
+    if let Some(skin) = way.strip_prefix("panel-") {
+        return panel_memory(&gfx, &mut surface, window, skin);
+    }
+    // PROBE (memory): a scene arranged anew at another size again and again (its frame pool made anew each time), a
+    // frame of each read; then let go of. The process stays a while for its memory to be read from outside.
+    if way == "scene" {
+        println!("before: card MB {}", card_memory());
+        std::thread::sleep(Duration::from_secs(4));
+        // Made and let go of again and again at one size, as a panel's is as it opens and goes: what stays.
+        if let Some(cycles) = std::env::var("GLANCE_CYCLES").ok().and_then(|s| s.parse::<usize>().ok()) {
+            for _ in 0..cycles {
+                let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| {});
+                let mut scene = crate::ui::scene::Scene::new(RECT { left: 200, top: 200, right: 1000, bottom: 700 }, wake, &gfx).ok_or("no scene")?;
+                scene.arrange(RECT { left: 200, top: 200, right: 1000, bottom: 700 }, window);
+                let began = Instant::now();
+                scene.want();
+                while began.elapsed() < Duration::from_millis(600) && scene.ready().is_none() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                drop(scene);
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            gfx.trim();
+            println!("{cycles} scenes made and let go: card MB {}", card_memory());
+            std::thread::sleep(Duration::from_secs(10));
+            return Ok(());
+        }
+        let steps: usize = std::env::var("GLANCE_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
+        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| {});
+        let mut scene = crate::ui::scene::Scene::new(RECT { left: 200, top: 200, right: 1000, bottom: 700 }, wake, &gfx).ok_or("no scene")?;
+        let mut taken = 0;
+        for step in 0..steps {
+            let grow = (step % 10) as i32 * 37;
+            let area = RECT { left: 200, top: 200, right: 1000 + grow, bottom: 700 + grow };
+            scene.arrange(area, window);
+            let began = Instant::now();
+            if std::env::var_os("GLANCE_NO_READ").is_some() {
+                std::thread::sleep(Duration::from_millis(150));
+                continue;
+            }
+            scene.want();
+            while began.elapsed() < Duration::from_millis(600) {
+                if let Some(capture) = scene.ready() {
+                    taken += 1;
+                    drop(capture);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        println!("scene: {taken} of {steps} frames taken; card MB (as Glance's device counts it) {}", card_memory());
+        drop(scene);
+        std::thread::sleep(Duration::from_secs(2));
+        println!("scene let go: card MB {}", card_memory());
+        gfx.trim();
+        std::thread::sleep(Duration::from_secs(2));
+        println!("then trimmed: card MB {}", card_memory());
+        std::thread::sleep(Duration::from_secs(15));
+        return Ok(());
+    }
+    draw(&mut surface, (800, 600)).map_err(|e| e.to_string())?;
+    std::thread::sleep(Duration::from_secs(2));
+    let before = card_memory();
+    let (began, mut most, mut frames) = (Instant::now(), before, 0);
+    while began.elapsed() < Duration::from_secs(6) {
+        let t = began.elapsed().as_secs_f32();
+        let size = ((1400.0 + 1100.0 * (t * 1.3).sin()) as u32, (800.0 + 600.0 * (t * 0.9).cos()) as u32);
+        if way != "unmoved" {
+            unsafe {
+                let _ = SetWindowPos(window, None, 0, 0, size.0 as i32, size.1 as i32, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+        draw(&mut surface, size).map_err(|e| e.to_string())?;
+        frames += 1;
+        most = most.max(card_memory());
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    drop(sizing);
+    let mut after = Vec::new();
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_secs(1));
+        after.push(card_memory());
+    }
+    println!("{way:<8} frames {frames:>4}  card MB: before {before}, at most {most}, then {after:?}");
+    Ok(())
+}
+
+/// As `surface_memory`, with a panel of two lanes drawn on it as Glance draws one (its ground, its readings, over a
+/// desktop) in `skin` ("glass", "fluent", "paper"; "-still" after it: not sized), sized by its zoom frame by frame.
+fn panel_memory(gfx: &Gfx, surface: &mut crate::ui::gfx::Surface, window: windows::Win32::Foundation::HWND, skin: &str) -> Result<(), String> {
+    use std::time::{Duration, Instant};
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER};
+    let (still, skin_name) = match skin.strip_suffix("-still") {
+        Some(name) => (true, name),
+        None => (false, skin),
+    };
+    let skin = match skin_name {
+        "glass" => Skin::Glass,
+        "fluent" => Skin::Fluent,
+        _ => Skin::Paper,
+    };
+    let px = 1.5f32;
+    let (width, height) = (2560u32, 1440u32);
+    let info = crate::metrics::Sampler::new().info;
+    let mut known = vec!["game".to_string(), "cpu".to_string()];
+    known.extend(info.gpu_modules());
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
+    let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
+    let history: Vec<Sample> = (0..400).map(|i| made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None)).collect();
+    let theme = Theme::new(skin, true);
+    let work = (width as f32 / px, height as f32 / px);
+    let desktop = {
+        let pixels: Vec<u8> = (0..width * height).flat_map(|i| { let v = ((i % width) * 255 / width) as u8; [v, 128u8, 255 - v, 255] }).collect();
+        crate::ui::backdrop::Capture::from_pixels(RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 }, pixels)
+    };
+    let form = Form::Lanes { detail: view::Detail::Compact, columns: 2 };
+    let mut filming = Filming::new(Choice { form, scale: 1.0, extra: (0.0, 0.0) }, (40.0, 40.0));
+    let seen = Seen::of(&history);
+    let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: history[399].t as f64 - 1000.0 - PEN_LAG_MS, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: false, newer: false };
+    let mut bitmap = None;
+    let mut frame_at = |zoom: f32, surface: &mut crate::ui::gfx::Surface, filming: &mut Filming| -> Result<(), String> {
+        filming.choice.scale = zoom;
+        let shown = filming.lay_out(0.0, &scene, &theme, &seen, work, None);
+        let lanes = view::lanes_at(&scene, |_| shown.detail);
+        let margin = theme.margin;
+        let size = ((((shown.size.0 + 2.0 * margin) * px * shown.zoom).ceil()) as u32, (((shown.size.1 + 2.0 * margin) * px * shown.zoom).ceil()) as u32);
+        unsafe {
+            let _ = SetWindowPos(window, None, 0, 0, size.0 as i32, size.1 as i32, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        let layers = &mut filming.layers;
+        let drawn = surface.draw(gfx, size, px, |frame| {
+            let scale = px * shown.zoom;
+            // (As the panel does: the same pixels at each zoom.)
+            bitmap = match bitmap.take() {
+                Some((made, _)) => desktop.at_scale(&frame.dc, &made, scale).ok(),
+                None => desktop.bitmap(&frame.dc, scale).ok(),
+            }
+            .map(|b| (b, scale));
+            let backdrop = bitmap.as_ref().map(|(bitmap, scale)| (bitmap, Vector2 { X: 200.0, Y: 100.0 }, desktop.digest, *scale));
+            let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &shown.layout, small: None, size: shown.size, at: (0.0, 0.0), edge: None, backdrop, frost: 0.5, rough: false };
+            let local = Matrix3x2::scale(shown.zoom, shown.zoom) * Matrix3x2::translation(margin * shown.zoom, margin * shown.zoom);
+            let part = std::env::var("GLANCE_PART").unwrap_or_default();
+            if part == "ground" {
+                let _ = layers.draw_ground(frame, &picture, local, scale);
+            } else {
+                let _ = layers.draw(frame, &picture, local, scale);
+            }
+        });
+        gfx.sweep();
+        if std::env::var("GLANCE_PART").as_deref() == Ok("cleared") {
+            gfx.clear_caches();
+        }
+        drawn.map_err(|e| e.to_string())
+    };
+    frame_at(1.0, surface, &mut filming)?;
+    std::thread::sleep(Duration::from_secs(2));
+    // (As a window sized by hand is drawn.)
+    let sizing = crate::ui::gfx::sizing(!still && std::env::var_os("GLANCE_AT_REST").is_none());
+    let before = card_memory();
+    let (began, mut most, mut frames) = (Instant::now(), before, 0);
+    while began.elapsed() < Duration::from_secs(6) {
+        let t = began.elapsed().as_secs_f32();
+        let zoom = if still { 1.0 } else { 1.0 + 0.45 * (t * 1.3).sin() };
+        frame_at(zoom, surface, &mut filming)?;
+        frames += 1;
+        most = most.max(card_memory());
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    // Let go: drawn once more at rest, as it then is, and what was made as it was sized let go (as Glance does).
+    drop(sizing);
+    frame_at(1.0, surface, &mut filming)?;
+    gfx.settle();
+    let mut after = Vec::new();
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_secs(1));
+        after.push(card_memory());
+    }
+    println!("panel {skin_name:<6} still {still:<5} frames {frames:>4}  card MB: before {before}, at most {most}, then {after:?}");
     Ok(())
 }

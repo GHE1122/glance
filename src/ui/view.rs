@@ -141,6 +141,31 @@ const MIN_RATE_SCALE: f64 = 10.0 * 1024.0;
 /// The frame time chart's least full scale, in milliseconds.
 const MIN_FRAME_SCALE: f64 = 10.0;
 
+/// The system icon font's open folder.
+const FOLDER: &str = "\u{E838}";
+
+/// The name `label` of a row that opens something (drawn at `left`, `top`),
+/// the pointer on it, marked as its skin marks what opens: chart paper
+/// underlines it in ink, as a link on paper is; Windows 11 sets it in the
+/// accent (by the caller), as its links are; glass, already lit along its
+/// rims, leaves it bright and no more. And after it, a folder: what a press opens. The folder is
+/// centred on the name's ink, not its line (a name of capitals and a colon
+/// has no descender, and sits high in its line).
+fn opens_marked(frame: &dyn Canvas, theme: &Theme, label: &str, left: f32, top: f32) {
+    let font = theme.small;
+    let (ink_top, ink_bottom) = frame.ink(label, font);
+    let wide = frame.measure(label, font);
+    match theme.skin {
+        Skin::Paper => frame.fill(theme.text, left, top + ink_bottom + 1.5, wide, 1.0),
+        Skin::Glass | Skin::Fluent => {}
+    }
+    let icon = Font::new(Family::Icons, 11.0, 400.0);
+    let (icon_top, icon_bottom) = frame.ink(FOLDER, icon);
+    let middle = top + (ink_top + ink_bottom) / 2.0;
+    let ink = if theme.skin == Skin::Fluent { super::theme::accent(theme.dark) } else { theme.text2 };
+    frame.text(FOLDER, icon, ink, left + wide + 5.0, middle - (icon_top + icon_bottom) / 2.0, LABEL, Align::Start);
+}
+
 /// What a click or a wheel turn on the panel lands on.
 #[derive(Clone, Copy, PartialEq, Hash)]
 pub enum Hit {
@@ -1606,9 +1631,18 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 if let Some(drive) = opens {
                     hits.push((left, row_y, width, LINE, Hit::Drive(*drive)));
                 }
-                frame.text(label, theme.small, theme.text2, left, row_y, LABEL, Align::Start);
+                // Under the pointer, a row that opens its drive says so, lightly (the rows are close, and a band
+                // across one would crowd them): its words in full ink, its name marked as its skin marks what opens,
+                // and a folder after it.
+                let hovered = opens.is_some_and(|drive| scene.hover == Some(Hit::Drive(drive)));
+                let words = if hovered { theme.text } else { theme.text2 };
+                let name = if hovered && theme.skin == Skin::Fluent { super::theme::accent(theme.dark) } else { words };
+                if hovered {
+                    opens_marked(frame, theme, label, left, row_y);
+                }
+                frame.text(label, theme.small, name, left, row_y, LABEL, Align::Start);
                 let value_width = frame.measure(value, theme.small);
-                frame.text(value, theme.small, theme.text2, left, row_y, width, Align::End);
+                frame.text(value, theme.small, words, left, row_y, width, Align::End);
                 let bar_width = left + width - value_width - LABEL_GAP - plot_left;
                 let bar_y = row_y + (LINE - theme.meter_height) / 2.0;
                 let (height, radius) = (theme.meter_height, theme.meter_radius);

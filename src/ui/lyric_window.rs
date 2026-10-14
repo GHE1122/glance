@@ -32,6 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::buttons::{self, Button};
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
+use super::life::Lives;
 use super::gfx::{self, rect, Frame, Gfx, Surface};
 use crate::cover::Cover;
 use crate::lyrics::Line;
@@ -97,12 +98,39 @@ const UNDER_FONT: Font = Font::new(Family::Segoe, 14.0, 500.0);
 const FLOAT_FONT: Font = Font::new(Family::Segoe, 36.0, 800.0);
 const FLOAT_UNDER: Font = Font::new(Family::Segoe, 18.0, 600.0);
 
+impl super::life::Lives for Shown {
+    fn device(&self) -> &Rc<Gfx> {
+        &self.gfx
+    }
+
+    fn showing(&mut self) -> &mut Option<super::life::Showing> {
+        &mut self.showing
+    }
+
+    /// What its surface holds, its ground, the cover behind it.
+    fn let_go_of_shown(&mut self) {
+        if let Some(surface) = &mut self.surface {
+            surface.release(&self.gfx);
+        }
+        self.ground = Default::default();
+        self.backdrop = None;
+        self.fading = None;
+    }
+
+    /// Its surface.
+    fn let_go_of_kept(&mut self) {
+        self.surface = None;
+    }
+}
+
 /// A window shown, and what it keeps from frame to frame.
 struct Shown {
     style: Style,
     hwnd: HWND,
     gfx: Rc<Gfx>,
     surface: Option<Surface>,
+    /// Counted as shown on its device while it is (see `life`).
+    showing: Option<super::life::Showing>,
     scale: f32,
     /// Its size (DIPs, inside the room for its shadow).
     room: (f32, f32),
@@ -148,12 +176,14 @@ pub fn tick(now: Instant) -> Option<Duration> {
         [Style::Card, Style::Subtitle].into_iter().filter(|style| on && super::prefs::item_on(view, "lyrics", style.item())).collect()
     };
     SHOWN.with_borrow_mut(|shown| {
-        shown.retain(|one| {
+        shown.retain_mut(|one| {
             let keep = wanted.contains(&one.style);
             if !keep {
                 if one.tipped.is_some() {
                     super::tip::hide();
                 }
+                // (All it drew with goes with its window: see `life`.)
+                one.gone();
                 unsafe {
                     let _ = DestroyWindow(one.hwnd);
                 }
@@ -503,6 +533,7 @@ fn make(style: Style) -> Option<Shown> {
             tint: [1.0, 1.0, 1.0],
             accent: [0.55, 0.65, 1.0],
             ground: Default::default(),
+            showing: None,
         })
     }
 }
@@ -750,16 +781,15 @@ impl Shown {
         }
         let settling = (self.rail - target).abs() > 0.002 || self.rail_speed.abs() > 0.002;
         if self.surface.is_none() {
+            // (What it drew with was the device's before, if it was another: made again on the new one.)
+            self.gone();
             if let Ok(gfx) = gfx::current() {
                 self.gfx = gfx;
             }
-            // (What was kept was kept on the device before: made again from the cover on the new one.)
-            self.ground = Default::default();
-            self.backdrop = None;
-            self.fading = None;
             self.surface = Surface::new(&self.gfx, self.hwnd).ok();
         }
         let Some(mut surface) = self.surface.take() else { return false };
+        self.shown();
         let (w, h) = self.room;
         let margin = self.style.margin();
         let size = (((w + 2.0 * margin) * self.scale) as u32, ((h + 2.0 * margin) * self.scale) as u32);

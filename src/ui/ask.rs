@@ -1155,6 +1155,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 /// `yes`; none, if not.
 pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
     let gfx = gfx::current().ok()?;
+    // Shown till it returns (see `life`).
+    let _showing = super::life::Showing::of(&gfx);
     unsafe {
         let module = GetModuleHandleW(None).ok()?;
         let class = w!("GlanceAsk");

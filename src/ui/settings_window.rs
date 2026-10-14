@@ -43,7 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_CAPTURECHANGED, WM_DESTROY,
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -54,6 +54,7 @@ use super::motion::{Easing, Transition};
 use super::overlay::{Layout, ROWS};
 use super::prefs::{self, LanguagePref, Prefs, ProcessSort, ThemePref};
 use super::arrange::{self, GAP};
+use super::life::Lives;
 use super::render::{self, PanelLayers};
 use super::skins;
 use super::text::Lang;
@@ -245,6 +246,49 @@ fn read_desktop(rect: RECT, width: u32, height: u32) -> Capture {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
     wallpaper::desktop(rect, width, height)
+}
+
+/// Each screen's desktop as the preview last read it (its name, its work area, the size it was read at): kept for
+/// as long as Glance runs, so that the settings open on the desktop as it was (read again as they open, and taken
+/// if it has changed), not on an empty stage while it is read. Small: read at the preview's size, in DIPs.
+static DESKTOPS: std::sync::Mutex<Vec<(String, RECT, (f32, f32), Capture)>> = std::sync::Mutex::new(Vec::new());
+
+/// Reads screen `screen`'s desktop for the preview (see `read_desktop`), and keeps it (see `DESKTOPS`).
+fn read_and_keep(screen: &str, work: RECT, size: (f32, f32)) -> Capture {
+    let desktop = read_desktop(work, size.0 as u32, size.1 as u32);
+    if let Some(copy) = desktop.copied() {
+        let mut kept = DESKTOPS.lock().unwrap();
+        kept.retain(|(name, ..)| name != screen);
+        kept.push((screen.to_string(), work, size, copy));
+    }
+    desktop
+}
+
+/// Screen `screen`'s desktop as last read for the preview, if it was read at its work area `work` and `size`.
+fn kept_desktop(screen: &str, work: RECT, size: (f32, f32)) -> Option<Capture> {
+    DESKTOPS.lock().unwrap().iter().find(|(name, at, read, _)| name == screen && *at == work && *read == size).and_then(|(.., desktop)| desktop.copied())
+}
+
+/// Every screen as the preview shows it: its name, its work area (physical px), and that area's size (DIPs).
+fn stages_wanted(screens: &[crate::screens::Screen]) -> Vec<(String, RECT, (f32, f32))> {
+    screens
+        .iter()
+        .filter_map(|known| {
+            let m = known.monitor;
+            let contact = crate::mouse::monitor_at(POINT { x: (m.left + m.right) / 2, y: (m.top + m.bottom) / 2 })?;
+            let work = contact.work;
+            let size = (((work.right - work.left) as f32 / contact.scale).round(), ((work.bottom - work.top) as f32 / contact.scale).round());
+            Some((known.id.clone(), work, size))
+        })
+        .collect()
+}
+
+/// Reads every screen's desktop for the preview and keeps it, before the settings are first opened: they open on
+/// it. On a thread of the caller's.
+pub fn read_desktops_ahead() {
+    for (screen, work, size) in stages_wanted(&crate::screens::all()) {
+        read_and_keep(&screen, work, size);
+    }
 }
 
 /// A desktop read on another thread for the settings (see `Ui::read`): for the preview, or for the map.
@@ -647,6 +691,8 @@ const PHONE_ASKED_EVERY: Duration = Duration::from_millis(1500);
 struct Ui {
     hwnd: HWND,
     gfx: Rc<Gfx>,
+    /// Counted as shown on its device while it is (see `life`).
+    showing: Option<crate::ui::life::Showing>,
     /// Out of the struct while a frame is drawn on it.
     surface: Option<Surface>,
     mica: bool,
@@ -709,6 +755,10 @@ struct Ui {
     motion: HashMap<String, Transition>,
     /// Thumbs land where they belong without sliding (after relabelling).
     settle_thumbs: bool,
+    /// Sized (or moved) by hand, in Windows' own loop: what is drawn is sized as it is (see `gfx::room`).
+    by_hand: bool,
+    /// Sized by hand in a frame since it was last drawn at rest (see `Gfx::settle`).
+    was_sized: bool,
     /// Taking a new shortcut: the next key combination pressed, and whether
     /// the last one lacked Ctrl, Alt or Win.
     recording: bool,
@@ -753,6 +803,29 @@ struct Ui {
     next_frame: Instant,
     /// Drawing the preview failed this frame (the device was lost).
     failed: bool,
+}
+
+impl Lives for Ui {
+    fn device(&self) -> &Rc<Gfx> {
+        &self.gfx
+    }
+
+    fn showing(&mut self) -> &mut Option<crate::ui::life::Showing> {
+        &mut self.showing
+    }
+
+    /// Its surface, its preview's layers, and the desktops it shows made bitmaps.
+    fn let_go_of_shown(&mut self) {
+        self.surface = None;
+        self.layers.release();
+        self.stage.bitmap = None;
+        for stage in &mut self.kept_stages {
+            stage.bitmap = None;
+        }
+        for art in &mut self.map_art {
+            art.bitmap = None;
+        }
+    }
 }
 
 /// Makes the window, draws its first frame, and shows it.
@@ -810,8 +883,10 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         let size = ((work_w as f32 / scale).round(), (work_h as f32 / scale).round());
         let centre = POINT { x: (work.left + work.right) / 2, y: (work.top + work.bottom) / 2 };
         let screen = crate::screens::all().into_iter().find(|screen| crate::mouse::monitor_at(centre).is_some_and(|contact| contact.monitor == screen.monitor)).map(|screen| screen.id);
-        // (Its desktop read on another thread: the window shows meanwhile.)
-        let stage = Stage { size, screen, work, desktop: None, bitmap: None };
+        // On the desktop as it was last read, if it was (see `DESKTOPS`): light or dark as it is from the first frame
+        // (read again on another thread, the window showing meanwhile).
+        let desktop = screen.as_deref().and_then(|screen| kept_desktop(screen, work, size));
+        let stage = Stage { size, screen, work, desktop, bitmap: None };
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
         let mut ui = Ui {
             hwnd,
@@ -853,6 +928,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             scroll_target: 0.0,
             motion: HashMap::new(),
             settle_thumbs: true,
+            by_hand: false,
+            was_sized: false,
             recording: false,
             needs_modifier: false,
             pointer: None,
@@ -875,6 +952,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             relabel_at: None,
             stage,
             layers: PanelLayers::default(),
+            showing: None,
             last_frame: Instant::now(),
             next_frame: Instant::now(),
             failed: false,
@@ -931,6 +1009,19 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
+            LRESULT(0)
+        }
+        // Sized or moved by hand from here till it is let go: drawn as it is sized (see `gfx::sizing`), and once
+        // more at rest as it is let go.
+        WM_ENTERSIZEMOVE => {
+            with_ui(|ui| ui.by_hand = true);
+            LRESULT(0)
+        }
+        WM_EXITSIZEMOVE => {
+            with_ui(|ui| {
+                ui.by_hand = false;
+                ui.draw(Instant::now());
+            });
             LRESULT(0)
         }
         // Drawn at once, so the content keeps up while the window is resized.
@@ -1023,13 +1114,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             // what they held (unless desktop widgets still draw with it).
             // Closed mid-drag: what was dragged is kept.
             with_ui(|ui| ui.let_go());
-            let ui = UI.with(|cell| cell.borrow_mut().take());
-            if let Some(ui) = ui {
-                let gfx = ui.gfx.clone();
-                drop(ui);
-                if !crate::widget::any_shown() {
-                    gfx.trim();
-                }
+            // (All it drew with goes: see `life`.)
+            if let Some(mut ui) = UI.with(|cell| cell.borrow_mut().take()) {
+                ui.gone();
             }
             WINDOW.store(0, Ordering::Release);
             LRESULT(0)
@@ -1386,21 +1473,19 @@ impl Ui {
     /// Reads every screen's desktop as the preview shows it (its wallpaper, at its work area's size), on another
     /// thread: each kept as it comes (see `draw`).
     fn read_stages(&mut self) {
-        let wanted: Vec<(String, RECT, (f32, f32))> = self
-            .screens
-            .iter()
-            .filter_map(|known| {
-                let m = known.monitor;
-                let contact = crate::mouse::monitor_at(POINT { x: (m.left + m.right) / 2, y: (m.top + m.bottom) / 2 })?;
-                let work = contact.work;
-                let size = (((work.right - work.left) as f32 / contact.scale).round(), ((work.bottom - work.top) as f32 / contact.scale).round());
-                Some((known.id.clone(), work, size))
-            })
-            .collect();
+        let wanted = stages_wanted(&self.screens);
+        // As they were last read, at once (read again below, and taken if changed).
+        for (screen, work, size) in &wanted {
+            if let Some(desktop) = kept_desktop(screen, *work, *size) {
+                self.kept_stages.retain(|kept| kept.screen.as_deref() != Some(screen.as_str()));
+                self.kept_stages.push(Stage { size: *size, screen: Some(screen.clone()), work: *work, desktop: Some(desktop), bitmap: None });
+            }
+        }
         let send = self.read.0.clone();
         std::thread::spawn(move || {
             for (screen, work, size) in wanted {
-                let stage = Stage { size, screen: Some(screen), work, desktop: Some(read_desktop(work, size.0 as u32, size.1 as u32)), bitmap: None };
+                let desktop = read_and_keep(&screen, work, size);
+                let stage = Stage { size, screen: Some(screen), work, desktop: Some(desktop), bitmap: None };
                 if send.send(Read::Stage(stage)).is_err() {
                     break;
                 }
@@ -1412,7 +1497,7 @@ impl Ui {
     fn read_stage(&self, screen: String, work: RECT, size: (f32, f32)) {
         let send = self.read.0.clone();
         std::thread::spawn(move || {
-            let desktop = read_desktop(work, size.0 as u32, size.1 as u32);
+            let desktop = read_and_keep(&screen, work, size);
             let _ = send.send(Read::Stage(Stage { size, screen: Some(screen), work, desktop: Some(desktop), bitmap: None }));
         });
     }
@@ -2822,22 +2907,15 @@ impl Ui {
         if Rc::ptr_eq(&current, &self.gfx) && self.surface.is_some() {
             return true;
         }
-        // A window has one composition target: the old one goes first.
-        self.surface = None;
+        // All it drew with was the other device's (see `life`). (A window has one composition target: the old one
+        // goes first.)
+        self.gone();
         let Ok(surface) = Surface::new(&current, self.hwnd) else {
             gfx::lost();
             return false;
         };
         self.surface = Some(surface);
         self.gfx = current;
-        self.layers.release();
-        self.stage.bitmap = None;
-        for stage in &mut self.kept_stages {
-            stage.bitmap = None;
-        }
-        for art in &mut self.map_art {
-            art.bitmap = None;
-        }
         true
     }
 
@@ -2854,12 +2932,18 @@ impl Ui {
             match read {
                 Read::Stage(stage) => {
                     let same = |other: &Stage| other.screen == stage.screen && other.work == stage.work && other.size == stage.size;
+                    // (What was shown at once, as it was kept: taken again only if the desktop has changed since.)
+                    let changed = |other: &Stage| other.desktop.as_ref().is_none_or(|was| stage.desktop.as_ref().is_some_and(|now| now.digest != was.digest));
                     if same(&self.stage) {
-                        if self.stage.desktop.is_none() {
+                        if changed(&self.stage) {
                             self.stage = stage;
                         }
-                    } else if !self.kept_stages.iter().any(same) {
-                        self.kept_stages.push(stage);
+                    } else {
+                        match self.kept_stages.iter().position(same) {
+                            Some(at) if changed(&self.kept_stages[at]) => self.kept_stages[at] = stage,
+                            Some(_) => {}
+                            None => self.kept_stages.push(stage),
+                        }
                     }
                 }
                 Read::Map { id, monitor, size, desktop } => {
@@ -2888,15 +2972,18 @@ impl Ui {
             self.next_frame = now + DEVICE_RETRY;
             return;
         }
+        self.shown();
         let gfx = self.gfx.clone();
         let mut surface = self.surface.take().unwrap();
         let mut creep = None;
         self.failed = false;
         let began = Instant::now();
+        let sizing = gfx::sizing(self.by_hand);
         let drawn = surface.draw(&gfx, size, self.scale, |frame| {
             frame.origin(0.0, 0.0);
             creep = self.paint(frame, now);
         });
+        drop(sizing);
         // A frame slow enough to be seen, noted (as the widgets' are).
         let took = began.elapsed();
         if took > SLOW_FRAME {
@@ -2914,6 +3001,12 @@ impl Ui {
             return;
         }
         self.gfx.sweep();
+        // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
+        if self.by_hand {
+            self.was_sized = true;
+        } else if std::mem::take(&mut self.was_sized) {
+            self.gfx.settle();
+        }
         let moving = self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target || self.drag.is_some();
         self.settle_thumbs = false;
         self.next_frame = if moving {
