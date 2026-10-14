@@ -18,6 +18,10 @@
   Cache-Control: public, max-age=3600, stale-while-revalidate=86400
 /assets/site.js
   Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+/assets/app.css
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+/assets/app.js
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
 
 # Images and the font change name when their content changes.
 /assets/img/*
