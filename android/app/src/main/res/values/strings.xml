@@ -119,6 +119,11 @@
     <string name="licences_what">This app\'s own, and those of what it is built with</string>
     <string name="view">View</string>
     <string name="close">Close</string>
-    <string name="newer_app">Version %1$s is out. Tap to get it</string>
+    <string name="newer_app">Version %1$s is out. Tap to update</string>
+    <string name="newer_allow">Allow Glance to install apps, then come back and tap here to continue</string>
+    <string name="newer_downloading">Downloading the new version: %1$d%%</string>
+    <string name="newer_downloading_unsized">Downloading the new version…</string>
+    <string name="newer_installing">Confirm the installation in the window the system shows</string>
+    <string name="newer_failed">The download did not finish. Tap to try again</string>
     <string name="keys_level">How bright</string>
 </resources>

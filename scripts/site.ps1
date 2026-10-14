@@ -57,9 +57,28 @@ if (-not (Test-Path (Join-Path $served $installer))) {
 }
 $signed = Get-AuthenticodeSignature (Join-Path $served $installer)
 if ($signed.Status -ne 'Valid') { throw "$installer is not validly signed" }
+# The phone app of the release too: the app takes it in itself from here (see /api/app and Update.kt), GitHub not
+# reached from everywhere. Only one signed with the app's release key goes up (the phone would refuse any other as
+# an update anyway).
+$app = "Glance_$($tag.Substring(1)).apk"
+if (-not (Test-Path (Join-Path $served $app))) {
+    gh release download $tag --repo lulu-loopp/glance --pattern $app --dir $served --clobber
+    if ($LASTEXITCODE -ne 0) { throw "$app could not be taken from GitHub" }
+}
+$appSigner = 'ae9b1d5b1e0ff6fbaae74648af16accb2bbd708f8e99d05ecc8f21dc8644958f'
+# (The Android SDK the app is built with, as android\local.properties names it.)
+$sdk = [regex]::Match((Get-Content -Raw android\local.properties), '(?m)^sdk\.dir=(.+)$').Groups[1].Value.Trim()
+$buildTools = Get-ChildItem (Join-Path $sdk 'build-tools') -Directory -ErrorAction SilentlyContinue | Sort-Object { [version]$_.Name } | Select-Object -Last 1
+if (-not $buildTools) { throw "the Android SDK's build tools (apksigner) were not found under $sdk" }
+$certificates = & (Join-Path $buildTools.FullName 'apksigner.bat') verify --print-certs (Join-Path $served $app)
+if ($LASTEXITCODE -ne 0 -or -not ($certificates -match "certificate SHA-256 digest: $appSigner")) { throw "$app is not signed with the app's release key" }
 # (Those of releases before are no longer served.)
 Get-ChildItem $served -Filter 'Glance_*_x64-setup.exe' | Where-Object Name -ne $installer | Remove-Item
-$told = @{ tag_name = $tag; assets = @(@{ name = $installer; browser_download_url = "https://glancepc.com/dl/$installer" }) } | ConvertTo-Json -Depth 4 -Compress
+Get-ChildItem $served -Filter 'Glance_*.apk' | Where-Object Name -ne $app | Remove-Item
+$told = @{ tag_name = $tag; assets = @(
+    @{ name = $installer; browser_download_url = "https://glancepc.com/dl/$installer" },
+    @{ name = $app; browser_download_url = "https://glancepc.com/dl/$app" }
+) } | ConvertTo-Json -Depth 4 -Compress
 [IO.File]::WriteAllText((Join-Path $root 'website\latest.json'), $told, (New-Object Text.UTF8Encoding $false))
 
 foreach ($needed in 'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID') {

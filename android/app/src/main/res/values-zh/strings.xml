@@ -119,6 +119,11 @@
     <string name="licences_what">本应用的许可证，以及所用开源组件的许可证</string>
     <string name="view">查看</string>
     <string name="close">关闭</string>
-    <string name="newer_app">有新版本 %1$s，点此下载</string>
+    <string name="newer_app">有新版本 %1$s，点按更新</string>
+    <string name="newer_allow">请允许 Glance 安装应用，返回后点按此处继续</string>
+    <string name="newer_downloading">正在下载新版本 %1$d%%</string>
+    <string name="newer_downloading_unsized">正在下载新版本…</string>
+    <string name="newer_installing">请在系统窗口中确认安装</string>
+    <string name="newer_failed">下载未完成，点按重试</string>
     <string name="keys_level">背光亮度</string>
 </resources>

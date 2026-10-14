@@ -100,7 +100,9 @@ async function app(request, env, url) {
   }
   const answer = await env.ASSETS.fetch(new Request(new URL("/latest.json", url), { method: "GET" }));
   const told = answer.ok ? await answer.json() : {};
-  return json({ version: String(told.tag_name || "").replace(/^v/, "") });
+  // And where the app of that version is, served from here (the app takes it in itself: see Update.kt).
+  const apk = (told.assets || []).find((asset) => /^Glance_[0-9.]+\.apk$/.test(asset.name || ""));
+  return json({ version: String(told.tag_name || "").replace(/^v/, ""), apk: apk ? apk.browser_download_url : null });
 }
 
 // An installer taken by Glance itself (it says which version takes it).

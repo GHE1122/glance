@@ -136,6 +136,9 @@ private fun App(opened: String?, taken: () -> Unit) {
     var colours by remember { mutableStateOf(Look.colours(context)) }
     // A newer app than this one, once the site has said so.
     var newer by remember { mutableStateOf(Newer.known(context)) }
+    // How taking it in the app stands (see `Update`).
+    var taking by remember { mutableStateOf<Update.State>(Update.State.Offered) }
+    val updating = rememberCoroutineScope()
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) { Newer.ask(context) }
         newer = Newer.known(context)
@@ -162,11 +165,35 @@ private fun App(opened: String?, taken: () -> Unit) {
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         Column(Modifier.fillMaxSize()) {
             newer?.let { version ->
+                val said = when (val state = taking) {
+                    Update.State.Offered -> stringResource(R.string.newer_app, version)
+                    Update.State.Allow -> stringResource(R.string.newer_allow)
+                    is Update.State.Downloading -> state.percent?.let { stringResource(R.string.newer_downloading, it) } ?: stringResource(R.string.newer_downloading_unsized)
+                    Update.State.Installing -> stringResource(R.string.newer_installing)
+                    Update.State.Failed -> stringResource(R.string.newer_failed)
+                }
                 Text(
-                    stringResource(R.string.newer_app, version),
+                    said,
                     color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clip(RoundedCornerShape(12.dp)).background(Accent)
-                        .clickable(role = Role.Button) { context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Newer.PAGE))) }.padding(horizontal = 14.dp, vertical = 9.dp),
+                        .clickable(role = Role.Button) {
+                            val apk = Newer.apk(context)
+                            when {
+                                // Not said where it is (an older site): its page, as before.
+                                apk == null -> context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Newer.PAGE)))
+                                // Under way: once is enough.
+                                taking is Update.State.Downloading -> {}
+                                // This app may not install apps: the system's page for letting it, come back from to go on.
+                                !Update.mayInstall(context) -> {
+                                    taking = Update.State.Allow
+                                    context.startActivity(Update.allowing(context))
+                                }
+                                else -> {
+                                    taking = Update.State.Downloading(null)
+                                    updating.launch(Dispatchers.IO) { Update.take(context, apk) { state -> taking = state } }
+                                }
+                            }
+                        }.padding(horizontal = 14.dp, vertical = 9.dp),
                 )
             }
             Computers(pcs, chosen, choose = { at -> Pcs.choose(context, at); chosen = at }, add = { wrong = false; page = Page.Pairing }, settings = { page = Page.Settings })

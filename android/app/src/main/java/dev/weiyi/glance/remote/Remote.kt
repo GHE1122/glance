@@ -384,6 +384,9 @@ object Newer {
     /** The newer version last heard of, if this app is still older than it. */
     fun known(context: Context): String? = kept(context).getString("version", null)?.takeIf { later(it, BuildConfig.VERSION_NAME) }
 
+    /** Where the newer app (see [known]) is downloaded from in the app, if the site said (see `Update`). */
+    fun apk(context: Context): String? = kept(context).getString("apk", null)?.takeIf { known(context) != null && Update.allowed(it) }
+
     /** Asks the site, unless it was asked today: not from the main thread. */
     fun ask(context: Context) {
         val today = System.currentTimeMillis() / 86_400_000
@@ -394,8 +397,11 @@ object Newer {
             setRequestProperty("User-Agent", "GlanceApp/${BuildConfig.VERSION_NAME}")
         }
         try {
-            val said = JSONObject(asking.inputStream.bufferedReader().use { it.readText() }).optString("version")
-            if (Regex("[0-9]+(\\.[0-9]+){1,3}").matches(said)) kept(context).edit().putString("version", said).putLong("asked", today).apply()
+            val answer = JSONObject(asking.inputStream.bufferedReader().use { it.readText() })
+            val said = answer.optString("version")
+            // (And where the app of that version is: from a site that does not say, it is got from the site's page.)
+            val apk = answer.optString("apk").takeIf(Update::allowed)
+            if (Regex("[0-9]+(\\.[0-9]+){1,3}").matches(said)) kept(context).edit().putString("version", said).putString("apk", apk).putLong("asked", today).apply()
         } catch (_: Exception) {
             // Not reached, or not answered as expected: asked again the next time the app is opened.
         } finally {

@@ -5,6 +5,9 @@
     <!-- Only to read the pairing code off the PC's screen. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <!-- Only to hand a newer version of this app, downloaded from Glance's site, to the system to install (it asks
+         the user first). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- The PC is asked over the local network, in plain HTTP: each request
          is signed with the key shared at pairing, which never travels. -->
@@ -41,6 +44,9 @@
             android:stateNotNeeded="true"
             tools:replace="android:screenOrientation"
             xmlns:tools="http://schemas.android.com/tools" />
+
+        <!-- What the system's installer answers as a newer version is handed to it. -->
+        <receiver android:name=".Installed" android:exported="false" />
 
         <!-- Night mode from the quick settings, the app not opened. -->
         <service
