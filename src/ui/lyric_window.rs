@@ -756,9 +756,10 @@ fn sung_to(parts: &[(usize, usize, f64, f64)], t: f64) -> f32 {
 }
 
 /// The dots of the music between lines: their radius, of the size of the words in their place (lit, a quarter
-/// larger), and how wide the three are, of it.
+/// larger), how far apart their centres are, and how wide the three are, of it.
 const INTERLUDE_DOT: f32 = 0.08;
-const INTERLUDE_WIDE: f32 = INTERLUDE_DOT * 10.5;
+const INTERLUDE_STEP: f32 = 0.43;
+const INTERLUDE_WIDE: f32 = INTERLUDE_DOT * 2.5 + INTERLUDE_STEP * 2.0;
 
 /// How far through it is (0 to 1) at `t`: a line without words (the music between), from its start to its end or
 /// the next line's.
@@ -778,7 +779,7 @@ fn interlude(frame: &Frame, x: f32, y: f32, size: f32, done: f32, dim: Color, br
         let lit = lit * lit * (3.0 - 2.0 * lit);
         let color = Color { r: dim.r + (bright.r - dim.r) * lit, g: dim.g + (bright.g - dim.g) * lit, b: dim.b + (bright.b - dim.b) * lit, a: dim.a + (bright.a - dim.a) * lit };
         if color.a > 0.0 {
-            frame.fill_circle(color, Point { x: x + radius * 1.25 + index as f32 * radius * 4.0, y: centre_y }, radius * (1.0 + 0.25 * lit));
+            frame.fill_circle(color, Point { x: x + radius * 1.25 + index as f32 * size * INTERLUDE_STEP, y: centre_y }, radius * (1.0 + 0.25 * lit));
         }
     }
 }
