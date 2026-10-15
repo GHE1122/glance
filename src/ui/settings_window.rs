@@ -256,12 +256,17 @@ static DESKTOPS: std::sync::Mutex<Vec<(String, RECT, (f32, f32), Capture)>> = st
 /// Reads screen `screen`'s desktop for the preview (see `read_desktop`), and keeps it (see `DESKTOPS`).
 fn read_and_keep(screen: &str, work: RECT, size: (f32, f32)) -> Capture {
     let desktop = read_desktop(work, size.0 as u32, size.1 as u32);
+    keep_desktop(screen, work, size, &desktop);
+    desktop
+}
+
+/// Keeps `desktop`, screen `screen`'s as read at `work` and `size` (see `DESKTOPS`).
+fn keep_desktop(screen: &str, work: RECT, size: (f32, f32), desktop: &Capture) {
     if let Some(copy) = desktop.copied() {
         let mut kept = DESKTOPS.lock().unwrap();
         kept.retain(|(name, ..)| name != screen);
         kept.push((screen.to_string(), work, size, copy));
     }
-    desktop
 }
 
 /// Screen `screen`'s desktop as last read for the preview, if it was read at its work area `work` and `size`.
@@ -286,8 +291,14 @@ fn stages_wanted(screens: &[crate::screens::Screen]) -> Vec<(String, RECT, (f32,
 /// Reads every screen's desktop for the preview and keeps it, before the settings are first opened: they open on
 /// it. On a thread of the caller's.
 pub fn read_desktops_ahead() {
-    for (screen, work, size) in stages_wanted(&crate::screens::all()) {
-        read_and_keep(&screen, work, size);
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+    }
+    // (A live wallpaper printed once for them all: see `wallpaper::desktops`.)
+    let wanted = stages_wanted(&crate::screens::all());
+    let asked: Vec<(RECT, u32, u32)> = wanted.iter().map(|(_, work, size)| (*work, size.0 as u32, size.1 as u32)).collect();
+    for ((screen, work, size), desktop) in wanted.iter().zip(wallpaper::desktops(&asked)) {
+        keep_desktop(screen, *work, *size, &desktop);
     }
 }
 

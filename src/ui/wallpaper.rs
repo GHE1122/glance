@@ -25,8 +25,21 @@ use super::backdrop::Capture;
 /// The desktop of the work area `work` (physical pixels) as a picture
 /// `width` × `height` pixels large. Needs COM on the calling thread.
 pub fn desktop(work: RECT, width: u32, height: u32) -> Capture {
+    desktops(&[(work, width, height)]).pop().expect("one asked for")
+}
+
+/// `desktop` for each of `asked` (a work area, and the picture's width and height), a live wallpaper printed once
+/// for them all. Needs COM on the calling thread.
+pub fn desktops(asked: &[(RECT, u32, u32)]) -> Vec<Capture> {
+    let printed = print();
+    asked.iter().map(|&(work, width, height)| desktop_from(printed.as_ref(), work, width, height)).collect()
+}
+
+/// `desktop`, from the live wallpaper as `printed` holds it, if there is one.
+fn desktop_from(printed: Option<&Printed>, work: RECT, width: u32, height: u32) -> Capture {
     let rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
-    let pixels = shown(work, width, height)
+    let pixels = printed
+        .and_then(|printed| shown_in(printed, work, width, height))
         .or_else(|| wallpaper_path().and_then(|path| file(&path, width, height).ok()))
         .unwrap_or_else(|| {
             // GetSysColor answers 0x00BBGGRR; the picture is BGRA.
@@ -66,18 +79,36 @@ fn live_layer() -> Option<HWND> {
     }
 }
 
-/// The live wallpaper inside `work` as the desktop shows it just then,
-/// scaled to `width` × `height`; it may hold the desktop's icons (Windows 11
-/// 24H2 draws them into the same layer). `None` without a live wallpaper.
-fn shown(work: RECT, width: u32, height: u32) -> Option<Vec<u8>> {
+/// The live wallpaper layer as the desktop shows it just then (`print`), printed once for every screen read from it:
+/// its pixels (rows top to bottom, BGRX), where it is on the desktop, and the GDI objects that hold them.
+struct Printed {
+    memory: windows::Win32::Graphics::Gdi::HDC,
+    bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
+    previous: windows::Win32::Graphics::Gdi::HGDIOBJ,
+    bits: *const u8,
+    at: RECT,
+}
+
+impl Drop for Printed {
+    fn drop(&mut self) {
+        unsafe {
+            SelectObject(self.memory, self.previous);
+            let _ = DeleteObject(self.bitmap.into());
+            let _ = DeleteDC(self.memory);
+        }
+    }
+}
+
+/// The live wallpaper's layer printed whole, with what DirectX draws in it as the screen shows it. `None` without a
+/// live wallpaper (see `live_layer`), or if it could not be printed.
+fn print() -> Option<Printed> {
     let layer = live_layer()?;
     let mut at = RECT::default();
     unsafe { GetWindowRect(layer, &mut at) }.ok()?;
-    let inside = work.left >= at.left && work.top >= at.top && work.right <= at.right && work.bottom <= at.bottom;
-    if !inside || work.right <= work.left || work.bottom <= work.top {
+    let (w, h) = (at.right - at.left, at.bottom - at.top);
+    if w <= 0 || h <= 0 {
         return None;
     }
-    let (w, h) = (at.right - at.left, at.bottom - at.top);
     let header = BITMAPINFOHEADER {
         biSize: size_of::<BITMAPINFOHEADER>() as u32,
         biWidth: w,
@@ -89,35 +120,94 @@ fn shown(work: RECT, width: u32, height: u32) -> Option<Vec<u8>> {
         ..Default::default()
     };
     let info = BITMAPINFO { bmiHeader: header, ..Default::default() };
-    let (pw, ph) = (work.right - work.left, work.bottom - work.top);
-    let mut pixels = vec![0u8; (pw * ph * 4) as usize];
     unsafe {
         let memory = CreateCompatibleDC(None);
         let mut bits = std::ptr::null_mut();
-        let printed = CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok().map(|bitmap| {
-            let previous = SelectObject(memory, bitmap.into());
-            // Full content: what DirectX draws in it too, as the screen shows it.
-            let printed = PrintWindow(layer, memory, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool();
-            if printed {
-                let source = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize);
-                let row = (pw * 4) as usize;
-                for y in 0..ph {
-                    let from = ((y + work.top - at.top) * w + (work.left - at.left)) as usize * 4;
-                    pixels[y as usize * row..][..row].copy_from_slice(&source[from..from + row]);
-                }
-            }
-            SelectObject(memory, previous);
-            let _ = DeleteObject(bitmap.into());
-            printed
-        });
-        let _ = DeleteDC(memory);
-        if printed != Some(true) {
+        let Ok(bitmap) = CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            let _ = DeleteDC(memory);
             return None;
+        };
+        let previous = SelectObject(memory, bitmap.into());
+        let printed = Printed { memory, bitmap, previous, bits: bits as *const u8, at };
+        // Full content: what DirectX draws in it too, as the screen shows it.
+        PrintWindow(layer, memory, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool().then_some(printed)
+    }
+}
+
+/// The part of a printed layer (see `Printed`) inside the work area it was asked for, as a picture WIC reads from
+/// where the print holds it: nothing copied out of the print (a desktop's worth for each screen) before it is scaled.
+#[windows_core::implement(IWICBitmapSource)]
+struct Part {
+    bits: usize,
+    /// The print's width (pixels), and the part's corner in it and size.
+    stride: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl windows::Win32::Graphics::Imaging::IWICBitmapSource_Impl for Part_Impl {
+    fn GetSize(&self, width: *mut u32, height: *mut u32) -> Result<()> {
+        unsafe {
+            *width = self.width;
+            *height = self.height;
         }
+        Ok(())
+    }
+
+    fn GetPixelFormat(&self) -> Result<windows::core::GUID> {
+        // (Read as BGR: the alpha the print leaves is not the picture's.)
+        Ok(GUID_WICPixelFormat32bppBGR)
+    }
+
+    fn GetResolution(&self, x: *mut f64, y: *mut f64) -> Result<()> {
+        unsafe {
+            *x = 96.0;
+            *y = 96.0;
+        }
+        Ok(())
+    }
+
+    fn CopyPalette(&self, _: windows_core::Ref<'_, windows::Win32::Graphics::Imaging::IWICPalette>) -> Result<()> {
+        Err(windows::Win32::Foundation::WINCODEC_ERR_PALETTEUNAVAILABLE.into())
+    }
+
+    fn CopyPixels(&self, rect: *const WICRect, stride: u32, size: u32, buffer: *mut u8) -> Result<()> {
+        let rect = unsafe { rect.as_ref() }.copied().unwrap_or(WICRect { X: 0, Y: 0, Width: self.width as i32, Height: self.height as i32 });
+        let fits = rect.X >= 0 && rect.Y >= 0 && rect.Width >= 0 && rect.Height >= 0 && (rect.X + rect.Width) as u32 <= self.width && (rect.Y + rect.Height) as u32 <= self.height;
+        let row = rect.Width as usize * 4;
+        if !fits || (stride as usize) < row || (size as usize) < stride as usize * (rect.Height.max(1) as usize - 1) + row {
+            return Err(windows::Win32::Foundation::E_INVALIDARG.into());
+        }
+        for line in 0..rect.Height as usize {
+            let from = ((self.y as usize + rect.Y as usize + line) * self.stride as usize + self.x as usize + rect.X as usize) * 4;
+            unsafe { std::ptr::copy_nonoverlapping((self.bits as *const u8).add(from), buffer.add(line * stride as usize), row) };
+        }
+        Ok(())
+    }
+}
+
+/// The live wallpaper inside `work` as `printed` holds it, scaled to `width` × `height`; it may hold the desktop's
+/// icons (Windows 11 24H2 draws them into the same layer). `None` if the work area is not all in it.
+fn shown_in(printed: &Printed, work: RECT, width: u32, height: u32) -> Option<Vec<u8>> {
+    let at = printed.at;
+    let inside = work.left >= at.left && work.top >= at.top && work.right <= at.right && work.bottom <= at.bottom;
+    if !inside || work.right <= work.left || work.bottom <= work.top {
+        return None;
+    }
+    let part: IWICBitmapSource = Part {
+        bits: printed.bits as usize,
+        stride: (at.right - at.left) as u32,
+        x: (work.left - at.left) as u32,
+        y: (work.top - at.top) as u32,
+        width: (work.right - work.left) as u32,
+        height: (work.bottom - work.top) as u32,
+    }
+    .into();
+    unsafe {
         let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
-        // Read as BGR: the alpha the print leaves is not the picture's.
-        let bitmap = factory.CreateBitmapFromMemory(pw as u32, ph as u32, &GUID_WICPixelFormat32bppBGR, pw as u32 * 4, &pixels).ok()?;
-        cover(&factory, &bitmap.cast().ok()?, width, height).ok()
+        cover(&factory, &part, width, height).ok()
     }
 }
 
