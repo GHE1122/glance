@@ -661,6 +661,11 @@ impl Widgets {
         !self.put_away.is_empty()
     }
 
+    /// Whether any widget is on the screen now.
+    pub fn any_showing(&self) -> bool {
+        self.list.iter().any(|widget| widget.showing.is_some())
+    }
+
     /// The widgets kept in the settings (and a panel 0.2.3 left on the
     /// desktop, as a widget showing all of each lane), once.
     fn restore(&mut self, kept: &[WidgetAt]) {
