@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Diagnostics::Etw::{
     CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW, CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS, ENABLE_TRACE_PARAMETERS_VERSION_2,
     EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_FILTER_DESCRIPTOR, EVENT_FILTER_TYPE_EVENT_ID, EVENT_RECORD,
-    EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
+    EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
     PROCESS_TRACE_MODE_RAW_TIMESTAMP, PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION, TRACE_LEVEL_VERBOSE, WNODE_FLAG_TRACED_GUID,
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
@@ -40,6 +40,8 @@ const D3D9_PRESENT: u16 = 1;
 /// The graphics kernel's: a frame handed to the compositor (PresentHistory_Start or PresentHistoryDetailed_Start, one
 /// for each), and a frame flipped to the screen without it (Flip_Info, FlipMultiPlaneOverlay_Info).
 const KERNEL_PRESENTS: [u16; 4] = [0xAB, 0xD7, 0xA8, 0xFC];
+/// The session's flush timer counted in milliseconds, not seconds (Windows 8 and later).
+const EVENT_TRACE_USE_MS_FLUSH_TIMER: u32 = 0x10;
 /// Its keywords asked for: Base and Present (as PresentMon asks).
 const DXGKRNL_KEYWORDS: u64 = 0x1 | 0x800_0000;
 
@@ -114,9 +116,16 @@ impl Properties {
             (*properties).Wnode.ClientContext = 1;
             // One buffer for the session: events come in the order they
             // happened, not each processor's in turn; and delivered within
-            // a second, the span the frame rate is taken over.
-            (*properties).LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING;
-            (*properties).FlushTimer = 1;
+            // a tenth of a second (in milliseconds: delivered by the second,
+            // the frame rate shown lagged the game's by about one).
+            (*properties).LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING | EVENT_TRACE_USE_MS_FLUSH_TIMER;
+            (*properties).FlushTimer = 100;
+            // Room for a burst (the kernel tells of every program's frames, the compositor's among them, many a
+            // second): an event with no room is lost, and a frame lost is a frame not counted, and a stutter that
+            // was not there.
+            (*properties).BufferSize = 64;
+            (*properties).MinimumBuffers = 16;
+            (*properties).MaximumBuffers = 64;
             (*properties).LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
         }
         Properties(buffer)
@@ -171,6 +180,30 @@ pub fn start() {
         crate::journal::note(format!("frames: the graphics kernel's not heard ({})", enabled.0));
     }
     *PRESENTS.lock().unwrap() = Some(HashMap::new());
+    // How many events the session lost, told in the journal as it grows.
+    thread::Builder::new()
+        .name("glance: frames lost".into())
+        .spawn({
+            let name = name.clone();
+            move || {
+                let mut told = 0;
+                loop {
+                    thread::sleep(Duration::from_secs(10));
+                    let mut properties = Properties::new(&name);
+                    let queried = unsafe { ControlTraceW(CONTROLTRACE_HANDLE::default(), PCWSTR(name.as_ptr()), properties.get(), EVENT_TRACE_CONTROL_QUERY) };
+                    // (Stopped: it is no more.)
+                    if queried != ERROR_SUCCESS {
+                        return;
+                    }
+                    let lost = unsafe { (*properties.get()).EventsLost + (*properties.get()).RealTimeBuffersLost };
+                    if lost > told {
+                        crate::journal::note(format!("frames: {} events lost by the session in all ({} more)", lost, lost - told));
+                        told = lost;
+                    }
+                }
+            }
+        })
+        .expect("a thread started");
     thread::Builder::new().name("glance: frames presented".into()).spawn(move || {
         let mut logfile = EVENT_TRACE_LOGFILEW { LoggerName: PWSTR(name.as_ptr() as *mut u16), ..Default::default() };
         // Timestamps left as the session takes them, from the performance
