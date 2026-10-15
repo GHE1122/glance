@@ -394,6 +394,12 @@ pub fn game_hidden() -> bool {
     false
 }
 
+/// Whether a module's lane shows: switched on; or the game's, asked for by hand (the game button pressed: the
+/// window in front taken for a game) though it is switched off.
+pub fn shows_module(entry: &super::prefs::ModuleEntry) -> bool {
+    entry.on || (entry.id == "game" && front_is_game())
+}
+
 /// What a game asked for by hand says before its first frames.
 pub fn waiting(lang: Lang) -> String {
     if front_is_game() { lang.pick("等待画面", "No frames yet").into() } else { String::new() }
@@ -418,7 +424,7 @@ pub fn lanes_at(scene: &Scene, detail: impl Fn(&str) -> Detail) -> Vec<Lane> {
         .prefs
         .modules
         .iter()
-        .filter(|entry| entry.on)
+        .filter(|entry| shows_module(entry))
         .filter_map(|entry| Some(Lane { id: entry.id.clone(), blocks: lane(scene, &entry.id, detail(&entry.id))?, ink: scene.theme.ink(&entry.id) }))
         .collect()
 }
@@ -448,7 +454,7 @@ pub fn heights(scene: &Scene) -> Vec<(String, [f32; 2])> {
         .prefs
         .modules
         .iter()
-        .filter(|entry| entry.on)
+        .filter(|entry| shows_module(entry))
         .filter_map(|entry| Some((entry.id.clone(), [height(&entry.id, Detail::Full)?, height(&entry.id, Detail::Compact)?])))
         .collect()
 }

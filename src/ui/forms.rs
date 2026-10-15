@@ -254,7 +254,7 @@ fn rate(value: Option<f64>, bits: bool, short: bool) -> (String, String) {
 /// graphics card, memory, the network both ways, the disk both ways.
 fn readings(scene: &Scene) -> Vec<Reading> {
     let (s, prefs, lang) = (scene.history.last().unwrap(), scene.prefs, scene.lang);
-    let on = |module: &str| prefs.modules.iter().any(|entry| entry.on && entry.id == module);
+    let on = |module: &str| prefs.modules.iter().any(|entry| entry.id == module && super::view::shows_module(entry));
     let celsius = |value: Option<f32>| value.map(|t| format!("{t:.0}°")).unwrap_or_default();
     let percent = |value: Option<f32>| value.map_or("—".into(), |v| format!("{v:.0}"));
     let mut readings = Vec::new();
