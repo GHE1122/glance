@@ -155,8 +155,10 @@ thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
 }
 
-pub fn is_open() -> bool {
-    WINDOW.load(Ordering::Relaxed) != 0
+/// Whether it is open and not minimized: what it shows can be seen.
+pub fn is_seen() -> bool {
+    let hwnd = WINDOW.load(Ordering::Relaxed);
+    hwnd != 0 && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(HWND(hwnd as *mut _)) }.as_bool()
 }
 
 /// Brings the settings window up, from any thread: raised if it is open,
@@ -218,6 +220,11 @@ pub fn open_at_overlay() {
 /// while there is no window.
 pub fn tick(now: Instant) -> Option<Duration> {
     with_ui(|ui| {
+        // Minimized, nothing is drawn (it is drawn whole as it is restored: see WM_SIZE); looked at again a while
+        // later.
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(ui.hwnd) }.as_bool() {
+            return MINIMIZED_LOOK;
+        }
         if ui.relabel_at.is_some_and(|at| now >= at) {
             ui.relabel();
         }
@@ -227,6 +234,9 @@ pub fn tick(now: Instant) -> Option<Duration> {
         ui.next_frame.saturating_duration_since(now)
     })
 }
+
+/// How often a minimized settings window is looked at (to be drawn again once it is restored).
+const MINIMIZED_LOOK: Duration = Duration::from_millis(500);
 
 fn windows_build() -> u32 {
     metrics::reg_string(w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"), w!("CurrentBuild")).parse().unwrap_or(0)
@@ -1037,7 +1047,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         // Drawn at once, so the content keeps up while the window is resized.
         WM_SIZE => {
-            with_ui(|ui| ui.draw(Instant::now()));
+            // (Minimized: nothing to draw.)
+            if wparam.0 != windows::Win32::UI::WindowsAndMessaging::SIZE_MINIMIZED as usize {
+                with_ui(|ui| ui.draw(Instant::now()));
+            }
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
