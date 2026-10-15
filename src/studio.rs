@@ -920,7 +920,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
 }
 
 /// Writes premultiplied BGRA `pixels` (opaque: drawn over the picture) as a PNG.
-fn save_png(path: &PathBuf, width: u32, height: u32, pixels: &[u8]) -> windows::core::Result<()> {
+pub(crate) fn save_png(path: &PathBuf, width: u32, height: u32, pixels: &[u8]) -> windows::core::Result<()> {
     unsafe {
         let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
         let stream = factory.CreateStream()?;

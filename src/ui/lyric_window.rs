@@ -1,7 +1,9 @@
 //! The lyrics in windows of their own, on the desktop: a card (the cover
 //! blurred behind them, the lines around the one sung now gliding past it,
 //! that one filled word by word as it is sung, a spectrum along the bottom
-//! moving with the music), and floating lyrics (one line, glowing, over
+//! moving with the music), a player of middle size (the cover, what plays,
+//! the line sung now, its track and what pauses, plays and skips it, on the
+//! same ground as the card's), and floating lyrics (one line, glowing, over
 //! every window, as subtitles are). Each is shown while the lyrics module
 //! is on and its own switch is; dragged where it is wanted, and kept there.
 //! While something plays they are drawn every frame; at rest, now and then.
@@ -42,6 +44,7 @@ use crate::playing::Sung;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Style {
     Card,
+    Medium,
     Subtitle,
 }
 
@@ -50,13 +53,14 @@ impl Style {
     fn size(self) -> (f32, f32) {
         match self {
             Style::Card => (440.0, 330.0),
+            Style::Medium => (420.0, 170.0),
             Style::Subtitle => (980.0, 120.0),
         }
     }
 
     fn margin(self) -> f32 {
         match self {
-            Style::Card => 30.0,
+            Style::Card | Style::Medium => 30.0,
             Style::Subtitle => 0.0,
         }
     }
@@ -65,6 +69,7 @@ impl Style {
     fn least(self) -> (f32, f32) {
         match self {
             Style::Card => (320.0, 230.0),
+            Style::Medium => (340.0, 150.0),
             Style::Subtitle => (420.0, 100.0),
         }
     }
@@ -72,7 +77,7 @@ impl Style {
     /// The buttons it shows while the pointer is over it, in their row.
     fn buttons(self) -> &'static [Button] {
         match self {
-            Style::Card => &[Button::Settings, Button::Pin, Button::Close],
+            Style::Card | Style::Medium => &[Button::Settings, Button::Pin, Button::Close],
             Style::Subtitle => &[Button::Settings, Button::Pin, Button::Through, Button::Close],
         }
     }
@@ -81,6 +86,7 @@ impl Style {
     fn item(self) -> &'static str {
         match self {
             Style::Card => "card",
+            Style::Medium => "medium",
             Style::Subtitle => "subtitle",
         }
     }
@@ -94,6 +100,15 @@ const REST_FRAME: Duration = Duration::from_millis(250);
 const NOW_FONT: Font = Font::new(Family::Segoe, 25.0, 700.0);
 const TITLE_FONT: Font = Font::new(Family::Segoe, 12.0, 600.0);
 const UNDER_FONT: Font = Font::new(Family::Segoe, 14.0, 500.0);
+/// The player's: what plays, by whom, the line sung now and what is under it, how far in it is.
+const PLAYER_TITLE: Font = Font::new(Family::Segoe, 15.0, 700.0);
+const PLAYER_ABOUT: Font = Font::new(Family::Segoe, 12.0, 500.0);
+const PLAYER_LINE: Font = Font::new(Family::Segoe, 18.0, 700.0);
+const PLAYER_UNDER: Font = Font::new(Family::Segoe, 12.5, 500.0);
+const PLAYER_TIME: Font = Font::new(Family::Segoe, 11.0, 500.0);
+/// The player's three that are pressed: the side of each, and the system icon font's glyphs.
+const CONTROL: f32 = 28.0;
+const CONTROL_FONT: Font = Font::new(Family::Icons, 14.0, 400.0);
 /// The floating lyrics' line and what is under it.
 const FLOAT_FONT: Font = Font::new(Family::Segoe, 36.0, 800.0);
 const FLOAT_UNDER: Font = Font::new(Family::Segoe, 18.0, 600.0);
@@ -143,6 +158,9 @@ struct Shown {
     reachable: bool,
     /// Where its buttons were drawn (DIPs, inside), and the one whose words show.
     hits: Vec<(f32, f32, f32, f32, Button)>,
+    /// Where the player's three that are pressed were drawn, and its track (none: pressed there, it is played from
+    /// that far along it).
+    controls: Vec<(f32, f32, f32, f32, Option<crate::playing::Key>)>,
     tipped: Option<Button>,
     next_frame: Instant,
     /// The rows the lines have glided to (the line sung now's place, fractional while gliding), and how fast.
@@ -173,7 +191,7 @@ pub fn tick(now: Instant) -> Option<Duration> {
         let settings = crate::app().settings.lock().unwrap();
         let view = &settings.view;
         let on = super::prefs::module_on(view, "lyrics");
-        [Style::Card, Style::Subtitle].into_iter().filter(|style| on && super::prefs::item_on(view, "lyrics", style.item())).collect()
+        [Style::Card, Style::Medium, Style::Subtitle].into_iter().filter(|style| on && super::prefs::item_on(view, "lyrics", style.item())).collect()
     };
     SHOWN.with_borrow_mut(|shown| {
         shown.retain_mut(|one| {
@@ -292,6 +310,7 @@ impl Shown {
                 let pinned = self.pinned;
                 crate::app().change(|settings| match style {
                     Style::Card => settings.lyric_card_pinned = pinned,
+                    Style::Medium => settings.lyric_medium_pinned = pinned,
                     Style::Subtitle => settings.lyric_subtitle_pinned = pinned,
                 });
             }
@@ -352,7 +371,7 @@ fn edge_at(one: &Shown, (x, y): (f32, f32)) -> Option<u32> {
                 None
             }
         }
-        Style::Card => match (left, right, top, bottom) {
+        Style::Card | Style::Medium => match (left, right, top, bottom) {
             (true, _, true, _) => Some(HTTOPLEFT),
             (_, true, true, _) => Some(HTTOPRIGHT),
             (true, _, _, true) => Some(HTBOTTOMLEFT),
@@ -377,7 +396,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_NCHITTEST => {
             let hit = with(hwnd, |one| {
                 let at = one.pointer();
-                if at.and_then(|at| one.button_at(at)).is_some() || one.pinned {
+                if at.and_then(|at| one.button_at(at)).is_some() || at.and_then(|at| one.control_at(at)).is_some() || one.pinned {
                     return HTCLIENT;
                 }
                 at.and_then(|at| edge_at(one, at)).unwrap_or(HTCAPTION)
@@ -392,8 +411,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_LBUTTONUP => {
             with(hwnd, |one| {
-                if let Some(button) = one.pointer().and_then(|at| one.button_at(at)) {
+                let at = one.pointer();
+                if let Some(button) = at.and_then(|at| one.button_at(at)) {
                     one.press(button);
+                } else if let Some((at, control)) = at.and_then(|at| Some((at, one.control_at(at)?))) {
+                    one.control(at, control);
                 }
             });
             LRESULT(0)
@@ -436,6 +458,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                             settings.lyric_card = kept;
                             settings.lyric_card_size = Some(room);
                         }
+                        Style::Medium => {
+                            settings.lyric_medium = kept;
+                            settings.lyric_medium_size = Some(room);
+                        }
                         Style::Subtitle => {
                             settings.lyric_subtitle = kept;
                             settings.lyric_subtitle_size = Some(room);
@@ -457,14 +483,15 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
     }
 }
 
-/// A window of `style`, where it was kept (else at the bottom of the main screen: the card at its right, the
-/// floating lyrics in its middle).
+/// A window of `style`, where it was kept (else on the main screen: the card at its bottom right, the player at its
+/// top right, the floating lyrics in the middle of its bottom).
 fn make(style: Style) -> Option<Shown> {
     let gfx = gfx::current().ok()?;
     let (kept, size, pinned, through) = {
         let settings = crate::app().settings.lock().unwrap();
         match style {
             Style::Card => (settings.lyric_card, settings.lyric_card_size, settings.lyric_card_pinned, false),
+            Style::Medium => (settings.lyric_medium, settings.lyric_medium_size, settings.lyric_medium_pinned, false),
             Style::Subtitle => (settings.lyric_subtitle, settings.lyric_subtitle_size, settings.lyric_subtitle_pinned, settings.lyric_subtitle_through),
         }
     };
@@ -482,6 +509,7 @@ fn make(style: Style) -> Option<Shown> {
         let (pw, ph) = (((w + 2.0 * margin) * scale) as i32, ((h + 2.0 * margin) * scale) as i32);
         let (x, y) = kept.unwrap_or(match style {
             Style::Card => (work.right - pw - (12.0 * scale) as i32, work.bottom - ph - (12.0 * scale) as i32),
+            Style::Medium => (work.right - pw - (12.0 * scale) as i32, work.top + (12.0 * scale) as i32),
             Style::Subtitle => ((work.left + work.right - pw) / 2, work.bottom - ph - (60.0 * scale) as i32),
         });
         // The floating lyrics above all, and layered (as a window that lets clicks through must be).
@@ -519,6 +547,7 @@ fn make(style: Style) -> Option<Shown> {
             over: None,
             reachable: false,
             hits: Vec::new(),
+            controls: Vec::new(),
             tipped: None,
             next_frame: now,
             rail: 0.0,
@@ -542,6 +571,9 @@ struct Moment {
     now: Option<usize>,
     since: Option<Instant>,
     position: f64,
+    /// How long the track is (seconds), and whether it can be played from elsewhere along it; none where its player
+    /// does not say.
+    length: Option<(f64, bool)>,
     title: String,
     artist: String,
     /// Why there are no lines, where there are none.
@@ -562,6 +594,7 @@ fn moment() -> Moment {
         now: None,
         since: None,
         position: crate::playing::position().unwrap_or(0.0),
+        length: heard.as_ref().and_then(|heard| heard.timeline).map(|timeline| (timeline.length, timeline.seekable)),
         cover: (!title.is_empty()).then(|| crate::cover::of(&title, &artist)).flatten(),
         sound: if playing { crate::sound::heard() } else { crate::sound::Heard::default() },
         title,
@@ -796,6 +829,7 @@ impl Shown {
             frame.origin(margin, margin);
             match self.style {
                 Style::Card => self.card(frame, &moment, (w, h)),
+                Style::Medium => self.medium(frame, &moment, (w, h)),
                 Style::Subtitle => {
                     // Pointed at, where it is shows, for it to be taken and moved.
                     if self.over.is_some() && !self.through {
@@ -866,36 +900,9 @@ impl Shown {
             hasher.finish()
         };
         let margin = self.style.margin();
+        let ground = Ground { size: (w, h), radius, backdrop: backdrop.map(|(_, bitmap)| bitmap), before, shown, accent, tint };
         let _ = self.ground.draw(frame, key, windows_numerics::Matrix3x2::identity(), (-margin, -margin, w + 2.0 * margin, h + 2.0 * margin), self.scale, None, |frame| {
-            frame.shadow(Color::hex(0x000000, 0.4), 0.0, 0.0, w, h, radius, 8.0, 4.0);
-            // All of it inside its rounded corners.
-            let mask = unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(0.0, 0.0, w, h), radiusX: radius, radiusY: radius }) }?;
-            let layer = D2D1_LAYER_PARAMETERS1 {
-                contentBounds: rect(0.0, 0.0, w, h),
-                geometricMask: std::mem::ManuallyDrop::new(mask.cast().ok()),
-                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                maskTransform: windows_numerics::Matrix3x2::identity(),
-                opacity: 1.0,
-                ..Default::default()
-            };
-            unsafe { frame.dc.PushLayer(&layer, None) };
-            frame.fill(Color::hex(0x101014, 1.0), 0.0, 0.0, w, h);
-            let grown = 1.35;
-            let (bw, bh) = (w.max(h) * grown, w.max(h) * grown);
-            let place = rect((w - bw) / 2.0, (h - bh) / 2.0, bw, bh);
-            if let Some((_, bitmap)) = &backdrop {
-                if let Some(before) = &before {
-                    unsafe { frame.dc.DrawBitmap(before, Some(&place), 1.0 - shown, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
-                }
-                unsafe { frame.dc.DrawBitmap(bitmap, Some(&place), shown, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
-            }
-            // Darkened for the words to be read on, the cover's colour washed from a corner.
-            frame.fill(Color::hex(0x000000, 0.42), 0.0, 0.0, w, h);
-            frame.fill_shape(&[Point { x: 0.0, y: 0.0 }, Point { x: w, y: 0.0 }, Point { x: w, y: h }, Point { x: 0.0, y: h }], Fill::Down { top: 0.0, from: colour(accent, 0.12), bottom: h, to: colour(tint, 0.0) });
-            frame.text(&about, TITLE_FONT, Color::hex(0xFFFFFF, 0.62), pad, 16.0, w - 2.0 * pad - buttons_room, Align::Start);
-            unsafe { frame.dc.PopLayer() };
-            drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
-            Ok(())
+            ground.paint(frame, |frame| frame.text(&about, TITLE_FONT, Color::hex(0xFFFFFF, 0.62), pad, 16.0, w - 2.0 * pad - buttons_room, Align::Start))
         });
         // What moves, over it, inside the card (the lines and the spectrum keep clear of its rounded corners).
         unsafe { frame.dc.PushAxisAlignedClip(&rect(0.0, 0.0, w, h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
@@ -925,6 +932,148 @@ impl Shown {
             }
         }
         unsafe { frame.dc.PopAxisAlignedClip() };
+    }
+
+    /// The cover blurred behind it, its colour washed over it (as the card's ground), and on it the cover itself at
+    /// the start; beside it what plays and by whom, the line sung now filled as it is sung with what is under it,
+    /// and along the bottom what pauses, plays and skips it and its track.
+    fn medium(&mut self, frame: &Frame, moment: &Moment, (w, h): (f32, f32)) {
+        use crate::playing::Key;
+        let radius = 14.0;
+        let pad = 18.0;
+        if let Some(cover) = &moment.cover {
+            self.backdrop(frame, cover);
+        }
+        let shown = self.fading.as_ref().map_or(1.0, |(_, since)| (since.elapsed().as_secs_f32() / 1.2).min(1.0));
+        let before = self.fading.as_ref().map(|(before, _)| before.clone());
+        if shown >= 1.0 {
+            self.fading = None;
+        }
+        let backdrop = self.backdrop.as_ref().map(|(key, bitmap)| (*key, bitmap.clone()));
+        // The cover as tall as the room inside, no wider than a third of it.
+        let side = (h - 2.0 * pad).min(w * 0.34).max(0.0);
+        let left = pad + side + 16.0;
+        let width = (w - left - pad).max(0.0);
+        let buttons_room = if self.over.is_some() { self.style.buttons().len() as f32 * (buttons::SIZE + buttons::GAP) } else { 0.0 };
+        let (accent, tint) = (self.accent, self.tint);
+        let cover = moment.cover.clone();
+        let (title, about) = (moment.title.clone(), moment.artist.clone());
+        // The ground, with the cover and what plays on it, drawn again only as one of them changes (see `card`).
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (w.to_bits(), h.to_bits(), self.scale.to_bits(), backdrop.as_ref().map(|(key, _)| *key), (shown * 64.0).round() as u32).hash(&mut hasher);
+            accent.iter().chain(&tint).map(|v| (v * 255.0).round() as u8).collect::<Vec<_>>().hash(&mut hasher);
+            (&title, &about, buttons_room.to_bits(), cover.as_ref().map(|cover| Arc::as_ptr(cover) as usize)).hash(&mut hasher);
+            hasher.finish()
+        };
+        let margin = self.style.margin();
+        let ground = Ground { size: (w, h), radius, backdrop: backdrop.map(|(_, bitmap)| bitmap), before, shown, accent, tint };
+        let _ = self.ground.draw(frame, key, windows_numerics::Matrix3x2::identity(), (-margin, -margin, w + 2.0 * margin, h + 2.0 * margin), self.scale, None, |frame| {
+            ground.paint(frame, |frame| {
+                let corner = (radius - pad / 2.0).max(6.0);
+                frame.shadow(Color::hex(0x000000, 0.35), pad, pad, side, side, corner, 10.0, 3.0);
+                match &cover {
+                    Some(cover) => {
+                        let picture = super::canvas::Picture { key: Arc::as_ptr(cover) as usize as u64, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
+                        frame.picture(&picture, pad, pad, side, corner, 1.0);
+                    }
+                    // None (its player gives none, or it is being read): a plate with a note on it.
+                    None => {
+                        frame.fill_rounded(Color::hex(0xFFFFFF, 0.08), pad, pad, side, side, corner);
+                        let note = Font::new(Family::Icons, side * 0.36, 400.0);
+                        let (ink_top, ink_bottom) = frame.ink("\u{E8D6}", note);
+                        let wide = frame.measure("\u{E8D6}", note);
+                        frame.text("\u{E8D6}", note, Color::hex(0xFFFFFF, 0.45), pad + (side - wide) / 2.0, pad + side / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0, Align::Start);
+                    }
+                }
+                let room = (width - buttons_room).max(0.0);
+                frame.text(&fitted(frame, &title, PLAYER_TITLE, room), PLAYER_TITLE, Color::hex(0xFFFFFF, 0.95), left, pad - 2.0, room + 2.0, Align::Start);
+                frame.text(&fitted(frame, &about, PLAYER_ABOUT, room), PLAYER_ABOUT, Color::hex(0xFFFFFF, 0.6), left, pad + 19.0, room + 2.0, Align::Start);
+            })
+        });
+        // The line sung now, rising in as it comes, filled as it is sung; under it its translation or the next.
+        let line_top = pad + 46.0;
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(left - 4.0, line_top - 4.0, width + 8.0, 48.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        match (&moment.lines, moment.now) {
+            (Some(lines), Some(now)) => {
+                let line = &lines[now];
+                let (text, parts) = parts(line, lines.get(now + 1).map(|line| line.at));
+                let text = if text.trim().is_empty() { "♪".to_string() } else { text };
+                let came = moment.since.map_or(1.0, |since| (since.elapsed().as_secs_f32() / 0.28).min(1.0));
+                let eased = 1.0 - (1.0 - came).powi(3);
+                // Too long for its room: smaller, down to the size of what is under it, then cut where it wraps.
+                let font = Font { size: (PLAYER_LINE.size * (width / frame.measure(&text, PLAYER_LINE).max(1.0))).clamp(PLAYER_UNDER.size + 1.5, PLAYER_LINE.size), ..PLAYER_LINE };
+                let y = line_top + (1.0 - eased) * 10.0;
+                let layout = frame.gfx.wrapped(&text, font, width);
+                let sung = sung_to(&parts, moment.position);
+                // (What is sung near white, the cover's colour in it, as the card's line sung now: clearly apart from what is not.)
+                filled(frame, &layout, &text, font, left, y, width, sung, Color::hex(0xFFFFFF, 0.36 * eased), colour(toward(tint, [1.0; 3], 0.65), eased), 12.0);
+                let under = line.translation.clone().filter(|_| moment.translated).or_else(|| lines.get(now + 1).map(|line| line.text.clone())).unwrap_or_default();
+                frame.text(&fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(0xFFFFFF, 0.5 * eased), left, line_top + font.size * 1.4 + 2.0, width + 2.0, Align::Start);
+            }
+            // None yet, or none to be had: why, in their place.
+            _ => {
+                let said = match &moment.lines {
+                    Some(_) => "♪".to_string(),
+                    None => moment.said.clone().unwrap_or_default(),
+                };
+                frame.text_wrapped(&said, PLAYER_UNDER, Color::hex(0xFFFFFF, 0.62), left, line_top + 2.0, width);
+            }
+        }
+        unsafe { frame.dc.PopAxisAlignedClip() };
+        // Along the bottom: what goes back, pauses or plays, and skips; then its track, and how long is left.
+        self.controls.clear();
+        let row = pad + side - CONTROL;
+        let pointer = self.pointer();
+        let lit = |x: f32, y: f32, wide: f32| pointer.is_some_and(|(px, py)| px >= x && px < x + wide && py >= y && py < y + CONTROL);
+        let mut x = left - (CONTROL - 16.0) / 2.0;
+        for (key, glyph) in [(Key::Previous, "\u{E892}"), (Key::Toggle, if moment.playing { "\u{E769}" } else { "\u{E768}" }), (Key::Next, "\u{E893}")] {
+            let on = lit(x, row, CONTROL);
+            if on {
+                frame.fill_rounded(Color::hex(0xFFFFFF, 0.14), x, row, CONTROL, CONTROL, CONTROL / 2.0);
+            }
+            let font = if key == Key::Toggle { Font { size: 16.0, ..CONTROL_FONT } } else { CONTROL_FONT };
+            let (ink_top, ink_bottom) = frame.ink(glyph, font);
+            let wide = frame.measure(glyph, font);
+            frame.text(glyph, font, Color::hex(0xFFFFFF, if on { 1.0 } else { 0.85 }), x + (CONTROL - wide) / 2.0, row + CONTROL / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0, Align::Start);
+            self.controls.push((x, row, CONTROL, CONTROL, Some(key)));
+            x += CONTROL + 2.0;
+        }
+        if let Some((length, seekable)) = moment.length.filter(|(length, _)| *length > 0.0) {
+            let left_over = format!("-{}", super::text::clock((length - moment.position).max(0.0).round() as u32));
+            let time_wide = frame.measure(&left_over, PLAYER_TIME) + 2.0;
+            let track_from = x + 10.0;
+            let track = (left + width - time_wide - 10.0 - track_from).max(0.0);
+            let middle = row + CONTROL / 2.0;
+            let fraction = (moment.position / length).clamp(0.0, 1.0) as f32;
+            let thick = if seekable && lit(track_from, row, track) { 5.0 } else { 3.0 };
+            frame.fill_rounded(Color::hex(0xFFFFFF, 0.18), track_from, middle - thick / 2.0, track, thick, thick / 2.0);
+            frame.fill_rounded(colour(accent, 0.95), track_from, middle - thick / 2.0, track * fraction, thick, thick / 2.0);
+            frame.text(&left_over, PLAYER_TIME, Color::hex(0xFFFFFF, 0.55), left + width - time_wide, middle - PLAYER_TIME.size * 0.7, time_wide, Align::End);
+            if seekable {
+                self.controls.push((track_from, row, track, CONTROL, None));
+            }
+        }
+    }
+
+    /// The player's control at `at` (DIPs, inside), if one is there: `Some(None)`, its track.
+    fn control_at(&self, (x, y): (f32, f32)) -> Option<Option<crate::playing::Key>> {
+        self.controls.iter().find(|(cx, cy, cw, ch, _)| x >= *cx && x < cx + cw && y >= *cy && y < cy + ch).map(|control| control.4)
+    }
+
+    /// The player's `control` pressed at `at`: its key; its track, played from as far along it.
+    fn control(&mut self, (x, _): (f32, f32), control: Option<crate::playing::Key>) {
+        use crate::playing::{act, Act};
+        match control {
+            Some(key) => act(Act::Key(key)),
+            None => {
+                let Some((cx, _, cw, _, _)) = self.controls.iter().find(|control| control.4.is_none()).copied() else { return };
+                let length = crate::playing::now().and_then(|now| now.timeline).map_or(0.0, |timeline| timeline.length);
+                act(Act::Seek(((x - cx) / cw.max(1.0)).clamp(0.0, 1.0) as f64 * length));
+            }
+        }
+        self.next_frame = Instant::now();
     }
 
     /// The lines before and after the one sung now, smaller and fainter the farther they are from it, the rail
@@ -1045,6 +1194,67 @@ impl Shown {
     }
 }
 
+/// The ground of the card and of the player: its shadow, the cover blurred behind (the one before fading out) and
+/// darkened, the cover's colour washed from a corner; all inside its rounded corners, with what `on` draws.
+struct Ground {
+    size: (f32, f32),
+    radius: f32,
+    backdrop: Option<ID2D1Bitmap1>,
+    before: Option<ID2D1Bitmap1>,
+    shown: f32,
+    accent: [f32; 3],
+    tint: [f32; 3],
+}
+
+impl Ground {
+    fn paint(&self, frame: &Frame, on: impl FnOnce(&Frame)) -> windows::core::Result<()> {
+        let ((w, h), radius) = (self.size, self.radius);
+        frame.shadow(Color::hex(0x000000, 0.4), 0.0, 0.0, w, h, radius, 8.0, 4.0);
+        let mask = unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(0.0, 0.0, w, h), radiusX: radius, radiusY: radius }) }?;
+        let layer = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: rect(0.0, 0.0, w, h),
+            geometricMask: std::mem::ManuallyDrop::new(mask.cast().ok()),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: windows_numerics::Matrix3x2::identity(),
+            opacity: 1.0,
+            ..Default::default()
+        };
+        unsafe { frame.dc.PushLayer(&layer, None) };
+        frame.fill(Color::hex(0x101014, 1.0), 0.0, 0.0, w, h);
+        let grown = 1.35;
+        let (bw, bh) = (w.max(h) * grown, w.max(h) * grown);
+        let place = rect((w - bw) / 2.0, (h - bh) / 2.0, bw, bh);
+        if let Some(bitmap) = &self.backdrop {
+            if let Some(before) = &self.before {
+                unsafe { frame.dc.DrawBitmap(before, Some(&place), 1.0 - self.shown, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+            }
+            unsafe { frame.dc.DrawBitmap(bitmap, Some(&place), self.shown, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+        }
+        // Darkened for the words to be read on, the cover's colour washed from a corner.
+        frame.fill(Color::hex(0x000000, 0.42), 0.0, 0.0, w, h);
+        frame.fill_shape(&[Point { x: 0.0, y: 0.0 }, Point { x: w, y: 0.0 }, Point { x: w, y: h }, Point { x: 0.0, y: h }], Fill::Down { top: 0.0, from: colour(self.accent, 0.12), bottom: h, to: colour(self.tint, 0.0) });
+        on(frame);
+        unsafe { frame.dc.PopLayer() };
+        drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+        Ok(())
+    }
+}
+
+/// `text`, or as much of its start as is no wider than `room` with an ellipsis after it.
+fn fitted(frame: &Frame, text: &str, font: Font, room: f32) -> String {
+    if frame.measure(text, font) <= room {
+        return text.to_string();
+    }
+    let mut kept: Vec<char> = text.chars().collect();
+    loop {
+        kept.pop();
+        let cut = format!("{}…", kept.iter().collect::<String>().trim_end());
+        if kept.is_empty() || frame.measure(&cut, font) <= room {
+            return cut;
+        }
+    }
+}
+
 /// Words with a dark edge under them, to be read on whatever is behind.
 fn outlined(frame: &Frame, text: &str, font: Font, colour: Color, x: f32, y: f32, width: f32) {
     for (dx, dy) in [(0.0, 1.2), (0.8, 0.8), (-0.8, 0.8)] {
@@ -1083,80 +1293,119 @@ mod tests {
 #[cfg(feature = "studio")]
 mod pictures {
     use super::*;
+    use crate::lyrics::Word;
 
-    /// Draws the card and the floating lyrics as they would show a known track (its words timed word by word, the
-    /// cover of what this PC plays, a made-up spectrum), into raw files beside the target folder:
-    /// `cargo test -- --ignored draws_the_lyrics --nocapture`.
+    /// Draws the card, the player and the floating lyrics as they would show a made-up track (its lines timed word
+    /// by word, a cover of two colours, a made-up spectrum), with the pointer away and over them, into PNG files in
+    /// the target folder: `cargo test --features studio -- --ignored draws_the_lyrics --nocapture`.
     #[test]
     #[ignore]
     fn draws_the_lyrics() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        eprintln!("asking for the lyrics");
-        let lines = Arc::new(crate::lyrics::amll(1901371647).ok().flatten().expect("lyrics"));
-        eprintln!("lyrics: {} lines", lines.len());
-        let now = lines.iter().position(|line| line.words.len() > 4).unwrap() + 3;
-        let line = &lines[now];
-        let position = line.words[line.words.len() / 2].at + 0.1;
+        let worded = |at: f64, text: &str| {
+            let pieces: Vec<&str> = text.split_inclusive(' ').collect();
+            let words = pieces.iter().enumerate().map(|(i, piece)| Word { at: at + i as f64 * 0.4, end: at + (i + 1) as f64 * 0.4, text: piece.to_string() }).collect();
+            Line { at, end: Some(at + pieces.len() as f64 * 0.4), text: text.into(), words, backing: None, translation: None }
+        };
+        let mut lines = vec![
+            worded(10.0, "Somewhere far beyond the city lights "),
+            worded(14.0, "我们 在 黑夜里 奔跑 "),
+            worded(18.0, "Every heartbeat sounds like thunder "),
+            worded(22.0, "直到 晨光 照亮 归途 "),
+            worded(26.0, "And the morning finds us singing "),
+        ];
+        lines[1].translation = Some("We run through the night".into());
+        let lines = Arc::new(lines);
+        let now = 1;
+        let position = lines[now].words[2].at + 0.2;
         let mut bands = [0.0; crate::sound::BANDS];
         for (i, band) in bands.iter_mut().enumerate() {
             *band = (0.85 - i as f32 * 0.025 + 0.15 * (i as f32 * 1.7).sin()).clamp(0.0, 1.0);
         }
-        let cover = crate::cover::read().map(Arc::new);
-        eprintln!("cover read: {}", cover.is_some());
-        for style in [Style::Card, Style::Subtitle] {
-            let moment = Moment {
-                lines: Some(lines.clone()),
-                now: Some(now),
-                since: Some(Instant::now() - Duration::from_secs(2)),
-                position,
-                title: "孤勇者".into(),
-                artist: "陈奕迅".into(),
-                said: None,
-                playing: true,
-                cover: cover.clone(),
-                sound: crate::sound::Heard { level: 0.8, bands, beat: 0.3 },
-                translated: true,
-            };
-            let gfx = gfx::current().unwrap();
-            let mut shown = Shown {
-                style,
-                hwnd: HWND::default(),
-                gfx: gfx.clone(),
-                surface: None,
-                scale: 1.5,
-                next_frame: Instant::now(),
-                rail: now as f32,
-                rail_speed: 0.0,
-                lyrics: None,
-                last_frame: Instant::now(),
-                backdrop: None,
-                fading: None,
-                tint: cover.as_ref().map_or([1.0; 3], |c| readable(c.base, 0.72)),
-                accent: cover.as_ref().map_or([0.5, 0.6, 1.0], |c| readable(c.accent, 0.62)),
-            };
-            let (w, h) = style.size();
-            let margin = style.margin();
-            let size = (((w + 2.0 * margin) * 1.5) as u32, ((h + 2.0 * margin) * 1.5) as u32);
-            eprintln!("drawing {style:?}");
-            let pixels = gfx
-                .draw_offscreen(size, 1.5, |frame| {
-                    // (On a mid grey, as a desktop might be.)
-                    frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
-                    frame.origin(margin, margin);
-                    match style {
-                        Style::Card => shown.card(frame, &moment, (w, h)),
-                        Style::Subtitle => shown.subtitle(frame, &moment, (w, h)),
-                    }
-                })
-                .unwrap();
-            let out = format!("{}/target/lyrics-{:?}.raw", env!("CARGO_MANIFEST_DIR"), style);
-            let mut file = size.0.to_le_bytes().to_vec();
-            file.extend(size.1.to_le_bytes());
-            file.extend(pixels);
-            std::fs::write(&out, file).unwrap();
-            println!("{out}");
+        // A cover: a warm sky over a dark sea, a pale sun in it.
+        let side = crate::cover::SIDE as usize;
+        let mut pixels = vec![0u8; side * side * 4];
+        for y in 0..side {
+            for x in 0..side {
+                let (fx, fy) = (x as f32 / side as f32, y as f32 / side as f32);
+                let sun = (((fx - 0.62).powi(2) + (fy - 0.4).powi(2)).sqrt() < 0.12) as u8 as f32;
+                let [r, g, b] = if fy < 0.6 { [0.95 - 0.3 * fy, 0.45 + 0.2 * fy, 0.35 + 0.1 * fx] } else { [0.08, 0.18 + 0.1 * fx, 0.32] };
+                let at = (y * side + x) * 4;
+                pixels[at] = ((b * (1.0 - sun) + 0.85 * sun) * 255.0) as u8;
+                pixels[at + 1] = ((g * (1.0 - sun) + 0.95 * sun) * 255.0) as u8;
+                pixels[at + 2] = ((r * (1.0 - sun) + 1.0 * sun) * 255.0) as u8;
+                pixels[at + 3] = 255;
+            }
+        }
+        let cover = Arc::new(Cover { pixels: Arc::new(pixels), base: [0.85, 0.5, 0.4], accent: [0.95, 0.6, 0.35] });
+        let out = format!("{}/target/lyrics", env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(&out).unwrap();
+        for style in [Style::Card, Style::Medium, Style::Subtitle] {
+            for over in [false, true] {
+                let moment = Moment {
+                    lines: Some(lines.clone()),
+                    now: Some(now),
+                    since: Some(Instant::now() - Duration::from_secs(2)),
+                    position,
+                    length: Some((214.0, true)),
+                    title: "Night Runners".into(),
+                    artist: "Some Artist".into(),
+                    said: None,
+                    playing: true,
+                    cover: Some(cover.clone()),
+                    sound: crate::sound::Heard { level: 0.8, bands, beat: 0.3 },
+                    translated: true,
+                };
+                let gfx = gfx::current().unwrap();
+                let at = Instant::now();
+                let mut shown = Shown {
+                    style,
+                    hwnd: HWND::default(),
+                    gfx: gfx.clone(),
+                    surface: None,
+                    showing: None,
+                    scale: 1.5,
+                    room: style.size(),
+                    pinned: false,
+                    through: false,
+                    over: over.then_some(at),
+                    reachable: false,
+                    hits: Vec::new(),
+                    controls: Vec::new(),
+                    tipped: None,
+                    next_frame: at,
+                    rail: now as f32,
+                    rail_speed: 0.0,
+                    lyrics: None,
+                    last_frame: at,
+                    backdrop: None,
+                    fading: None,
+                    tint: readable(cover.base, 0.72),
+                    accent: readable(cover.accent, 0.62),
+                    ground: Default::default(),
+                };
+                let (w, h) = style.size();
+                let margin = style.margin();
+                let size = (((w + 2.0 * margin) * 1.5) as u32, ((h + 2.0 * margin) * 1.5) as u32);
+                let pixels = gfx
+                    .draw_offscreen(size, 1.5, |frame| {
+                        // (On a mid grey, as a desktop might be.)
+                        frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
+                        frame.origin(margin, margin);
+                        match style {
+                            Style::Card => shown.card(frame, &moment, (w, h)),
+                            Style::Medium => shown.medium(frame, &moment, (w, h)),
+                            Style::Subtitle => shown.subtitle(frame, &moment, (w, h)),
+                        }
+                        shown.paint_buttons(frame, (w, h));
+                    })
+                    .unwrap();
+                let path = std::path::PathBuf::from(format!("{out}/{style:?}{}.png", if over { "-over" } else { "" }));
+                crate::studio::save_png(&path, size.0, size.1, &pixels).unwrap();
+                println!("{}", path.display());
+            }
         }
     }
 }

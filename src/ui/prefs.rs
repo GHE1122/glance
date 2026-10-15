@@ -76,7 +76,7 @@ const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const WSL: [Item; 4] = [item("chart", true), item("memory", true), item("gpu", true), item("distros", true)];
 const TIME: [Item; 4] = [item("twelve", false), item("sound", true), item("media", true), item("lyrics", false)];
-const LYRICS: [Item; 3] = [item("translation", true), item("card", false), item("subtitle", false)];
+const LYRICS: [Item; 4] = [item("translation", true), item("card", false), item("medium", false), item("subtitle", false)];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
 const GAME: [Item; 9] = [
     item("chart", true),
