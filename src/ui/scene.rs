@@ -546,7 +546,11 @@ impl Scene {
         self.shared.wanted.store(false, Ordering::Release);
         close(self.shared.latest.lock().unwrap().take());
         *self.shared.ready.lock().unwrap() = None;
-        *self.shared.halves.lock().unwrap() = None;
+        // (Not while a frame is read through them on another thread, which can wait a while on the card: the
+        // thread that draws never waits on it. Let go of at the next rest, or with the scene.)
+        if let Ok(mut halves) = self.shared.halves.try_lock() {
+            *halves = None;
+        }
         self.shared.spare.0.lock().unwrap().clear();
         unsafe {
             let _ = SetWindowPos(self.window, None, least.left, least.top, 1, 1, SWP_NOACTIVATE | SWP_NOZORDER);
@@ -584,7 +588,11 @@ impl Scene {
         let _ = self.pool.RemoveFrameArrived(self.arrived);
         close(self.shared.latest.lock().unwrap().take());
         *self.shared.ready.lock().unwrap() = None;
-        *self.shared.halves.lock().unwrap() = None;
+        // (Not while a frame is read through them on another thread, which can wait a while on the card: the
+        // thread that draws never waits on it. Let go of at the next rest, or with the scene.)
+        if let Ok(mut halves) = self.shared.halves.try_lock() {
+            *halves = None;
+        }
         self.shared.spare.0.lock().unwrap().clear();
     }
 
