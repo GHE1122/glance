@@ -755,6 +755,11 @@ fn sung_to(parts: &[(usize, usize, f64, f64)], t: f64) -> f32 {
     done
 }
 
+/// The dots of the music between lines: their radius, of the size of the words in their place (lit, a quarter
+/// larger), and how wide the three are, of it.
+const INTERLUDE_DOT: f32 = 0.08;
+const INTERLUDE_WIDE: f32 = INTERLUDE_DOT * 10.5;
+
 /// How far through it is (0 to 1) at `t`: a line without words (the music between), from its start to its end or
 /// the next line's.
 fn between(line: &Line, next: Option<f64>, t: f64) -> f32 {
@@ -766,14 +771,14 @@ fn between(line: &Line, next: Option<f64>, t: f64) -> f32 {
 /// dots in `dim`, each coming to `bright` (and a little larger) as its third of it goes (`done`, 0 to 1): how many
 /// are lit, how much of it has gone.
 fn interlude(frame: &Frame, x: f32, y: f32, size: f32, done: f32, dim: Color, bright: Color) {
-    let radius = size * 0.12;
+    let radius = size * INTERLUDE_DOT;
     let centre_y = y + size * 0.68;
     for index in 0..3 {
         let lit = (done * 3.0 - index as f32).clamp(0.0, 1.0);
         let lit = lit * lit * (3.0 - 2.0 * lit);
         let color = Color { r: dim.r + (bright.r - dim.r) * lit, g: dim.g + (bright.g - dim.g) * lit, b: dim.b + (bright.b - dim.b) * lit, a: dim.a + (bright.a - dim.a) * lit };
         if color.a > 0.0 {
-            frame.fill_circle(color, Point { x: x + radius * 1.2 + index as f32 * radius * 3.6, y: centre_y }, radius * (1.0 + 0.25 * lit));
+            frame.fill_circle(color, Point { x: x + radius * 1.25 + index as f32 * radius * 4.0, y: centre_y }, radius * (1.0 + 0.25 * lit));
         }
     }
 }
@@ -1447,7 +1452,7 @@ impl Shown {
         let y = 14.0 + (1.0 - eased) * 18.0;
         let (dim, bright) = (Color::hex(0xFFFFFF, 0.6 * eased), colour(self.tint, eased));
         if text.trim().is_empty() {
-            let x = (w - font.size * 1.15) / 2.0;
+            let x = (w - font.size * INTERLUDE_WIDE) / 2.0;
             let done = between(line, next, moment.position);
             // A dark haze for it to be seen on anything; a glow in the cover's colour round what has gone.
             frame.glow(Color::hex(0x000000, 0.55 * eased), 3.0, |frame| interlude(frame, x, y + 1.0, font.size, 0.0, Color::hex(0xFFFFFF, 1.0), Color::hex(0xFFFFFF, 1.0)));
