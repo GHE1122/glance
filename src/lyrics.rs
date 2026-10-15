@@ -3,10 +3,12 @@
 //! shows them as the track plays. Asked for on the network, only while
 //! lyrics are to be shown, by the track's number on NetEase Cloud Music
 //! (where its player says it, as it does with the InfLink-rs plugin; else as
-//! NetEase finds it by its title and length): first of the AMLL TTML
-//! collection (lyrics timed word by word, public domain, kept by that
-//! number), then of NetEase itself; else of LRCLIB (an open collection of
+//! NetEase finds it by its title and length): of the AMLL TTML collection
+//! (lyrics timed word by word, public domain, kept by that number, reached
+//! through a CDN) and of NetEase itself; and of LRCLIB (an open collection of
 //! lyrics timed by line), by the track's title, artist, album and length.
+//! The sources are asked all at once (see `find`): where one far away cannot
+//! be reached, as may be in mainland China, NetEase's still come at once.
 //! Each track's are asked for on a thread of their own, and kept on disk
 //! (see `kept`): asked for again only once they may have changed.
 
@@ -128,27 +130,31 @@ struct Said {
     sure: bool,
 }
 
-/// Asks each source in turn: by the track's NetEase number, the word-timed collection and then NetEase; by its
-/// name, LRCLIB, and then the same by the number NetEase finds it by.
+/// Asks the sources, all at once (one far away, slow or not reached, keeps none waiting for the others): by the
+/// track's NetEase number, the word-timed collection and NetEase itself (the collection's, with NetEase's
+/// translation where it gives none; else NetEase's); by its name, LRCLIB, and the same by the number NetEase finds
+/// it by: of these, lyrics timed word by word first, then LRCLIB's (found by title, artist, album and length, more
+/// surely the track's own than a search's), then NetEase's.
 fn find(track: &Track) -> Said {
-    let sure = std::cell::Cell::new(true);
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let sure = AtomicBool::new(true);
     // What a source has, none where it was not reached (and then what the sources have is not sure).
-    fn answered<T>(sure: &std::cell::Cell<bool>, answer: Answer<T>) -> Option<T> {
+    let answered = |answer: Answer<Vec<Line>>| {
         answer.unwrap_or_else(|Unreached| {
-            sure.set(false);
+            sure.store(false, Ordering::Relaxed);
             None
         })
-    }
+    };
     let by_number = |id: u64| {
-        let worded = answered(&sure, amll(id));
-        // The collection's, with NetEase's translation where it gives none.
-        if worded.as_ref().is_some_and(|lines| lines.iter().any(|line| line.translation.is_some())) {
-            return worded;
-        }
-        let theirs = answered(&sure, netease(id));
+        let (worded, theirs) = std::thread::scope(|scope| {
+            let theirs = scope.spawn(|| answered(netease(id)));
+            (answered(amll(id)), theirs.join().expect("NetEase asked"))
+        });
         match (worded, theirs) {
             (Some(mut lines), Some(theirs)) => {
-                translated(&mut lines, &theirs);
+                if lines.iter().all(|line| line.translation.is_none()) {
+                    translated(&mut lines, &theirs);
+                }
                 Some(lines)
             }
             (worded, theirs) => worded.or(theirs),
@@ -156,9 +162,18 @@ fn find(track: &Track) -> Said {
     };
     let found = match track.netease {
         Some(id) => by_number(id),
-        None => answered(&sure, lrclib(track)).or_else(|| answered(&sure, netease_search(track)).and_then(by_number)),
+        None => std::thread::scope(|scope| {
+            let searched = scope.spawn(|| match netease_search(track) {
+                Ok(id) => id.and_then(by_number),
+                Err(Unreached) => answered(Err(Unreached)),
+            });
+            let named = answered(lrclib(track));
+            let searched = searched.join().expect("NetEase asked");
+            let worded = |lines: &Option<Vec<Line>>| lines.as_ref().is_some_and(|lines| lines.iter().any(|line| !line.words.is_empty()));
+            if worded(&searched) { searched } else { named.or(searched) }
+        }),
     };
-    Said { found, sure: sure.get() }
+    Said { found, sure: sure.into_inner() }
 }
 
 /// `lines` with the translation of the line of `theirs` nearest in time to each, within a second.
