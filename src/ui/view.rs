@@ -3,7 +3,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
+use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Picture, Point};
 use super::prefs::{Prefs, ProcessSort};
 use super::seen::Seen;
 use super::text::{self, Lang};
@@ -25,6 +25,8 @@ const LINE: f32 = 16.0;
 /// The sound and what plays: the room over each, and how tall what is pressed there is.
 const MEDIA_GAP: f32 = 8.0;
 const MEDIA_ROW: f32 = 24.0;
+/// The side of a track's cover in the music lane.
+const COVER: f32 = 44.0;
 /// The lyrics module's rows: how many, and each one's height (DIPs).
 const LYRIC_ROWS: usize = 7;
 const LYRIC_ROW: f32 = 22.0;
@@ -69,6 +71,20 @@ pub enum Sing {
     Under,
     Next,
     Said,
+}
+
+/// What is said of what plays (`heard`): its title (else its player's name, else that nothing plays), and under it
+/// whether it plays, by whom and in which player.
+fn said_of(heard: &crate::playing::Now, lang: Lang) -> (String, String) {
+    let nothing = heard.title.is_empty() && heard.app.is_empty();
+    let title = match (heard.title.is_empty(), nothing) {
+        (_, true) => lang.pick("没有正在播放的内容", "Nothing is playing").to_string(),
+        (true, false) => heard.app.clone(),
+        (false, _) => heard.title.clone(),
+    };
+    let state = if heard.playing { lang.pick("正在播放", "Playing") } else { lang.pick("已暂停", "Paused") };
+    let about = if nothing { String::new() } else { [state, heard.artist.as_str(), if heard.title.is_empty() { "" } else { heard.app.as_str() }].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · ") };
+    (title, about)
 }
 
 /// What the lyrics show for what plays now (`heard`): the line sung now and under it its translation (with
@@ -298,6 +314,9 @@ enum Block {
     /// plays and skips it.
     /// `players`: how many tell Windows what they play (the line under the title switches between them).
     Playing { title: String, about: String, playing: bool, players: u8 },
+    /// What plays, as the music lane shows it: its cover (none: its player gives none, or it is still being read),
+    /// what it is and by whom (and in which player), with what pauses, plays and skips it; `players` as `Playing`'s.
+    Track { cover: Option<Picture>, title: String, about: String, playing: bool, players: u8 },
     /// How far into its track what plays is and how long the track is (whole seconds), on a track it is dragged
     /// along where its player lets it be (`seekable`).
     Progress { at: u32, length: u32, seekable: bool },
@@ -324,6 +343,7 @@ impl Block {
             Block::Facts { .. } => 0.0,
             Block::Sound { .. } => MEDIA_GAP + MEDIA_ROW,
             Block::Playing { .. } => MEDIA_GAP + 2.0 * LINE,
+            Block::Track { .. } => MEDIA_GAP + COVER,
             Block::Progress { .. } => MEDIA_ROW,
             Block::Lyric { .. } => MEDIA_GAP + 2.0 * LINE,
             Block::Lyrics { .. } => MEDIA_GAP + LYRIC_ROWS as f32 * LYRIC_ROW,
@@ -347,6 +367,7 @@ impl Hash for Block {
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
             Block::Sound { level, muted } => (level, muted).hash(state),
             Block::Playing { title, about, playing, players } => (title, about, playing, players).hash(state),
+            Block::Track { cover, title, about, playing, players } => (cover.as_ref().map(|cover| cover.key), title, about, playing, players).hash(state),
             Block::Progress { at, length, seekable } => (at, length, seekable).hash(state),
             Block::Lyric { line, under, said, glide } => (line, under, said, glide).hash(state),
             Block::Lyrics { rows, glide } => (rows, glide).hash(state),
@@ -1079,14 +1100,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     blocks.push(Block::Sound { level, muted: heard.muted });
                 }
                 if on("media") {
-                    let nothing = heard.title.is_empty() && heard.app.is_empty();
-                    let title = match (heard.title.is_empty(), nothing) {
-                        (_, true) => lang.pick("没有正在播放的内容", "Nothing is playing").to_string(),
-                        (true, false) => heard.app.clone(),
-                        (false, _) => heard.title.clone(),
-                    };
-                    let state = if heard.playing { lang.pick("正在播放", "Playing") } else { lang.pick("已暂停", "Paused") };
-                    let about = if nothing { String::new() } else { [state, heard.artist.as_str(), if heard.title.is_empty() { "" } else { heard.app.as_str() }].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · ") };
+                    let (title, about) = said_of(&heard, lang);
                     blocks.push(Block::Playing { title, about, playing: heard.playing, players: heard.players });
                     if let Some(timeline) = heard.timeline {
                         let whole = |seconds: f64| seconds.max(0.0).round() as u32;
@@ -1102,10 +1116,30 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             blocks
         }
         // The lyrics of what plays, as it plays (looked for and followed by `playing`).
+        // Music: what plays (its cover, what it is, its track, how loud) and its lyrics as they are sung (looked for and
+        // followed by `playing`). Kept by the name it had as the lyrics' alone.
         "lyrics" => {
             let heard = crate::playing::now();
-            let about = heard.as_ref().filter(|heard| !heard.title.is_empty()).map_or(String::new(), |heard| [heard.title.as_str(), heard.artist.as_str()].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · "));
-            vec![head(lang.pick("歌词", "Lyrics"), about, "", false), Block::Lyrics { rows: lyric_rows(heard.as_ref(), lang, on("translation")), glide: glide_of(heard.as_ref()) }]
+            let mut blocks = vec![head(lang.pick("音乐", "Music"), heard.as_ref().map_or(String::new(), |heard| heard.app.clone()), "", false)];
+            if let Some(heard) = &heard {
+                let (title, about) = said_of(heard, lang);
+                let cover = (!heard.title.is_empty()).then(|| crate::cover::of(&heard.title, &heard.artist)).flatten().map(|cover| Picture {
+                    // (The same track, the same picture: what is made of it on the card is made once.)
+                    key: heard.title.bytes().chain([1]).chain(heard.artist.bytes()).fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3)),
+                    side: crate::cover::SIDE,
+                    pixels: cover.pixels.clone(),
+                });
+                blocks.push(Block::Track { cover, title, about, playing: heard.playing, players: heard.players });
+                if let Some(timeline) = heard.timeline {
+                    let whole = |seconds: f64| seconds.max(0.0).round() as u32;
+                    blocks.push(Block::Progress { at: whole(timeline.at).min(whole(timeline.length)), length: whole(timeline.length), seekable: timeline.seekable });
+                }
+                if let Some(level) = heard.volume {
+                    blocks.push(Block::Sound { level, muted: heard.muted });
+                }
+            }
+            blocks.push(Block::Lyrics { rows: lyric_rows(heard.as_ref(), lang, on("translation")), glide: glide_of(heard.as_ref()) });
+            blocks
         }
         "system" => {
             let rows = [
@@ -1411,6 +1445,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Facts { .. } => "facts",
             Block::Sound { .. } => "sound",
             Block::Playing { .. } => "playing",
+            Block::Track { .. } => "track",
             Block::Progress { .. } => "progress",
             Block::Lyric { .. } => "lyric",
             Block::Lyrics { .. } => "lyrics",
@@ -1541,6 +1576,40 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 frame.text(&said, theme.small, if *muted { theme.text3 } else { theme.text2 }, mute - 6.0 - said_width, middle - LINE / 2.0, said_width, Align::End);
                 let hit = Hit::Media(crate::playing::Key::Mute);
                 pressed(frame, scene, hits, hit, if *muted { "\u{E74F}" } else { "\u{E767}" }, mute, row, *muted);
+            }
+            (Block::Track { cover, title, about, playing, players }, Pass::Content) => {
+                use crate::playing::Key;
+                // The cover at the start, what plays and what is said of it beside it, and the three that are
+                // pressed at the end, all on its middle.
+                let top = y + MEDIA_GAP;
+                part("cover");
+                match cover {
+                    Some(cover) => frame.picture(cover, left, top, COVER, theme.control_radius.min(COVER / 4.0), 1.0),
+                    // None (its player gives none, or it is being read): a plate with a note on it.
+                    None => {
+                        frame.fill_rounded(theme.track, left, top, COVER, COVER, theme.control_radius.min(COVER / 4.0));
+                        let note = Font::new(Family::Icons, 18.0, 400.0);
+                        let (ink_top, ink_bottom) = frame.ink("\u{E8D6}", note);
+                        frame.text("\u{E8D6}", note, theme.text3, left + (COVER - frame.measure("\u{E8D6}", note)) / 2.0, top + COVER / 2.0 - (ink_top + ink_bottom) / 2.0, COVER, Align::Start);
+                    }
+                }
+                let text_left = left + COVER + 10.0;
+                let pressed_from = left + width - 3.0 * MEDIA_ROW - 2.0 * 2.0;
+                let words = top + (COVER - 2.0 * LINE) / 2.0;
+                part("title");
+                frame.text(title, theme.body, theme.text, text_left, words, pressed_from - 8.0 - text_left, Align::Start);
+                part("about");
+                let switches = *players > 1;
+                let switch = Hit::Media(Key::Player);
+                let lit = switches && scene.hover == Some(switch);
+                frame.text(about, theme.small, if lit { theme.text } else { theme.text3 }, text_left, words + LINE, pressed_from - 8.0 - text_left, Align::Start);
+                if switches {
+                    hits.push((text_left, words + LINE, pressed_from - 8.0 - text_left, LINE, switch));
+                }
+                let row = top + (COVER - MEDIA_ROW) / 2.0;
+                for (place, (key, glyph)) in [(Key::Previous, "\u{E892}"), (Key::Toggle, if *playing { "\u{E769}" } else { "\u{E768}" }), (Key::Next, "\u{E893}")].into_iter().enumerate() {
+                    pressed(frame, scene, hits, Hit::Media(key), glyph, pressed_from + place as f32 * (MEDIA_ROW + 2.0), row, false);
+                }
             }
             (Block::Progress { at, length, seekable }, Pass::Content) => {
                 // How far in it is where a meter's name is; the track, with a knob where it is dragged along; how

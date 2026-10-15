@@ -18,7 +18,7 @@ pub const SIDE: u32 = 192;
 
 /// A track's cover: its copy (premultiplied BGRA, `SIDE` square, opaque), and its colours (straight RGB, 0 to 1).
 pub struct Cover {
-    pub pixels: Vec<u8>,
+    pub pixels: Arc<Vec<u8>>,
     pub base: [f32; 3],
     pub accent: [f32; 3],
 }
@@ -77,7 +77,7 @@ pub(crate) fn read() -> Option<Cover> {
             pixel[3] = 255;
         }
         let (base, accent) = colours(&pixels);
-        Some(Cover { pixels, base, accent })
+        Some(Cover { pixels: Arc::new(pixels), base, accent })
     }
 }
 
