@@ -107,6 +107,9 @@ const SLOW_FRAME: Duration = Duration::from_millis(12);
 /// How often a widget at rest is drawn again (its charts step with the
 /// samples).
 const REST_FRAME: Duration = Duration::from_millis(250);
+/// Without live refraction, how long after a frame of what is behind is taken another is looked for (see
+/// `collect`).
+const LOOK_AGAIN: Duration = Duration::from_millis(250);
 /// With live refraction, how often the desktop behind is taken again as it
 /// changes, as the panel's is: fifteen times a second (what shows through
 /// the glass is blurred; faster cost twice the processor for little that
@@ -453,6 +456,9 @@ struct Widget {
     retake: bool,
     /// What is behind it arranged anew, its frame awaited.
     pending: Option<Request>,
+    /// Without live refraction, a frame taken: till when another is looked for before the scene rests (see
+    /// `collect`).
+    look_again: Option<Instant>,
     /// What is behind it is to be replaced at once, even in hand: the
     /// panel's, lent as it was torn off (`false`: its tone kept), or taken
     /// of its screen as it was (`true`: toned afresh).
@@ -1056,6 +1062,7 @@ impl Widget {
             arranged: None,
             retake: false,
             pending: None,
+            look_again: None,
             replace: None,
             generation: 0,
             unsaved: false,
@@ -1168,6 +1175,14 @@ impl Widget {
     fn collect(&mut self, live: bool, px: f32) {
         let Some(scene) = &self.backdrop else { return };
         let Some(capture) = scene.ready() else {
+            // Looked for again a while, and none came: what was taken stands, and the scene rests.
+            if self.look_again.is_some_and(|till| Instant::now() >= till) {
+                self.look_again = None;
+                if let Some(scene) = &mut self.backdrop {
+                    scene.rest();
+                }
+                return;
+            }
             // (Without live refraction, only the one awaited.)
             let again = live && self.behind.as_ref().is_some_and(|behind| behind.taken.elapsed() >= Self::backdrop_every(live));
             if self.pending.is_some() || self.behind.is_none() || again {
@@ -1177,10 +1192,17 @@ impl Widget {
         };
         let now = Instant::now();
         // Without live refraction, what is behind is as it was when looked at, till it is looked at again (see
-        // `frame`): the scene rests meanwhile.
+        // `frame`): the scene rests meanwhile. Not at once: a frame put together while the compositor had put in
+        // only some of the windows behind is followed by one with all of them (a frame comes as what is there
+        // changes), which is looked for a while, and taken in its place if it comes; then it rests.
         if !live {
-            if let Some(scene) = &mut self.backdrop {
-                scene.rest();
+            if self.look_again.take().is_some() {
+                if let Some(scene) = &mut self.backdrop {
+                    scene.rest();
+                }
+            } else {
+                self.look_again = Some(now + LOOK_AGAIN);
+                scene.want();
             }
         }
         match self.pending.take() {
@@ -1194,6 +1216,10 @@ impl Widget {
     /// has come is due to be taken (none: none has come; without, none is
     /// taken but the one awaited, which wakes it as it is read).
     fn backdrop_wait(&self, live: bool) -> Option<Duration> {
+        // (Without it, while another frame is looked for: till it is given up.)
+        if let Some(till) = self.look_again.filter(|_| !live) {
+            return Some(till.saturating_duration_since(Instant::now()));
+        }
         self.backdrop.as_ref().filter(|scene| live && scene.fresh())?;
         Some(self.behind.as_ref().map_or(Duration::ZERO, |behind| Self::backdrop_every(live).saturating_sub(behind.taken.elapsed())))
     }
@@ -1959,6 +1985,8 @@ impl Widget {
                 Some(scene) => {
                     if scene.arrange(area, self.window.hwnd) || self.behind.is_none() {
                         self.pending = Some(Request { area, generation: self.generation, moved });
+                        // (Its first frame looked past as the last were.)
+                        self.look_again = None;
                     } else if let Some(behind) = &mut self.behind {
                         behind.taken = now;
                         self.replace = None;
