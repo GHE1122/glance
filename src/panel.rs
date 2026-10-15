@@ -1751,7 +1751,7 @@ impl<'a> Panel<'a> {
         let Some(scene) = &mut self.backdrop else { return };
         let Some(capture) = scene.ready() else {
             // Looked for again a while, and none came: what was taken stands, and the scene rests.
-            if self.look_again.is_some_and(|till| now >= till) {
+            if self.look_again.is_some_and(|till| now >= till) && !scene.reading() {
                 self.look_again = None;
                 scene.rest();
                 return;

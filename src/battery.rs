@@ -32,8 +32,10 @@ pub struct BatteryFigures {
 pub fn read() -> BatteryFigures {
     let mut watts: Option<f32> = None;
     let (mut full, mut design) = (0u64, 0u64);
-    // What they hold now (mWh), where some battery's driver does not say its rate: reckoned from that instead.
+    // What they hold now (mWh), where some battery's driver does not say its rate: reckoned from that instead;
+    // unless one says neither.
     let mut held: Option<u64> = None;
+    let mut unknown = false;
     each_battery(|handle| {
         let Some((tag, info)) = information(handle) else { return };
         // A battery of the machine's own, measured in milliwatt-hours (a
@@ -48,16 +50,29 @@ pub fn read() -> BatteryFigures {
         // Milliwatts; i32::MIN when the driver does not know.
         let Some(status) = status(handle, tag) else { return };
         match status.Rate {
+            // (What it holds unknown too: nothing to reckon with.)
+            i32::MIN if status.Capacity == BATTERY_UNKNOWN_CAPACITY => unknown = true,
             i32::MIN => *held.get_or_insert(0) += status.Capacity as u64,
             rate => *watts.get_or_insert(0.0) += rate as f32 / 1000.0,
         }
     });
-    let watts = match held {
+    let watts = match held.filter(|_| !unknown) {
         Some(held) => watts.or(trend(held)),
-        None => watts,
+        // Not reckoned now: what was reckoned from is of before, and is not reckoned on from later.
+        None => {
+            *TREND.lock().unwrap() = None;
+            watts
+        }
     };
     BatteryFigures { watts, health: (design > 0).then(|| full as f32 / design as f32 * 100.0) }
 }
+
+/// What the batteries whose rate is reckoned held when last seen to change (or first looked at), when that was,
+/// whether it was a change (the time from the first look to the first change is no step's length), and the rate last
+/// reckoned (see `trend`).
+static TREND: std::sync::Mutex<Option<(u64, std::time::Instant, bool, Option<f32>)>> = std::sync::Mutex::new(None);
+/// What a battery that does not know what it holds says it holds.
+const BATTERY_UNKNOWN_CAPACITY: u32 = 0xFFFF_FFFF;
 
 /// The rate (W) at which batteries holding `held` mWh now are charging or discharging, reckoned from what they held
 /// before, for batteries whose driver does not say its rate (some laptops' firmware, while on mains power). What
@@ -66,10 +81,7 @@ pub fn read() -> BatteryFigures {
 fn trend(held: u64) -> Option<f32> {
     use std::time::{Duration, Instant};
     const STILL: Duration = Duration::from_secs(5 * 60);
-    /// What they held when last seen to change (or first looked at), when that was, whether it was a change (the
-    /// time from the first look to the first change is no step's length), and the rate last reckoned.
-    static LAST: std::sync::Mutex<Option<(u64, Instant, bool, Option<f32>)>> = std::sync::Mutex::new(None);
-    let mut last = LAST.lock().unwrap();
+    let mut last = TREND.lock().unwrap();
     let now = Instant::now();
     let rate = match *last {
         None => None,

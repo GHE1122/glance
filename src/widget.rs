@@ -110,6 +110,8 @@ const REST_FRAME: Duration = Duration::from_millis(250);
 /// Without live refraction, how long after a frame of what is behind is taken another is looked for (see
 /// `collect`).
 pub const LOOK_AGAIN: Duration = Duration::from_millis(250);
+/// How often, the time up, a frame being read meanwhile is waited for.
+const LOOK_AGAIN_STEP: Duration = Duration::from_millis(16);
 /// With live refraction, how often the desktop behind is taken again as it
 /// changes, as the panel's is: fifteen times a second (what shows through
 /// the glass is blurred; faster cost twice the processor for little that
@@ -1176,8 +1178,9 @@ impl Widget {
     fn collect(&mut self, live: bool, px: f32) {
         let Some(scene) = &self.backdrop else { return };
         let Some(capture) = scene.ready() else {
-            // Looked for again a while, and none came: what was taken stands, and the scene rests.
-            if self.look_again.is_some_and(|till| Instant::now() >= till) {
+            // Looked for again a while, and none came (none being read either, which is waited for): what was taken
+            // stands, and the scene rests.
+            if self.look_again.is_some_and(|till| Instant::now() >= till) && !scene.reading() {
                 self.look_again = None;
                 if let Some(scene) = &mut self.backdrop {
                     scene.rest();
@@ -1217,9 +1220,9 @@ impl Widget {
     /// has come is due to be taken (none: none has come; without, none is
     /// taken but the one awaited, which wakes it as it is read).
     fn backdrop_wait(&self, live: bool) -> Option<Duration> {
-        // (Without it, while another frame is looked for: till it is given up.)
-        if let Some(till) = self.look_again.filter(|_| !live) {
-            return Some(till.saturating_duration_since(Instant::now()));
+        // (Without it, while another frame is looked for: till it is given up, or a while, one being read.)
+        if let Some(till) = self.look_again.filter(|_| !live && self.backdrop.is_some()) {
+            return Some(till.saturating_duration_since(Instant::now()).max(LOOK_AGAIN_STEP));
         }
         self.backdrop.as_ref().filter(|scene| live && scene.fresh())?;
         Some(self.behind.as_ref().map_or(Duration::ZERO, |behind| Self::backdrop_every(live).saturating_sub(behind.taken.elapsed())))
@@ -1338,6 +1341,8 @@ impl Widget {
             let room = (self.surface_size.0 * self.zoom, self.surface_size.1 * self.zoom);
             self.drag = Some(Drag::Size { edges, from, room, corner: self.at });
             self.keeps_to = (edges.0, edges.2);
+            // (What showed is measured against the room it has now, at each sizing: not the room one long ago left.)
+            self.taken = None;
         } else {
             self.drag = Some(Drag::Move { grab: POINT { x: from.x - self.at.x, y: from.y - self.at.y }, trail: Vec::new(), torn: false, moved: false });
         }
@@ -1913,6 +1918,7 @@ impl Widget {
         if !sees {
             self.backdrop = None;
             self.pending = None;
+            self.look_again = None;
         }
         // A frame of it, come.
         self.collect(live, px);
