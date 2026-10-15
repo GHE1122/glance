@@ -822,6 +822,8 @@ struct Ui {
     layers: PanelLayers,
     last_frame: Instant,
     next_frame: Instant,
+    /// The client size it was last drawn at (physical pixels), if it has been drawn.
+    drawn_size: Option<(u32, u32)>,
     /// Drawing the preview failed this frame (the device was lost).
     failed: bool,
 }
@@ -976,6 +978,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             showing: None,
             last_frame: Instant::now(),
             next_frame: Instant::now(),
+            drawn_size: None,
             failed: false,
         };
         ui.raise_more();
@@ -1047,9 +1050,15 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         // Drawn at once, so the content keeps up while the window is resized.
         WM_SIZE => {
-            // (Minimized: nothing to draw.)
+            // Drawn at its new size; minimized, or told of the size it was last drawn at (as it is first shown,
+            // drawn already), nothing new to draw. (Its surface keeps what was drawn.)
+            let size = ((lparam.0 & 0xFFFF) as u32, ((lparam.0 >> 16) & 0xFFFF) as u32);
             if wparam.0 != windows::Win32::UI::WindowsAndMessaging::SIZE_MINIMIZED as usize {
-                with_ui(|ui| ui.draw(Instant::now()));
+                with_ui(|ui| {
+                    if ui.drawn_size != Some(size) {
+                        ui.draw(Instant::now());
+                    }
+                });
             }
             LRESULT(0)
         }
@@ -3018,6 +3027,7 @@ impl Ui {
             });
         }
         self.surface = Some(surface);
+        self.drawn_size = drawn.is_ok().then_some(size);
         // The device is gone; a new one is made for the next frame.
         if drawn.is_err() || self.failed {
             gfx::lost();
