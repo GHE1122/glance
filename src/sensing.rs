@@ -131,7 +131,7 @@ pub fn run() {
         *PUSHES_TO.lock().unwrap() = Some(telling.clone());
         let mut next = Instant::now();
         let mut tick = 0u64;
-        while greeted {
+        while greeted && !listener.is_finished() {
             // Till the next reading is due, a report asked for meanwhile is said at once; the listener gone (the
             // rest of Glance gone with it), the reading ends.
             let now = Instant::now();
@@ -158,9 +158,6 @@ pub fn run() {
                 if !tell(&Told::Sample(Box::new(sample))) || !tell(&Told::Presenting { games: crate::presents::presenting(), mode: crate::presents::game_mode().into() }) {
                     break;
                 }
-            }
-            if listener.is_finished() {
-                break;
             }
         }
         // Gone: the pipes let go (which ends the listener's reading), for the rest to come again; no edge watched
