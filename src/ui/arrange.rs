@@ -351,6 +351,11 @@ pub struct Opening {
 }
 
 impl Opening {
+    /// Its lanes, by module, in the order `layout.lanes()` places them.
+    pub fn lane_ids(&self) -> &[String] {
+        &self.lanes
+    }
+
     /// Lays out `lanes` (each by module, with its heights when holding what
     /// `seen` holds) and the small layouts' `readings` for a work area
     /// `work` DIPs large, at the size chosen, as `want` says: by itself,

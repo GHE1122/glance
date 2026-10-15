@@ -76,7 +76,19 @@ const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const WSL: [Item; 4] = [item("chart", true), item("memory", true), item("gpu", true), item("distros", true)];
 const TIME: [Item; 4] = [item("twelve", false), item("sound", true), item("media", true), item("lyrics", false)];
-const LYRICS: [Item; 5] = [item("translation", true), item("card", false), item("medium", false), item("strip", false), item("subtitle", false)];
+/// What plays, as the music widgets show it (see `music::Shows`): the translation under the line sung now, else the
+/// next line; the cover, what plays, the lines round the one sung now, the spectrum, the controls kept showing, no
+/// ground.
+const LYRICS: [Item; 8] = [
+    item("translation", true),
+    item("next", true),
+    item("cover", true),
+    item("title", true),
+    item("lines", true),
+    item("spectrum", true),
+    item("controls", false),
+    item("clear", false),
+];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
 const GAME: [Item; 9] = [
     item("chart", true),
@@ -239,16 +251,6 @@ const DEFAULT_OFF: [&str; 5] = ["system", "time", "lyrics", "wsl", "docker"];
 /// before they are resolved: off unless listed on).
 pub fn module_on(stored: &serde_json::Value, id: &str) -> bool {
     stored["modules"].as_array().is_some_and(|modules| modules.iter().any(|entry| entry["id"] == id && entry["on"] == true))
-}
-
-/// Item `name` of module `id` switched to `on` in the stored preferences `stored`.
-pub fn set_item(stored: &mut serde_json::Value, id: &str, name: &str, on: bool) {
-    if let Some(entry) = stored["modules"].as_array_mut().and_then(|modules| modules.iter_mut().find(|entry| entry["id"] == id)) {
-        if !entry["items"].is_object() {
-            entry["items"] = serde_json::json!({});
-        }
-        entry["items"][name] = serde_json::Value::Bool(on);
-    }
 }
 
 /// Whether module `id` shows item `name` in the stored preferences `stored`: as switched there, else as it is

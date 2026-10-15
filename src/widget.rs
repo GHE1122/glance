@@ -5,6 +5,9 @@
 //! strip; flung, it slides away and is put away. Pinned, it is neither moved
 //! nor sized; letting clicks through, Ctrl held lets it take them again.
 //! Moved near an edge, where it would stick shows before it is let go.
+//! What a widget shows is its content (see `Content`): the panel's readings,
+//! or what plays (see `music`); its shell (moved, sized, stuck, flung, kept
+//! above the others or on the desktop, its buttons) is the same for each.
 
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -56,6 +59,7 @@ use crate::ui::forms::{self, Small};
 use crate::ui::gfx::{self, Gfx, Layer, Surface};
 use crate::ui::icons::Icon;
 use crate::ui::morph::{self, Part};
+use crate::ui::music::{self, Music, Shows};
 use crate::ui::prefs::Prefs;
 use crate::ui::life::Lives;
 use crate::ui::render::{self, PanelLayers};
@@ -373,15 +377,13 @@ impl crate::ui::life::Lives for Widget {
         &mut self.showing
     }
 
-    /// Its surface, its layers (and a turn between forms), where it would stick, the desktop behind it; its scene
-    /// rests.
+    /// Its surface, what its content kept (see `Content::release`), where it would stick, the desktop behind it; its
+    /// scene rests.
     fn let_go_of_shown(&mut self) {
         if let Some(surface) = &mut self.surface {
             surface.release(&self.gfx);
         }
-        self.layers.release();
-        self.morph = None;
-        self.morph_layer.release();
+        self.content.release();
         self.hide_hint();
         self.behind = None;
         self.pending = None;
@@ -403,12 +405,12 @@ struct Widget {
     /// Counted as shown on its device while it is (see `life`).
     showing: Option<crate::ui::life::Showing>,
     surface: Option<Surface>,
-    layers: PanelLayers,
+    /// What it shows.
+    content: Content,
     /// The screen it is on.
     contact: Contact,
     /// Its surface's corner on the screen (physical px).
     at: POINT,
-    choice: Choice,
     /// While it is sized: the room its edges were dragged to (DIPs).
     room: Option<(f32, f32)>,
     /// Let go after it was sized or stuck: since when, and from what
@@ -424,10 +426,6 @@ struct Widget {
     /// Where along it its middle is (physical px; none: where it was,
     /// restored from the settings): where the middle of what was stuck was.
     along: Option<i32>,
-    /// What it showed before it was stuck to an edge, and how large it was
-    /// then (DIPs on the screen; none, restored).
-    before: Option<Choice>,
-    before_size: Option<(f32, f32)>,
     /// Its skin's room round it for its shadow (DIPs, its own).
     margin: f32,
     /// Settling after it was sized by its left or top edge: where its right
@@ -442,13 +440,6 @@ struct Widget {
     /// Kept on the desktop, under every other window (one shown only with
     /// a game is above them all still).
     on_desktop: bool,
-    /// What it showed last frame.
-    last: Option<Shown>,
-    /// Turning from one layout into the one it shows: since when, from
-    /// what; what was drawn last as it turns, and the layer it is drawn on.
-    morph: Option<(Instant, Before)>,
-    drawn: Vec<Part>,
-    morph_layer: Layer,
     /// Sized by hand in a frame since it was last drawn at rest (see `Gfx::settle`).
     was_sized: bool,
     hint: Option<Hint>,
@@ -489,9 +480,6 @@ struct Widget {
     tone_due: bool,
     /// How long the last frame's painting took, and how long handing it to the compositor then did.
     frame_took: gfx::Took,
-    /// The form it shows and the room it was taken in while sized: a form
-    /// showing more comes back only with room to spare.
-    taken: Option<arrange::Shown>,
     /// The pointer is over it (its buttons show).
     hover: bool,
     /// What a press would do something with under the pointer (see `view::Hit::takes_press`): lit as it is drawn.
@@ -503,12 +491,9 @@ struct Widget {
     reached: bool,
     /// The button the pointer is on, said under it.
     tip: Option<Button>,
-    /// What of its lanes takes a press (what plays, the sound), where each
+    /// What of what it shows takes a press (what plays, the sound), where each
     /// is from the corner of what it shows (its own DIPs), as last drawn.
     hits: Vec<view::HitBox>,
-    /// How far its process list is turned (DIPs), and where the wheel turns it to (see `Widgets::wheel`).
-    scroll: f32,
-    scroll_target: f32,
     hits_from: (f32, f32),
     behind: Option<Behind>,
     /// When it is next drawn: at once while it moves, else after a rest (as
@@ -523,6 +508,99 @@ struct Widget {
     shown: (f32, f32),
     zoom: f32,
     last_frame: Instant,
+}
+
+/// What a widget shows.
+enum Content {
+    /// The panel's readings, as much of them as fits (see `arrange::Ladder`).
+    Readings(Readings),
+    /// What plays (see `music`).
+    Music(MusicShown),
+}
+
+/// The readings a widget shows, and what it keeps of them from frame to frame.
+struct Readings {
+    layers: PanelLayers,
+    choice: Choice,
+    /// What it showed before it was stuck to an edge, and how large it was
+    /// then (DIPs on the screen; none, restored).
+    before: Option<Choice>,
+    before_size: Option<(f32, f32)>,
+    /// What it showed last frame.
+    last: Option<Shown>,
+    /// Turning from one layout into the one it shows: since when, from
+    /// what; what was drawn last as it turns, and the layer it is drawn on.
+    morph: Option<(Instant, Before)>,
+    drawn: Vec<Part>,
+    morph_layer: Layer,
+    /// The form it shows and the room it was taken in while sized: a form
+    /// showing more comes back only with room to spare.
+    taken: Option<arrange::Shown>,
+    /// How far its process list is turned (DIPs), and where the wheel turns it to (see `Widgets::wheel`).
+    scroll: f32,
+    scroll_target: f32,
+}
+
+impl Readings {
+    fn new(choice: Choice) -> Self {
+        Readings { layers: PanelLayers::default(), choice, before: None, before_size: None, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scroll: 0.0, scroll_target: 0.0 }
+    }
+}
+
+/// What plays as a widget shows it: its size (DIPs, as large as it is on the screen: it is laid out for its room, not
+/// zoomed), and the layer it is drawn in, again each frame. (Drawn in a layer, not straight onto the surface: text drawn
+/// straight onto it is drawn a little differently in each place of the compositor's atlas the frames go to, and so
+/// shook by a pixel frame by frame; a layer is drawn in its own place, and put on whole pixels.)
+struct MusicShown {
+    music: Music,
+    size: (f32, f32),
+    layer: Layer,
+    /// Frames drawn: each draws its layer anew.
+    frames: u64,
+    /// Whether it is to be drawn again soon (see `music::Painted`).
+    busy: bool,
+}
+
+impl MusicShown {
+    fn new(size: (f32, f32)) -> Self {
+        MusicShown { music: Music::default(), size: (size.0.max(music::LEAST.0), size.1.max(music::LEAST.1)), layer: Layer::default(), frames: 0, busy: false }
+    }
+}
+
+/// The room round what plays for its shadow (DIPs).
+const MUSIC_SHADOW: f32 = 24.0;
+
+impl Content {
+    /// What it kept to be drawn again, let go of (its window hidden).
+    fn release(&mut self) {
+        match self {
+            Content::Readings(readings) => {
+                readings.layers.release();
+                readings.morph = None;
+                readings.morph_layer.release();
+            }
+            Content::Music(shown) => {
+                shown.music.release();
+                shown.layer.release();
+            }
+        }
+    }
+
+    /// As the journal names what it shows.
+    fn key(&self) -> String {
+        match self {
+            Content::Readings(readings) => readings.choice.form.key(),
+            Content::Music(_) => MUSIC_FORM.into(),
+        }
+    }
+
+    /// Its buttons, as they stand in their row: the game's only with the readings (the game lane is theirs).
+    fn buttons(&self) -> &'static [Button] {
+        match self {
+            Content::Readings(_) => &buttons::ALL,
+            Content::Music(_) => &[Button::Settings, Button::Pin, Button::Through, Button::Close],
+        }
+    }
 }
 
 /// Every widget on the desktop, and those put away this session, the last
@@ -562,7 +640,7 @@ impl Widgets {
         let Some(contact) = monitor_at(at) else { return false };
         let choice = Choice { form, scale, extra: (0.0, 0.0) };
         let made = Instant::now();
-        let Some(mut widget) = Widget::new(contact, at, choice) else { return false };
+        let Some(mut widget) = Widget::new(contact, at, Content::Readings(Readings::new(choice))) else { return false };
         let made = made.elapsed();
         if made > SLOW_FRAME {
             note(format!("widget: made in {:.1} ms", made.as_secs_f32() * 1000.0));
@@ -578,6 +656,20 @@ impl Widgets {
             widget.behind = Some(Behind { capture, bitmap: Some(bitmap), former: None, tone, taken: Instant::now() });
             widget.replace = Some(false);
         }
+        widget.window.yield_to(self.settings);
+        unsafe { SetCapture(widget.window.hwnd) };
+        self.list.push(widget);
+        true
+    }
+
+    /// What plays torn off the panel's music lane: a music widget `size` large (DIPs) with its corner at `at`, in
+    /// hand, the pointer `grab` from its corner.
+    pub fn tear_music(&mut self, size: (f32, f32), at: POINT, grab: POINT) -> bool {
+        let Some(contact) = monitor_at(at) else { return false };
+        let Some(mut widget) = Widget::new(contact, at, Content::Music(MusicShown::new(size))) else { return false };
+        note("widget: what plays torn off the panel");
+        widget.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: true, moved: true });
+        widget.torn_from = Some((None, contact.monitor));
         widget.window.yield_to(self.settings);
         unsafe { SetCapture(widget.window.hwnd) };
         self.list.push(widget);
@@ -796,9 +888,15 @@ impl Widgets {
         widget.window.point(shape);
     }
 
-    /// Turns the process list under the pointer (`screen`, physical px) by the wheel's `delta`, as the panel's.
+    /// Turns the process list under the pointer (`screen`, physical px) by the wheel's `delta`, as the panel's; or
+    /// the lines of what plays.
     pub fn wheel(&mut self, hwnd: HWND, screen: POINT, delta: i16) {
         let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
+        if let Content::Music(shown) = &mut widget.content {
+            shown.music.wheel(delta);
+            widget.next_frame = Instant::now();
+            return;
+        }
         let mut client = screen;
         unsafe {
             let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
@@ -807,9 +905,9 @@ impl Widgets {
         let margin = widget.margin_px();
         let (x, y) = ((client.x - margin) as f32 / px - widget.hits_from.0, (client.y - margin) as f32 / px - widget.hits_from.1);
         let most = widget.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).and_then(|hit| hit.4.max_scroll());
-        if let Some(most) = most {
+        if let (Some(most), Content::Readings(readings)) = (most, &mut widget.content) {
             let rows = -(delta as f32) / 120.0 * crate::panel::WHEEL_ROWS;
-            widget.scroll_target = (widget.scroll_target + rows * view::TABLE_ROW).clamp(0.0, most);
+            readings.scroll_target = (readings.scroll_target + rows * view::TABLE_ROW).clamp(0.0, most);
             widget.next_frame = Instant::now();
         }
     }
@@ -1027,11 +1125,15 @@ struct Request {
     since: Instant,
 }
 
+/// What a music widget is kept as (in place of the readings' form: an older Glance, which has no such form, leaves it
+/// out rather than show something else).
+const MUSIC_FORM: &str = "music";
+
 /// Posted to a widget's window as a frame of what is behind it has come.
 pub const CAPTURED: u32 = WM_APP + 12;
 
 impl Widget {
-    fn new(contact: Contact, at: POINT, choice: Choice) -> Option<Self> {
+    fn new(contact: Contact, at: POINT, content: Content) -> Option<Self> {
         let gfx = gfx::current().ok()?;
         let window = Window::new().ok()?;
         let surface = Surface::new(&gfx, window.hwnd).ok();
@@ -1039,13 +1141,10 @@ impl Widget {
             window,
             gfx,
             surface,
-            layers: PanelLayers::default(),
+            content,
             showing: None,
-            scroll: 0.0,
-            scroll_target: 0.0,
             contact,
             at,
-            choice,
             room: None,
             settle: None,
             keeps_to: (false, false),
@@ -1054,8 +1153,6 @@ impl Widget {
             opacity: 1.0,
             stuck: None,
             along: None,
-            before: None,
-            before_size: None,
             margin: Theme::new(Skin::Paper, false).margin,
             anchor: None,
             pinned: false,
@@ -1063,10 +1160,6 @@ impl Widget {
             torn_from: None,
             game_only: false,
             on_desktop: false,
-            last: None,
-            morph: None,
-            drawn: Vec::new(),
-            morph_layer: Layer::default(),
             was_sized: false,
             hint: None,
             backdrop: None,
@@ -1084,7 +1177,6 @@ impl Widget {
             frost_shown: None,
             tone_due: false,
             frame_took: gfx::Took::default(),
-            taken: None,
             hover: false,
             hit_hover: None,
             lingered: None,
@@ -1106,28 +1198,35 @@ impl Widget {
     fn restore(kept: &WidgetAt) -> Option<Self> {
         let at = POINT { x: kept.at.0, y: kept.at.1 };
         let contact = monitor_at(at)?;
-        let choice = Choice::from_kept(&kept.layout)?;
-        let mut widget = Widget::new(contact, at, choice)?;
+        let content = match kept.layout.form.as_str() {
+            MUSIC_FORM => Content::Music(MusicShown::new(kept.size.unwrap_or(music::LEAST))),
+            _ => Content::Readings(Readings { before: kept.before.as_ref().and_then(Choice::from_kept), ..Readings::new(Choice::from_kept(&kept.layout)?) }),
+        };
+        let mut widget = Widget::new(contact, at, content)?;
         widget.pinned = kept.pinned;
         widget.click_through = kept.click_through;
         widget.game_only = kept.game_only;
         widget.on_desktop = kept.on_desktop;
         widget.window.set_on_desktop(widget.low());
         widget.stuck = kept.stuck.map(Side::from_kept);
-        widget.before = kept.before.as_ref().and_then(Choice::from_kept);
         Some(widget)
     }
 
     fn kept(&self) -> WidgetAt {
+        let (layout, before, size) = match &self.content {
+            Content::Readings(readings) => (readings.choice.kept(), readings.before.map(Choice::kept), None),
+            Content::Music(shown) => (crate::settings::PanelLayout { form: MUSIC_FORM.into(), scale: 1.0, extra: (0.0, 0.0) }, None, Some(shown.size)),
+        };
         WidgetAt {
             at: (self.at.x, self.at.y),
-            layout: self.choice.kept(),
+            layout,
             pinned: self.pinned,
             click_through: self.click_through,
             game_only: self.game_only,
             on_desktop: self.on_desktop,
             stuck: self.stuck.map(Side::kept),
-            before: self.before.map(Choice::kept),
+            before,
+            size,
         }
     }
 
@@ -1279,19 +1378,20 @@ impl Widget {
 
     /// Where each of its buttons is, whether it shows or not: in a row
     /// ending at its right edge.
-    fn buttons(&self) -> [(Point, Button); 5] {
+    fn buttons(&self) -> Vec<(Point, Button)> {
         let (w, h) = self.surface_size;
         let r = BUTTON / 2.0;
-        let count = buttons::ALL.len();
+        let row = self.content.buttons();
+        let count = row.len();
         let step = BUTTON + buttons::GAP;
         match self.rack() {
             Rack::Above | Rack::Under => {
                 let y = if self.rack() == Rack::Under { h + BUTTON_INSET + r } else { -BUTTON_INSET - r };
-                std::array::from_fn(|place| (Point { x: w - r - (count - 1 - place) as f32 * step, y }, buttons::ALL[place]))
+                row.iter().enumerate().map(|(place, button)| (Point { x: w - r - (count - 1 - place) as f32 * step, y }, *button)).collect()
             }
             Rack::Right | Rack::Left => {
                 let x = if self.rack() == Rack::Right { w + BUTTON_INSET + r } else { -BUTTON_INSET - r };
-                std::array::from_fn(|place| (Point { x, y: r + place as f32 * step }, buttons::ALL[place]))
+                row.iter().enumerate().map(|(place, button)| (Point { x, y: r + place as f32 * step }, *button)).collect()
             }
         }
     }
@@ -1300,7 +1400,7 @@ impl Widget {
     /// narrower than the row and tall enough, in a column down its right side (its left, where its screen has no
     /// room on the right).
     fn rack(&self) -> Rack {
-        let count = buttons::ALL.len() as f32;
+        let count = self.content.buttons().len() as f32;
         let row = count * BUTTON + (count - 1.0) * buttons::GAP;
         let (w, h) = self.surface_size;
         if w >= row || h < row {
@@ -1317,7 +1417,7 @@ impl Widget {
         let all = self.buttons();
         match (self.hover, self.click_through) {
             (false, _) => Vec::new(),
-            (true, false) => all.to_vec(),
+            (true, false) => all,
             (true, true) if self.lingered.is_some_and(|since| since.elapsed() >= buttons::LINGER) => all.into_iter().filter(|(_, button)| *button == Button::Through).collect(),
             (true, true) => Vec::new(),
         }
@@ -1365,7 +1465,9 @@ impl Widget {
             self.drag = Some(Drag::Size { edges, from, room, corner: self.at });
             self.keeps_to = (edges.0, edges.2);
             // (What showed is measured against the room it has now, at each sizing: not the room one long ago left.)
-            self.taken = None;
+            if let Content::Readings(readings) = &mut self.content {
+                readings.taken = None;
+            }
         } else {
             self.drag = Some(Drag::Move { grab: POINT { x: from.x - self.at.x, y: from.y - self.at.y }, trail: Vec::new(), torn: false, moved: false });
         }
@@ -1414,7 +1516,7 @@ impl Widget {
                 }
                 // Pulled away from the edge it was stuck to: as it was before,
                 // under the hand where it was taken.
-                if let (Some(side), Some(before)) = (self.stuck, self.before) {
+                if let Some(side) = self.stuck {
                     let work = self.contact.work;
                     let (w, h) = (self.surface_size.0 * self.zoom * scale, self.surface_size.1 * self.zoom * scale);
                     let away = match side {
@@ -1429,11 +1531,15 @@ impl Widget {
                         self.stuck = None;
                         self.along = None;
                         self.keeps_to = (false, false);
-                        self.before = None;
-                        self.choice = before;
-                        // The grab, at the same share of the size it had.
-                        if let Some(size) = self.before_size.take() {
-                            *grab = POINT { x: (gx * size.0 * scale) as i32, y: (gy * size.1 * scale) as i32 };
+                        // The readings as they were before (what plays is as it was all along), the grab at the same
+                        // share of the size they had.
+                        if let Content::Readings(readings) = &mut self.content {
+                            if let Some(before) = readings.before.take() {
+                                readings.choice = before;
+                            }
+                            if let Some(size) = readings.before_size.take() {
+                                *grab = POINT { x: (gx * size.0 * scale) as i32, y: (gy * size.1 * scale) as i32 };
+                            }
                         }
                     }
                 }
@@ -1529,9 +1635,15 @@ impl Widget {
                         // No button: what of its lanes is there (what plays, the sound).
                         None => {
                             let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
-                            match self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h) {
-                                Some((.., view::Hit::Media(key))) => crate::playing::act(crate::playing::Act::Key(*key)),
-                                Some((.., view::Hit::Drive(place))) => crate::panel::open_drive(*place),
+                            match self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4) {
+                                Some(view::Hit::Media(key)) => crate::playing::act(crate::playing::Act::Key(key)),
+                                Some(view::Hit::Drive(place)) => crate::panel::open_drive(place),
+                                Some(view::Hit::Line(index)) => {
+                                    music::play_line(index);
+                                    if let Content::Music(shown) = &mut self.content {
+                                        shown.music.back_to_now();
+                                    }
+                                }
                                 _ => {}
                             }
                             Released::Nothing
@@ -1562,21 +1674,24 @@ impl Widget {
         }
     }
 
-    /// Let go near an edge of its screen's work area: stuck to it, a rail
-    /// on a side, a strip at the top or bottom; already stuck, flush with
-    /// its edge again.
+    /// Let go near an edge of its screen's work area: stuck to it (the readings
+    /// as a rail on a side, a strip at the top or bottom; what plays as it
+    /// is); already stuck, flush with its edge again.
     fn stick(&mut self, now: Instant) {
         let near = self.nearest_side().filter(|(_, away)| *away < STICK).map(|(side, _)| side);
         let Some(side) = near.or(self.stuck) else { return };
         if self.stuck.is_none() {
             self.along = Some(self.middle_along(side));
-            self.before = Some(self.choice);
-            self.before_size = Some((self.surface_size.0 * self.zoom, self.surface_size.1 * self.zoom));
-            let small = match side {
-                Side::Left | Side::Right => Small::Rail,
-                Side::Top | Side::Bottom => Small::Strip { rich: false },
-            };
-            self.choice = Choice { form: Form::Small(small), scale: 1.0, extra: (0.0, 0.0) };
+            let size = (self.surface_size.0 * self.zoom, self.surface_size.1 * self.zoom);
+            if let Content::Readings(readings) = &mut self.content {
+                readings.before = Some(readings.choice);
+                readings.before_size = Some(size);
+                let small = match side {
+                    Side::Left | Side::Right => Small::Rail,
+                    Side::Top | Side::Bottom => Small::Strip { rich: false },
+                };
+                readings.choice = Choice { form: Form::Small(small), scale: 1.0, extra: (0.0, 0.0) };
+            }
             note(format!("widget: stuck to the {side:?} edge"));
             self.stuck = Some(side);
             self.settle = Some((now, self.surface_size));
@@ -1708,9 +1823,12 @@ impl Widget {
         self.last_frame = now;
         // Each part of a frame timed, and a slow one noted.
         let started = Instant::now();
+        let mut moving = self.drag.is_some() || self.settle.is_some();
         // Its process list turned on toward where the wheel turned it, as the panel's is.
-        self.scroll += (self.scroll_target - self.scroll) * (1.0 - std::f32::consts::E.powf(-dt / 1000.0 / crate::panel::SCROLL_EASE));
-        let mut moving = self.drag.is_some() || self.settle.is_some() || (self.scroll_target - self.scroll).abs() > 0.05;
+        if let Content::Readings(readings) = &mut self.content {
+            readings.scroll += (readings.scroll_target - readings.scroll) * (1.0 - std::f32::consts::E.powf(-dt / 1000.0 / crate::panel::SCROLL_EASE));
+            moving |= (readings.scroll_target - readings.scroll).abs() > 0.05;
+        }
         // Settling this frame (its last too): its far edges held.
         let settling = self.settle.is_some();
         // Flung: on along its way, slowing; gone once it has left the
@@ -1760,9 +1878,14 @@ impl Widget {
         }
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| look.skin.sees_backdrop()));
         let theme = Theme::new(look.skin, dark);
-        // Room round it for its shadow, and above it for its buttons.
-        self.margin = theme.margin.max(BUTTON + 2.0 * BUTTON_INSET);
-        let scene = view::Scene { hover: self.hit_hover, process_scroll: self.scroll, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
+        // Room round it for its shadow (the skin's; what plays, its own), and above it for its buttons.
+        let shadow = if matches!(self.content, Content::Music(_)) { MUSIC_SHADOW } else { theme.margin };
+        self.margin = shadow.max(BUTTON + 2.0 * BUTTON_INSET);
+        let process_scroll = match &self.content {
+            Content::Readings(readings) => readings.scroll,
+            Content::Music(_) => 0.0,
+        };
+        let scene = view::Scene { hover: self.hit_hover, process_scroll, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -1771,43 +1894,56 @@ impl Widget {
         // rest, as the readings step); else laid out for what it shows, or
         // for the room it is sized to.
         let only_moved = matches!(self.drag, Some(Drag::Move { .. })) || self.fling.is_some();
-        let shown = match self.last.clone().filter(|last| only_moved && last.form == self.choice.form) {
-            Some(last) => last,
-            None => {
-                let heights = view::heights(&scene);
-                let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
-                let readings = forms::count(&scene);
-                let want = match (self.room, &self.drag) {
-                    (Some(room), Some(Drag::Size { .. })) => {
-                        Want::Room(room, Some(self.taken.filter(|taken| taken.form == self.choice.form).unwrap_or(arrange::Shown { form: self.choice.form, taken: room })))
+        let sized_to = self.room.filter(|_| matches!(self.drag, Some(Drag::Size { .. })));
+        match &mut self.content {
+            Content::Readings(readings) => {
+                let shown = match readings.last.clone().filter(|last| only_moved && last.form == readings.choice.form) {
+                    Some(last) => last,
+                    None => {
+                        let heights = view::heights(&scene);
+                        let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
+                        let readings_count = forms::count(&scene);
+                        let want = match sized_to {
+                            Some(room) => Want::Room(room, Some(readings.taken.filter(|taken| taken.form == readings.choice.form).unwrap_or(arrange::Shown { form: readings.choice.form, taken: room }))),
+                            None => Want::Kept(readings.choice),
+                        };
+                        let opening = arrange::Opening::new(&theme, Edge::Right, &lanes, readings_count, work, None, 1.0, want, seen.clone());
+                        let Some(choice) = opening.choice else { return Frame::Rest };
+                        if let Some(room) = sized_to {
+                            readings.taken = Some(arrange::Shown::after(readings.taken, choice.form, room));
+                        }
+                        readings.choice = choice;
+                        Shown { form: choice.form, zoom: opening.zoom, size: opening.size, layout: opening.layout.clone(), small: opening.small(), detail: opening.detail() }
                     }
-                    _ => Want::Kept(self.choice),
                 };
-                let opening = arrange::Opening::new(&theme, Edge::Right, &lanes, readings, work, None, 1.0, want, seen.clone());
-                let Some(choice) = opening.choice else { return Frame::Rest };
-                if let Some(room) = self.room.filter(|_| matches!(self.drag, Some(Drag::Size { .. }))) {
-                    self.taken = Some(arrange::Shown::after(self.taken, choice.form, room));
+                self.zoom = shown.zoom;
+                self.shown = shown.size;
+                // Another layout: what showed turns into it, from where it is now if
+                // it was still turning.
+                if let Some(last) = readings.last.take().filter(|last| last.form != shown.form) {
+                    note(format!("widget: {} -> {}", last.form.key(), shown.form.key()));
+                    let before = if readings.morph.is_some() { Before::Drawn(std::mem::take(&mut readings.drawn)) } else { Before::Shown(last) };
+                    readings.morph = Some((now, before));
                 }
-                self.choice = choice;
-                Shown { form: choice.form, zoom: opening.zoom, size: opening.size, layout: opening.layout.clone(), small: opening.small(), detail: opening.detail() }
+                readings.last = Some(shown);
+                if readings.morph.as_ref().is_some_and(|(since, _)| now.duration_since(*since) >= MORPH) {
+                    readings.morph = None;
+                    readings.drawn.clear();
+                    readings.morph_layer.release();
+                }
+                moving |= readings.morph.is_some();
             }
-        };
-        self.zoom = shown.zoom;
-        self.shown = shown.size;
-        // Another layout: what showed turns into it, from where it is now if
-        // it was still turning.
-        if let Some(last) = self.last.take().filter(|last| last.form != shown.form) {
-            note(format!("widget: {} -> {}", last.form.key(), shown.form.key()));
-            let before = if self.morph.is_some() { Before::Drawn(std::mem::take(&mut self.drawn)) } else { Before::Shown(last) };
-            self.morph = Some((now, before));
+            // What plays is laid out for the room it is given (see `music::Layout`): as large as the hand makes it,
+            // down to the least it can be.
+            Content::Music(shown) => {
+                if let Some(room) = sized_to {
+                    shown.size = (room.0.max(music::LEAST.0), room.1.max(music::LEAST.1));
+                }
+                self.zoom = 1.0;
+                self.shown = shown.size;
+                moving |= shown.busy;
+            }
         }
-        self.last = Some(shown);
-        if self.morph.as_ref().is_some_and(|(since, _)| now.duration_since(*since) >= MORPH) {
-            self.morph = None;
-            self.drawn.clear();
-            self.morph_layer.release();
-        }
-        moving |= self.morph.is_some();
         // Its surface: the room the hand gives it, past what it shows only
         // part of the way; settling from that once let go; else what it shows.
         let give = |have: f32, fill: f32| if have <= fill { fill } else { fill + (have - fill) * GIVE };
@@ -1901,16 +2037,21 @@ impl Widget {
                     Side::Left | Side::Right => Small::Rail,
                     Side::Top | Side::Bottom => Small::Strip { rich: false },
                 };
-                // Laid out once for the side it nears.
+                // Laid out once for the side it nears (what plays, as large as it is).
                 let size = match self.hint_size.filter(|(near, _)| *near == side) {
                     Some((_, size)) => size,
                     None => {
-                        let heights = view::heights(&scene);
-                        let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
-                        let stuck = Want::Kept(Choice { form: Form::Small(small), scale: 1.0, extra: (0.0, 0.0) });
-                        let there = arrange::Opening::new(&theme, Edge::Right, &lanes, forms::count(&scene), work, None, 1.0, stuck, seen.clone());
                         let scale = self.contact.scale;
-                        let size = ((there.size.0 * there.zoom * scale) as i32, (there.size.1 * there.zoom * scale) as i32);
+                        let size = match &self.content {
+                            Content::Readings(_) => {
+                                let heights = view::heights(&scene);
+                                let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
+                                let stuck = Want::Kept(Choice { form: Form::Small(small), scale: 1.0, extra: (0.0, 0.0) });
+                                let there = arrange::Opening::new(&theme, Edge::Right, &lanes, forms::count(&scene), work, None, 1.0, stuck, seen.clone());
+                                ((there.size.0 * there.zoom * scale) as i32, (there.size.1 * there.zoom * scale) as i32)
+                            }
+                            Content::Music(shown) => ((shown.size.0 * scale) as i32, (shown.size.1 * scale) as i32),
+                        };
                         self.hint_size = Some((side, size));
                         size
                     }
@@ -1932,7 +2073,7 @@ impl Widget {
         // (On the device that draws now, before what is behind is awaited: one waited for on a device gone never
         // comes.)
         self.follow_device();
-        let sees = look.skin.sees_backdrop();
+        let sees = look.skin.sees_backdrop() && matches!(self.content, Content::Readings(_));
         let live = look.live && sees;
         if !sees {
             self.backdrop = None;
@@ -2042,7 +2183,7 @@ impl Widget {
         // been taken: a first frame drawn before that would show the other.
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| sees));
         let theme = if dark == theme.dark { theme } else { Theme::new(look.skin, dark) };
-        let scene = view::Scene { hover: self.hit_hover, process_scroll: self.scroll, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hit_hover, process_scroll, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, now);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
@@ -2054,7 +2195,7 @@ impl Widget {
         let whole = started.elapsed();
         if whole > SLOW_FRAME {
             let ms = |d: Duration| d.as_secs_f32() * 1000.0;
-            let form = self.choice.form.key();
+            let form = self.content.key();
             let took = self.frame_took;
             note_sparingly("slow", || {
                 format!("widget: a frame took {:.1} ms: laid out {:.1}, the desktop taken {:.1}, drawn {:.1} (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1}; {form})", ms(whole), ms(laid_out), ms(taken - laid_out), ms(whole - taken), ms(took.given), ms(took.painted), ms(took.handed))
@@ -2087,7 +2228,9 @@ impl Widget {
     }
 
     fn draw(&mut self, theme: &Theme, scene: &Scene, now: Instant) {
-        let Some(shown) = self.last.clone() else { return };
+        if matches!(&self.content, Content::Readings(Readings { last: None, .. })) {
+            return;
+        }
         if !self.follow_device() {
             return;
         }
@@ -2103,48 +2246,25 @@ impl Widget {
         // What it shows keeps to the sides not dragged; so does what it
         // showed, turning into it, at its own zoom.
         let keeps_to = self.keeps_to;
+        let zoom = self.zoom;
         let placed = |shown: &Shown| {
-            let k = shown.zoom / self.zoom;
+            let k = shown.zoom / zoom;
             (k, (if keeps_to.0 { size.0 - shown.size.0 * k } else { 0.0 }, if keeps_to.1 { size.1 - shown.size.1 * k } else { 0.0 }))
-        };
-        let lanes = view::lanes_at(scene, |_| shown.detail);
-        let turning = self.morph.as_ref().map(|(since, _)| morph::ease(now.duration_since(*since).as_secs_f32() / MORPH.as_secs_f32()));
-        let old = match &self.morph {
-            Some((_, Before::Shown(old))) => Some((view::lanes_at(scene, |_| old.detail), placed(old), old.clone())),
-            _ => None,
         };
         let halo = (theme.skin == Skin::Glass).then_some(theme.legibility);
         let (opacity, pinned, through, gfx) = (self.opacity, self.pinned, self.click_through, self.gfx.clone());
         let rough = matches!(self.drag, Some(Drag::Move { moved: true, .. })) || self.fling.is_some();
         let contact_scale = self.contact.scale;
         let offered = self.offered();
-        // Frosted as the desktop where it is now asks (its theme holds, as
-        // the panel's does): measured again as it moves a step.
-        let here = self.rect();
-        let step = (16.0 * contact_scale) as i32;
-        let target = match (&self.behind, self.frost_at) {
-            (None, _) => 0.0,
-            (Some(_), Some((at, frost))) if (at.left - here.left).abs() < step && (at.top - here.top).abs() < step && (at.right - here.right).abs() < step && (at.bottom - here.bottom).abs() < step => frost,
-            (Some(behind), _) => {
-                let (mean, spread) = behind.capture.luminance(here, contact_scale);
-                let frost = (skins::frost(mean, spread, theme.dark) * 20.0).round() / 20.0;
-                self.frost_at = Some((here, frost));
-                frost
-            }
+        let frost = match self.content {
+            Content::Readings(_) => self.frost(now, theme),
+            Content::Music(_) => 0.0,
         };
-        // Eased to it, not stepped: moved a little onto a busier or calmer part of the desktop, the glass frosts or
-        // clears over a moment rather than at once.
-        let frost = match self.frost_shown {
-            Some((shown, _, at)) => {
-                let step = now.saturating_duration_since(at).as_secs_f32() / FROST_EASE.as_secs_f32();
-                if target > shown { (shown + step).min(target) } else { (shown - step).max(target) }
-            }
-            None => target,
-        };
-        self.frost_shown = Some((frost, target, now));
+        // What plays: as its switches say, the pointer where it is over it (letting clicks through, it is not).
+        let shows = matches!(self.content, Content::Music(_)).then(|| Shows::from(&crate::app().settings.lock().unwrap().view));
+        let pointer = cursor_position().filter(|_| self.hover && !self.click_through).map(|c| ((c.x - self.at.x) as f32 / px, (c.y - self.at.y) as f32 / px));
         let behind = &mut self.behind;
-        let layers = &mut self.layers;
-        let (before, drawn, morph_layer) = (self.morph.as_mut().map(|(_, before)| before), &mut self.drawn, &mut self.morph_layer);
+        let content = &mut self.content;
         let Some(surface) = self.surface.as_mut() else { return };
         let pixels = ((window.right - window.left) as u32, (window.bottom - window.top) as u32);
         // Every layer of it drawn (see below).
@@ -2157,58 +2277,90 @@ impl Widget {
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
-            let backdrop = behind.as_mut().and_then(|behind| {
-                // Made once, at its screen's scale; its pixels then let go of
-                // (a screen's worth of memory).
-                if behind.bitmap.is_none() {
-                    if let Ok(bitmap) = behind.capture.bitmap_into(&frame.dc, contact_scale, behind.former.take().as_ref()) {
-                        behind.bitmap = Some((bitmap, contact_scale));
-                        behind.capture.forget_pixels();
+            let local = Matrix3x2::translation(margin, margin);
+            match content {
+                Content::Readings(readings) => {
+                    let Some(shown) = readings.last.clone() else { return };
+                    let lanes = view::lanes_at(scene, |_| shown.detail);
+                    let turning = readings.morph.as_ref().map(|(since, _)| morph::ease(now.duration_since(*since).as_secs_f32() / MORPH.as_secs_f32()));
+                    let old = match &readings.morph {
+                        Some((_, Before::Shown(old))) => Some((view::lanes_at(scene, |_| old.detail), placed(old), old.clone())),
+                        _ => None,
+                    };
+                    let backdrop = behind.as_mut().and_then(|behind| {
+                        // Made once, at its screen's scale; its pixels then let go of
+                        // (a screen's worth of memory).
+                        if behind.bitmap.is_none() {
+                            if let Ok(bitmap) = behind.capture.bitmap_into(&frame.dc, contact_scale, behind.former.take().as_ref()) {
+                                behind.bitmap = Some((bitmap, contact_scale));
+                                behind.capture.forget_pixels();
+                            }
+                        }
+                        let from = behind.capture.rect;
+                        let at = Vector2 { X: (window.left - from.left) as f32 / px + margin, Y: (window.top - from.top) as f32 / px + margin };
+                        Some((&behind.bitmap.as_ref()?.0, at, behind.capture.digest, px))
+                    });
+                    let at = (if keeps_to.0 { size.0 - shown.size.0 } else { 0.0 }, if keeps_to.1 { size.1 - shown.size.1 } else { 0.0 });
+                    let picture = render::Picture { scene, lanes: &lanes, layout: &shown.layout, small: shown.small.map(|small| (small, shown.size)), size, at, edge: None, backdrop, frost, rough };
+                    let (layers, before, drawn, morph_layer) = (&mut readings.layers, readings.morph.as_mut().map(|(_, before)| before), &mut readings.drawn, &mut readings.morph_layer);
+                    match (turning, before) {
+                        (Some(t), Some(before)) => {
+                            // Turning: the skin's ground as it is now, and over it each
+                            // reading between where it was and where it goes.
+                            if let Err(error) = layers.draw_ground(frame, &picture, local, px) {
+                                note(format!("widget: its ground not drawn: {error}"));
+                                whole = false;
+                            }
+                            if let Some((old_lanes, (k, old_at), old)) = &old {
+                                let small = old.small.map(|small| (small, old.size));
+                                *before = Before::Drawn(render::record(frame, scene, old_lanes, &old.layout, small, *k, *old_at));
+                            }
+                            let now_drawn = render::record(frame, scene, &lanes, &shown.layout, picture.small, 1.0, at);
+                            let Before::Drawn(from) = before else { return };
+                            let parts = morph::between(from, &now_drawn, t);
+                            // Within its frame: what is still on its way from a larger
+                            // layout does not spill past it.
+                            let area = (0.0, 0.0, size.0, size.1);
+                            let turned = morph_layer.draw(frame, t.to_bits() as u64 + 1, local, area, px, halo, |frame| {
+                                morph::draw(frame, &parts);
+                                Ok(())
+                            });
+                            if let Err(error) = turned {
+                                note(format!("widget: its turn between layouts not drawn: {error}"));
+                                whole = false;
+                            }
+                            *drawn = parts;
+                        }
+                        _ => {
+                            match layers.draw(frame, &picture, local, px) {
+                                // (Its readings drawn again: where each thing to press now is.)
+                                Ok(drawn) => pressed = drawn.hits.map(|hits| (hits, at)).or(pressed.take()),
+                                Err(error) => {
+                                    note(format!("widget: not drawn: {error}"));
+                                    whole = false;
+                                }
+                            }
+                        }
                     }
                 }
-                let from = behind.capture.rect;
-                let at = Vector2 { X: (window.left - from.left) as f32 / px + margin, Y: (window.top - from.top) as f32 / px + margin };
-                Some((&behind.bitmap.as_ref()?.0, at, behind.capture.digest, px))
-            });
-            let at = (if keeps_to.0 { size.0 - shown.size.0 } else { 0.0 }, if keeps_to.1 { size.1 - shown.size.1 } else { 0.0 });
-            let picture = render::Picture { scene, lanes: &lanes, layout: &shown.layout, small: shown.small.map(|small| (small, shown.size)), size, at, edge: None, backdrop, frost, rough };
-            let local = Matrix3x2::translation(margin, margin);
-            match (turning, before) {
-                (Some(t), Some(before)) => {
-                    // Turning: the skin's ground as it is now, and over it each
-                    // reading between where it was and where it goes.
-                    if let Err(error) = layers.draw_ground(frame, &picture, local, px) {
-                        note(format!("widget: its ground not drawn: {error}"));
-                        whole = false;
-                    }
-                    if let Some((old_lanes, (k, old_at), old)) = &old {
-                        let small = old.small.map(|small| (small, old.size));
-                        *before = Before::Drawn(render::record(frame, scene, old_lanes, &old.layout, small, *k, *old_at));
-                    }
-                    let now_drawn = render::record(frame, scene, &lanes, &shown.layout, picture.small, 1.0, at);
-                    let Before::Drawn(from) = before else { return };
-                    let parts = morph::between(from, &now_drawn, t);
-                    // Within its frame: what is still on its way from a larger
-                    // layout does not spill past it.
-                    let area = (0.0, 0.0, size.0, size.1);
-                    let turned = morph_layer.draw(frame, t.to_bits() as u64 + 1, local, area, px, halo, |frame| {
-                        morph::draw(frame, &parts);
+                // What plays, drawn anew in its layer (round it, the room for its shadow).
+                Content::Music(shown) => {
+                    let MusicShown { music, layer, frames, busy, .. } = shown;
+                    *frames += 1;
+                    let shows = shows.unwrap_or_else(|| Shows::from(&serde_json::Value::Null));
+                    let area = (-MUSIC_SHADOW, -MUSIC_SHADOW, size.0 + 2.0 * MUSIC_SHADOW, size.1 + 2.0 * MUSIC_SHADOW);
+                    let mut painted = None;
+                    let drew = layer.draw(frame, *frames, local, area, px, None, |frame| {
+                        painted = Some(music.paint(frame, size, &shows, px, pointer, now));
                         Ok(())
                     });
-                    if let Err(error) = turned {
-                        note(format!("widget: its turn between layouts not drawn: {error}"));
+                    if let Err(error) = drew {
+                        note(format!("widget: what plays not drawn: {error}"));
                         whole = false;
                     }
-                    *drawn = parts;
-                }
-                _ => {
-                    match layers.draw(frame, &picture, local, px) {
-                        // (Its readings drawn again: where each thing to press now is.)
-                        Ok(drawn) => pressed = drawn.hits.map(|hits| (hits, at)).or(pressed.take()),
-                        Err(error) => {
-                            note(format!("widget: not drawn: {error}"));
-                            whole = false;
-                        }
+                    if let Some(painted) = painted {
+                        *busy = painted.busy;
+                        pressed = Some((painted.hits, (0.0, 0.0)));
                     }
                 }
             }
@@ -2248,6 +2400,34 @@ impl Widget {
             crate::ui::tip::above();
         }
         self.shown_once |= whole;
+    }
+
+    /// How frosted its glass is drawn: as the desktop where it is now asks (its theme holds, as the panel's does),
+    /// measured again as it moves a step; eased to it, not stepped (moved a little onto a busier or calmer part of
+    /// the desktop, the glass frosts or clears over a moment rather than at once).
+    fn frost(&mut self, now: Instant, theme: &Theme) -> f32 {
+        let contact_scale = self.contact.scale;
+        let here = self.rect();
+        let step = (16.0 * contact_scale) as i32;
+        let target = match (&self.behind, self.frost_at) {
+            (None, _) => 0.0,
+            (Some(_), Some((at, frost))) if (at.left - here.left).abs() < step && (at.top - here.top).abs() < step && (at.right - here.right).abs() < step && (at.bottom - here.bottom).abs() < step => frost,
+            (Some(behind), _) => {
+                let (mean, spread) = behind.capture.luminance(here, contact_scale);
+                let frost = (skins::frost(mean, spread, theme.dark) * 20.0).round() / 20.0;
+                self.frost_at = Some((here, frost));
+                frost
+            }
+        };
+        let frost = match self.frost_shown {
+            Some((shown, _, at)) => {
+                let step = now.saturating_duration_since(at).as_secs_f32() / FROST_EASE.as_secs_f32();
+                if target > shown { (shown + step).min(target) } else { (shown - step).max(target) }
+            }
+            None => target,
+        };
+        self.frost_shown = Some((frost, target, now));
+        frost
     }
 
     fn menu(&self, lang: Lang) -> Option<WidgetChoice> {

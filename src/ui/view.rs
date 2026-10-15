@@ -205,6 +205,8 @@ pub enum Hit {
     Seek,
     /// A drive's row in the storage lane: the drive opened (by its place among the drives seen).
     Drive(u16),
+    /// A line of the lyrics turned to by the wheel (by its place among them): played from its start.
+    Line(u16),
 }
 
 impl Hit {

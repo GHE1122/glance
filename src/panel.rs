@@ -492,7 +492,7 @@ impl Controller {
             let layout = arrange::Choice { form: Form::Lanes { detail: Detail::Full, columns: 2 }, scale: 1.0, extra: (0.0, 0.0) }.kept();
             // Its corner, as near as can be told from its middle.
             let corner = (at.screen.0 - 356, at.screen.1 - 270);
-            widgets.adopt(crate::settings::WidgetAt { at: corner, layout, pinned: at.locked, click_through: false, game_only: false, on_desktop: false, stuck: None, before: None });
+            widgets.adopt(crate::settings::WidgetAt { at: corner, layout, pinned: at.locked, click_through: false, game_only: false, on_desktop: false, stuck: None, before: None, size: None });
             std::thread::spawn(|| crate::app().change(|settings| settings.panel_at = None));
         }
         let mut restore = false;
@@ -529,10 +529,6 @@ impl Controller {
                     }
                 }
                 if let Some(due) = settings_window::tick(now) {
-                    wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
-                }
-                // The lyrics' own windows, while they are wanted.
-                if let Some(due) = crate::ui::lyric_window::tick(now) {
                     wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
                 }
                 {
@@ -751,6 +747,9 @@ impl Controller {
                             panel.torn = false;
                             panel.exclude();
                         }
+                    }
+                    if let Some((size, at, grab)) = panel.tear_music.take() {
+                        widgets.tear_music(size, at, grab);
                     }
                 }
                 // The desktop widgets: pressed, let go (or found let go as the pointer moves: the button up unheard,
@@ -975,6 +974,9 @@ enum Phase {
 }
 
 /// Where the panel is, for the opening under way.
+/// How tall a music widget torn off the panel's music lane is (DIPs): a player's.
+const MUSIC_TORN_TALL: f32 = 170.0;
+
 struct Placement {
     contact: Contact,
     /// Where along the edge the panel centres: the pointer where it was
@@ -1229,6 +1231,9 @@ struct Panel<'a> {
     /// Torn off as it was dragged: the widget to make (its form, scale and
     /// corner on the screen, and where the hand holds it from that corner).
     tear: Option<(Form, f32, POINT, POINT)>,
+    /// What plays torn off its lane as it was dragged: the music widget to make (its size, DIPs, its corner on the
+    /// screen, and where the hand holds it from that corner). The panel stays.
+    tear_music: Option<((f32, f32), POINT, POINT)>,
     /// Torn off: to go once the widget is drawn.
     torn: bool,
     /// The presses the sensors' process had told when the panel last looked (one told since is a press, however
@@ -1317,6 +1322,7 @@ impl<'a> Panel<'a> {
             turn_layer: gfx::Layer::default(),
             bar: view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             tear: None,
+            tear_music: None,
             torn: false,
             presses_seen: 0,
             drag: None,
@@ -1971,6 +1977,19 @@ impl<'a> Panel<'a> {
                 return;
             }
             let Some(opening) = &self.opening else { return };
+            // Taken by its music lane: what plays, torn off alone (a music widget as wide as the lane, under the hand
+            // where it was taken; the panel stays).
+            let (x, y) = ((drag.from.x - placement.window.left) as f32 / placement.px - self.corner.0, (drag.from.y - placement.window.top) as f32 / placement.px - self.corner.1);
+            let music = opening.lane_ids().iter().zip(opening.layout.lanes()).find(|(id, lane)| *id == "lyrics" && x >= lane.x && x < lane.x + lane.w && y >= lane.y && y < lane.y + lane.h).map(|(_, lane)| lane);
+            if let Some(lane) = music {
+                let scale = placement.contact.scale;
+                let size = ((lane.w * placement.px / scale).max(crate::ui::music::LEAST.0), MUSIC_TORN_TALL);
+                let grab = POINT { x: (((x - lane.x) * placement.px / scale).min(size.0 - 8.0) * scale) as i32, y: (((y - lane.y) * placement.px / scale).min(size.1 - 8.0) * scale) as i32 };
+                let at = POINT { x: cursor.x - grab.x, y: cursor.y - grab.y };
+                self.tear_music = Some((size, at, grab));
+                self.end_drag();
+                return;
+            }
             let form = Form::Lanes { detail: Detail::Full, columns: opening.layout.columns };
             let at = POINT { x: placement.panel.left + dx, y: placement.panel.top + dy };
             self.tear = Some((form, opening.zoom, at, POINT { x: cursor.x - at.x, y: cursor.y - at.y }));

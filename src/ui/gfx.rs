@@ -1025,34 +1025,15 @@ impl<'a> Frame<'a> {
         unsafe { self.dc.DrawRoundedRectangle(&shape, self.brush(color), width, &self.gfx.dashed) };
     }
 
-    /// Where text laid out as `layout` at `y` is put: its first baseline on a whole pixel (see `whole_pixel`), where
-    /// it is drawn upright.
-    fn text_top(&self, layout: &IDWriteTextLayout, y: f32) -> f32 {
-        let baseline = first_row(layout).baseline;
-        let mut transform = Matrix3x2::default();
-        let mut dpi = (0.0, 0.0);
-        unsafe {
-            self.dc.GetTransform(&mut transform);
-            self.dc.GetDpi(&mut dpi.0, &mut dpi.1);
-        }
-        if transform.M12 != 0.0 || transform.M21 != 0.0 || transform.M22 == 0.0 {
-            return y;
-        }
-        let device = dpi.1 / 96.0;
-        (whole_pixel(((y + baseline) * transform.M22 + transform.M32) * device) / device - transform.M32) / transform.M22 - baseline
-    }
-
     /// Draws `text` in lines `width` wide, the first line's box at `(x, y)`.
     pub fn text_wrapped(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32) {
         let layout = self.gfx.wrapped(text, font, width);
-        let y = self.text_top(&layout, y);
         unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: x, Y: y }, &layout, self.brush(color), D2D1_DRAW_TEXT_OPTIONS_NONE) };
     }
 
     /// Draws `text` with its first baseline-box at `(x, y)`, in a box `width` wide.
     pub fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align) {
         let layout = self.gfx.layout(text, font, width, align);
-        let y = self.text_top(&layout, y);
         unsafe {
             self.dc.DrawTextLayout(
                 windows_numerics::Vector2 { X: x, Y: y },
@@ -1235,15 +1216,6 @@ impl Surface {
             }
         }
     }
-}
-
-/// The first row of what `layout` lays out (asked for with room for all of them: given less, none is told).
-pub fn first_row(layout: &IDWriteTextLayout) -> DWRITE_LINE_METRICS {
-    let mut count = 0;
-    let _ = unsafe { layout.GetLineMetrics(None, &mut count) };
-    let mut rows = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
-    let _ = unsafe { layout.GetLineMetrics(Some(&mut rows), &mut count) };
-    rows[0]
 }
 
 /// The whole pixel `at` (physical px) is put on: the nearest, a half going up; first taken to a 64th of a pixel,

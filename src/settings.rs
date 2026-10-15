@@ -168,6 +168,9 @@ pub struct WidgetAt {
     pub stuck: Option<WidgetSide>,
     #[serde(default)]
     pub before: Option<PanelLayout>,
+    /// How large it is (DIPs), where its size is its own (what plays) rather than its form's.
+    #[serde(default)]
+    pub size: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,37 +413,6 @@ pub struct Settings {
     pub panel_pinned: Option<(i32, i32)>,
     /// The desktop widgets torn off the panel.
     pub widgets: Vec<WidgetAt>,
-    /// Where the lyrics' own windows were put, the card and the subtitles (their corners, physical px).
-    #[serde(default)]
-    pub lyric_card: Option<(i32, i32)>,
-    #[serde(default)]
-    pub lyric_subtitle: Option<(i32, i32)>,
-    /// Their sizes (DIPs; none, as they come), whether each is pinned (neither moved nor sized), and whether the
-    /// floating lyrics let clicks through.
-    #[serde(default)]
-    pub lyric_card_size: Option<(f32, f32)>,
-    #[serde(default)]
-    pub lyric_subtitle_size: Option<(f32, f32)>,
-    #[serde(default)]
-    pub lyric_card_pinned: bool,
-    /// The player of middle size: where it was put (its corner, physical px), its size (DIPs), whether it is pinned.
-    #[serde(default)]
-    pub lyric_medium: Option<(i32, i32)>,
-    #[serde(default)]
-    pub lyric_medium_size: Option<(f32, f32)>,
-    #[serde(default)]
-    pub lyric_medium_pinned: bool,
-    /// The strip: where it was put (its corner, physical px), its size (DIPs), whether it is pinned.
-    #[serde(default)]
-    pub lyric_strip: Option<(i32, i32)>,
-    #[serde(default)]
-    pub lyric_strip_size: Option<(f32, f32)>,
-    #[serde(default)]
-    pub lyric_strip_pinned: bool,
-    #[serde(default)]
-    pub lyric_subtitle_pinned: bool,
-    #[serde(default)]
-    pub lyric_subtitle_through: bool,
     pub view: serde_json::Value,
 }
 
@@ -472,19 +444,6 @@ impl Default for Settings {
             panel_at: None,
             panel_pinned: None,
             widgets: Vec::new(),
-            lyric_card: None,
-            lyric_subtitle: None,
-            lyric_card_size: None,
-            lyric_subtitle_size: None,
-            lyric_card_pinned: false,
-            lyric_medium: None,
-            lyric_medium_size: None,
-            lyric_medium_pinned: false,
-            lyric_strip: None,
-            lyric_strip_size: None,
-            lyric_strip_pinned: false,
-            lyric_subtitle_pinned: false,
-            lyric_subtitle_through: false,
             view: serde_json::Value::Null,
         }
     }

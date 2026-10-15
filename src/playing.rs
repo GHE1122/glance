@@ -337,6 +337,17 @@ pub fn slide_along(slider: Slider, fraction: f32) {
     }
 }
 
+/// Where what plays's track is being dragged to (seconds), while it is (see `slide_along`).
+#[cfg(windows)]
+pub fn dragged_to() -> Option<f64> {
+    SEEKING.lock().unwrap().and_then(|(at, settling)| settling.is_none().then_some(at))
+}
+
+#[cfg(not(windows))]
+pub fn dragged_to() -> Option<f64> {
+    None
+}
+
 /// `slider` let go (`kept`: where it was left; else, the drag given up, as it was before).
 #[cfg(windows)]
 pub fn slid(slider: Slider, kept: bool) {
