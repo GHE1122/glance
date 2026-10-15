@@ -1228,13 +1228,30 @@ fn default_interface() -> Option<NetworkInfo> {
                     model: unsafe { a.Description.to_string() }.unwrap_or_default(),
                     ipv4,
                     link_bps: a.ReceiveLinkSpeed,
-                    wifi: unsafe { a.AdapterName.to_string() }.ok().and_then(|adapter| wifi_name(&adapter)),
+                    wifi: unsafe { a.AdapterName.to_string() }.ok().and_then(|adapter| wifi_name_on(&adapter, a.NetworkGuid)),
                 });
             }
             adapter = a.Next;
         }
         return None;
     }
+}
+
+/// The wireless network the adapter `adapter` is on, by its name, as `wifi_name` says; asked of Windows only as the
+/// adapter comes onto another network (`network`, Windows' identifier of the network it is on), else as it was. Windows
+/// counts each asking as a use of the PC's location (a network's name can tell where it is), and lists it so in its
+/// privacy settings: asked at each reading, that was every few seconds.
+fn wifi_name_on(adapter: &str, network: windows::core::GUID) -> Option<String> {
+    static KNOWN: std::sync::Mutex<Option<(String, windows::core::GUID, Option<String>)>> = std::sync::Mutex::new(None);
+    let mut known = KNOWN.lock().unwrap();
+    if let Some((on, of, name)) = known.as_ref() {
+        if on == adapter && *of == network {
+            return name.clone();
+        }
+    }
+    let name = wifi_name(adapter);
+    *known = Some((adapter.to_string(), network, name.clone()));
+    name
 }
 
 /// The wireless network the adapter `adapter` (its identifier, in braces, as Windows names adapters) is on, by
@@ -1433,11 +1450,14 @@ mod tests {
 
 #[cfg(test)]
 mod network_tests {
-    /// On a PC: the interface the default route goes through, and the wireless network it is on.
+    /// On a PC: the interface the default route goes through, and the wireless network it is on; read three times,
+    /// as at three readings (its name asked of Windows only the first time).
     #[test]
     #[ignore]
     fn says_the_default_interface() {
-        let found = super::default_interface();
-        println!("{:?}", found.map(|network| (network.name, network.ipv4.is_some(), network.link_bps, network.wifi)));
+        for _ in 0..3 {
+            let found = super::default_interface();
+            println!("{:?}", found.map(|network| (network.name, network.ipv4.is_some(), network.link_bps, network.wifi)));
+        }
     }
 }
