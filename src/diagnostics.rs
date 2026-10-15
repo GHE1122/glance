@@ -35,6 +35,14 @@ pub fn report() -> String {
         format!("PawnIO driver: {}", crate::elevation::pawnio_version().unwrap_or_else(|| "not installed".into())),
         format!("CPU: {} ({} threads)", info.cpu_name, info.threads),
         format!("Motherboard: {} {}", reg_string(bios, w!("BaseBoardManufacturer")), info.board),
+        // (A laptop's model is here: its maker gives its board a name shared by many of its models.)
+        format!(
+            "Machine: {} {} (family {}, version {})",
+            reg_string(bios, w!("SystemManufacturer")),
+            reg_string(bios, w!("SystemProductName")),
+            reg_string(bios, w!("SystemFamily")),
+            reg_string(bios, w!("SystemVersion"))
+        ),
         format!("Memory: {}", info.memory_modules.clone().unwrap_or_else(|| "unknown".into())),
     ];
     lines.extend(info.gpus.iter().map(|gpu| format!("GPU: {}", gpu.name)));
@@ -169,7 +177,17 @@ fn readings(sample: &Sample, info: &StaticInfo) -> Vec<String> {
     lines.extend(board.fans.iter().map(|(name, rpm)| format!("  {name}: {rpm:.0} RPM")));
     lines.push(format!("Memory module temperatures: {}", sample.dimm_temps.len()));
     lines.push(format!("Drive temperatures: {}", sample.drive_temps.len()));
-    lines.push(format!("Battery: {}", if sample.battery.is_some() { "present" } else { "none" }));
+    let yes = |b: bool| if b { "yes" } else { "no" };
+    lines.push(match &sample.battery {
+        Some(battery) => format!(
+            "Battery: {}%, plugged in {}, charging {}, power {}",
+            battery.percent,
+            yes(battery.plugged),
+            yes(battery.charging),
+            battery.watts.map_or("not said".to_string(), |watts| format!("{watts:.1} W"))
+        ),
+        None => "Battery: none".to_string(),
+    });
     lines
 }
 

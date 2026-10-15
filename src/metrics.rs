@@ -173,6 +173,9 @@ impl Sampler {
             format!("Memory sensors: {}", dimms.as_ref().map_or_else(|why| why.describe().to_string(), Dimms::describe)),
             format!("Laptop fans: {}", laptop_fans.as_ref().map_or_else(missing, LaptopFans::describe)),
         ];
+        if let Some(failed) = crate::pawnio::last_failure() {
+            found.push(format!("PawnIO, the last that failed: {failed}"));
+        }
         found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| {
             format!("GPU power, {}: {}", gpu.name, adapter.power.map_or("not available", gpu_power::Reader::describe))
         }));
