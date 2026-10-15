@@ -36,12 +36,14 @@ pub struct Playing {
     pub timeline: Option<(f64, f64)>,
     /// Whether the program lets it be moved along its track (see `seek`).
     pub seekable: bool,
+    /// How long ago the program last said how far in it is (seconds), where it says.
+    pub said_ago: Option<f64>,
 }
 
 /// How far into its track `session` is now, and how long the track is
 /// (seconds): where it was when the program last said, and, while it
 /// plays, on by the time since. None where the program does not say.
-fn timeline(session: &Session, playing: bool) -> Option<(f64, f64)> {
+fn timeline(session: &Session, playing: bool) -> Option<(f64, f64, f64)> {
     let told = session.GetTimelineProperties().ok()?;
     let ticks = |span: windows::Foundation::TimeSpan| span.Duration as f64 / 1e7;
     let (position, end) = (ticks(told.Position().ok()?), ticks(told.EndTime().ok()?));
@@ -52,7 +54,7 @@ fn timeline(session: &Session, playing: bool) -> Option<(f64, f64)> {
     let said = told.LastUpdatedTime().ok()?.UniversalTime as f64 / 1e7;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64() + 11_644_473_600.0;
     let since = if playing { (now - said).max(0.0) } else { 0.0 };
-    Some(((position + since).min(end), end))
+    Some(((position + since).min(end), end, (now - said).max(0.0)))
 }
 
 /// The one manager of the programs' media sessions, got the first time
@@ -145,6 +147,7 @@ fn told() -> Option<Playing> {
     let playing = info.as_ref().and_then(|info| info.PlaybackStatus().ok()).is_some_and(|status| status == Status::Playing);
     let seekable = info.and_then(|info| info.Controls().ok()).and_then(|controls| controls.IsPlaybackPositionEnabled().ok()).unwrap_or(false);
     let app_id = session.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default();
+    let timeline = timeline(&session, playing);
     Some(Playing {
         title,
         artist: about.Artist().map(|artist| artist.to_string()).unwrap_or_default(),
@@ -155,7 +158,8 @@ fn told() -> Option<Playing> {
         app: shown(&app_id).unwrap_or_default(),
         app_id,
         playing,
-        timeline: timeline(&session, playing),
+        timeline: timeline.map(|(at, end, _)| (at, end)),
+        said_ago: timeline.map(|(_, _, ago)| ago),
         seekable,
     })
 }
@@ -272,7 +276,7 @@ fn heard() -> Option<Playing> {
     *heard = Some(name.clone());
     // As its file describes it; one that does not say, by its file's name.
     let app = programs.iter().find(|(program, _, _)| *program == name).and_then(|(_, path, _)| described(path)).unwrap_or(name);
-    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None, seekable: false })
+    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None, seekable: false, said_ago: None })
 }
 
 /// What is playing (or paused); none, when nothing is.

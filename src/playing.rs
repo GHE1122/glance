@@ -156,7 +156,16 @@ fn look() -> Option<std::time::Duration> {
     if let (Some(at), Some((position, _))) = (seeking, playing.as_mut().and_then(|playing| playing.timeline.as_mut())) {
         *position = at;
     }
+    let was = *POSITION.lock().unwrap();
     *POSITION.lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, std::time::Instant::now(), playing.playing)));
+    // Paused since it was last looked at: where it was reckoned to be then, and where its player says it stopped
+    // (for the journal: a line sung that moves as it pauses, told apart from the player's own saying).
+    if let (Some((at, when, true)), Some(now)) = (was, playing.as_ref().filter(|playing| !playing.playing)) {
+        if let Some((said, _)) = now.timeline {
+            let reckoned = at + when.elapsed().as_secs_f64();
+            crate::journal::note(format!("media: paused: reckoned at {reckoned:.2} s, {} says {said:.2} s, said {:.2} s ago", now.app, now.said_ago.unwrap_or(-1.0)));
+        }
+    }
     let timeline = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, length)| Timeline { at: at.floor(), length, seekable: playing.seekable }));
     let sound = crate::actions::volume();
     let (sung, next) = match playing.as_ref().filter(|playing| LYRICS.load(Ordering::Relaxed) && !playing.title.is_empty()) {
