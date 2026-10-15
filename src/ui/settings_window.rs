@@ -892,6 +892,10 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         // the keys of a shortcut being chosen for itself (they come as
         // VK_PROCESSKEY while it is on).
         let _ = ImmAssociateContextEx(hwnd, HIMC::default(), 0);
+        // Shown as drawn, at once: not faded and grown in by the system, which showed it for a moment as a grey
+        // shape (its material not yet in place) before what was drawn.
+        let still = BOOL::from(true);
+        let _ = DwmSetWindowAttribute(hwnd, windows::Win32::Graphics::Dwm::DWMWA_TRANSITIONS_FORCEDISABLED, &still as *const _ as *const _, size_of::<BOOL>() as u32);
         // Mica, the Windows 11 window material, where the system has it: the
         // window's content leaves it showing through.
         let mica = windows_build() >= FIRST_MICA_BUILD;
