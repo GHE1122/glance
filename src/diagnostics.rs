@@ -35,12 +35,22 @@ pub fn report() -> String {
         format!("PawnIO driver: {}", crate::elevation::pawnio_version().unwrap_or_else(|| "not installed".into())),
         format!("CPU: {} ({} threads)", info.cpu_name, info.threads),
         format!("Motherboard: {} {}", reg_string(bios, w!("BaseBoardManufacturer")), info.board),
+        // (A laptop's model is here: its maker gives its board a name shared by many of its models.)
+        format!(
+            "Machine: {} {} (family {}, version {})",
+            reg_string(bios, w!("SystemManufacturer")),
+            reg_string(bios, w!("SystemProductName")),
+            reg_string(bios, w!("SystemFamily")),
+            reg_string(bios, w!("SystemVersion"))
+        ),
         format!("Memory: {}", info.memory_modules.clone().unwrap_or_else(|| "unknown".into())),
     ];
     lines.extend(info.gpus.iter().map(|gpu| format!("GPU: {}", gpu.name)));
     lines.extend(info.found.iter().cloned());
     lines.extend(crate::source::sensor_lines());
-    let log = crate::journal::recent(15);
+    lines.extend(crate::drives::describe());
+    // (Enough to see what led up to a fault, well within what a report may hold.)
+    let log = crate::journal::recent(80);
     lines.push(format!("Recent log ({} lines):", log.len()));
     lines.extend(log.into_iter().map(|line| format!("  {line}")));
     // What the phone remote finds, where it is there: the lights, the monitors, what else it sets.
@@ -90,9 +100,9 @@ pub fn sensor_lines() -> Vec<String> {
     if let Some(later) = crate::superio::found_later() {
         lines.push(format!("Motherboard chip, looked for again: {later}"));
     }
-    let (reads, missed) = crate::superio::reads();
+    let (reads, missed, relocked) = crate::superio::reads();
     if reads > 0 {
-        lines.push(format!("Motherboard chip reads: {reads}, the bus another program's all the while at {missed}"));
+        lines.push(format!("Motherboard chip reads: {reads}, the bus another program's all the while at {missed}, its monitor found locked again by another program and unlocked {relocked} times"));
     }
     // Other programs that read the board or light it, running now: they share the bus Glance reads the board by.
     let sharing = sharing_the_bus();
@@ -167,7 +177,17 @@ fn readings(sample: &Sample, info: &StaticInfo) -> Vec<String> {
     lines.extend(board.fans.iter().map(|(name, rpm)| format!("  {name}: {rpm:.0} RPM")));
     lines.push(format!("Memory module temperatures: {}", sample.dimm_temps.len()));
     lines.push(format!("Drive temperatures: {}", sample.drive_temps.len()));
-    lines.push(format!("Battery: {}", if sample.battery.is_some() { "present" } else { "none" }));
+    let yes = |b: bool| if b { "yes" } else { "no" };
+    lines.push(match &sample.battery {
+        Some(battery) => format!(
+            "Battery: {}%, plugged in {}, charging {}, power {}",
+            battery.percent,
+            yes(battery.plugged),
+            yes(battery.charging),
+            battery.watts.map_or("not said".to_string(), |watts| format!("{watts:.1} W"))
+        ),
+        None => "Battery: none".to_string(),
+    });
     lines
 }
 

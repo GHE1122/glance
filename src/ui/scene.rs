@@ -47,8 +47,8 @@ use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerforma
 use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, GetWindowRect, IsIconic, IsWindowVisible, RegisterClassW, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, GetShellWindow, GetWindowRect, IsIconic, IsWindowVisible, RegisterClassW, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP,
 };
 
 use super::backdrop::{Capture, Spare, Texture};
@@ -82,7 +82,8 @@ impl Device {
 /// What a scene's frames meet as they come, on whatever thread they come on.
 struct Shared {
     /// What its frames are of: the area, when it was last arranged anew (the system's clock of frames, in 100 ns:
-    /// a frame from before is of what was there before), and where in it the windows behind are put.
+    /// a frame from before is of what was there before), and where in it nothing may be clear once what is behind
+    /// is put in (see `keep`).
     of: Mutex<(RECT, i64, Vec<RECT>)>,
     /// The latest frame come and not read (none was wanted as it came).
     latest: Mutex<Option<Direct3D11CaptureFrame>>,
@@ -129,6 +130,13 @@ impl Shared {
                 return None;
             }
             let texture: ID3D11Texture2D = unsafe { frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface() }.ok()?;
+            // (Its texture as large too: a pool not made larger as its window was keeps smaller ones, and what lies
+            // past a texture is not copied.)
+            let mut made = D3D11_TEXTURE2D_DESC::default();
+            unsafe { texture.GetDesc(&mut made) };
+            if made.Width < width as u32 || made.Height < height as u32 {
+                return None;
+            }
             let (kept, luma) = keep(&self.device, &mut self.halves.lock().unwrap(), &self.spare, &texture, width as u32, height as u32, area, &covered)?;
             let taken = self.taken.fetch_add(1, Ordering::Relaxed) + 1;
             Some(Capture::from_texture(area, Texture { texture: kept, spare: self.spare.clone() }, luma, taken))
@@ -154,11 +162,13 @@ impl Shared {
 /// square, through `halves`: made, or made anew, for that size).
 ///
 /// None where the frame was put together before the windows behind were (the compositor puts them in a frame or
-/// so after it is asked, and says nothing of it): somewhere one of them is put (`covered`, screen coordinates, the
-/// frame's top left at `area`'s), it holds nothing at all. Once they are put, nothing there is clear: the desktop's
-/// own window is under all the others.
+/// so after it is asked, and says nothing of it, and a frame from just before holds the scene's own window: nothing,
+/// clear). Told by `opaque` (screen coordinates; the frame's top left at `area`'s): where the desktop's own window is
+/// put and a screen is, which is wholly clear in such a frame and wholly opaque once it is put in (whatever the
+/// windows over it are; a live wallpaper is drawn in it too). Wholly clear there, it is passed over: what the card
+/// made of each square of two by two pixels is clear only where all four are, wherever its squares fall.
 #[allow(clippy::too_many_arguments)]
-fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, texture: &ID3D11Texture2D, width: u32, height: u32, area: RECT, covered: &[RECT]) -> Option<(ID3D11Texture2D, Vec<u8>)> {
+fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, texture: &ID3D11Texture2D, width: u32, height: u32, area: RECT, opaque: &[RECT]) -> Option<(ID3D11Texture2D, Vec<u8>)> {
     unsafe {
         let make = |description: &D3D11_TEXTURE2D_DESC| -> Option<ID3D11Texture2D> {
             let mut made = None;
@@ -238,7 +248,8 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
         // As `Capture::from_pixels` reads it: a square for each two pixels each way, rounded up.
         let (columns, down) = ((width as usize).div_ceil(2), (height as usize).div_ceil(2));
         let mut luma = Vec::with_capacity(columns * down);
-        let mut whole = true;
+        // (Whether any square there was looked at, and whether any held anything.)
+        let (mut looked, mut held) = (false, false);
         for y in 0..down {
             let line = std::slice::from_raw_parts((mapped.pData as *const u8).add(y.min(rows - 1) * mapped.RowPitch as usize), row_width * 4);
             // (Each square's middle, on the screen.)
@@ -247,14 +258,17 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
                 let i = x.min(row_width - 1) * 4;
                 let lightness = (0.2126 * line[i + 2] as f64 + 0.7152 * line[i + 1] as f64 + 0.0722 * line[i] as f64) / 255.0;
                 luma.push((lightness * 255.0).round() as u8);
-                if line[i + 3] == 0 && whole {
-                    let screen_x = area.left + (2 * x.min(row_width - 1)) as i32 + 1;
-                    whole = !covered.iter().any(|rect| screen_x >= rect.left && screen_x < rect.right && screen_y >= rect.top && screen_y < rect.bottom);
+                if !held {
+                    let screen_x = area.left + (2 * x.min(row_width - 1)) as i32;
+                    if opaque.iter().any(|rect| screen_x >= rect.left && screen_x + 2 <= rect.right && screen_y - 1 >= rect.top && screen_y + 1 <= rect.bottom) {
+                        looked = true;
+                        held = line[i + 3] > 0;
+                    }
                 }
             }
         }
         context.Unmap(staging, 0);
-        if !whole {
+        if looked && !held {
             // (The texture it was copied into, spare again.)
             drop(Texture { texture: kept, spare: spare.clone() });
             return None;
@@ -377,6 +391,11 @@ fn meet(a: RECT, b: RECT) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
+/// Where `a` and `b` meet, if they do.
+fn meeting(a: RECT, b: RECT) -> Option<RECT> {
+    meet(a, b).then(|| RECT { left: a.left.max(b.left), top: a.top.max(b.top), right: a.right.min(b.right), bottom: a.bottom.min(b.bottom) })
+}
+
 impl Scene {
     /// A scene standing for `area`, its frames made on `gfx`'s device, empty till it is arranged; `wake` is called
     /// (on another thread) as a frame wanted has been read (see `ready`), and as one comes unwanted after none had
@@ -465,10 +484,20 @@ impl Scene {
         if same_windows && area == self.area && behind.iter().zip(&self.shown).all(|((_, a), (.., b))| a == b) {
             return false;
         }
+        // Where the desktop's own window will be put, on a screen (see `keep`): worked out before anything is put in
+        // place, so that nothing comes between the last of that and when frames count from. (Between screens it
+        // holds nothing. Not behind, as while Explorer is not running: nothing then tells such a frame.)
+        let shell = unsafe { GetShellWindow() };
+        let opaque: Vec<RECT> = behind.iter().find(|(window, _)| *window == shell).map_or_else(Vec::new, |(_, desktop)| {
+            crate::screens::monitors().into_iter().filter_map(|monitor| meeting(meeting(*desktop, monitor)?, area)).collect()
+        });
         let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
         if area != self.area {
+            // (Only moved, where its size is as it was: sizing a window costs more.)
+            let same_size = (area.right - area.left, area.bottom - area.top) == (self.area.right - self.area.left, self.area.bottom - self.area.top);
+            let flags = SWP_NOACTIVATE | SWP_NOZORDER | if same_size { SWP_NOSIZE } else { Default::default() };
             unsafe {
-                let _ = SetWindowPos(self.window, None, area.left, area.top, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+                let _ = SetWindowPos(self.window, None, area.left, area.top, width, height, flags);
             }
             self.area = area;
         }
@@ -491,13 +520,16 @@ impl Scene {
             }
         }
         // Frames from before all of it was in place are not of what is there now (one may be put together while it
-        // is being put in place).
-        let covered = self.shown.iter().map(|(.., rect)| *rect).collect();
-        *self.shared.of.lock().unwrap() = (area, now_100ns(), covered);
-        // (Nor what was read of it before and not taken yet.)
-        *self.shared.ready.lock().unwrap() = None;
-        close(self.shared.latest.lock().unwrap().take());
-        self.shared.resting.store(false, Ordering::Release);
+        // is being put in place); nor what was read of it before and not taken yet. Cleared and made so under one
+        // lock, as what reads a frame looks and hands on under it: one read meanwhile is of before, or kept.
+        let from = now_100ns();
+        {
+            let mut of = self.shared.of.lock().unwrap();
+            *self.shared.ready.lock().unwrap() = None;
+            close(self.shared.latest.lock().unwrap().take());
+            *of = (area, from, opaque);
+            self.shared.resting.store(false, Ordering::Release);
+        }
         true
     }
 
@@ -514,7 +546,11 @@ impl Scene {
         self.shared.wanted.store(false, Ordering::Release);
         close(self.shared.latest.lock().unwrap().take());
         *self.shared.ready.lock().unwrap() = None;
-        *self.shared.halves.lock().unwrap() = None;
+        // (Not while a frame is read through them on another thread, which can wait a while on the card: the
+        // thread that draws never waits on it. Let go of at the next rest, or with the scene.)
+        if let Ok(mut halves) = self.shared.halves.try_lock() {
+            *halves = None;
+        }
         self.shared.spare.0.lock().unwrap().clear();
         unsafe {
             let _ = SetWindowPos(self.window, None, least.left, least.top, 1, 1, SWP_NOACTIVATE | SWP_NOZORDER);
@@ -552,7 +588,11 @@ impl Scene {
         let _ = self.pool.RemoveFrameArrived(self.arrived);
         close(self.shared.latest.lock().unwrap().take());
         *self.shared.ready.lock().unwrap() = None;
-        *self.shared.halves.lock().unwrap() = None;
+        // (Not while a frame is read through them on another thread, which can wait a while on the card: the
+        // thread that draws never waits on it. Let go of at the next rest, or with the scene.)
+        if let Ok(mut halves) = self.shared.halves.try_lock() {
+            *halves = None;
+        }
         self.shared.spare.0.lock().unwrap().clear();
     }
 
@@ -653,13 +693,16 @@ mod tests {
             }
         };
         let mut means = Vec::new();
+        let mut arranged = Vec::new();
         for step in 0..60 {
             let (x, grow) = (100 + (step % 7) * 53, (step % 5) * 61);
             let area = RECT { left: x, top: 100 + grow / 2, right: x + 300 + grow, bottom: 300 + grow };
             if step % 10 == 9 {
                 scene.rest();
             }
+            let arranging = std::time::Instant::now();
             scene.arrange(area, all[0]);
+            arranged.push(arranging.elapsed().as_secs_f64() * 1000.0);
             let began = std::time::Instant::now();
             scene.want();
             let mut capture = None;
@@ -676,6 +719,8 @@ mod tests {
             means.push(seen.iter().sum::<f32>() / seen.len() as f32);
         }
         let dark = means.iter().filter(|mean| (0.0..0.02).contains(*mean)).count();
+        arranged.sort_by(f64::total_cmp);
+        println!("arranging took {:.2} ms at the median, {:.2} at most", arranged[arranged.len() / 2], arranged[arranged.len() - 1]);
         println!("first frames: {dark} of {} dark; none {}; {:?}", means.len(), means.iter().filter(|m| **m < 0.0).count(), means.iter().map(|m| (m * 100.0).round() as i32).collect::<Vec<_>>());
     }
 
@@ -704,6 +749,13 @@ mod tests {
             };
             let changed = scene.arrange(area, over);
             println!("{name}: arranged {changed}, {} thumbnails, area {:?}, frames {}x{}", scene.shown.len(), scene.area, scene.size.Width, scene.size.Height);
+            for (window, _, rect) in &scene.shown {
+                let mut title = [0u16; 80];
+                let n = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(*window, &mut title) };
+                let mut class = [0u16; 80];
+                let c = unsafe { windows::Win32::UI::WindowsAndMessaging::GetClassNameW(*window, &mut class) };
+                println!("   behind: {:?} [{}] {:?}", String::from_utf16_lossy(&title[..n as usize]), String::from_utf16_lossy(&class[..c as usize]), rect);
+            }
             let arranged = std::time::Instant::now();
             for taken in 0..3 {
                 let began = std::time::Instant::now();

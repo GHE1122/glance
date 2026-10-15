@@ -82,8 +82,11 @@ impl GpuPower {
         match reader {
             Reader::Intel(index) => self.igcl.as_ref()?.more(index),
             Reader::Nvidia(index) => {
-                let at = self.nvml.as_ref()?.devices.get(index)?.0;
-                Some(More { hot_spot: self.nvapi.as_ref()?.hot_spot(at), ..More::default() })
+                let nvml = self.nvml.as_ref()?;
+                let at = nvml.devices.get(index)?.0;
+                // Its fans standing still: none turning, not unread (Windows' adapter data has no word for that).
+                let fan_rpm = nvml.fans_still(index).filter(|still| *still).map(|_| 0);
+                Some(More { hot_spot: self.nvapi.as_ref().and_then(|nvapi| nvapi.hot_spot(at)), fan_rpm, ..More::default() })
             }
             Reader::Amd(index) => Some(More { hot_spot: self.adl.as_ref()?.hot_spot(index), ..More::default() }),
         }
@@ -172,6 +175,9 @@ struct Nvml {
     /// The reasons the clock is held back; absent from drivers before NVML
     /// had them.
     clock_reasons: Option<unsafe extern "C" fn(NvmlDevice, *mut u64) -> i32>,
+    /// How many fans a card has, and each one's speed (a share of its most); absent from drivers before NVML had
+    /// them.
+    fans: Option<(unsafe extern "C" fn(NvmlDevice, *mut u32) -> i32, unsafe extern "C" fn(NvmlDevice, u32, *mut u32) -> i32)>,
     shutdown: unsafe extern "C" fn() -> i32,
     /// Every card, by where it sits (a card's GPU is function 0).
     devices: Vec<(PciAddress, NvmlDevice)>,
@@ -197,6 +203,7 @@ impl Nvml {
         // Named "throttle" reasons before driver 535 ("clocks event" since).
         let clock_reasons = unsafe { export(library, s!("nvmlDeviceGetCurrentClocksEventReasons")) }
             .or_else(|| unsafe { export(library, s!("nvmlDeviceGetCurrentClocksThrottleReasons")) });
+        let fans = unsafe { export(library, s!("nvmlDeviceGetNumFans")) }.zip(unsafe { export(library, s!("nvmlDeviceGetFanSpeed_v2")) });
         if unsafe { init() } != NVML_SUCCESS {
             return None;
         }
@@ -211,13 +218,33 @@ impl Nvml {
                 }
             }
         }
-        Some(Nvml { library, power_usage, clock_reasons, shutdown, devices })
+        Some(Nvml { library, power_usage, clock_reasons, fans, shutdown, devices })
     }
 
     fn power(&self, index: usize) -> Option<f32> {
         let mut milliwatts = 0u32;
         let read = unsafe { (self.power_usage)(self.devices.get(index)?.1, &mut milliwatts) };
         (read == NVML_SUCCESS).then(|| milliwatts as f32 / 1000.0)
+    }
+
+    /// Whether the card's fans are all standing still (as a card's do while it is cool, at rest), where it says it
+    /// has fans; none where it has none, or does not say.
+    fn fans_still(&self, index: usize) -> Option<bool> {
+        let (count, speed) = self.fans?;
+        let device = self.devices.get(index)?.1;
+        let mut fans = 0u32;
+        if unsafe { count(device, &mut fans) } != NVML_SUCCESS || fans == 0 {
+            return None;
+        }
+        let mut still = true;
+        for fan in 0..fans {
+            let mut share = 0u32;
+            if unsafe { speed(device, fan, &mut share) } != NVML_SUCCESS {
+                return None;
+            }
+            still &= share == 0;
+        }
+        Some(still)
     }
 
     fn limit(&self, index: usize) -> Option<GpuLimit> {
@@ -702,6 +729,16 @@ impl Drop for Igcl {
 
 #[cfg(test)]
 mod tests {
+    /// What NVML says of this PC's cards' fans: `cargo test --lib -- --ignored says_the_fans --nocapture`.
+    #[test]
+    #[ignore = "asks this PC's driver"]
+    fn says_the_fans() {
+        let Some(nvml) = super::Nvml::open() else { return println!("no NVML") };
+        for index in 0..nvml.devices.len() {
+            println!("card {index}: fans still {:?}", nvml.fans_still(index));
+        }
+    }
+
     #[test]
     fn lays_out_intels_structures() {
         use super::*;

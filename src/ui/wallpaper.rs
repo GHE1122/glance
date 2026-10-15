@@ -130,7 +130,10 @@ fn print() -> Option<Printed> {
         let previous = SelectObject(memory, bitmap.into());
         let printed = Printed { memory, bitmap, previous, bits: bits as *const u8, at };
         // Full content: what DirectX draws in it too, as the screen shows it.
-        PrintWindow(layer, memory, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool().then_some(printed)
+        let done = PrintWindow(layer, memory, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool();
+        // (What GDI has yet to do in the bitmap, done before its bits are read.)
+        let _ = windows::Win32::Graphics::Gdi::GdiFlush();
+        done.then_some(printed)
     }
 }
 

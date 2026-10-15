@@ -28,10 +28,26 @@ pub struct Module {
 // The handle is the driver's; calls on it are independent of the thread.
 unsafe impl Send for Module {}
 
+/// How the last module that could not be loaded failed (the driver not opened, or the module not loaded, and why),
+/// for a report.
+static FAILED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn last_failure() -> Option<String> {
+    FAILED.lock().unwrap().clone()
+}
+
 impl Module {
     /// Loads a compiled module. Fails if the driver is not installed, the
     /// process may not open it, or the module does not support this machine.
     pub fn load(blob: &[u8]) -> windows::core::Result<Self> {
+        let loaded = Self::loaded(blob);
+        if let Err((step, error)) = &loaded {
+            *FAILED.lock().unwrap() = Some(format!("{step}: {error}"));
+        }
+        loaded.map_err(|(_, error)| error)
+    }
+
+    fn loaded(blob: &[u8]) -> Result<Self, (&'static str, windows::core::Error)> {
         let handle = unsafe {
             CreateFileW(
                 w!(r"\\?\GLOBALROOT\Device\PawnIO"),
@@ -42,7 +58,8 @@ impl Module {
                 FILE_FLAGS_AND_ATTRIBUTES(0),
                 None,
             )
-        }?;
+        }
+        .map_err(|error| ("the driver not opened", error))?;
         let module = Module { handle };
         // A synchronous call has to be given somewhere to say how much it
         // returned, even when it returns nothing.
@@ -58,7 +75,8 @@ impl Module {
                 Some(&mut returned),
                 None,
             )
-        }?;
+        }
+        .map_err(|error| ("a module not loaded", error))?;
         Ok(module)
     }
 

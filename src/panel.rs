@@ -198,6 +198,8 @@ pub struct Controller {
     shown: AtomicBool,
     /// A desktop widget was put away this session (the tray offers it back).
     widget_put_away: AtomicBool,
+    /// Whether a widget on the screen shows the process list (read afresh each sample then, as while the panel is).
+    widget_processes: AtomicBool,
 }
 
 impl Controller {
@@ -212,6 +214,7 @@ impl Controller {
             sink: AtomicIsize::new(0),
             shown: AtomicBool::new(false),
             widget_put_away: AtomicBool::new(false),
+            widget_processes: AtomicBool::new(false),
         }
     }
 
@@ -357,6 +360,10 @@ impl Controller {
     }
 
     /// Whether a desktop widget was put away that can be brought back.
+    pub fn widget_processes(&self) -> bool {
+        self.widget_processes.load(Ordering::Relaxed)
+    }
+
     pub fn widget_put_away(&self) -> bool {
         self.widget_put_away.load(Ordering::Relaxed)
     }
@@ -540,6 +547,7 @@ impl Controller {
                         }
                     }
                     self.widget_put_away.store(widgets.any_put_away(), Ordering::Relaxed);
+                    self.widget_processes.store(widgets.any_showing_processes(), Ordering::Relaxed);
                 }
                 if let Some(point) = pinned_at.filter(|_| !self.history.lock().unwrap().is_empty()) {
                     pinned_at = None;
@@ -1239,6 +1247,9 @@ struct Panel<'a> {
     /// A capture of the desktop behind under way on another thread (see
     /// `take_behind`).
     capturing: Option<PanelRequest>,
+    /// Without live refraction, a frame taken: till when another is looked for before the scene rests (see
+    /// `collect_behind`).
+    look_again: Option<Instant>,
     /// Counts what makes a capture under way of no use: the panel closing,
     /// the settings coming in front of it.
     generation: u64,
@@ -1310,6 +1321,7 @@ impl<'a> Panel<'a> {
             sliding: false,
             recapture: false,
             capturing: None,
+            look_again: None,
             generation: 0,
             failed_behind: None,
             backdrop: None,
@@ -1478,6 +1490,9 @@ impl<'a> Panel<'a> {
             }
         }
         self.phase = Phase::Open { entered: false, outside_since: None, dragging: false };
+        // Presses from before it opened are no press elsewhere (what was seen of them is otherwise as old as the
+        // last look while it was away, which may be long ago: opened by the shortcut, it closed at once).
+        self.presses_seen = PRESSES.load(Ordering::Relaxed);
         self.controller.shown.store(true, Ordering::Relaxed);
         self.exclude();
         // Away from the edge it has nowhere to slide from: it fades in.
@@ -1721,6 +1736,8 @@ impl<'a> Panel<'a> {
         if changed || self.behind.is_none() {
             let menus = crate::ui::menu::SHOWN.load(Ordering::Relaxed);
             self.capturing = Some(PanelRequest { generation: self.generation, menus, afresh });
+            // (Its first frame looked past as the last were.)
+            self.look_again = None;
         }
     }
 
@@ -1733,6 +1750,12 @@ impl<'a> Panel<'a> {
     fn collect_behind(&mut self, now: Instant) {
         let Some(scene) = &mut self.backdrop else { return };
         let Some(capture) = scene.ready() else {
+            // Looked for again a while, and none came: what was taken stands, and the scene rests.
+            if self.look_again.is_some_and(|till| now >= till) {
+                self.look_again = None;
+                scene.rest();
+                return;
+            }
             // (Live, as often as it is looked at: see `refresh_behind`.)
             if self.capturing.is_some() || (self.live && self.behind.as_ref().is_none_or(|behind| now.duration_since(behind.taken) >= LIVE_INTERVAL)) {
                 scene.want();
@@ -1740,10 +1763,15 @@ impl<'a> Panel<'a> {
             return;
         };
         // Without live refraction, what is behind is as it was when taken, till it is taken again: the scene rests
-        // meanwhile.
+        // meanwhile. Not at once: a frame put together while the compositor had put in only some of the windows
+        // behind is followed by one with all of them, which is looked for a while (see `widget::LOOK_AGAIN`), and
+        // taken in its place if it comes; then it rests.
         if !self.live {
-            if let Some(scene) = &mut self.backdrop {
+            if self.look_again.take().is_some() {
                 scene.rest();
+            } else {
+                self.look_again = Some(now + crate::widget::LOOK_AGAIN);
+                scene.want();
             }
         }
         let capture = Some(capture);

@@ -32,6 +32,8 @@ pub struct BatteryFigures {
 pub fn read() -> BatteryFigures {
     let mut watts: Option<f32> = None;
     let (mut full, mut design) = (0u64, 0u64);
+    // What they hold now (mWh), where some battery's driver does not say its rate: reckoned from that instead.
+    let mut held: Option<u64> = None;
     each_battery(|handle| {
         let Some((tag, info)) = information(handle) else { return };
         // A battery of the machine's own, measured in milliwatt-hours (a
@@ -44,11 +46,42 @@ pub fn read() -> BatteryFigures {
             design += info.DesignedCapacity as u64;
         }
         // Milliwatts; i32::MIN when the driver does not know.
-        if let Some(rate) = status(handle, tag).map(|status| status.Rate).filter(|&rate| rate != i32::MIN) {
-            *watts.get_or_insert(0.0) += rate as f32 / 1000.0;
+        let Some(status) = status(handle, tag) else { return };
+        match status.Rate {
+            i32::MIN => *held.get_or_insert(0) += status.Capacity as u64,
+            rate => *watts.get_or_insert(0.0) += rate as f32 / 1000.0,
         }
     });
+    let watts = match held {
+        Some(held) => watts.or(trend(held)),
+        None => watts,
+    };
     BatteryFigures { watts, health: (design > 0).then(|| full as f32 / design as f32 * 100.0) }
+}
+
+/// The rate (W) at which batteries holding `held` mWh now are charging or discharging, reckoned from what they held
+/// before, for batteries whose driver does not say its rate (some laptops' firmware, while on mains power). What
+/// they hold changes in steps, a while apart: the rate is that of the last step, over the time since the step
+/// before; none before two steps have been seen, and 0 once none has come for `STILL` (full, or not charging).
+fn trend(held: u64) -> Option<f32> {
+    use std::time::{Duration, Instant};
+    const STILL: Duration = Duration::from_secs(5 * 60);
+    /// What they held when last seen to change (or first looked at), when that was, whether it was a change (the
+    /// time from the first look to the first change is no step's length), and the rate last reckoned.
+    static LAST: std::sync::Mutex<Option<(u64, Instant, bool, Option<f32>)>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    let now = Instant::now();
+    let rate = match *last {
+        None => None,
+        Some((was, at, stepped, _)) if was != held => {
+            let hours = now.duration_since(at).as_secs_f32() / 3600.0;
+            (stepped && hours > 0.0).then(|| (held as f32 - was as f32) / 1000.0 / hours)
+        }
+        Some((_, at, _, _)) if now.duration_since(at) >= STILL => return Some(0.0),
+        Some((_, _, _, rate)) => return rate,
+    };
+    *last = Some((held, now, last.is_some(), rate));
+    rate
 }
 
 /// Calls `visit` with each battery's device, opened.

@@ -37,6 +37,18 @@ fn text(wide: &[u16]) -> String {
     String::from_utf16_lossy(&wide[..wide.iter().position(|c| *c == 0).unwrap_or(wide.len())])
 }
 
+/// Where each screen of the desktop is (physical px), and no more: quick, where `all`, which names each by its
+/// display, takes a millisecond or two.
+pub fn monitors() -> Vec<RECT> {
+    unsafe extern "system" fn each(_: HMONITOR, _: HDC, at: *mut RECT, found: LPARAM) -> BOOL {
+        unsafe { (*(found.0 as *mut Vec<RECT>)).push(*at) };
+        true.into()
+    }
+    let mut found: Vec<RECT> = Vec::new();
+    let _ = unsafe { EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut found as *mut _ as isize)) };
+    found
+}
+
 /// Every screen of the desktop.
 pub fn all() -> Vec<Screen> {
     unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, found: LPARAM) -> BOOL {

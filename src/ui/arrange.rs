@@ -217,15 +217,18 @@ impl Ladder {
     /// room, scaled up as far as it fits (to `MOST_SCALE`) and stretched into
     /// what is left, though `shown` (the form shown, as it is sized) stays
     /// unless another covers clearly more (see `STICK`). A level showing
-    /// more than `shown`'s counts only once the room is `UP` times as wide
-    /// or tall as the room `shown` was taken in. Where none fits, the
+    /// more than `shown`'s counts only once the room is no smaller either
+    /// way than the room `shown` was taken in, and `UP` times as wide or
+    /// tall. Where none fits, the
     /// smallest at its least.
     ///
     /// The less room, the less shows: as the room shrinks (or grows) both
     /// ways, the level only goes down (or up), never back.
     pub fn choose(&self, room: (f32, f32), shown: Option<Shown>) -> Choice {
         let area = (room.0 * room.1).max(1.0);
-        let grown = shown.is_none_or(|shown| room.0 >= shown.taken.0 * UP || room.1 >= shown.taken.1 * UP);
+        // Grown: no smaller either way than when the shown one was taken, and larger by `UP` one way at least (a
+        // room grown one way as it shrinks the other has not grown: a level coming back then left again at once).
+        let grown = shown.is_none_or(|shown| room.0 >= shown.taken.0 && room.1 >= shown.taken.1 && (room.0 >= shown.taken.0 * UP || room.1 >= shown.taken.1 * UP));
         let fitting: Vec<(Choice, f32)> = self
             .rungs
             .iter()
@@ -553,6 +556,26 @@ mod tests {
             }
         }
         assert!(drops >= 8, "{drops}");
+    }
+
+    #[test]
+    fn a_room_grown_one_way_as_it_shrinks_the_other_keeps_its_level() {
+        let theme = Theme::new(Skin::Paper, false);
+        let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
+        let ladder = Ladder::new(&theme, &lanes, 6);
+        // Dragged by a corner, wider and shorter at each step: the level only ever goes down, never back up and
+        // down again.
+        let (mut width, mut height) = (500.0f32, 700.0f32);
+        let mut shown = Shown::after(None, ladder.choose((width, height), None).form, (width, height));
+        let mut levels = vec![shown.form.level()];
+        while height > 60.0 {
+            width += 6.0;
+            height -= 4.0;
+            let room = (width, height);
+            shown = Shown::after(Some(shown), ladder.choose(room, Some(shown)).form, room);
+            levels.push(shown.form.level());
+        }
+        assert!(levels.windows(2).all(|pair| pair[1] >= pair[0]), "{levels:?}");
     }
 
     #[test]

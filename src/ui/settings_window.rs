@@ -155,8 +155,10 @@ thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
 }
 
-pub fn is_open() -> bool {
-    WINDOW.load(Ordering::Relaxed) != 0
+/// Whether it is open and not minimized: what it shows can be seen.
+pub fn is_seen() -> bool {
+    let hwnd = WINDOW.load(Ordering::Relaxed);
+    hwnd != 0 && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(HWND(hwnd as *mut _)) }.as_bool()
 }
 
 /// Brings the settings window up, from any thread: raised if it is open,
@@ -218,6 +220,11 @@ pub fn open_at_overlay() {
 /// while there is no window.
 pub fn tick(now: Instant) -> Option<Duration> {
     with_ui(|ui| {
+        // Minimized, nothing is drawn (it is drawn whole as it is restored: see WM_SIZE); looked at again a while
+        // later.
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(ui.hwnd) }.as_bool() {
+            return MINIMIZED_LOOK;
+        }
         if ui.relabel_at.is_some_and(|at| now >= at) {
             ui.relabel();
         }
@@ -227,6 +234,9 @@ pub fn tick(now: Instant) -> Option<Duration> {
         ui.next_frame.saturating_duration_since(now)
     })
 }
+
+/// How often a minimized settings window is looked at (to be drawn again once it is restored).
+const MINIMIZED_LOOK: Duration = Duration::from_millis(500);
 
 fn windows_build() -> u32 {
     metrics::reg_string(w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"), w!("CurrentBuild")).parse().unwrap_or(0)
@@ -812,6 +822,8 @@ struct Ui {
     layers: PanelLayers,
     last_frame: Instant,
     next_frame: Instant,
+    /// The client size it was last drawn at (physical pixels), if it has been drawn.
+    drawn_size: Option<(u32, u32)>,
     /// Drawing the preview failed this frame (the device was lost).
     failed: bool,
 }
@@ -966,6 +978,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             showing: None,
             last_frame: Instant::now(),
             next_frame: Instant::now(),
+            drawn_size: None,
             failed: false,
         };
         ui.raise_more();
@@ -1037,7 +1050,16 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         // Drawn at once, so the content keeps up while the window is resized.
         WM_SIZE => {
-            with_ui(|ui| ui.draw(Instant::now()));
+            // Drawn at its new size; minimized, or told of the size it was last drawn at (as it is first shown,
+            // drawn already), nothing new to draw. (Its surface keeps what was drawn.)
+            let size = ((lparam.0 & 0xFFFF) as u32, ((lparam.0 >> 16) & 0xFFFF) as u32);
+            if wparam.0 != windows::Win32::UI::WindowsAndMessaging::SIZE_MINIMIZED as usize {
+                with_ui(|ui| {
+                    if ui.drawn_size != Some(size) {
+                        ui.draw(Instant::now());
+                    }
+                });
+            }
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
@@ -3005,6 +3027,7 @@ impl Ui {
             });
         }
         self.surface = Some(surface);
+        self.drawn_size = drawn.is_ok().then_some(size);
         // The device is gone; a new one is made for the next frame.
         if drawn.is_err() || self.failed {
             gfx::lost();

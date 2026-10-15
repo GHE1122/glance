@@ -101,9 +101,12 @@ pub struct Sampler {
     /// The board's chip was not looked at as Glance started, another
     /// program having the bus: looked for again every so often, since when.
     super_io_awaited: Option<Instant>,
-    /// An ASUS laptop's fans, as its firmware reports them.
-    asus_fans: Option<crate::asus::AsusFans>,
+    /// A laptop's fans, as its firmware reports them.
+    laptop_fans: Option<LaptopFans>,
     dimms: Option<Dimms>,
+    /// The modules' sensors were not looked at as Glance started, another program having the bus: looked for again
+    /// every so often, since when.
+    dimms_awaited: Option<Instant>,
     mic: Option<Microphone>,
     /// Each process's GPU use at the last sample, by process id.
     /// Each process's use of the GPUs (unread where an instance of its
@@ -161,14 +164,18 @@ impl Sampler {
         let cpu_sensors = CpuReader::open();
         let super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")));
         let dimms = Dimms::open();
-        let asus_fans = crate::asus::AsusFans::open();
+        let dimms_awaited = (dimms.as_ref().err() == Some(&crate::dimm::Missing::BusHeld)).then(Instant::now);
+        let laptop_fans = LaptopFans::open();
         let missing = || "not found".to_string();
         let mut found = vec![
             format!("CPU sensors: {}", cpu_sensors.as_ref().map_or_else(missing, |cpu| cpu.describe().to_string())),
             format!("Motherboard chip: {}", super_io.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe)),
-            format!("Memory sensors: {}", dimms.as_ref().map_or_else(missing, Dimms::describe)),
-            format!("Laptop fans: {}", asus_fans.as_ref().map_or_else(missing, crate::asus::AsusFans::describe)),
+            format!("Memory sensors: {}", dimms.as_ref().map_or_else(|why| why.describe().to_string(), Dimms::describe)),
+            format!("Laptop fans: {}", laptop_fans.as_ref().map_or_else(missing, LaptopFans::describe)),
         ];
+        if let Some(failed) = crate::pawnio::last_failure() {
+            found.push(format!("PawnIO, the last that failed: {failed}"));
+        }
         found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| {
             format!("GPU power, {}: {}", gpu.name, adapter.power.map_or("not available", gpu_power::Reader::describe))
         }));
@@ -211,8 +218,9 @@ impl Sampler {
             cpu_sensors,
             super_io_awaited: super_io.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now()),
             super_io: super_io.ok().map(crate::superio::Watched::new),
-            asus_fans,
-            dimms,
+            laptop_fans,
+            dimms: dimms.ok(),
+            dimms_awaited,
             mic: Microphone::open(),
             gpu_by_pid: None,
             adapter_by_pid: HashMap::new(),
@@ -446,7 +454,7 @@ impl Sampler {
             cpu_sensors: self.cpu_sensors.as_mut().map(CpuReader::read),
             board: self.board(),
             drive_temps: crate::drives::temperatures(),
-            dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
+            dimm_temps: self.dimms().map(Dimms::read).unwrap_or_default(),
             mic_muted: self.mic.as_ref().and_then(Microphone::muted),
             wsl: self.wsl.as_mut().map(|wsl| wsl.read(self.gpu_by_pid.as_ref(), &self.processes.names)),
             docker: self.docker.as_ref().and_then(crate::docker::Docker::read),
@@ -1174,7 +1182,9 @@ fn graphics_clock(kmt_handle: u32) -> Option<f32> {
         PrivateDriverDataSize: size_of::<D3DKMT_NODE_PERFDATA>() as u32,
     };
     let answered = unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok();
-    (answered && perf.MaxFrequency != 0).then(|| (perf.Frequency as f64 / 1e6) as f32)
+    // (A clock past the most the node may run at, overclocked too, is no reading: one integrated GPU said 8550 MHz.)
+    let most = perf.MaxFrequency.max(perf.MaxFrequencyOC);
+    (answered && perf.MaxFrequency != 0 && perf.Frequency <= most).then(|| (perf.Frequency as f64 / 1e6) as f32)
 }
 
 /// Octets received and sent by each hardware network interface, by its LUID. Virtual
@@ -1228,7 +1238,7 @@ fn default_interface() -> Option<NetworkInfo> {
                     model: unsafe { a.Description.to_string() }.unwrap_or_default(),
                     ipv4,
                     link_bps: a.ReceiveLinkSpeed,
-                    wifi: unsafe { a.AdapterName.to_string() }.ok().and_then(|adapter| wifi_name(&adapter)),
+                    wifi: unsafe { a.AdapterName.to_string() }.ok().and_then(|adapter| wifi_name_on(&adapter, a.NetworkGuid)),
                 });
             }
             adapter = a.Next;
@@ -1236,6 +1246,30 @@ fn default_interface() -> Option<NetworkInfo> {
         return None;
     }
 }
+
+/// The wireless network the adapter `adapter` is on, by its name, as `wifi_name` says; asked of Windows only as the
+/// adapter comes onto another network (`network`, Windows' identifier of the network it is on), else as it was. Windows
+/// counts each asking as a use of the PC's location (a network's name can tell where it is), and lists it so in its
+/// privacy settings: asked at each reading, that was every few seconds.
+fn wifi_name_on(adapter: &str, network: windows::core::GUID) -> Option<String> {
+    static KNOWN: std::sync::Mutex<Option<(String, windows::core::GUID, Option<String>, std::time::Instant)>> = std::sync::Mutex::new(None);
+    let mut known = KNOWN.lock().unwrap();
+    if let Some((on, of, name, asked)) = known.as_ref() {
+        // Where Windows names no network (an identifier of zeros, which it may give), or said no name, what was
+        // said serves a while only: the adapter may be on another network by then, or Windows answer now.
+        let lasts = *of != windows::core::GUID::zeroed() && name.is_some();
+        if on == adapter && *of == network && (lasts || asked.elapsed() < WIFI_ASKED_AGAIN) {
+            return name.clone();
+        }
+    }
+    let name = wifi_name(adapter);
+    *known = Some((adapter.to_string(), network, name.clone(), std::time::Instant::now()));
+    name
+}
+
+/// How long a network's name is taken to stand where Windows did not tell which network the adapter is on, or said
+/// no name.
+const WIFI_ASKED_AGAIN: Duration = Duration::from_secs(60);
 
 /// The wireless network the adapter `adapter` (its identifier, in braces, as Windows names adapters) is on, by
 /// its name; none for an adapter that is no wireless one, or is on none, or where Windows does not say.
@@ -1268,10 +1302,57 @@ fn performance_info() -> PERFORMANCE_INFORMATION {
     info
 }
 
+/// A laptop's fans, as its maker's firmware reports them to the maker's own software.
+enum LaptopFans {
+    Asus(crate::asus::AsusFans),
+    Lenovo(crate::lenovo::LenovoFans),
+}
+
+impl LaptopFans {
+    fn open() -> Option<Self> {
+        crate::asus::AsusFans::open().map(LaptopFans::Asus).or_else(|| crate::lenovo::LenovoFans::open().map(LaptopFans::Lenovo))
+    }
+
+    /// Each fan's speed (RPM), by name.
+    fn read(&self) -> Vec<(String, f32)> {
+        match self {
+            LaptopFans::Asus(fans) => fans.read(),
+            LaptopFans::Lenovo(fans) => fans.read(),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            LaptopFans::Asus(fans) => fans.describe(),
+            LaptopFans::Lenovo(fans) => fans.describe(),
+        }
+    }
+}
+
 /// How often the board's chip is looked for again while another program has the bus.
 const SUPER_IO_AGAIN: Duration = Duration::from_secs(30);
 
 impl Sampler {
+    /// The modules' sensors; looked for again, every half minute, while another program had the bus as Glance
+    /// started (and till it is free).
+    fn dimms(&mut self) -> Option<&mut Dimms> {
+        if self.dimms_awaited.is_some_and(|since| since.elapsed() >= SUPER_IO_AGAIN) {
+            match Dimms::open() {
+                Ok(found) => {
+                    crate::journal::note(format!("memory sensors, looked for again: {}", found.describe()));
+                    self.dimms = Some(found);
+                    self.dimms_awaited = None;
+                }
+                Err(crate::dimm::Missing::BusHeld) => self.dimms_awaited = Some(Instant::now()),
+                Err(why) => {
+                    crate::journal::note(format!("memory sensors, looked for again: {}", why.describe()));
+                    self.dimms_awaited = None;
+                }
+            }
+        }
+        self.dimms.as_mut()
+    }
+
     /// The motherboard's sensors, and a laptop's fans its firmware reports.
     fn board(&mut self) -> Option<crate::reading::BoardSensors> {
         // Another program had the bus as Glance started: the chip is looked for again, every half minute,
@@ -1283,7 +1364,7 @@ impl Sampler {
             self.super_io = found.ok().map(crate::superio::Watched::new);
         }
         let mut board = self.super_io.as_ref().map(crate::superio::Watched::read);
-        if let Some(fans) = &self.asus_fans {
+        if let Some(fans) = &self.laptop_fans {
             board.get_or_insert_with(Default::default).fans.extend(fans.read());
         }
         board
@@ -1295,6 +1376,7 @@ fn battery() -> Option<BatterySample> {
     let mut status = SYSTEM_POWER_STATUS::default();
     unsafe { GetSystemPowerStatus(&mut status) }.ok()?;
     const NO_BATTERY: u8 = 128;
+    const CHARGING: u8 = 8;
     const UNKNOWN: u8 = 255;
     if status.BatteryFlag & NO_BATTERY != 0 || status.BatteryLifePercent == UNKNOWN {
         return None;
@@ -1302,7 +1384,9 @@ fn battery() -> Option<BatterySample> {
     let figures = crate::battery::read();
     Some(BatterySample {
         percent: status.BatteryLifePercent,
-        charging: status.ACLineStatus == 1,
+        // (Charging, as the system says it apart from being plugged in.)
+        charging: status.BatteryFlag & CHARGING != 0,
+        plugged: status.ACLineStatus == 1,
         seconds_left: (status.BatteryLifeTime != u32::MAX).then_some(status.BatteryLifeTime),
         watts: figures.watts,
         health: figures.health,
@@ -1433,11 +1517,14 @@ mod tests {
 
 #[cfg(test)]
 mod network_tests {
-    /// On a PC: the interface the default route goes through, and the wireless network it is on.
+    /// On a PC: the interface the default route goes through, and the wireless network it is on; read three times,
+    /// as at three readings (its name asked of Windows only the first time).
     #[test]
     #[ignore]
     fn says_the_default_interface() {
-        let found = super::default_interface();
-        println!("{:?}", found.map(|network| (network.name, network.ipv4.is_some(), network.link_bps, network.wifi)));
+        for _ in 0..3 {
+            let found = super::default_interface();
+            println!("{:?}", found.map(|network| (network.name, network.ipv4.is_some(), network.link_bps, network.wifi)));
+        }
     }
 }

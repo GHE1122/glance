@@ -25,7 +25,7 @@ use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, DeleteProcThreadAttributeList, GetExitCodeProcess, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT,
+    CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT,
     INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_FORCEOFFFEEDBACK, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
@@ -67,11 +67,7 @@ fn ask(arguments: &[&str]) -> Option<String> {
 }
 
 fn asked(helper: &Path, arguments: &[&str]) -> Option<String> {
-    if elevation::is_elevated() {
-        return said_plainly(helper, arguments);
-    }
-    let said = Command::new(helper).args(arguments).creation_flags(NO_WINDOW).output().ok()?;
-    said.status.success().then(|| String::from_utf8_lossy(&said.stdout).into_owned())
+    said_plainly(helper, arguments)
 }
 
 /// A handle closed when this is let go.
@@ -188,10 +184,13 @@ fn said_plainly(program: &Path, arguments: &[&str]) -> Option<String> {
     (ended == 0).then_some(said)
 }
 
-/// `program` run with `arguments` and without an administrator's rights:
-/// how it ended, what it said, and what it said went wrong.
+/// `program` run with `arguments` and without an administrator's rights
+/// (this program's own, where it has none; else those taken from it): how
+/// it ended, what it said, and what it said went wrong. Started so that the
+/// pointer does not say a program is starting (as `std::process` would
+/// have it), asked again and again as the settings' phone page is used.
 fn run_plainly(program: &Path, arguments: &[&str]) -> Option<(u32, String, String)> {
-    let rights = plain_rights()?;
+    let rights = if elevation::is_elevated() { Some(plain_rights()?) } else { None };
     let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let name = wide(&program.display().to_string());
     let mut line = wide(&std::iter::once(quoted(&program.display().to_string())).chain(arguments.iter().map(|argument| quoted(argument))).collect::<Vec<_>>().join(" "));
@@ -213,7 +212,11 @@ fn run_plainly(program: &Path, arguments: &[&str]) -> Option<(u32, String, Strin
             startup.StartupInfo.hStdOutput = said.0;
             startup.StartupInfo.hStdError = said_wrong.0;
             startup.lpAttributeList = list;
-            CreateProcessAsUserW(Some(rights.0), PCWSTR(name.as_ptr()), Some(PWSTR(line.as_mut_ptr())), None, None, true, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, None, None, &startup.StartupInfo, &mut process)
+            let flags = CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+            match &rights {
+                Some(rights) => CreateProcessAsUserW(Some(rights.0), PCWSTR(name.as_ptr()), Some(PWSTR(line.as_mut_ptr())), None, None, true, flags, None, None, &startup.StartupInfo, &mut process),
+                None => CreateProcessW(PCWSTR(name.as_ptr()), Some(PWSTR(line.as_mut_ptr())), None, None, true, flags, None, None, &startup.StartupInfo, &mut process),
+            }
         });
         DeleteProcThreadAttributeList(list);
         started.ok()?;
@@ -409,5 +412,16 @@ mod tests {
         assert_eq!(read.0, [[true, false, true], [false, true, false], [true, true, true]]);
         assert!(code(&mut "101\n01\n".lines()).is_none());
         assert!(code(&mut "".lines()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod quiet_tests {
+    /// A program started as the helper is, its output read back.
+    #[test]
+    fn runs_a_program_quietly() {
+        let cmd = std::path::PathBuf::from(std::env::var("ComSpec").unwrap());
+        let (ended, said, _) = super::run_plainly(&cmd, &["/c", "echo", "heard"]).expect("started");
+        assert_eq!((ended, said.trim()), (0, "heard"));
     }
 }
