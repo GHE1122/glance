@@ -110,6 +110,8 @@ const REST_FRAME: Duration = Duration::from_millis(250);
 /// Without live refraction, how long after a frame of what is behind is taken another is looked for (see
 /// `collect`).
 pub const LOOK_AGAIN: Duration = Duration::from_millis(250);
+/// How long the glass takes to frost fully from clear, or to clear (see `draw`).
+const FROST_EASE: Duration = Duration::from_millis(400);
 /// How often, the time up, a frame being read meanwhile is waited for.
 const LOOK_AGAIN_STEP: Duration = Duration::from_millis(16);
 /// With live refraction, how often the desktop behind is taken again as it
@@ -477,6 +479,8 @@ struct Widget {
     shown_once: bool,
     /// How frosted it was, measured where it was (see `draw`).
     frost_at: Option<(RECT, f32)>,
+    /// How frosted it is drawn, easing toward how frosted it should be (the second), and when it was last drawn so.
+    frost_shown: Option<(f32, f32, Instant)>,
     /// Light or dark is to be measured again where it comes to rest (see
     /// `retone`).
     tone_due: bool,
@@ -1072,6 +1076,7 @@ impl Widget {
             failed: None,
             shown_once: false,
             frost_at: None,
+            frost_shown: None,
             tone_due: false,
             frame_took: gfx::Took::default(),
             taken: None,
@@ -2043,8 +2048,9 @@ impl Widget {
                 format!("widget: a frame took {:.1} ms: laid out {:.1}, the desktop taken {:.1}, drawn {:.1} (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1}; {form})", ms(whole), ms(laid_out), ms(taken - laid_out), ms(whole - taken), ms(took.given), ms(took.painted), ms(took.handed))
             });
         }
-        // (The lyrics gliding to the next line are drawn every frame too.)
-        if moving || crate::playing::gliding() { Frame::Moving } else { Frame::Rest }
+        // (The lyrics gliding to the next line are drawn every frame too, and the glass easing to how frosted it is.)
+        let easing = self.frost_shown.is_some_and(|(shown, target, _)| shown != target);
+        if moving || easing || crate::playing::gliding() { Frame::Moving } else { Frame::Rest }
     }
 
     /// On the device that draws now, if it is not (a driver reset, a device lost): its surface made anew, what it
@@ -2104,7 +2110,7 @@ impl Widget {
         // the panel's does): measured again as it moves a step.
         let here = self.rect();
         let step = (16.0 * contact_scale) as i32;
-        let frost = match (&self.behind, self.frost_at) {
+        let target = match (&self.behind, self.frost_at) {
             (None, _) => 0.0,
             (Some(_), Some((at, frost))) if (at.left - here.left).abs() < step && (at.top - here.top).abs() < step && (at.right - here.right).abs() < step && (at.bottom - here.bottom).abs() < step => frost,
             (Some(behind), _) => {
@@ -2114,6 +2120,16 @@ impl Widget {
                 frost
             }
         };
+        // Eased to it, not stepped: moved a little onto a busier or calmer part of the desktop, the glass frosts or
+        // clears over a moment rather than at once.
+        let frost = match self.frost_shown {
+            Some((shown, _, at)) => {
+                let step = now.saturating_duration_since(at).as_secs_f32() / FROST_EASE.as_secs_f32();
+                if target > shown { (shown + step).min(target) } else { (shown - step).max(target) }
+            }
+            None => target,
+        };
+        self.frost_shown = Some((frost, target, now));
         let behind = &mut self.behind;
         let layers = &mut self.layers;
         let (before, drawn, morph_layer) = (self.morph.as_mut().map(|(_, before)| before), &mut self.drawn, &mut self.morph_layer);
