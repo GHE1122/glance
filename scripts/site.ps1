@@ -70,7 +70,9 @@ $appSigner = 'ae9b1d5b1e0ff6fbaae74648af16accb2bbd708f8e99d05ecc8f21dc8644958f'
 $sdk = [regex]::Match((Get-Content -Raw android\local.properties), '(?m)^sdk\.dir=(.+)$').Groups[1].Value.Trim()
 $buildTools = Get-ChildItem (Join-Path $sdk 'build-tools') -Directory -ErrorAction SilentlyContinue | Sort-Object { [version]$_.Name } | Select-Object -Last 1
 if (-not $buildTools) { throw "the Android SDK's build tools (apksigner) were not found under $sdk" }
-$certificates = & (Join-Path $buildTools.FullName 'apksigner.bat') verify --print-certs (Join-Path $served $app)
+$certificates = & (Join-Path $buildTools.FullName 'apksigner.bat') verify --print-certs (Join-Path $served $app) 2>&1
+# (apksigner runs on Java: without it, it says so and checks nothing.)
+if ($certificates -match 'JAVA_HOME') { throw "apksigner could not run: no Java (set JAVA_HOME to a JDK, as the app is built with)" }
 if ($LASTEXITCODE -ne 0 -or -not ($certificates -match "certificate SHA-256 digest: $appSigner")) { throw "$app is not signed with the app's release key" }
 # (Those of releases before are no longer served.)
 Get-ChildItem $served -Filter 'Glance_*_x64-setup.exe' | Where-Object Name -ne $installer | Remove-Item
