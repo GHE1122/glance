@@ -1028,10 +1028,7 @@ impl<'a> Frame<'a> {
     /// Where text laid out as `layout` at `y` is put: its first baseline on a whole pixel (see `whole_pixel`), where
     /// it is drawn upright.
     fn text_top(&self, layout: &IDWriteTextLayout, y: f32) -> f32 {
-        let mut rows = [DWRITE_LINE_METRICS::default()];
-        let mut count = 0;
-        let _ = unsafe { layout.GetLineMetrics(Some(&mut rows), &mut count) };
-        let baseline = rows[0].baseline;
+        let baseline = first_row(layout).baseline;
         let mut transform = Matrix3x2::default();
         let mut dpi = (0.0, 0.0);
         unsafe {
@@ -1238,6 +1235,15 @@ impl Surface {
             }
         }
     }
+}
+
+/// The first row of what `layout` lays out (asked for with room for all of them: given less, none is told).
+pub fn first_row(layout: &IDWriteTextLayout) -> DWRITE_LINE_METRICS {
+    let mut count = 0;
+    let _ = unsafe { layout.GetLineMetrics(None, &mut count) };
+    let mut rows = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
+    let _ = unsafe { layout.GetLineMetrics(Some(&mut rows), &mut count) };
+    rows[0]
 }
 
 /// The whole pixel `at` (physical px) is put on: the nearest, a half going up; first taken to a 64th of a pixel,

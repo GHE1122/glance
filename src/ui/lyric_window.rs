@@ -1117,10 +1117,7 @@ impl Shown {
                     let layout = frame.gfx.wrapped(&text, font, width);
                     let sung = sung_to(&parts, moment.position);
                     // Its first row only (what wraps would lie over what is under it).
-                    let mut rows = [DWRITE_LINE_METRICS::default()];
-                    let mut count = 0;
-                    let _ = unsafe { layout.GetLineMetrics(Some(&mut rows), &mut count) };
-                    frame.clip(left - 4.0, y - 4.0, width + 8.0, rows[0].height + 4.0);
+                    frame.clip(left - 4.0, y - 4.0, width + 8.0, gfx::first_row(&layout).height + 4.0);
                     filled(frame, &layout, &text, font, left, y, width, sung, dim, bright, 12.0);
                     frame.unclip();
                     font
