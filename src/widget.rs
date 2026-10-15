@@ -1020,6 +1020,8 @@ struct Request {
     area: RECT,
     generation: u64,
     moved: bool,
+    /// When it was asked for.
+    since: Instant,
 }
 
 /// Posted to a widget's window as a frame of what is behind it has come.
@@ -1196,6 +1198,10 @@ impl Widget {
             let again = live && self.behind.as_ref().is_some_and(|behind| behind.taken.elapsed() >= Self::backdrop_every(live));
             if self.pending.is_some() || self.behind.is_none() || again {
                 scene.want();
+            }
+            if let Some(request) = self.pending.as_ref().filter(|request| request.since.elapsed() >= Duration::from_secs(3)) {
+                let (area, waited, shown) = (request.area, request.since.elapsed().as_secs(), self.behind.is_some());
+                note_sparingly("waiting", || format!("widget: the desktop behind awaited {waited} s ({area:?}, something shown: {shown}, reading: {})", scene.reading()));
             }
             return;
         };
@@ -1999,7 +2005,7 @@ impl Widget {
                 // A frame of it as it is now awaited; nothing changed, what it has stands.
                 Some(scene) => {
                     if scene.arrange(area, self.window.hwnd) || self.behind.is_none() {
-                        self.pending = Some(Request { area, generation: self.generation, moved });
+                        self.pending = Some(Request { area, generation: self.generation, moved, since: now });
                         // (Its first frame looked past as the last were.)
                         self.look_again = None;
                     } else if let Some(behind) = &mut self.behind {
