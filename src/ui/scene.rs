@@ -164,8 +164,9 @@ impl Shared {
 /// None where the frame was put together before the windows behind were (the compositor puts them in a frame or
 /// so after it is asked, and says nothing of it, and a frame from just before holds the scene's own window: nothing,
 /// clear). Told by `opaque` (screen coordinates; the frame's top left at `area`'s): where the desktop's own window is
-/// put and a screen is, which nothing is clear in once it is (whatever the windows over it are, and a live
-/// wallpaper is drawn in it too). Squares of two by two pixels wholly inside are looked at.
+/// put and a screen is, which is wholly clear in such a frame and wholly opaque once it is put in (whatever the
+/// windows over it are; a live wallpaper is drawn in it too). Wholly clear there, it is passed over: what the card
+/// made of each square of two by two pixels is clear only where all four are, wherever its squares fall.
 #[allow(clippy::too_many_arguments)]
 fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, texture: &ID3D11Texture2D, width: u32, height: u32, area: RECT, opaque: &[RECT]) -> Option<(ID3D11Texture2D, Vec<u8>)> {
     unsafe {
@@ -247,7 +248,8 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
         // As `Capture::from_pixels` reads it: a square for each two pixels each way, rounded up.
         let (columns, down) = ((width as usize).div_ceil(2), (height as usize).div_ceil(2));
         let mut luma = Vec::with_capacity(columns * down);
-        let mut whole = true;
+        // (Whether any square there was looked at, and whether any held anything.)
+        let (mut looked, mut held) = (false, false);
         for y in 0..down {
             let line = std::slice::from_raw_parts((mapped.pData as *const u8).add(y.min(rows - 1) * mapped.RowPitch as usize), row_width * 4);
             // (Each square's middle, on the screen.)
@@ -256,14 +258,17 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
                 let i = x.min(row_width - 1) * 4;
                 let lightness = (0.2126 * line[i + 2] as f64 + 0.7152 * line[i + 1] as f64 + 0.0722 * line[i] as f64) / 255.0;
                 luma.push((lightness * 255.0).round() as u8);
-                if line[i + 3] < 255 && whole {
+                if !held {
                     let screen_x = area.left + (2 * x.min(row_width - 1)) as i32;
-                    whole = !opaque.iter().any(|rect| screen_x >= rect.left && screen_x + 2 <= rect.right && screen_y - 1 >= rect.top && screen_y + 1 <= rect.bottom);
+                    if opaque.iter().any(|rect| screen_x >= rect.left && screen_x + 2 <= rect.right && screen_y - 1 >= rect.top && screen_y + 1 <= rect.bottom) {
+                        looked = true;
+                        held = line[i + 3] > 0;
+                    }
                 }
             }
         }
         context.Unmap(staging, 0);
-        if !whole {
+        if looked && !held {
             // (The texture it was copied into, spare again.)
             drop(Texture { texture: kept, spare: spare.clone() });
             return None;
@@ -479,6 +484,13 @@ impl Scene {
         if same_windows && area == self.area && behind.iter().zip(&self.shown).all(|((_, a), (.., b))| a == b) {
             return false;
         }
+        // Where the desktop's own window will be put, on a screen (see `keep`): worked out before anything is put in
+        // place, so that nothing comes between the last of that and when frames count from. (Between screens it
+        // holds nothing. Not behind, as while Explorer is not running: nothing then tells such a frame.)
+        let shell = unsafe { GetShellWindow() };
+        let opaque: Vec<RECT> = behind.iter().find(|(window, _)| *window == shell).map_or_else(Vec::new, |(_, desktop)| {
+            crate::screens::all().iter().filter_map(|screen| meeting(meeting(*desktop, screen.monitor)?, area)).collect()
+        });
         let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
         if area != self.area {
             unsafe {
@@ -505,19 +517,16 @@ impl Scene {
             }
         }
         // Frames from before all of it was in place are not of what is there now (one may be put together while it
-        // is being put in place).
-        // Where the desktop's own window is put, on a screen: nothing clear there once it is (where it is not on one,
-        // between screens, it holds nothing). None where it is not behind (Explorer not running): nothing then tells
-        // a frame put together before the rest were put in.
-        let shell = unsafe { GetShellWindow() };
-        let opaque = self.shown.iter().find(|(window, ..)| *window == shell).map_or_else(Vec::new, |(.., desktop)| {
-            crate::screens::all().iter().filter_map(|screen| meeting(meeting(*desktop, screen.monitor)?, area)).collect()
-        });
-        *self.shared.of.lock().unwrap() = (area, now_100ns(), opaque);
-        // (Nor what was read of it before and not taken yet.)
-        *self.shared.ready.lock().unwrap() = None;
-        close(self.shared.latest.lock().unwrap().take());
-        self.shared.resting.store(false, Ordering::Release);
+        // is being put in place); nor what was read of it before and not taken yet. Cleared and made so under one
+        // lock, as what reads a frame looks and hands on under it: one read meanwhile is of before, or kept.
+        let from = now_100ns();
+        {
+            let mut of = self.shared.of.lock().unwrap();
+            *self.shared.ready.lock().unwrap() = None;
+            close(self.shared.latest.lock().unwrap().take());
+            *of = (area, from, opaque);
+            self.shared.resting.store(false, Ordering::Release);
+        }
         true
     }
 
