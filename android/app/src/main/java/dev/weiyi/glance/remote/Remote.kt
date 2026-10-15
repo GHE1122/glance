@@ -357,7 +357,8 @@ object Look {
 }
 
 /**
- * Whether there is a newer app than this one, as Glance's site says: asked once a day, as the app is opened. (The
+ * Whether there is a newer app than this one, as Glance's site says: asked as the app is opened, every few hours
+ * at most (once a day, one released after the day's asking went untold till the next). (The
  * app is not from a store: nothing else would tell of a newer one.) The site counts the asking, by the day and the
  * network it comes from, and is told nothing of the phone but this app's version.
  */
@@ -387,10 +388,15 @@ object Newer {
     /** Where the newer app (see [known]) is downloaded from in the app, if the site said (see `Update`). */
     fun apk(context: Context): String? = kept(context).getString("apk", null)?.takeIf { known(context) != null && Update.allowed(it) }
 
-    /** Asks the site, unless it was asked today: not from the main thread. */
-    fun ask(context: Context) {
-        val today = System.currentTimeMillis() / 86_400_000
-        if (kept(context).getLong("asked", 0) == today) return
+    /** How long after the site was asked it is not asked again. */
+    private const val ASK_EVERY_MS = 3 * 60 * 60 * 1000L
+
+    /** Asks the site, unless it was asked lately (asked [now], whenever it was): not from the main thread. Whether it
+     *  answered (not asked: as if it had). */
+    fun ask(context: Context, now: Boolean = false): Boolean {
+        val at = System.currentTimeMillis()
+        // (Kept as a moment since 0.3.11; a day's number, as it was kept before, is long past.)
+        if (!now && at - kept(context).getLong("asked_at", 0) < ASK_EVERY_MS) return true
         val asking = (java.net.URL("$SITE/api/app?v=${BuildConfig.VERSION_NAME}").openConnection() as java.net.HttpURLConnection).apply {
             connectTimeout = 8000
             readTimeout = 8000
@@ -401,9 +407,12 @@ object Newer {
             val said = answer.optString("version")
             // (And where the app of that version is: from a site that does not say, it is got from the site's page.)
             val apk = answer.optString("apk").takeIf(Update::allowed)
-            if (Regex("[0-9]+(\\.[0-9]+){1,3}").matches(said)) kept(context).edit().putString("version", said).putString("apk", apk).putLong("asked", today).apply()
+            if (!Regex("[0-9]+(\\.[0-9]+){1,3}").matches(said)) return false
+            kept(context).edit().putString("version", said).putString("apk", apk).putLong("asked_at", at).apply()
+            return true
         } catch (_: Exception) {
             // Not reached, or not answered as expected: asked again the next time the app is opened.
+            return false
         } finally {
             asking.disconnect()
         }

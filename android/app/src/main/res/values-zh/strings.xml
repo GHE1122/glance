@@ -53,7 +53,7 @@
     <string name="working">正在执行…</string>
     <string name="no_reads">电脑上的 Glance 没有在运行，读不到温度和风扇</string>
     <string name="night">夜间模式</string>
-    <string name="night_how">电脑继续运行：关屏、关灯、切到节能</string>
+    <string name="night_how">电脑继续运行：关屏、关灯、静音、切到节能</string>
     <string name="night_on">已开启，电脑还在运行。再点一次结束</string>
     <string name="screen">屏幕</string>
     <string name="screen_is_on">亮着，点一下全部关闭</string>
@@ -78,6 +78,7 @@
     <string name="saturation">浓度</string>
     <string name="brightness_is">亮度 %1$d%%</string>
     <string name="brightness">亮度</string>
+    <string name="screen_brightness">屏幕亮度</string>
     <string name="use_colour">用这个颜色</string>
     <string name="keys">键盘背光</string>
     <string name="keys_off">关</string>
@@ -115,6 +116,11 @@
     <string name="case_fan_line">机箱风扇 %1$d 转</string>
     <string name="about">关于</string>
     <string name="version">版本 %1$s</string>
+    <string name="check_update">检查更新</string>
+    <string name="checking">正在检查</string>
+    <string name="newest">已是最新版本</string>
+    <string name="newer_is">有新版本 %1$s</string>
+    <string name="check_failed">无法连接更新服务器</string>
     <string name="licences">开源许可</string>
     <string name="licences_what">本应用的许可证，以及所用开源组件的许可证</string>
     <string name="view">查看</string>

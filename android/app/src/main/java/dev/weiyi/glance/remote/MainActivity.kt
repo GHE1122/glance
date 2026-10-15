@@ -143,6 +143,18 @@ private fun App(opened: String?, taken: () -> Unit) {
         withContext(Dispatchers.IO) { Newer.ask(context) }
         newer = Newer.known(context)
     }
+    // Asked for by hand in the settings: whether it is being asked, and whether the site answered.
+    var checking by remember { mutableStateOf(false) }
+    var checked by remember { mutableStateOf<Boolean?>(null) }
+    val check = {
+        updating.launch {
+            checking = true
+            checked = withContext(Dispatchers.IO) { Newer.ask(context, now = true) }
+            newer = Newer.known(context)
+            checking = false
+        }
+        Unit
+    }
     // A code scanned that is no pairing code is said on the pairing page.
     var wrong by remember { mutableStateOf(false) }
     var unpairing by remember { mutableStateOf<Int?>(null) }
@@ -214,7 +226,7 @@ private fun App(opened: String?, taken: () -> Unit) {
                 when (page) {
                     Page.Pairing -> Pairing(first = pcs.isEmpty(), wrong = wrong, back = { page = Page.Home }, scan = scan) { text -> wrong = false; take(text) }
                     else -> SettingsPage(
-                        pcs, chosen, shown,
+                        pcs, chosen, shown, newer, checking, checked, check,
                         back = { page = Page.Home },
                         show = { part, on -> Look.show(context, part, on); shown = Look.shown(context) },
                         add = { wrong = false; page = Page.Pairing },
@@ -300,7 +312,10 @@ private fun Pairing(first: Boolean, wrong: Boolean, back: () -> Unit, scan: () -
 
 /** The page behind the gear: every PC paired with, each unpaired by itself, and what the main page shows. */
 @Composable
-private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>, back: () -> Unit, show: (String, Boolean) -> Unit, add: () -> Unit, unpair: (Int) -> Unit) {
+private fun SettingsPage(
+    pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>, newer: String?, checking: Boolean, checked: Boolean?, check: () -> Unit,
+    back: () -> Unit, show: (String, Boolean) -> Unit, add: () -> Unit, unpair: (Int) -> Unit,
+) {
     var licences by remember { mutableStateOf(false) }
     if (licences) Read(stringResource(R.string.licences), LocalContext.current.resources.openRawResource(R.raw.licences).use { it.readBytes().decodeToString() }, stringResource(R.string.close)) { licences = false }
     Column(Modifier.fillMaxSize()) {
@@ -310,7 +325,17 @@ private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>
             Text(stringResource(R.string.about), color = Dim, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
             Panel {
                 Column {
-                    Line("Glance", stringResource(R.string.version, BuildConfig.VERSION_NAME)) {}
+                    // Whether there is a newer app, asked for now: what the site said, or that it could not be asked.
+                    val said = when {
+                        checking -> stringResource(R.string.checking)
+                        newer != null -> stringResource(R.string.newer_is, newer)
+                        checked == true -> stringResource(R.string.newest)
+                        checked == false -> stringResource(R.string.check_failed)
+                        else -> null
+                    }
+                    Line("Glance", listOfNotNull(stringResource(R.string.version, BuildConfig.VERSION_NAME), said).joinToString(" · ")) {
+                        if (!checking) Words(stringResource(R.string.check_update), Accent, press = check)
+                    }
                     Rule()
                     Line(stringResource(R.string.licences), stringResource(R.string.licences_what)) { Words(stringResource(R.string.view), Accent) { licences = true } }
                 }
@@ -589,7 +614,17 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 }
             }
         }
-        // Each monitor by itself, where there are several.
+        // Each monitor by itself, where there are several; where there is one that says how bright it is (a laptop's
+        // own screen), how bright it is alone (the screens' tile turns it off).
+        val alone = now.monitors.singleOrNull()?.takeIf { it.brightness != null }
+        if (shown["monitors"] != false && alone != null) {
+            Panel {
+                Heading(stringResource(R.string.screen_brightness))
+                Brightness(alone, enabled = reached && now.screen != false && alone.on != false) { wanted ->
+                    act("bright0", "/v1/monitor", JSONObject().put("index", 0).put("brightness", wanted)) { was -> was.copy(monitors = was.monitors.mapIndexed { i, one -> if (i == 0) one.copy(brightness = wanted) else one }) }
+                }
+            }
+        }
         if (shown["monitors"] != false && now.monitors.size > 1) {
             Panel {
                 Heading(stringResource(R.string.monitors)) { Places(now.monitors, now.screen != false) }
@@ -693,26 +728,32 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
  */
 @Composable
 private fun MonitorRow(at: Int, monitor: Monitor, enabled: Boolean, lit: Boolean, turn: (Boolean) -> Unit, dim: (Int) -> Unit) {
-    var level by remember { mutableFloatStateOf((monitor.brightness ?: 0).toFloat()) }
-    var sliding by remember { mutableStateOf(false) }
-    // As the monitor says, but for while it is being slid.
-    LaunchedEffect(monitor.brightness) { if (!sliding) monitor.brightness?.let { level = it.toFloat() } }
     val size = "${monitor.width} × ${monitor.height}"
     val detail = when {
         monitor.on == null -> "$size · ${stringResource(R.string.monitor_fixed)}"
-        monitor.brightness != null -> "$size · ${stringResource(R.string.brightness_is, level.toInt())}"
+        monitor.brightness != null -> "$size · ${stringResource(R.string.brightness_is, monitor.brightness)}"
         else -> size
     }
     Line(
         monitor.name, detail,
         lead = { Box(Modifier.size(24.dp).clip(RoundedCornerShape(7.dp)).background(Card2), contentAlignment = Alignment.Center) { Text("${at + 1}", color = Dim, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) } },
     ) { Toggle(monitor.on != false && lit, monitor.name, enabled = enabled && monitor.on != null, change = turn) }
-    if (monitor.brightness != null) {
-        val can = enabled && monitor.on != false
-        Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) { Sign(Sign.BRIGHT, if (can) Dim else Faint, size = 18.dp) }
-            Bar(level, 0f..100f, stringResource(R.string.brightness), Modifier.weight(1f), enabled = can, slim = true, track = filled(Accent), change = { sliding = true; level = it }, done = { sliding = false; dim(level.toInt()) })
-        }
+    if (monitor.brightness != null) Brightness(monitor, enabled && monitor.on != false, dim)
+}
+
+/**
+ * How bright a monitor is, as a line to slide: as the monitor says, but for while it is being slid (the figure
+ * follows the finger), and set as it is let go.
+ */
+@Composable
+private fun Brightness(monitor: Monitor, enabled: Boolean, dim: (Int) -> Unit) {
+    var level by remember { mutableFloatStateOf((monitor.brightness ?: 0).toFloat()) }
+    var sliding by remember { mutableStateOf(false) }
+    LaunchedEffect(monitor.brightness) { if (!sliding) monitor.brightness?.let { level = it.toFloat() } }
+    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) { Sign(Sign.BRIGHT, if (enabled) Dim else Faint, size = 18.dp) }
+        Bar(level, 0f..100f, stringResource(R.string.brightness), Modifier.weight(1f), enabled = enabled, slim = true, track = filled(Accent), change = { sliding = true; level = it }, done = { sliding = false; dim(level.toInt()) })
+        Text("${level.toInt()}%", color = Dim, fontSize = 13.sp)
     }
 }
 

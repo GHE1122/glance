@@ -16,7 +16,7 @@ Unicode true
 !include "FileFunc.nsh"
 
 !define NAME "Glance"
-!define VERSION "0.3.9"
+!define VERSION "0.3.11"
 !define PUBLISHER "lulu-loopp"
 !define EXE "glance.exe"
 !define SENSORS "glance-sensors.exe"

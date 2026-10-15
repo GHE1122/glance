@@ -749,10 +749,30 @@ fn copy_into(from: &Path, to: &Path) -> std::io::Result<()> {
             if !target.is_dir() {
                 std::fs::create_dir(&target)?;
             }
+            own_as_administrators(&target)?;
             copy_into(&entry.path(), &target)?;
         } else {
             replace(&entry.path(), &target)?;
+            own_as_administrators(&target)?;
         }
+    }
+    Ok(())
+}
+
+/// `path`, put in place by the installer, owned by the Administrators group, whatever account it runs as: an
+/// administrator's session that did not come through the elevation prompt (a remote shell's, a deployment tool's)
+/// makes what it creates its user's, who could then re-permission it, and Glance would rightly no longer start
+/// from there unasked (nor be installed over it again).
+fn own_as_administrators(path: &Path) -> std::io::Result<()> {
+    use windows::Win32::Security::Authorization::{ConvertStringSidToSidW, SetNamedSecurityInfoW};
+    let mut administrators = PSID::default();
+    unsafe { ConvertStringSidToSidW(w!("S-1-5-32-544"), &mut administrators) }.map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xFFFF))?;
+    let set = unsafe { SetNamedSecurityInfoW(&HSTRING::from(path.as_os_str()), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, Some(administrators), None, None, None) };
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(administrators.0)));
+    }
+    if set.is_err() {
+        return Err(std::io::Error::from_raw_os_error(set.0 as i32));
     }
     Ok(())
 }

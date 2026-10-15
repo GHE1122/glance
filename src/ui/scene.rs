@@ -131,11 +131,13 @@ impl Shared {
         let (area, arranged, covered) = self.of.lock().unwrap().clone();
         let read = (|| {
             if frame.SystemRelativeTime().ok()?.Duration < arranged {
+                crate::widget::note_sparingly("scene-early", || "scene: a frame from before it was arranged passed over".into());
                 return None;
             }
             let size = frame.ContentSize().ok()?;
             let (width, height) = (area.right - area.left, area.bottom - area.top);
             if size.Width < width || size.Height < height {
+                crate::widget::note_sparingly("scene-small", || format!("scene: a frame of {}x{} passed over, {width}x{height} wanted", size.Width, size.Height));
                 return None;
             }
             let texture: ID3D11Texture2D = unsafe { frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface() }.ok()?;
@@ -144,6 +146,7 @@ impl Shared {
             let mut made = D3D11_TEXTURE2D_DESC::default();
             unsafe { texture.GetDesc(&mut made) };
             if made.Width < width as u32 || made.Height < height as u32 {
+                crate::widget::note_sparingly("scene-texture", || format!("scene: a texture of {}x{} passed over, {width}x{height} wanted", made.Width, made.Height));
                 return None;
             }
             let (kept, luma) = keep(&self.device, &mut self.halves.lock().unwrap(), &self.spare, &texture, width as u32, height as u32, area, &covered)?;
@@ -278,6 +281,7 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
         }
         context.Unmap(staging, 0);
         if looked && !held {
+            crate::widget::note_sparingly("scene-clear", || format!("scene: a frame of {area:?} with the desktop not yet in it passed over"));
             // (The texture it was copied into, spare again.)
             drop(Texture { texture: kept, spare: spare.clone() });
             return None;

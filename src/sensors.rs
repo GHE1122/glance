@@ -435,6 +435,19 @@ mod tests {
         assert_eq!(counter.power(5), None);
     }
 
+    /// Each step of opening this CPU's sensors, and what it gave: for a CPU whose sensors do not open.
+    #[test]
+    #[ignore = "needs administrator rights and the PawnIO driver; run with --ignored"]
+    fn opens_this_cpu_step_by_step() {
+        println!("family/model {:x?}", cpu_family_model());
+        let module = Module::load(AMD_FAMILY_17);
+        println!("module: {:?}", module.as_ref().err());
+        let Ok(module) = module else { return };
+        println!("power unit: {:x?}", module.read("ioctl_read_msr", MSR_PWR_UNIT));
+        println!("energy: {:x?}", module.read("ioctl_read_msr", MSR_PKG_ENERGY_STAT));
+        println!("Tctl: {:x?}", module.read("ioctl_read_smn", THM_TCON_CUR_TMP));
+    }
+
     /// Needs administrator rights and the PawnIO driver.
     #[test]
     #[ignore = "needs administrator rights and the PawnIO driver; run with --ignored"]

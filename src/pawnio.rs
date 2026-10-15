@@ -4,7 +4,7 @@
 //! by name with arrays of 64-bit values in and out.
 
 use windows::core::w;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -19,6 +19,62 @@ const fn ctl_code(function: u32) -> u32 {
 const IOCTL_LOAD_BINARY: u32 = ctl_code(0x821);
 const IOCTL_EXECUTE_FN: u32 = ctl_code(0x841);
 const FN_NAME_LENGTH: usize = 32;
+
+/// Whether the driver has been started again for a device it ran without (see `Module::loaded`).
+static REVIVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The driver's device, opened.
+fn open() -> windows::core::Result<HANDLE> {
+    unsafe {
+        CreateFileW(
+            w!(r"\\?\GLOBALROOT\Device\PawnIO"),
+            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    }
+}
+
+/// Starts the driver's device again, as Device Manager does when a device's settings change (and `pnputil
+/// /restart-device`): every PawnIO device there is. Whether one was. Needs elevation.
+fn revive() -> bool {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiCallClassInstaller, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
+        SetupDiSetClassInstallParamsW, DICS_FLAG_GLOBAL, DICS_PROPCHANGE, DIF_PROPERTYCHANGE, DIGCF_ALLCLASSES, DIGCF_PRESENT, SP_CLASSINSTALL_HEADER,
+        SP_DEVINFO_DATA, SP_PROPCHANGE_PARAMS,
+    };
+    let Ok(devices) = (unsafe { SetupDiGetClassDevsW(None, w!("ROOT"), None, DIGCF_ALLCLASSES | DIGCF_PRESENT) }) else { return false };
+    let mut revived = false;
+    let mut index = 0;
+    loop {
+        let mut device = SP_DEVINFO_DATA { cbSize: size_of::<SP_DEVINFO_DATA>() as u32, ..Default::default() };
+        if unsafe { SetupDiEnumDeviceInfo(devices, index, &mut device) }.is_err() {
+            break;
+        }
+        index += 1;
+        let mut id = [0u16; 256];
+        if unsafe { SetupDiGetDeviceInstanceIdW(devices, &device, Some(&mut id), None) }.is_err() {
+            continue;
+        }
+        let id = String::from_utf16_lossy(&id[..id.iter().position(|&c| c == 0).unwrap_or(id.len())]);
+        if !id.to_ascii_uppercase().starts_with(r"ROOT\PAWNIO\") {
+            continue;
+        }
+        let change = SP_PROPCHANGE_PARAMS {
+            ClassInstallHeader: SP_CLASSINSTALL_HEADER { cbSize: size_of::<SP_CLASSINSTALL_HEADER>() as u32, InstallFunction: DIF_PROPERTYCHANGE },
+            StateChange: DICS_PROPCHANGE,
+            Scope: DICS_FLAG_GLOBAL,
+            HwProfile: 0,
+        };
+        let asked = unsafe { SetupDiSetClassInstallParamsW(devices, Some(&device), Some(&change.ClassInstallHeader), size_of::<SP_PROPCHANGE_PARAMS>() as u32) }.is_ok();
+        revived |= asked && unsafe { SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, devices, Some(&device)) }.is_ok();
+    }
+    let _ = unsafe { SetupDiDestroyDeviceInfoList(devices) };
+    revived
+}
 
 /// One module loaded into the driver.
 pub struct Module {
@@ -48,16 +104,15 @@ impl Module {
     }
 
     fn loaded(blob: &[u8]) -> Result<Self, (&'static str, windows::core::Error)> {
-        let handle = unsafe {
-            CreateFileW(
-                w!(r"\\?\GLOBALROOT\Device\PawnIO"),
-                (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
-                None,
-            )
+        let handle = match open() {
+            // Installed and running, and yet no device to open: the driver came up while an earlier copy of it was
+            // still held by another program (one that installs PawnIO itself, as G-Helper does), and could not take
+            // its name. Started again (once for this process), it takes it.
+            Err(error) if error.code() == ERROR_FILE_NOT_FOUND.to_hresult() && !REVIVED.swap(true, std::sync::atomic::Ordering::Relaxed) && revive() => {
+                crate::journal::note("sensors: the PawnIO driver ran with no device to open, and was started again");
+                open()
+            }
+            opened => opened,
         }
         .map_err(|error| ("the driver not opened", error))?;
         let module = Module { handle };

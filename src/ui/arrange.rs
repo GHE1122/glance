@@ -163,12 +163,18 @@ const MOST_SCALE: f32 = 1.3;
 const LANES_FLOOR: f32 = 0.8;
 /// Within its level, a form shown keeps being shown unless another covers
 /// this much more of the room: no flicker between two layouts where they
-/// cover about as much.
-const STICK: f32 = 1.05;
-/// A level showing more than the one shown comes back only once the room is
-/// this much wider or taller than when that one was taken: a size on the
-/// line between two levels keeps whichever it came with.
-const UP: f32 = 1.08;
+/// cover about as much. (At a twentieth more, tiles three across and two
+/// across swapped back and forth as a corner was dragged across the line
+/// between them, the hand never quite still.)
+const STICK: f32 = 1.25;
+/// A level showing more than the one shown comes back only once one of its
+/// forms fits the room at this much more than its least scale: it left as it
+/// no longer fitted at that least, and a room about that size keeps whichever
+/// level it came with, however the room was reached. (Measured against the
+/// room the level shown was taken in instead, a room grown a long way one way
+/// and a little less the other kept a narrow form stretched across a wide
+/// one; and a hand going to and fro moved that room with it.)
+const UP: f32 = 1.15;
 
 /// A form the panel offers, its size as designed, how much wider and
 /// taller it may be drawn, and the least it may be scaled to.
@@ -217,25 +223,20 @@ impl Ladder {
     /// room, scaled up as far as it fits (to `MOST_SCALE`) and stretched into
     /// what is left, though `shown` (the form shown, as it is sized) stays
     /// unless another covers clearly more (see `STICK`). A level showing
-    /// more than `shown`'s counts only once the room is no smaller either
-    /// way than the room `shown` was taken in, and `UP` times as wide or
-    /// tall. Where none fits, the
-    /// smallest at its least.
+    /// more than `shown`'s counts only where it fits at `UP` times its least
+    /// scale. Where none fits, the smallest at its least.
     ///
     /// The less room, the less shows: as the room shrinks (or grows) both
     /// ways, the level only goes down (or up), never back.
     pub fn choose(&self, room: (f32, f32), shown: Option<Shown>) -> Choice {
         let area = (room.0 * room.1).max(1.0);
-        // Grown: no smaller either way than when the shown one was taken, and larger by `UP` one way at least (a
-        // room grown one way as it shrinks the other has not grown: a level coming back then left again at once).
-        let grown = shown.is_none_or(|shown| room.0 >= shown.taken.0 && room.1 >= shown.taken.1 && (room.0 >= shown.taken.0 * UP || room.1 >= shown.taken.1 * UP));
         let fitting: Vec<(Choice, f32)> = self
             .rungs
             .iter()
             .filter_map(|rung| {
                 let fit = (room.0 / rung.size.0).min(room.1 / rung.size.1);
                 let richer = shown.is_some_and(|shown| rung.form.level() < shown.form.level());
-                (fit >= rung.floor && (grown || !richer)).then(|| {
+                (fit >= rung.floor * if richer { UP } else { 1.0 }).then(|| {
                     let choice = fill(rung, room, fit.min(MOST_SCALE));
                     let (w, h) = self.drawn(choice);
                     (choice, w * h / area)
@@ -534,8 +535,8 @@ mod tests {
         let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
         let ladder = Ladder::new(&theme, &lanes, 6);
         // Narrowed a pixel at a time until the level drops, then widened:
-        // a few pixels back keep the level it dropped to, `UP` times the
-        // width it dropped at brings the other back.
+        // a few pixels back keep the level it dropped to; `UP` times the
+        // room it dropped at, both ways, brings the other back.
         let mut drops = 0;
         for height in [600.0, 440.0, 320.0, 200.0] {
             let mut shown = Shown::after(None, ladder.choose((1400.0, height), None).form, (1400.0, height));
@@ -545,10 +546,10 @@ mod tests {
                 let next = Shown::after(Some(shown), ladder.choose(room, Some(shown)).form, room);
                 if next.form.level() > shown.form.level() {
                     drops += 1;
-                    for back in [width, width + 4.0, width * UP - 2.0] {
+                    for back in [width, width + 4.0] {
                         assert_eq!(ladder.choose((back, height), Some(next)).form.level(), next.form.level(), "{height}: {back} from {next:?}");
                     }
-                    let room = (width * UP + 1.0, height);
+                    let room = (width * UP + 1.0, height * UP + 1.0);
                     assert!(ladder.choose(room, Some(next)).form.level() <= shown.form.level(), "{height}: {room:?} from {next:?}");
                 }
                 shown = next;
@@ -559,7 +560,50 @@ mod tests {
     }
 
     #[test]
-    fn a_room_grown_one_way_as_it_shrinks_the_other_keeps_its_level() {
+    fn tiles_across_and_down_do_not_swap_as_a_corner_wavers_over_their_line() {
+        let theme = Theme::new(Skin::Glass, false);
+        let ladder = Ladder::new(&theme, &lanes(), 6);
+        // Where, going from wide to tall, three across gives way to two across: the room before and after.
+        let room = |i: usize| (560.0 - 2.0 * i as f32, 300.0 + 1.5 * i as f32);
+        let mut shown = Shown::after(None, ladder.choose(room(0), None).form, room(0));
+        let mut line = None;
+        for i in 1..200 {
+            let form = ladder.choose(room(i), Some(shown)).form;
+            if form != shown.form && matches!((shown.form, form), (Form::Small(Small::Tiles { .. }), Form::Small(Small::Tiles { .. }))) {
+                line = Some(i);
+                break;
+            }
+            shown = Shown::after(Some(shown), form, room(i));
+        }
+        let line = line.expect("three across gives way to two across somewhere");
+        // A hand never quite still there: some 30 DIPs across and 20 down either way of the line, again and again
+        // (at a twentieth more for another form to be taken, the form changed at every turn).
+        shown = Shown::after(Some(shown), ladder.choose(room(line), Some(shown)).form, room(line));
+        let mut changes = 0;
+        for wobble in 0..40 {
+            let at = if wobble % 2 == 0 { room(line - 15) } else { room(line + 15) };
+            let form = ladder.choose(at, Some(shown)).form;
+            changes += (form != shown.form) as usize;
+            shown = Shown::after(Some(shown), form, at);
+        }
+        assert_eq!(changes, 0, "the form changed {changes} times as the corner wavered");
+    }
+
+    #[test]
+    fn a_rail_widened_a_long_way_gives_way_though_it_is_a_little_shorter() {
+        let theme = Theme::new(Skin::Glass, false);
+        let ladder = Ladder::new(&theme, &lanes(), 6);
+        let tall = (130.0, 330.0);
+        let shown = Shown::after(None, ladder.choose(tall, None).form, tall);
+        assert_eq!(shown.form, Form::Small(Small::Rail), "{shown:?}");
+        // Dragged by its corner: three times as wide, a little shorter.
+        let wide = (410.0, 310.0);
+        let now = ladder.choose(wide, Some(shown)).form;
+        assert!(now.level() < shown.form.level(), "still {now:?} in {wide:?}");
+    }
+
+    #[test]
+    fn a_room_grown_one_way_as_it_shrinks_the_other_turns_its_level_once_at_most() {
         let theme = Theme::new(Skin::Paper, false);
         let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
         let ladder = Ladder::new(&theme, &lanes, 6);
@@ -575,7 +619,9 @@ mod tests {
             shown = Shown::after(Some(shown), ladder.choose(room, Some(shown)).form, room);
             levels.push(shown.form.level());
         }
-        assert!(levels.windows(2).all(|pair| pair[1] >= pair[0]), "{levels:?}");
+        // (A richer level may come as the room comes to suit it, and go as it no longer does: once, not to and fro.)
+        let turns = levels.windows(2).filter(|pair| pair[0] != pair[1]).map(|pair| pair[1] > pair[0]).collect::<Vec<_>>().windows(2).filter(|pair| pair[0] != pair[1]).count();
+        assert!(turns <= 1, "{levels:?}");
     }
 
     #[test]

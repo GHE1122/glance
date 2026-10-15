@@ -110,13 +110,16 @@ const REST_FRAME: Duration = Duration::from_millis(250);
 /// Without live refraction, how long after a frame of what is behind is taken another is looked for (see
 /// `collect`).
 pub const LOOK_AGAIN: Duration = Duration::from_millis(250);
+/// How long a frame of what is behind is awaited before its scene is arranged anew (see `collect`).
+const ASK_AGAIN: Duration = Duration::from_secs(1);
+/// How long the glass takes to frost fully from clear, or to clear (see `draw`).
+const FROST_EASE: Duration = Duration::from_millis(400);
 /// How often, the time up, a frame being read meanwhile is waited for.
 const LOOK_AGAIN_STEP: Duration = Duration::from_millis(16);
 /// With live refraction, how often the desktop behind is taken again as it
-/// changes, as the panel's is: fifteen times a second (what shows through
-/// the glass is blurred; faster cost twice the processor for little that
-/// shows).
-const LIVE_INTERVAL: Duration = Duration::from_millis(66);
+/// changes, as the panel's is: thirty times a second (at fifteen, what moves
+/// behind the glass, a game's picture, was seen to step).
+const LIVE_INTERVAL: Duration = Duration::from_millis(33);
 /// Without live refraction, how old the desktop taken behind a widget is
 /// before letting go of it takes it again.
 const RETAKE_AFTER: Duration = Duration::from_secs(3);
@@ -452,8 +455,9 @@ struct Widget {
     /// What is behind it, put together live where no one sees it (see
     /// `scene`): while it sees the desktop and shows.
     backdrop: Option<crate::ui::scene::Scene>,
-    /// When the windows behind it were last looked at for it.
+    /// When the windows behind it were last looked at for it, and the screen it was on then.
     arranged: Option<Instant>,
+    arranged_on: Option<RECT>,
     /// Looking at what is behind it again is due (let go, the settings
     /// gone from the front).
     retake: bool,
@@ -478,6 +482,8 @@ struct Widget {
     shown_once: bool,
     /// How frosted it was, measured where it was (see `draw`).
     frost_at: Option<(RECT, f32)>,
+    /// How frosted it is drawn, easing toward how frosted it should be (the second), and when it was last drawn so.
+    frost_shown: Option<(f32, f32, Instant)>,
     /// Light or dark is to be measured again where it comes to rest (see
     /// `retone`).
     tone_due: bool,
@@ -750,7 +756,7 @@ impl Widgets {
                     let lit = match button {
                         Button::Pin => widget.pinned,
                         Button::Through => widget.click_through,
-                        Button::Game => game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
+                        Button::Game => crate::ui::view::game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
                         _ => false,
                     };
                     crate::ui::tip::show(button.says(lit, lang, false), at, crate::os::apps_dark());
@@ -883,7 +889,7 @@ impl Widgets {
         // one of them moved, sized, come or gone where it meets another
         // changes what is behind that one too, as another program's would.
         self.live = look.live && look.skin.sees_backdrop();
-        let playing = game_shown(history);
+        let playing = crate::ui::view::game_shown(history);
         // Each shown, with its shadow and the room for its buttons round it.
         let shown: Vec<&Widget> = self.list.iter().filter(|w| !w.game_only || playing).collect();
         let areas: Vec<(isize, RECT)> = shown
@@ -1017,6 +1023,8 @@ struct Request {
     area: RECT,
     generation: u64,
     moved: bool,
+    /// When it was asked for.
+    since: Instant,
 }
 
 /// Posted to a widget's window as a frame of what is behind it has come.
@@ -1063,6 +1071,7 @@ impl Widget {
             hint: None,
             backdrop: None,
             arranged: None,
+            arranged_on: None,
             retake: false,
             pending: None,
             look_again: None,
@@ -1072,6 +1081,7 @@ impl Widget {
             failed: None,
             shown_once: false,
             frost_at: None,
+            frost_shown: None,
             tone_due: false,
             frame_took: gfx::Took::default(),
             taken: None,
@@ -1191,6 +1201,19 @@ impl Widget {
             let again = live && self.behind.as_ref().is_some_and(|behind| behind.taken.elapsed() >= Self::backdrop_every(live));
             if self.pending.is_some() || self.behind.is_none() || again {
                 scene.want();
+            }
+            // Asked for a while ago, and none come (nor being read): arranged anew. A frame comes only as what the
+            // scene shows changes, and one passed over (put together before the desktop was in it, as it can be just
+            // after Glance starts) is followed by none while nothing behind changes: the widget, waiting for its
+            // first, would never show.
+            if self.pending.as_ref().is_some_and(|request| request.since.elapsed() >= ASK_AGAIN) && !scene.reading() {
+                note_sparingly("ask again", || "widget: the desktop behind asked for again (none came)".into());
+                if let Some(scene) = &mut self.backdrop {
+                    scene.rest();
+                }
+                self.pending = None;
+                self.look_again = None;
+                self.retake |= self.behind.is_some();
             }
             return;
         };
@@ -1500,11 +1523,7 @@ impl Widget {
                         Some(Button::Close) => Released::Closed,
                         Some(Button::Settings) => Released::Settings,
                         Some(Button::Game) => {
-                            // Showing a game (found or asked for): off; else on.
-                            let history = crate::app().controller.history.lock().unwrap();
-                            let shown = game_shown(history.iter().last().map(std::slice::from_ref).unwrap_or_default());
-                            drop(history);
-                            crate::source::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
+                            press_game();
                             Released::Nothing
                         }
                         // No button: what of its lanes is there (what plays, the sound).
@@ -1935,7 +1954,9 @@ impl Widget {
             let taken = behind.capture.rect;
             let ahead = if self.drag.is_some() { (on_screen.right - on_screen.left).max(on_screen.bottom - on_screen.top) / 6 } else { 0 };
             let past = on_screen.left - ahead < taken.left || on_screen.top - ahead < taken.top || on_screen.right + ahead > taken.right || on_screen.bottom + ahead > taken.bottom;
-            let other_screen = clip(taken, self.contact.monitor) != taken;
+            // (What was taken may reach past its screen, onto others or where there is none: only its being on
+            // another screen than it was on when it was taken counts.)
+            let other_screen = self.arranged_on.is_some_and(|on| on != self.contact.monitor);
             other_screen || past
         });
         let retake = self.retake && self.drag.is_none() && !sizing;
@@ -1970,6 +1991,7 @@ impl Widget {
                 self.backdrop = crate::ui::scene::Scene::new(area, wake, &self.gfx);
             }
             self.arranged = Some(now);
+            self.arranged_on = Some(self.contact.monitor);
             // In hand, light or dark holds (measured again as it is let go:
             // see `retone`).
             let moved = (elsewhere && self.drag.is_none()) || self.replace == Some(true);
@@ -1989,7 +2011,7 @@ impl Widget {
                 // A frame of it as it is now awaited; nothing changed, what it has stands.
                 Some(scene) => {
                     if scene.arrange(area, self.window.hwnd) || self.behind.is_none() {
-                        self.pending = Some(Request { area, generation: self.generation, moved });
+                        self.pending = Some(Request { area, generation: self.generation, moved, since: now });
                         // (Its first frame looked past as the last were.)
                         self.look_again = None;
                     } else if let Some(behind) = &mut self.behind {
@@ -2038,8 +2060,9 @@ impl Widget {
                 format!("widget: a frame took {:.1} ms: laid out {:.1}, the desktop taken {:.1}, drawn {:.1} (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1}; {form})", ms(whole), ms(laid_out), ms(taken - laid_out), ms(whole - taken), ms(took.given), ms(took.painted), ms(took.handed))
             });
         }
-        // (The lyrics gliding to the next line are drawn every frame too.)
-        if moving || crate::playing::gliding() { Frame::Moving } else { Frame::Rest }
+        // (The lyrics gliding to the next line are drawn every frame too, and the glass easing to how frosted it is.)
+        let easing = self.frost_shown.is_some_and(|(shown, target, _)| shown != target);
+        if moving || easing || crate::playing::gliding() { Frame::Moving } else { Frame::Rest }
     }
 
     /// On the device that draws now, if it is not (a driver reset, a device lost): its surface made anew, what it
@@ -2099,7 +2122,7 @@ impl Widget {
         // the panel's does): measured again as it moves a step.
         let here = self.rect();
         let step = (16.0 * contact_scale) as i32;
-        let frost = match (&self.behind, self.frost_at) {
+        let target = match (&self.behind, self.frost_at) {
             (None, _) => 0.0,
             (Some(_), Some((at, frost))) if (at.left - here.left).abs() < step && (at.top - here.top).abs() < step && (at.right - here.right).abs() < step && (at.bottom - here.bottom).abs() < step => frost,
             (Some(behind), _) => {
@@ -2109,6 +2132,16 @@ impl Widget {
                 frost
             }
         };
+        // Eased to it, not stepped: moved a little onto a busier or calmer part of the desktop, the glass frosts or
+        // clears over a moment rather than at once.
+        let frost = match self.frost_shown {
+            Some((shown, _, at)) => {
+                let step = now.saturating_duration_since(at).as_secs_f32() / FROST_EASE.as_secs_f32();
+                if target > shown { (shown + step).min(target) } else { (shown - step).max(target) }
+            }
+            None => target,
+        };
+        self.frost_shown = Some((frost, target, now));
         let behind = &mut self.behind;
         let layers = &mut self.layers;
         let (before, drawn, morph_layer) = (self.morph.as_mut().map(|(_, before)| before), &mut self.drawn, &mut self.morph_layer);
@@ -2181,7 +2214,7 @@ impl Widget {
             }
             frame.place(Matrix3x2::translation(margin, margin));
             // The pointer over it: its buttons (letting clicks through, the one that ends that).
-            let front_is_game = game_shown(scene.history);
+            let front_is_game = crate::ui::view::game_shown(scene.history);
             for (centre, button) in offered {
                 // Lit while on: pinned, letting clicks through, the window in front a game.
                 let lit = (button == Button::Pin && pinned) || (button == Button::Through && through) || (button == Button::Game && front_is_game);
@@ -2283,15 +2316,12 @@ fn clip(r: RECT, bounds: RECT) -> RECT {
     RECT { left, top, right: r.right.clamp(left, bounds.right), bottom: r.bottom.clamp(top, bounds.bottom) }
 }
 
-/// Whether a game shows (its button lit): one found and not turned off, or
-/// one asked for by hand.
-pub(crate) fn game_shown(history: &[Sample]) -> bool {
-    use crate::presents::{game_mode, GameMode};
-    match game_mode() {
-        GameMode::On => true,
-        GameMode::Off => false,
-        GameMode::Auto => history.last().is_some_and(|s| s.game.is_some()),
-    }
+/// The game button pressed (a widget's or the panel's): showing a game (found or asked for), off; else on.
+pub(crate) fn press_game() {
+    let history = crate::app().controller.history.lock().unwrap();
+    let shown = crate::ui::view::game_shown(history.iter().last().map(std::slice::from_ref).unwrap_or_default());
+    drop(history);
+    crate::source::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
 }
 
 /// The outline of a rounded rectangle, as points round it, closed.

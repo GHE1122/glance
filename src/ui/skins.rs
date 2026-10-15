@@ -194,6 +194,35 @@ pub fn shadows(frame: &Frame, shapes: &[(Rect, f32)], specs: &[Shadow]) -> Resul
     Ok(())
 }
 
+/// `shadows`, cast only outside each shape, as CSS casts a box's shadow: under a shape that lets what is behind it
+/// show (glass), the shadow under it would darken all that shows through.
+fn shadows_outside(frame: &Frame, shapes: &[(Rect, f32)], specs: &[Shadow]) -> Result<()> {
+    let furthest = specs.iter().map(|shadow| reach(shadow.blur / 2.0) + shadow.spread.max(0.0) + shadow.y.abs() + 1.0).fold(0.0, f32::max);
+    for shape in shapes {
+        let (r, radius) = *shape;
+        let around = grow(r, furthest);
+        let ring: ID2D1Geometry = unsafe {
+            let factory = &frame.gfx.factory;
+            let outer: ID2D1Geometry = factory.CreateRectangleGeometry(&D2D_RECT_F { left: around.x, top: around.y, right: around.x + around.w, bottom: around.y + around.h })?.cast()?;
+            factory.CreateGeometryGroup(D2D1_FILL_MODE_ALTERNATE, &[Some(outer), Some(geometry(frame, r, radius)?)])?.cast()?
+        };
+        let layer = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: D2D_RECT_F { left: around.x, top: around.y, right: around.x + around.w, bottom: around.y + around.h },
+            geometricMask: std::mem::ManuallyDrop::new(Some(ring)),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: 1.0,
+            ..Default::default()
+        };
+        unsafe { frame.dc.PushLayer(&layer, None) };
+        let drawn = shadows(frame, std::slice::from_ref(shape), specs);
+        unsafe { frame.dc.PopLayer() };
+        drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+        drawn?;
+    }
+    Ok(())
+}
+
 /// How far a Gaussian of `deviation` reaches before what it adds no longer shows (DIPs, whole).
 fn reach(deviation: f32) -> f32 {
     (3.0 * deviation).ceil()
@@ -532,7 +561,7 @@ fn glass(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
     let theme = ground.theme;
     let pieces: Vec<(Rect, f32)> = ground.lanes.iter().chain([&ground.bar]).filter(|r| r.w > 0.0 && r.h > 0.0).map(|r| (*r, theme.radius)).collect();
     if part == Part::Under {
-        return shadows(frame, &pieces, &theme.shadows);
+        return shadows_outside(frame, &pieces, &theme.shadows);
     }
     let tint = theme.glass.alpha(theme.glass_clear + theme.glass_frosted * ground.frost);
     for (piece, radius) in &pieces {

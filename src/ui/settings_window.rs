@@ -826,6 +826,9 @@ struct Ui {
     drawn_size: Option<(u32, u32)>,
     /// Drawing the preview failed this frame (the device was lost).
     failed: bool,
+    /// The largest panel size at which the panel still grows on the screen the preview shows (see
+    /// `arrange::largest`): past it a larger size changed the figure and nothing else.
+    largest: f32,
 }
 
 impl Lives for Ui {
@@ -980,6 +983,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             next_frame: Instant::now(),
             drawn_size: None,
             failed: false,
+            largest: SIZES.1,
         };
         ui.raise_more();
         if ui.remote_there {
@@ -1952,7 +1956,14 @@ impl Ui {
         let lang = self.lang;
         let (sizes, overlay) = (SIZES, &self.settings.overlay);
         match field {
-            Field::PanelSize => (pick(lang, "面板大小", "Panel size"), sizes.0, sizes.1, 0.05, self.settings.panel_size.clamp(sizes.0, sizes.1)),
+            // No larger than the screen holds it: at that, said so.
+            Field::PanelSize => {
+                // (On a step, as the slider moves by them: a most between two could never be reached.)
+                let most = (sizes.0 + ((self.largest - sizes.0) / 0.05 + 1e-4).floor() * 0.05).clamp(sizes.0, sizes.1);
+                let value = self.settings.panel_size.clamp(sizes.0, most);
+                let name = if most < sizes.1 && value >= most - 0.001 { pick(lang, "面板大小（已达屏幕上限）", "Panel size (as large as this screen holds)") } else { pick(lang, "面板大小", "Panel size") };
+                (name, sizes.0, most, 0.05, value)
+            }
             Field::OverlayClear => (pick(lang, "玻璃透明度", "Glass clarity"), 0.0, 1.0, 0.05, overlay.clear.clamp(0.0, 1.0)),
             _ => (pick(lang, "大小", "Size"), sizes.0, sizes.1, 0.05, overlay.size.clamp(sizes.0, sizes.1)),
         }
@@ -3239,7 +3250,8 @@ impl Ui {
                     let shown = format!("{:.0}%", value * 100.0);
                     text_centred(frame, &shown, label, palette.text2, right - SLIDER_VALUE, cy, SLIDER_VALUE, Align::End);
                     let (start, end) = (track.x + SLIDER_THUMB, track.x + track.w - SLIDER_THUMB);
-                    let at = start + (value - min) / (max - min) * (end - start);
+                    // (A slider whose most is its least, the screen holding no more than that: at its start.)
+                    let at = start + if max > min { (value - min) / (max - min) * (end - start) } else { 0.0 };
                     fill(frame, palette.switch_stroke.alpha(0.45), start, cy - 2.0, end - start, 4.0, 2.0);
                     fill(frame, palette.switch_on, start, cy - 2.0, at - start, 4.0, 2.0);
                     // As Windows' own: a ring around a dot in the accent, the
@@ -4060,6 +4072,7 @@ impl Ui {
         let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let heights: Vec<f32> = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
+        self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), self.settings.columns, SIZES.1);
         let size = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns, size);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);

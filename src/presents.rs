@@ -1,5 +1,7 @@
 //! The frames programs present, from Event Tracing for Windows: DXGI's
-//! Present_Start (Direct3D 10, 11 and 12) and Direct3D 9's. Nothing is
+//! Present_Start (Direct3D 10, 11 and 12) and Direct3D 9's; for a program
+//! that presents through neither (OpenGL, Vulkan), what the graphics
+//! kernel is handed of each frame (see `Fed`). Nothing is
 //! asked of the programs themselves: no handle to a game's process, nothing
 //! injected, so no anti-cheat has anything to see. A real-time session needs
 //! administrator rights, which Glance has; without them there are no frames.
@@ -17,9 +19,10 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
 };
 use windows::Win32::System::Diagnostics::Etw::{
-    CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW, CONTROLTRACE_HANDLE, EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_RECORD,
-    EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
-    PROCESS_TRACE_MODE_RAW_TIMESTAMP, PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
+    CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW, CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS, ENABLE_TRACE_PARAMETERS_VERSION_2,
+    EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_FILTER_DESCRIPTOR, EVENT_FILTER_TYPE_EVENT_ID, EVENT_RECORD,
+    EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
+    PROCESS_TRACE_MODE_RAW_TIMESTAMP, PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION, TRACE_LEVEL_VERBOSE, WNODE_FLAG_TRACED_GUID,
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -30,9 +33,22 @@ use crate::frames::{FrameStats, Presents};
 
 const DXGI: GUID = GUID::from_u128(0xCA11C036_0102_4A2D_A6AD_F03CFED5D3C9);
 const D3D9: GUID = GUID::from_u128(0x783ACA0A_790E_4D7F_8451_AA850511C6B9);
+const DXGKRNL: GUID = GUID::from_u128(0x802EC45A_1E99_4B83_9920_87C98277BA9D);
 /// Present_Start, in each provider.
 const DXGI_PRESENT: u16 = 42;
 const D3D9_PRESENT: u16 = 1;
+/// The graphics kernel's: a frame handed to the compositor (PresentHistory_Start or PresentHistoryDetailed_Start, one
+/// for each), and a frame flipped to the screen without it (Flip_Info, FlipMultiPlaneOverlay_Info).
+const KERNEL_PRESENTS: [u16; 4] = [0xAB, 0xD7, 0xA8, 0xFC];
+/// The present models (D3DKMT_PRESENT_MODEL) that tell of no frame, as PresentMon passes them over: a window's GDI
+/// drawing (REDIRECTED_GDI, REDIRECTED_GDI_SYSMEM) and a screen capture's fence (SCREENCAPTUREFENCE).
+const NOT_FRAMES: [u64; 3] = [1, 5, 6];
+/// DXGI_PRESENT_TEST: a present that asks whether the window shows, and draws nothing.
+const DXGI_PRESENT_TEST: u64 = 0x1;
+/// The session's flush timer counted in milliseconds, not seconds (Windows 8 and later).
+const EVENT_TRACE_USE_MS_FLUSH_TIMER: u32 = 0x10;
+/// Its keywords asked for: Base and Present (as PresentMon asks).
+const DXGKRNL_KEYWORDS: u64 = 0x1 | 0x800_0000;
 
 /// The session's name: one per Glance (a debug build has its own).
 #[cfg(not(debug_assertions))]
@@ -41,7 +57,16 @@ const SESSION: &str = "Glance.Frames";
 const SESSION: &str = "Glance.Frames.Debug";
 
 /// Each process's presents, by process id, in QPC ticks since boot.
-static PRESENTS: Mutex<Option<HashMap<u32, Presents>>> = Mutex::new(None);
+static PRESENTS: Mutex<Option<HashMap<u32, Fed>>> = Mutex::new(None);
+
+/// A process's frames, and where they are told from: its runtime's presents (DXGI, Direct3D 9) once it has made one,
+/// and from then on those alone (the kernel is handed those frames too); till then, what the kernel is handed of
+/// them, as PresentMon counts them (a driver may hand it more than one for a frame drawn: so many it shows).
+#[derive(Default)]
+struct Fed {
+    frames: Presents,
+    runtime: bool,
+}
 /// The moment of the latest event heard of from the session (QPC ticks):
 /// frames are told of in batches, a while after they were presented, and
 /// only up to here is it known what has been presented.
@@ -54,21 +79,46 @@ fn ticks(qpc: i64) -> Duration {
     Duration::from_nanos((qpc as i128 * 1_000_000_000 / frequency.max(1) as i128) as u64)
 }
 
+
 unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     let header = unsafe { &(*record).EventHeader };
-    let present = match header.ProviderId {
-        DXGI => header.EventDescriptor.Id == DXGI_PRESENT,
-        D3D9 => header.EventDescriptor.Id == D3D9_PRESENT,
-        _ => false,
+    let id = header.EventDescriptor.Id;
+    // Whether a frame is told of, and whether by its runtime.
+    let told = match header.ProviderId {
+        // (A present that only asks whether the window shows draws nothing: no frame, nor a sign of the runtime.)
+        DXGI if id == DXGI_PRESENT => (field(record, "Flags").unwrap_or(0) & DXGI_PRESENT_TEST == 0).then_some(true),
+        D3D9 if id == D3D9_PRESENT => Some(true),
+        // (A window's GDI drawing, or a screen capture's fence, handed to the compositor is no frame of a game's.)
+        DXGKRNL if KERNEL_PRESENTS.contains(&id) => (!field(record, "Model").is_some_and(|model| NOT_FRAMES.contains(&model))).then_some(false),
+        _ => None,
     };
-    // (Every event of either provider, a frame presented or not: they come in the order they happened, near enough.)
+    // (Every event of the providers, a frame presented or not: they come in the order they happened, near enough.)
     HEARD.fetch_max(header.TimeStamp, std::sync::atomic::Ordering::Relaxed);
-    if present {
-        let at = ticks(header.TimeStamp);
-        if let Some(presents) = PRESENTS.lock().unwrap().as_mut() {
-            presents.entry(header.ProcessId).or_default().push(at);
-        }
+    let Some(runtime) = told else { return };
+    let at = ticks(header.TimeStamp);
+    let mut presents = PRESENTS.lock().unwrap();
+    let Some(presents) = presents.as_mut() else { return };
+    let fed = presents.entry(header.ProcessId).or_default();
+    if runtime && !fed.runtime {
+        // Its runtime's from now on: what the kernel told of it before goes.
+        *fed = Fed { runtime: true, ..Default::default() };
     }
+    if runtime == fed.runtime {
+        fed.frames.push(at);
+    }
+}
+
+/// The field `name` of an event (an integer of up to eight bytes), as its manifest has it.
+fn field(record: *const EVENT_RECORD, name: &str) -> Option<u64> {
+    use windows::Win32::System::Diagnostics::Etw::{TdhGetProperty, TdhGetPropertySize, PROPERTY_DATA_DESCRIPTOR};
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let descriptor = PROPERTY_DATA_DESCRIPTOR { PropertyName: wide.as_ptr() as u64, ArrayIndex: u32::MAX, Reserved: 0 };
+    let mut size = 0u32;
+    if unsafe { TdhGetPropertySize(record, None, &[descriptor], &mut size) } != ERROR_SUCCESS.0 || size == 0 || size > 8 {
+        return None;
+    }
+    let mut value = [0u8; 8];
+    (unsafe { TdhGetProperty(record, None, &[descriptor], &mut value[..size as usize]) } == ERROR_SUCCESS.0).then(|| u64::from_le_bytes(value))
 }
 
 /// The session's properties, its name after them.
@@ -86,9 +136,16 @@ impl Properties {
             (*properties).Wnode.ClientContext = 1;
             // One buffer for the session: events come in the order they
             // happened, not each processor's in turn; and delivered within
-            // a second, the span the frame rate is taken over.
-            (*properties).LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING;
-            (*properties).FlushTimer = 1;
+            // a tenth of a second (in milliseconds: delivered by the second,
+            // the frame rate shown lagged the game's by about one).
+            (*properties).LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING | EVENT_TRACE_USE_MS_FLUSH_TIMER;
+            (*properties).FlushTimer = 100;
+            // Room for a burst (the kernel tells of every program's frames, the compositor's among them, many a
+            // second): an event with no room is lost, and a frame lost is a frame not counted, and a stutter that
+            // was not there.
+            (*properties).BufferSize = 64;
+            (*properties).MinimumBuffers = 16;
+            (*properties).MaximumBuffers = 64;
             (*properties).LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
         }
         Properties(buffer)
@@ -127,7 +184,46 @@ pub fn start() {
     for provider in [DXGI, D3D9] {
         let _ = unsafe { EnableTraceEx2(handle, &provider, EVENT_CONTROL_CODE_ENABLE_PROVIDER.0, TRACE_LEVEL_INFORMATION as u8, u64::MAX, 0, 0, None) };
     }
+    // The kernel's, only the events that tell of a frame (it tells of much else, many times a frame).
+    #[repr(C)]
+    struct Ids {
+        filter_in: u8,
+        reserved: u8,
+        count: u16,
+        events: [u16; 4],
+    }
+    let ids = Ids { filter_in: 1, reserved: 0, count: KERNEL_PRESENTS.len() as u16, events: KERNEL_PRESENTS };
+    let mut descriptor = EVENT_FILTER_DESCRIPTOR { Ptr: &ids as *const Ids as u64, Size: size_of::<Ids>() as u32, Type: EVENT_FILTER_TYPE_EVENT_ID };
+    let parameters = ENABLE_TRACE_PARAMETERS { Version: ENABLE_TRACE_PARAMETERS_VERSION_2, EnableFilterDesc: &mut descriptor, FilterDescCount: 1, ..Default::default() };
+    let enabled = unsafe { EnableTraceEx2(handle, &DXGKRNL, EVENT_CONTROL_CODE_ENABLE_PROVIDER.0, TRACE_LEVEL_VERBOSE as u8, DXGKRNL_KEYWORDS, 0, 0, Some(&parameters)) };
+    if enabled != ERROR_SUCCESS {
+        crate::journal::note(format!("frames: the graphics kernel's not heard ({})", enabled.0));
+    }
     *PRESENTS.lock().unwrap() = Some(HashMap::new());
+    // How many events the session lost, told in the journal as it grows.
+    thread::Builder::new()
+        .name("glance: frames lost".into())
+        .spawn({
+            let name = name.clone();
+            move || {
+                let mut told = (0, 0);
+                loop {
+                    thread::sleep(Duration::from_secs(10));
+                    let mut properties = Properties::new(&name);
+                    let queried = unsafe { ControlTraceW(CONTROLTRACE_HANDLE::default(), PCWSTR(name.as_ptr()), properties.get(), EVENT_TRACE_CONTROL_QUERY) };
+                    // (Stopped: it is no more.)
+                    if queried != ERROR_SUCCESS {
+                        return;
+                    }
+                    let lost = unsafe { ((*properties.get()).EventsLost, (*properties.get()).RealTimeBuffersLost) };
+                    if lost != told {
+                        crate::journal::note(format!("frames: the session has lost {} events and {} buffers of them in all", lost.0, lost.1));
+                        told = lost;
+                    }
+                }
+            }
+        })
+        .expect("a thread started");
     thread::Builder::new().name("glance: frames presented".into()).spawn(move || {
         let mut logfile = EVENT_TRACE_LOGFILEW { LoggerName: PWSTR(name.as_ptr() as *mut u16), ..Default::default() };
         // Timestamps left as the session takes them, from the performance
@@ -240,8 +336,8 @@ pub fn presenting() -> Vec<Presenting> {
         let mut presents = PRESENTS.lock().unwrap();
         let Some(presents) = presents.as_mut() else { return Vec::new() };
         let heard = ticks(HEARD.load(std::sync::atomic::Ordering::Relaxed));
-        presents.retain(|_, frames| frames.stats(now, heard).is_some());
-        presents.iter().filter_map(|(pid, frames)| Some((*pid, frames.stats(now, heard)?))).collect()
+        presents.retain(|_, fed| fed.frames.stats(now, heard).is_some());
+        presents.iter().filter_map(|(pid, fed)| Some((*pid, fed.frames.stats(now, heard)?))).collect()
     };
     if stats.is_empty() {
         return Vec::new();
@@ -358,7 +454,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(|presents| presents.iter().filter_map(|(pid, frames)| Some((*pid, frames.stats(now, now)?.fps))).collect())
+                .map(|presents| presents.iter().filter_map(|(pid, fed)| Some((*pid, fed.frames.stats(now, now)?.fps))).collect())
                 .unwrap_or_default();
             rates.sort_by(|a, b| b.1.total_cmp(&a.1));
             let windows: Vec<String> = presenting()

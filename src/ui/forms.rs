@@ -38,6 +38,8 @@ const STRIP: f32 = 44.0;
 /// A tall corner's row of two chips, and a pair of rates' row (DIPs).
 const TALL_CHIPS: f32 = 40.0;
 const TALL_PAIR: f32 = 34.0;
+/// The widest a name in a chart's legend is drawn (DIPs).
+const LEGEND_NAME: f32 = 120.0;
 /// A rail's width, and a reading's height in it.
 const RAIL: f32 = 96.0;
 const RAIL_ROW: f32 = 36.0;
@@ -252,7 +254,7 @@ fn rate(value: Option<f64>, bits: bool, short: bool) -> (String, String) {
 /// graphics card, memory, the network both ways, the disk both ways.
 fn readings(scene: &Scene) -> Vec<Reading> {
     let (s, prefs, lang) = (scene.history.last().unwrap(), scene.prefs, scene.lang);
-    let on = |module: &str| prefs.modules.iter().any(|entry| entry.on && entry.id == module);
+    let on = |module: &str| prefs.modules.iter().any(|entry| entry.id == module && super::view::shows_module(entry));
     let celsius = |value: Option<f32>| value.map(|t| format!("{t:.0}°")).unwrap_or_default();
     let percent = |value: Option<f32>| value.map_or("—".into(), |v| format!("{v:.0}"));
     let mut readings = Vec::new();
@@ -691,12 +693,14 @@ impl Painter<'_> {
     }
 
     /// Which line is which, from (`x`, `y`): a piece of each line, then its
-    /// name, on a plate of their own; none where `room` is too narrow.
+    /// name (a long one, as a game's title may be, cut short), on a plate of
+    /// their own; none where `room` is too narrow.
     fn legend(&self, x: f32, y: f32, room: f32, lines: [(&str, Color, bool); 2]) {
         let theme = self.theme();
         let font = self.font(10.5, 500.0);
         let (pad, sample, gap, apart) = (5.0, 12.0, 4.0, 9.0);
-        let widths = lines.map(|(name, ..)| self.frame.measure(name, font));
+        let lines = lines.map(|(name, color, dashed)| (self.fitted(name, font, LEGEND_NAME), color, dashed));
+        let widths = lines.each_ref().map(|(name, ..)| self.frame.measure(name, font));
         let width = widths.iter().sum::<f32>() + 2.0 * (sample + gap) + apart + 2.0 * pad;
         if width > room {
             return;
@@ -714,7 +718,7 @@ impl Painter<'_> {
                 self.frame.stroke(&piece, color, 1.5);
             }
             at += sample + gap;
-            self.level(name, font, theme.text2, at, middle, Align::Start);
+            self.level(&name, font, theme.text2, at, middle, Align::Start);
             at += width + apart;
         }
     }

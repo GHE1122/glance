@@ -53,7 +53,7 @@
     <string name="working">Working…</string>
     <string name="no_reads">Glance is not running on the PC: no temperatures or fan speeds</string>
     <string name="night">Night mode</string>
-    <string name="night_how">The PC keeps running: screens off, lights off, power saver</string>
+    <string name="night_how">The PC keeps running: screens off, lights off, sound muted, power saver</string>
     <string name="night_on">On; the PC is still running. Tap again to end it</string>
     <string name="screen">Screens</string>
     <string name="screen_is_on">On. Tap to turn them all off</string>
@@ -78,6 +78,7 @@
     <string name="saturation">Depth</string>
     <string name="brightness_is">%1$d%% bright</string>
     <string name="brightness">Light</string>
+    <string name="screen_brightness">Screen brightness</string>
     <string name="use_colour">Use this colour</string>
     <string name="keys">Keyboard light</string>
     <string name="keys_off">Off</string>
@@ -115,6 +116,11 @@
     <string name="case_fan_line">Case fans %1$d rpm</string>
     <string name="about">About</string>
     <string name="version">Version %1$s</string>
+    <string name="check_update">Check for updates</string>
+    <string name="checking">Checking</string>
+    <string name="newest">Up to date</string>
+    <string name="newer_is">Version %1$s is available</string>
+    <string name="check_failed">The update server could not be reached</string>
     <string name="licences">Open-source licences</string>
     <string name="licences_what">This app\'s own, and those of what it is built with</string>
     <string name="view">View</string>

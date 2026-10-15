@@ -83,7 +83,7 @@ const WATCH_MS: u32 = 100;
 /// How soon to try again when drawing failed for want of a device.
 const DEVICE_RETRY: Duration = Duration::from_millis(250);
 /// How often a live backdrop is taken again as it changes (see `widget::LIVE_INTERVAL`).
-const LIVE_INTERVAL: Duration = Duration::from_millis(66);
+const LIVE_INTERVAL: Duration = Duration::from_millis(33);
 /// Rows a wheel notch scrolls the process list by.
 pub(crate) const WHEEL_ROWS: f32 = 3.0;
 /// How quickly the process list catches up with the wheel.
@@ -1204,6 +1204,9 @@ struct Panel<'a> {
     /// The panel as it opened, held while it is up (laid out afresh at the
     /// next frame when `None`), and the settings it was made for.
     opening: Option<arrange::Opening>,
+    /// Whether the game was asked for, and turned off, by hand, as `opening` was laid out: its lane comes or goes
+    /// with them (see `arrange`).
+    game_at: (bool, bool),
     /// What a panel laid out afresh while up (the settings changed) still
     /// holds from before: a volume unplugged stays until it closes.
     held: Option<Seen>,
@@ -1302,6 +1305,7 @@ impl<'a> Panel<'a> {
             pinned: false,
             game: None,
             opening: None,
+            game_at: (false, false),
             held: None,
             style: String::new(),
             hits: Vec::new(),
@@ -2127,6 +2131,15 @@ impl<'a> Panel<'a> {
             (contact.work.right - contact.work.left) as f32 / contact.scale,
             (contact.work.bottom - contact.work.top) as f32 / contact.scale,
         );
+        // The game asked for or turned off by hand since it was laid out (from here, a widget, or the game gone):
+        // its lane comes or goes, and it is laid out anew, holding what it held.
+        let game = (view::front_is_game(), view::game_hidden());
+        if game != self.game_at {
+            if let Some(opening) = self.opening.take() {
+                self.held = Some(opening.seen);
+            }
+            self.game_at = game;
+        }
         let (prefs, theme, lang, scroll, hover, pinned) = (&self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned);
         let opening = match &mut self.opening {
             Some(opening) => {
@@ -2434,6 +2447,11 @@ impl<'a> Panel<'a> {
                     let at = self.placement.as_ref().filter(|_| self.pinned).map(|p| (p.anchor.x, p.anchor.y));
                     crate::app().pin_panel(at);
                 }
+            }
+            Some(Hit::Game) => {
+                // (Its lane comes or goes at the next frame: see `arrange`.)
+                crate::widget::press_game();
+                self.next_frame = Instant::now();
             }
             Some(Hit::Overlay) => {
                 // As it is on screen now: shown, it closes; not, it opens.
