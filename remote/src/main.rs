@@ -390,8 +390,10 @@ impl Helper {
 
     fn state(&self) -> Value {
         // As OpenRGB has them; while it is not running, as this helper last
-        // set them.
-        let lights = lights::lit().or(self.state.lock().unwrap().lights);
+        // set them. A laptop whose lights are its keys' is never asked of
+        // OpenRGB (see `lights`): as set here, whatever OpenRGB last had.
+        let kept = self.state.lock().unwrap().lights;
+        let lights = if lights_are_keys() { kept } else { lights::lit().or(kept) };
         let light = self.light.lock().unwrap().clone();
         let playing = media::playing();
         let state = self.state.lock().unwrap();

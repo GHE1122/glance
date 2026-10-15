@@ -214,7 +214,7 @@ function draw() {
   }
   const tiles = el("div", "tiles");
   tiles.append(
-    tile(t("夜间模式", "Night mode"), night ? t("已开启，电脑还在运行。再点一次结束", "On; the PC is still running. Tap again to end it") : t("电脑继续运行：关屏、关灯、切到节能", "The PC keeps running: screens off, lights off, power saving"), night, () => act("/v1/night", { on: !night }, s => { s.night = !night; s.screen = night; s.lights = night; }), true),
+    tile(t("夜间模式", "Night mode"), night ? t("已开启，电脑还在运行。再点一次结束", "On; the PC is still running. Tap again to end it") : t("电脑继续运行：关屏、关灯、静音、切到节能", "The PC keeps running: screens off, lights off, sound muted, power saving"), night, () => act("/v1/night", { on: !night }, s => { s.night = !night; s.screen = night; s.lights = night; }), true),
     tile(t("屏幕", "Screens"), screen ? t("亮着，点一下全部关闭", "On. Tap to turn them all off") : t("已关闭，点一下打开", "Off. Tap to turn them on"), screen, () => act("/v1/screen", { on: !screen }, s => { s.screen = !screen; })),
     ...(state.lights_there === false ? [] : [tile(t("灯光", "Lights"), lights === false ? t("关着，点一下打开", "Off. Tap to turn them on") : t("开着", "On"), lights !== false, () => act("/v1/lights", { on: lights === false }, s => { s.lights = lights === false; }))]),
   );
@@ -240,6 +240,12 @@ function draw() {
     main.append(c);
   }
   const monitors = state.monitors || [];
+  // One monitor that says how bright it is (a laptop's own screen): how bright, alone (the screens' tile turns it off).
+  if (monitors.length === 1 && monitors[0].brightness != null) {
+    const c = card(t("屏幕亮度", "Screen brightness")), alone = monitors[0];
+    c.append(slide(alone.brightness, 0, alone.on !== false && screen, level => act("/v1/monitor", { index: 0, brightness: level }, s => { s.monitors[0].brightness = level; })));
+    main.append(c);
+  }
   if (monitors.length > 1) {
     const c = card(t("显示器", "Monitors")), rows = el("div", "rows");
     monitors.forEach((monitor, at) => {

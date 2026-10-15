@@ -53,7 +53,7 @@
     <string name="working">Working…</string>
     <string name="no_reads">Glance is not running on the PC: no temperatures or fan speeds</string>
     <string name="night">Night mode</string>
-    <string name="night_how">The PC keeps running: screens off, lights off, power saver</string>
+    <string name="night_how">The PC keeps running: screens off, lights off, sound muted, power saver</string>
     <string name="night_on">On; the PC is still running. Tap again to end it</string>
     <string name="screen">Screens</string>
     <string name="screen_is_on">On. Tap to turn them all off</string>
@@ -78,6 +78,7 @@
     <string name="saturation">Depth</string>
     <string name="brightness_is">%1$d%% bright</string>
     <string name="brightness">Light</string>
+    <string name="screen_brightness">Screen brightness</string>
     <string name="use_colour">Use this colour</string>
     <string name="keys">Keyboard light</string>
     <string name="keys_off">Off</string>
