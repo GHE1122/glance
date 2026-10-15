@@ -661,9 +661,9 @@ impl Widgets {
         !self.put_away.is_empty()
     }
 
-    /// Whether any widget is on the screen now.
-    pub fn any_showing(&self) -> bool {
-        self.list.iter().any(|widget| widget.showing.is_some())
+    /// Whether a widget on the screen now shows the process list (what it was last drawn with says).
+    pub fn any_showing_processes(&self) -> bool {
+        self.list.iter().any(|widget| widget.showing.is_some() && widget.hits.iter().any(|hit| matches!(hit.4, view::Hit::Processes(_))))
     }
 
     /// The widgets kept in the settings (and a panel 0.2.3 left on the

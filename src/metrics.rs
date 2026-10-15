@@ -1242,17 +1242,24 @@ fn default_interface() -> Option<NetworkInfo> {
 /// counts each asking as a use of the PC's location (a network's name can tell where it is), and lists it so in its
 /// privacy settings: asked at each reading, that was every few seconds.
 fn wifi_name_on(adapter: &str, network: windows::core::GUID) -> Option<String> {
-    static KNOWN: std::sync::Mutex<Option<(String, windows::core::GUID, Option<String>)>> = std::sync::Mutex::new(None);
+    static KNOWN: std::sync::Mutex<Option<(String, windows::core::GUID, Option<String>, std::time::Instant)>> = std::sync::Mutex::new(None);
     let mut known = KNOWN.lock().unwrap();
-    if let Some((on, of, name)) = known.as_ref() {
-        if on == adapter && *of == network {
+    if let Some((on, of, name, asked)) = known.as_ref() {
+        // Where Windows names no network (an identifier of zeros, which it may give), or said no name, what was
+        // said serves a while only: the adapter may be on another network by then, or Windows answer now.
+        let lasts = *of != windows::core::GUID::zeroed() && name.is_some();
+        if on == adapter && *of == network && (lasts || asked.elapsed() < WIFI_ASKED_AGAIN) {
             return name.clone();
         }
     }
     let name = wifi_name(adapter);
-    *known = Some((adapter.to_string(), network, name.clone()));
+    *known = Some((adapter.to_string(), network, name.clone(), std::time::Instant::now()));
     name
 }
+
+/// How long a network's name is taken to stand where Windows did not tell which network the adapter is on, or said
+/// no name.
+const WIFI_ASKED_AGAIN: Duration = Duration::from_secs(60);
 
 /// The wireless network the adapter `adapter` (its identifier, in braces, as Windows names adapters) is on, by
 /// its name; none for an adapter that is no wireless one, or is on none, or where Windows does not say.

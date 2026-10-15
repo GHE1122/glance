@@ -198,8 +198,8 @@ pub struct Controller {
     shown: AtomicBool,
     /// A desktop widget was put away this session (the tray offers it back).
     widget_put_away: AtomicBool,
-    /// Whether a widget is on the screen (what changes slowly is read afresh then too: its process list).
-    widget_showing: AtomicBool,
+    /// Whether a widget on the screen shows the process list (read afresh each sample then, as while the panel is).
+    widget_processes: AtomicBool,
 }
 
 impl Controller {
@@ -214,7 +214,7 @@ impl Controller {
             sink: AtomicIsize::new(0),
             shown: AtomicBool::new(false),
             widget_put_away: AtomicBool::new(false),
-            widget_showing: AtomicBool::new(false),
+            widget_processes: AtomicBool::new(false),
         }
     }
 
@@ -360,8 +360,8 @@ impl Controller {
     }
 
     /// Whether a desktop widget was put away that can be brought back.
-    pub fn widget_showing(&self) -> bool {
-        self.widget_showing.load(Ordering::Relaxed)
+    pub fn widget_processes(&self) -> bool {
+        self.widget_processes.load(Ordering::Relaxed)
     }
 
     pub fn widget_put_away(&self) -> bool {
@@ -547,7 +547,7 @@ impl Controller {
                         }
                     }
                     self.widget_put_away.store(widgets.any_put_away(), Ordering::Relaxed);
-                    self.widget_showing.store(widgets.any_showing(), Ordering::Relaxed);
+                    self.widget_processes.store(widgets.any_showing_processes(), Ordering::Relaxed);
                 }
                 if let Some(point) = pinned_at.filter(|_| !self.history.lock().unwrap().is_empty()) {
                     pinned_at = None;

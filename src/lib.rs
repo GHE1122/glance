@@ -462,7 +462,7 @@ pub fn run() {
                 link::Want {
                     interval_ms: settings.interval().as_millis() as u32,
                     // (What changes slowly is read afresh while something shows it; else now and then.)
-                    refresh_slow: controller.is_shown() || controller.widget_showing() || ui::settings_window::is_seen(),
+                    refresh_slow: controller.is_shown() || controller.widget_processes() || ui::settings_window::is_seen(),
                     wsl: ui::prefs::module_on(&settings.view, "wsl"),
                     docker: ui::prefs::module_on(&settings.view, "docker"),
                 }
