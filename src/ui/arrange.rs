@@ -163,8 +163,10 @@ const MOST_SCALE: f32 = 1.3;
 const LANES_FLOOR: f32 = 0.8;
 /// Within its level, a form shown keeps being shown unless another covers
 /// this much more of the room: no flicker between two layouts where they
-/// cover about as much.
-const STICK: f32 = 1.05;
+/// cover about as much. (At a twentieth more, tiles three across and two
+/// across swapped back and forth as a corner was dragged across the line
+/// between them, the hand never quite still.)
+const STICK: f32 = 1.25;
 /// A level showing more than the one shown comes back only once the room is
 /// this much wider or taller than when that one was taken: a size on the
 /// line between two levels keeps whichever it came with.
@@ -556,6 +558,36 @@ mod tests {
             }
         }
         assert!(drops >= 8, "{drops}");
+    }
+
+    #[test]
+    fn tiles_across_and_down_do_not_swap_as_a_corner_wavers_over_their_line() {
+        let theme = Theme::new(Skin::Glass, false);
+        let ladder = Ladder::new(&theme, &lanes(), 6);
+        // Where, going from wide to tall, three across gives way to two across: the room before and after.
+        let room = |i: usize| (560.0 - 2.0 * i as f32, 300.0 + 1.5 * i as f32);
+        let mut shown = Shown::after(None, ladder.choose(room(0), None).form, room(0));
+        let mut line = None;
+        for i in 1..200 {
+            let form = ladder.choose(room(i), Some(shown)).form;
+            if form != shown.form && matches!((shown.form, form), (Form::Small(Small::Tiles { .. }), Form::Small(Small::Tiles { .. }))) {
+                line = Some(i);
+                break;
+            }
+            shown = Shown::after(Some(shown), form, room(i));
+        }
+        let line = line.expect("three across gives way to two across somewhere");
+        // A hand never quite still there: some 30 DIPs across and 20 down either way of the line, again and again
+        // (at a twentieth more for another form to be taken, the form changed at every turn).
+        shown = Shown::after(Some(shown), ladder.choose(room(line), Some(shown)).form, room(line));
+        let mut changes = 0;
+        for wobble in 0..40 {
+            let at = if wobble % 2 == 0 { room(line - 15) } else { room(line + 15) };
+            let form = ladder.choose(at, Some(shown)).form;
+            changes += (form != shown.form) as usize;
+            shown = Shown::after(Some(shown), form, at);
+        }
+        assert_eq!(changes, 0, "the form changed {changes} times as the corner wavered");
     }
 
     #[test]
