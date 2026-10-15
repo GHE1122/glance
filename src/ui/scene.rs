@@ -81,9 +81,10 @@ impl Device {
 
 /// What a scene's frames meet as they come, on whatever thread they come on.
 struct Shared {
-    /// What its frames are of: the area, when it was last arranged anew (the system's clock of frames, in 100 ns:
-    /// a frame from before is of what was there before), and where in it the windows behind are put.
-    of: Mutex<(RECT, i64, Vec<RECT>)>,
+    /// What its frames are of: the area; from when (the system's clock of frames, in 100 ns: a frame from before
+    /// is of what was there before), `SETTLING` till that is known (see `Scene::arrange`); and how many times it
+    /// has been arranged, which tells one arrangement from the next.
+    of: Mutex<(RECT, i64, u64)>,
     /// The latest frame come and not read (none was wanted as it came).
     latest: Mutex<Option<Direct3D11CaptureFrame>>,
     /// A frame is wanted: read as it comes.
@@ -118,7 +119,7 @@ unsafe impl Send for Halves {}
 impl Shared {
     /// Reads `frame` back (if it is of the area as it is now), for it to be taken; whether it was.
     fn read(&self, frame: &Direct3D11CaptureFrame) -> bool {
-        let (area, arranged, covered) = self.of.lock().unwrap().clone();
+        let (area, arranged, _) = *self.of.lock().unwrap();
         let read = (|| {
             if frame.SystemRelativeTime().ok()?.Duration < arranged {
                 return None;
@@ -129,7 +130,14 @@ impl Shared {
                 return None;
             }
             let texture: ID3D11Texture2D = unsafe { frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface() }.ok()?;
-            let (kept, luma) = keep(&self.device, &mut self.halves.lock().unwrap(), &self.spare, &texture, width as u32, height as u32, area, &covered)?;
+            // (Its texture as large too: a pool not made larger as its window was keeps smaller ones, and what lies
+            // past a texture is not copied.)
+            let mut made = D3D11_TEXTURE2D_DESC::default();
+            unsafe { texture.GetDesc(&mut made) };
+            if made.Width < width as u32 || made.Height < height as u32 {
+                return None;
+            }
+            let (kept, luma) = keep(&self.device, &mut self.halves.lock().unwrap(), &self.spare, &texture, width as u32, height as u32)?;
             let taken = self.taken.fetch_add(1, Ordering::Relaxed) + 1;
             Some(Capture::from_texture(area, Texture { texture: kept, spare: self.spare.clone() }, luma, taken))
         })();
@@ -152,13 +160,7 @@ impl Shared {
 /// its own to be drawn from (one let go of before, of that size, from `spare`; else a new one); and how light it is,
 /// a value (0–255) for each square of two by two pixels, as `Capture::from_pixels` makes it (the card averaging each
 /// square, through `halves`: made, or made anew, for that size).
-///
-/// None where the frame was put together before the windows behind were (the compositor puts them in a frame or
-/// so after it is asked, and says nothing of it): somewhere one of them is put (`covered`, screen coordinates, the
-/// frame's top left at `area`'s), it holds nothing at all. Once they are put, nothing there is clear: the desktop's
-/// own window is under all the others.
-#[allow(clippy::too_many_arguments)]
-fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, texture: &ID3D11Texture2D, width: u32, height: u32, area: RECT, covered: &[RECT]) -> Option<(ID3D11Texture2D, Vec<u8>)> {
+fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Spare, texture: &ID3D11Texture2D, width: u32, height: u32) -> Option<(ID3D11Texture2D, Vec<u8>)> {
     unsafe {
         let make = |description: &D3D11_TEXTURE2D_DESC| -> Option<ID3D11Texture2D> {
             let mut made = None;
@@ -238,27 +240,15 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
         // As `Capture::from_pixels` reads it: a square for each two pixels each way, rounded up.
         let (columns, down) = ((width as usize).div_ceil(2), (height as usize).div_ceil(2));
         let mut luma = Vec::with_capacity(columns * down);
-        let mut whole = true;
         for y in 0..down {
             let line = std::slice::from_raw_parts((mapped.pData as *const u8).add(y.min(rows - 1) * mapped.RowPitch as usize), row_width * 4);
-            // (Each square's middle, on the screen.)
-            let screen_y = area.top + (2 * y.min(rows - 1)) as i32 + 1;
             for x in 0..columns {
                 let i = x.min(row_width - 1) * 4;
                 let lightness = (0.2126 * line[i + 2] as f64 + 0.7152 * line[i + 1] as f64 + 0.0722 * line[i] as f64) / 255.0;
                 luma.push((lightness * 255.0).round() as u8);
-                if line[i + 3] == 0 && whole {
-                    let screen_x = area.left + (2 * x.min(row_width - 1)) as i32 + 1;
-                    whole = !covered.iter().any(|rect| screen_x >= rect.left && screen_x < rect.right && screen_y >= rect.top && screen_y < rect.bottom);
-                }
             }
         }
         context.Unmap(staging, 0);
-        if !whole {
-            // (The texture it was copied into, spare again.)
-            drop(Texture { texture: kept, spare: spare.clone() });
-            return None;
-        }
         Some((kept, luma))
     }
 }
@@ -278,6 +268,12 @@ fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) ->
             }
             let Some(frame) = newest else { return Ok(()) };
             if shared.resting.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            // While it is not known yet from when frames are of what is there: kept, to be looked at once it is (see
+            // `settled`), the thread that draws not told of it yet.
+            if shared.of.lock().unwrap().1 == SETTLING {
+                close(shared.latest.lock().unwrap().replace(frame));
                 return Ok(());
             }
             // Wanted, read now (one of what was there before is not, and the next is wanted still); else
@@ -306,6 +302,53 @@ fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) ->
     Some((pool, session, arrived))
 }
 
+/// From when frames are of what is there, while that is not known yet.
+const SETTLING: i64 = i64::MAX;
+
+/// Waits till the compositor has put together what arrangement `count` of `shared` asked of it, and makes frames of
+/// that composition and after its frames from then on. The compositor takes up what it is asked (the windows behind
+/// put in, moved) in a composition or two after, and says nothing of it: a frame just after the asking may still hold
+/// what was there before, or nothing (the scene's window holds nothing of its own). Waited for here, on a thread of its
+/// own (the thread that draws is never held): `DwmFlush` returns once what this process asked of the compositor has
+/// been composed, and the compositor says when it last composed. A frame that came meanwhile (kept: see `capture`) is
+/// looked at now; one wanted is read.
+fn settled(shared: Arc<Shared>, count: u64) {
+    use windows::Win32::Graphics::Dwm::{DwmFlush, DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+    let _ = unsafe { DwmFlush() };
+    let mut timing = DWM_TIMING_INFO { cbSize: size_of::<DWM_TIMING_INFO>() as u32, ..Default::default() };
+    // (When it last composed, on the frames' clock; it cannot say only were nothing composed at all.)
+    let composed = match unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut timing) } {
+        Ok(()) => qpc_100ns(timing.qpcCompose as i64),
+        Err(_) => now_100ns(),
+    };
+    {
+        let mut of = shared.of.lock().unwrap();
+        // (Arranged again meanwhile: that arrangement's own wait says.)
+        if of.2 != count {
+            return;
+        }
+        of.1 = composed;
+    }
+    if shared.resting.load(Ordering::Acquire) {
+        return;
+    }
+    let came = shared.latest.lock().unwrap().take();
+    if shared.wanted.swap(false, Ordering::AcqRel) {
+        match came {
+            Some(frame) => {
+                if !shared.read(&frame) {
+                    shared.wanted.store(true, Ordering::Release);
+                }
+                close(Some(frame));
+            }
+            None => shared.wanted.store(true, Ordering::Release),
+        }
+    } else if let Some(frame) = came {
+        close(shared.latest.lock().unwrap().replace(frame));
+        (shared.wake)();
+    }
+}
+
 /// A window of Glance's own that no one sees, the windows behind an area put together in it, and its capture.
 pub struct Scene {
     owner: HWND,
@@ -332,9 +375,17 @@ fn close(frame: Option<Direct3D11CaptureFrame>) {
 
 /// The system's clock of frames, now (100 ns).
 fn now_100ns() -> i64 {
-    let (mut count, mut frequency) = (0i64, 0i64);
+    let mut count = 0i64;
     unsafe {
         let _ = QueryPerformanceCounter(&mut count);
+    }
+    qpc_100ns(count)
+}
+
+/// A count of the performance counter (what the frames' clock is made of) in 100 ns.
+fn qpc_100ns(count: i64) -> i64 {
+    let mut frequency = 0i64;
+    unsafe {
         let _ = QueryPerformanceFrequency(&mut frequency);
     }
     (count as i128 * 10_000_000 / frequency.max(1) as i128) as i64
@@ -398,7 +449,7 @@ impl Scene {
                     return None;
                 }
             };
-            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns(), Vec::new())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), spare: Arc::default(), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0) });
+            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns(), 0)), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), spare: Arc::default(), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0) });
             let made = (|| {
                 let cloak: BOOL = true.into();
                 DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).ok()?;
@@ -491,13 +542,18 @@ impl Scene {
             }
         }
         // Frames from before all of it was in place are not of what is there now (one may be put together while it
-        // is being put in place).
-        let covered = self.shown.iter().map(|(.., rect)| *rect).collect();
-        *self.shared.of.lock().unwrap() = (area, now_100ns(), covered);
+        // is being put in place, or before the compositor has taken it up): from when they are, waited for.
+        let count = {
+            let mut of = self.shared.of.lock().unwrap();
+            *of = (area, SETTLING, of.2 + 1);
+            of.2
+        };
         // (Nor what was read of it before and not taken yet.)
         *self.shared.ready.lock().unwrap() = None;
         close(self.shared.latest.lock().unwrap().take());
         self.shared.resting.store(false, Ordering::Release);
+        let shared = self.shared.clone();
+        std::thread::spawn(move || settled(shared, count));
         true
     }
 
@@ -508,7 +564,10 @@ impl Scene {
     pub fn rest(&mut self) {
         let least = RECT { left: self.area.left, top: self.area.top, right: self.area.left + 1, bottom: self.area.top + 1 };
         // (A frame being read meanwhile is of what was there: marked so first, see `Shared::read`.)
-        *self.shared.of.lock().unwrap() = (least, now_100ns(), Vec::new());
+        {
+            let mut of = self.shared.of.lock().unwrap();
+            *of = (least, now_100ns(), of.2 + 1);
+        }
         self.shared.resting.store(true, Ordering::Release);
         self.forget();
         self.shared.wanted.store(false, Ordering::Release);
@@ -589,6 +648,11 @@ impl Scene {
     /// has been read (see `ready`).
     pub fn want(&self) {
         if self.shared.ready.lock().unwrap().is_some() {
+            return;
+        }
+        // (Till it is known from when frames are of what is there, wanted: see `settled`.)
+        if self.shared.of.lock().unwrap().1 == SETTLING {
+            self.shared.wanted.store(true, Ordering::Release);
             return;
         }
         match self.shared.latest.lock().unwrap().take() {
