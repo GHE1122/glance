@@ -755,7 +755,7 @@ impl Widgets {
                     let lit = match button {
                         Button::Pin => widget.pinned,
                         Button::Through => widget.click_through,
-                        Button::Game => game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
+                        Button::Game => crate::ui::view::game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
                         _ => false,
                     };
                     crate::ui::tip::show(button.says(lit, lang, false), at, crate::os::apps_dark());
@@ -888,7 +888,7 @@ impl Widgets {
         // one of them moved, sized, come or gone where it meets another
         // changes what is behind that one too, as another program's would.
         self.live = look.live && look.skin.sees_backdrop();
-        let playing = game_shown(history);
+        let playing = crate::ui::view::game_shown(history);
         // Each shown, with its shadow and the room for its buttons round it.
         let shown: Vec<&Widget> = self.list.iter().filter(|w| !w.game_only || playing).collect();
         let areas: Vec<(isize, RECT)> = shown
@@ -2215,7 +2215,7 @@ impl Widget {
             }
             frame.place(Matrix3x2::translation(margin, margin));
             // The pointer over it: its buttons (letting clicks through, the one that ends that).
-            let front_is_game = game_shown(scene.history);
+            let front_is_game = crate::ui::view::game_shown(scene.history);
             for (centre, button) in offered {
                 // Lit while on: pinned, letting clicks through, the window in front a game.
                 let lit = (button == Button::Pin && pinned) || (button == Button::Through && through) || (button == Button::Game && front_is_game);
@@ -2317,23 +2317,12 @@ fn clip(r: RECT, bounds: RECT) -> RECT {
     RECT { left, top, right: r.right.clamp(left, bounds.right), bottom: r.bottom.clamp(top, bounds.bottom) }
 }
 
-/// Whether a game shows (its button lit): one found and not turned off, or
-/// one asked for by hand.
 /// The game button pressed (a widget's or the panel's): showing a game (found or asked for), off; else on.
 pub(crate) fn press_game() {
     let history = crate::app().controller.history.lock().unwrap();
-    let shown = game_shown(history.iter().last().map(std::slice::from_ref).unwrap_or_default());
+    let shown = crate::ui::view::game_shown(history.iter().last().map(std::slice::from_ref).unwrap_or_default());
     drop(history);
     crate::source::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
-}
-
-pub(crate) fn game_shown(history: &[Sample]) -> bool {
-    use crate::presents::{game_mode, GameMode};
-    match game_mode() {
-        GameMode::On => true,
-        GameMode::Off => false,
-        GameMode::Auto => history.last().is_some_and(|s| s.game.is_some()),
-    }
 }
 
 /// The outline of a rounded rectangle, as points round it, closed.

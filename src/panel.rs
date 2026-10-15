@@ -1204,6 +1204,9 @@ struct Panel<'a> {
     /// The panel as it opened, held while it is up (laid out afresh at the
     /// next frame when `None`), and the settings it was made for.
     opening: Option<arrange::Opening>,
+    /// Whether the game was asked for, and turned off, by hand, as `opening` was laid out: its lane comes or goes
+    /// with them (see `arrange`).
+    game_at: (bool, bool),
     /// What a panel laid out afresh while up (the settings changed) still
     /// holds from before: a volume unplugged stays until it closes.
     held: Option<Seen>,
@@ -1302,6 +1305,7 @@ impl<'a> Panel<'a> {
             pinned: false,
             game: None,
             opening: None,
+            game_at: (false, false),
             held: None,
             style: String::new(),
             hits: Vec::new(),
@@ -2128,6 +2132,15 @@ impl<'a> Panel<'a> {
             (contact.work.right - contact.work.left) as f32 / contact.scale,
             (contact.work.bottom - contact.work.top) as f32 / contact.scale,
         );
+        // The game asked for or turned off by hand since it was laid out (from here, a widget, or the game gone):
+        // its lane comes or goes, and it is laid out anew, holding what it held.
+        let game = (view::front_is_game(), view::game_hidden());
+        if game != self.game_at {
+            if let Some(opening) = self.opening.take() {
+                self.held = Some(opening.seen);
+            }
+            self.game_at = game;
+        }
         let (prefs, theme, lang, scroll, hover, pinned) = (&self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned);
         let opening = match &mut self.opening {
             Some(opening) => {
@@ -2438,12 +2451,8 @@ impl<'a> Panel<'a> {
                 }
             }
             Some(Hit::Game) => {
+                // (Its lane comes or goes at the next frame: see `arrange`.)
                 crate::widget::press_game();
-                // Its lane comes or goes with it: laid out anew at once (as when the settings change), not as it next
-                // opens.
-                if let Some(opening) = self.opening.take().filter(|_| self.is_shown()) {
-                    self.held = Some(opening.seen);
-                }
                 self.next_frame = Instant::now();
             }
             Some(Hit::Overlay) => {

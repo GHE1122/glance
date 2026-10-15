@@ -385,6 +385,17 @@ pub fn front_is_game() -> bool {
     false
 }
 
+/// Whether a game shows (the game button lit): one found and not turned off, or one asked for by hand.
+pub fn game_shown(history: &[Sample]) -> bool {
+    if front_is_game() {
+        true
+    } else if game_hidden() {
+        false
+    } else {
+        history.last().is_some_and(|s| s.game.is_some())
+    }
+}
+
 /// Whether games are turned off by hand: none shows, found or not.
 pub fn game_hidden() -> bool {
     #[cfg(windows)]
@@ -1862,7 +1873,7 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
     let pin_glyph = if scene.pinned { "\u{E840}" } else { "\u{E718}" };
     // The overlay's: a window with a trace in it, lit while it is on.
     // And the game button before it, lit while a game shows (found, or asked for by hand), as a widget's is.
-    let game_lit = crate::widget::game_shown(scene.history.last().map(std::slice::from_ref).unwrap_or_default());
+    let game_lit = game_shown(scene.history.last().map(std::slice::from_ref).unwrap_or_default());
     let buttons = [(game, "", Hit::Game, game_lit), (overlay, "\u{E9D9}", Hit::Overlay, scene.overlay), (pin, pin_glyph, Hit::Pin, scene.pinned), (settings, "\u{E713}", Hit::Settings, false)];
     for (left, glyph, hit, lit) in buttons {
         let hovered = scene.hover == Some(hit);

@@ -288,7 +288,7 @@ impl Overlay {
         self.clear = clear;
         self.through = settings.click_through;
         self.window.set_click_through(self.through);
-        self.game = crate::widget::game_shown(history.back().map(std::slice::from_ref).unwrap_or_default());
+        self.game = crate::ui::view::game_shown(history.back().map(std::slice::from_ref).unwrap_or_default());
         self.beneath = beneath;
         self.lang = lang;
         let sample = history.back();
