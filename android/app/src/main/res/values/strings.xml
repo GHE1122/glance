@@ -116,6 +116,11 @@
     <string name="case_fan_line">Case fans %1$d rpm</string>
     <string name="about">About</string>
     <string name="version">Version %1$s</string>
+    <string name="check_update">Check for updates</string>
+    <string name="checking">Checking</string>
+    <string name="newest">Up to date</string>
+    <string name="newer_is">Version %1$s is available</string>
+    <string name="check_failed">The update server could not be reached</string>
     <string name="licences">Open-source licences</string>
     <string name="licences_what">This app\'s own, and those of what it is built with</string>
     <string name="view">View</string>

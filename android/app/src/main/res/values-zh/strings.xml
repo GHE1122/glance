@@ -116,6 +116,11 @@
     <string name="case_fan_line">机箱风扇 %1$d 转</string>
     <string name="about">关于</string>
     <string name="version">版本 %1$s</string>
+    <string name="check_update">检查更新</string>
+    <string name="checking">正在检查</string>
+    <string name="newest">已是最新版本</string>
+    <string name="newer_is">有新版本 %1$s</string>
+    <string name="check_failed">无法连接更新服务器</string>
     <string name="licences">开源许可</string>
     <string name="licences_what">本应用的许可证，以及所用开源组件的许可证</string>
     <string name="view">查看</string>

@@ -391,11 +391,12 @@ object Newer {
     /** How long after the site was asked it is not asked again. */
     private const val ASK_EVERY_MS = 3 * 60 * 60 * 1000L
 
-    /** Asks the site, unless it was asked lately: not from the main thread. */
-    fun ask(context: Context) {
-        val now = System.currentTimeMillis()
+    /** Asks the site, unless it was asked lately (asked [now], whenever it was): not from the main thread. Whether it
+     *  answered (not asked: as if it had). */
+    fun ask(context: Context, now: Boolean = false): Boolean {
+        val at = System.currentTimeMillis()
         // (Kept as a moment since 0.3.11; a day's number, as it was kept before, is long past.)
-        if (now - kept(context).getLong("asked_at", 0) < ASK_EVERY_MS) return
+        if (!now && at - kept(context).getLong("asked_at", 0) < ASK_EVERY_MS) return true
         val asking = (java.net.URL("$SITE/api/app?v=${BuildConfig.VERSION_NAME}").openConnection() as java.net.HttpURLConnection).apply {
             connectTimeout = 8000
             readTimeout = 8000
@@ -406,9 +407,12 @@ object Newer {
             val said = answer.optString("version")
             // (And where the app of that version is: from a site that does not say, it is got from the site's page.)
             val apk = answer.optString("apk").takeIf(Update::allowed)
-            if (Regex("[0-9]+(\\.[0-9]+){1,3}").matches(said)) kept(context).edit().putString("version", said).putString("apk", apk).putLong("asked_at", now).apply()
+            if (!Regex("[0-9]+(\\.[0-9]+){1,3}").matches(said)) return false
+            kept(context).edit().putString("version", said).putString("apk", apk).putLong("asked_at", at).apply()
+            return true
         } catch (_: Exception) {
             // Not reached, or not answered as expected: asked again the next time the app is opened.
+            return false
         } finally {
             asking.disconnect()
         }

@@ -143,6 +143,18 @@ private fun App(opened: String?, taken: () -> Unit) {
         withContext(Dispatchers.IO) { Newer.ask(context) }
         newer = Newer.known(context)
     }
+    // Asked for by hand in the settings: whether it is being asked, and whether the site answered.
+    var checking by remember { mutableStateOf(false) }
+    var checked by remember { mutableStateOf<Boolean?>(null) }
+    val check = {
+        updating.launch {
+            checking = true
+            checked = withContext(Dispatchers.IO) { Newer.ask(context, now = true) }
+            newer = Newer.known(context)
+            checking = false
+        }
+        Unit
+    }
     // A code scanned that is no pairing code is said on the pairing page.
     var wrong by remember { mutableStateOf(false) }
     var unpairing by remember { mutableStateOf<Int?>(null) }
@@ -214,7 +226,7 @@ private fun App(opened: String?, taken: () -> Unit) {
                 when (page) {
                     Page.Pairing -> Pairing(first = pcs.isEmpty(), wrong = wrong, back = { page = Page.Home }, scan = scan) { text -> wrong = false; take(text) }
                     else -> SettingsPage(
-                        pcs, chosen, shown,
+                        pcs, chosen, shown, newer, checking, checked, check,
                         back = { page = Page.Home },
                         show = { part, on -> Look.show(context, part, on); shown = Look.shown(context) },
                         add = { wrong = false; page = Page.Pairing },
@@ -300,7 +312,10 @@ private fun Pairing(first: Boolean, wrong: Boolean, back: () -> Unit, scan: () -
 
 /** The page behind the gear: every PC paired with, each unpaired by itself, and what the main page shows. */
 @Composable
-private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>, back: () -> Unit, show: (String, Boolean) -> Unit, add: () -> Unit, unpair: (Int) -> Unit) {
+private fun SettingsPage(
+    pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>, newer: String?, checking: Boolean, checked: Boolean?, check: () -> Unit,
+    back: () -> Unit, show: (String, Boolean) -> Unit, add: () -> Unit, unpair: (Int) -> Unit,
+) {
     var licences by remember { mutableStateOf(false) }
     if (licences) Read(stringResource(R.string.licences), LocalContext.current.resources.openRawResource(R.raw.licences).use { it.readBytes().decodeToString() }, stringResource(R.string.close)) { licences = false }
     Column(Modifier.fillMaxSize()) {
@@ -310,7 +325,17 @@ private fun SettingsPage(pcs: List<Pc>, chosen: Int, shown: Map<String, Boolean>
             Text(stringResource(R.string.about), color = Dim, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
             Panel {
                 Column {
-                    Line("Glance", stringResource(R.string.version, BuildConfig.VERSION_NAME)) {}
+                    // Whether there is a newer app, asked for now: what the site said, or that it could not be asked.
+                    val said = when {
+                        checking -> stringResource(R.string.checking)
+                        newer != null -> stringResource(R.string.newer_is, newer)
+                        checked == true -> stringResource(R.string.newest)
+                        checked == false -> stringResource(R.string.check_failed)
+                        else -> null
+                    }
+                    Line("Glance", listOfNotNull(stringResource(R.string.version, BuildConfig.VERSION_NAME), said).joinToString(" · ")) {
+                        if (!checking) Words(stringResource(R.string.check_update), Accent, press = check)
+                    }
                     Rule()
                     Line(stringResource(R.string.licences), stringResource(R.string.licences_what)) { Words(stringResource(R.string.view), Accent) { licences = true } }
                 }
