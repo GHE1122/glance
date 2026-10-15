@@ -40,6 +40,11 @@ const D3D9_PRESENT: u16 = 1;
 /// The graphics kernel's: a frame handed to the compositor (PresentHistory_Start or PresentHistoryDetailed_Start, one
 /// for each), and a frame flipped to the screen without it (Flip_Info, FlipMultiPlaneOverlay_Info).
 const KERNEL_PRESENTS: [u16; 4] = [0xAB, 0xD7, 0xA8, 0xFC];
+/// The present models (D3DKMT_PRESENT_MODEL) that tell of no frame, as PresentMon passes them over: a window's GDI
+/// drawing (REDIRECTED_GDI, REDIRECTED_GDI_SYSMEM) and a screen capture's fence (SCREENCAPTUREFENCE).
+const NOT_FRAMES: [u64; 3] = [1, 5, 6];
+/// DXGI_PRESENT_TEST: a present that asks whether the window shows, and draws nothing.
+const DXGI_PRESENT_TEST: u64 = 0x1;
 /// The session's flush timer counted in milliseconds, not seconds (Windows 8 and later).
 const EVENT_TRACE_USE_MS_FLUSH_TIMER: u32 = 0x10;
 /// Its keywords asked for: Base and Present (as PresentMon asks).
@@ -80,9 +85,11 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     let id = header.EventDescriptor.Id;
     // Whether a frame is told of, and whether by its runtime.
     let told = match header.ProviderId {
-        DXGI if id == DXGI_PRESENT => Some(true),
+        // (A present that only asks whether the window shows draws nothing: no frame, nor a sign of the runtime.)
+        DXGI if id == DXGI_PRESENT => (field(record, "Flags").unwrap_or(0) & DXGI_PRESENT_TEST == 0).then_some(true),
         D3D9 if id == D3D9_PRESENT => Some(true),
-        DXGKRNL if KERNEL_PRESENTS.contains(&id) => Some(false),
+        // (A window's GDI drawing, or a screen capture's fence, handed to the compositor is no frame of a game's.)
+        DXGKRNL if KERNEL_PRESENTS.contains(&id) => (!field(record, "Model").is_some_and(|model| NOT_FRAMES.contains(&model))).then_some(false),
         _ => None,
     };
     // (Every event of the providers, a frame presented or not: they come in the order they happened, near enough.)
@@ -99,6 +106,19 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     if runtime == fed.runtime {
         fed.frames.push(at);
     }
+}
+
+/// The field `name` of an event (an integer of up to eight bytes), as its manifest has it.
+fn field(record: *const EVENT_RECORD, name: &str) -> Option<u64> {
+    use windows::Win32::System::Diagnostics::Etw::{TdhGetProperty, TdhGetPropertySize, PROPERTY_DATA_DESCRIPTOR};
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let descriptor = PROPERTY_DATA_DESCRIPTOR { PropertyName: wide.as_ptr() as u64, ArrayIndex: u32::MAX, Reserved: 0 };
+    let mut size = 0u32;
+    if unsafe { TdhGetPropertySize(record, None, &[descriptor], &mut size) } != ERROR_SUCCESS.0 || size == 0 || size > 8 {
+        return None;
+    }
+    let mut value = [0u8; 8];
+    (unsafe { TdhGetProperty(record, None, &[descriptor], &mut value[..size as usize]) } == ERROR_SUCCESS.0).then(|| u64::from_le_bytes(value))
 }
 
 /// The session's properties, its name after them.
@@ -186,7 +206,7 @@ pub fn start() {
         .spawn({
             let name = name.clone();
             move || {
-                let mut told = 0;
+                let mut told = (0, 0);
                 loop {
                     thread::sleep(Duration::from_secs(10));
                     let mut properties = Properties::new(&name);
@@ -195,9 +215,9 @@ pub fn start() {
                     if queried != ERROR_SUCCESS {
                         return;
                     }
-                    let lost = unsafe { (*properties.get()).EventsLost + (*properties.get()).RealTimeBuffersLost };
-                    if lost > told {
-                        crate::journal::note(format!("frames: {} events lost by the session in all ({} more)", lost, lost - told));
+                    let lost = unsafe { ((*properties.get()).EventsLost, (*properties.get()).RealTimeBuffersLost) };
+                    if lost != told {
+                        crate::journal::note(format!("frames: the session has lost {} events and {} buffers of them in all", lost.0, lost.1));
                         told = lost;
                     }
                 }

@@ -1958,7 +1958,8 @@ impl Ui {
         match field {
             // No larger than the screen holds it: at that, said so.
             Field::PanelSize => {
-                let most = self.largest.clamp(sizes.0, sizes.1);
+                // (On a step, as the slider moves by them: a most between two could never be reached.)
+                let most = (sizes.0 + ((self.largest - sizes.0) / 0.05 + 1e-4).floor() * 0.05).clamp(sizes.0, sizes.1);
                 let value = self.settings.panel_size.clamp(sizes.0, most);
                 let name = if most < sizes.1 && value >= most - 0.001 { pick(lang, "面板大小（已达屏幕上限）", "Panel size (as large as this screen holds)") } else { pick(lang, "面板大小", "Panel size") };
                 (name, sizes.0, most, 0.05, value)
