@@ -1025,15 +1025,37 @@ impl<'a> Frame<'a> {
         unsafe { self.dc.DrawRoundedRectangle(&shape, self.brush(color), width, &self.gfx.dashed) };
     }
 
+    /// Where text laid out as `layout` at `y` is put: its first baseline on a whole pixel (see `whole_pixel`), where
+    /// it is drawn upright.
+    fn text_top(&self, layout: &IDWriteTextLayout, y: f32) -> f32 {
+        let mut rows = [DWRITE_LINE_METRICS::default()];
+        let mut count = 0;
+        let _ = unsafe { layout.GetLineMetrics(Some(&mut rows), &mut count) };
+        let baseline = rows[0].baseline;
+        let mut transform = Matrix3x2::default();
+        let mut dpi = (0.0, 0.0);
+        unsafe {
+            self.dc.GetTransform(&mut transform);
+            self.dc.GetDpi(&mut dpi.0, &mut dpi.1);
+        }
+        if transform.M12 != 0.0 || transform.M21 != 0.0 || transform.M22 == 0.0 {
+            return y;
+        }
+        let device = dpi.1 / 96.0;
+        (whole_pixel(((y + baseline) * transform.M22 + transform.M32) * device) / device - transform.M32) / transform.M22 - baseline
+    }
+
     /// Draws `text` in lines `width` wide, the first line's box at `(x, y)`.
     pub fn text_wrapped(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32) {
         let layout = self.gfx.wrapped(text, font, width);
+        let y = self.text_top(&layout, y);
         unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: x, Y: y }, &layout, self.brush(color), D2D1_DRAW_TEXT_OPTIONS_NONE) };
     }
 
     /// Draws `text` with its first baseline-box at `(x, y)`, in a box `width` wide.
     pub fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align) {
         let layout = self.gfx.layout(text, font, width, align);
+        let y = self.text_top(&layout, y);
         unsafe {
             self.dc.DrawTextLayout(
                 windows_numerics::Vector2 { X: x, Y: y },
@@ -1218,6 +1240,14 @@ impl Surface {
     }
 }
 
+/// The whole pixel `at` (physical px) is put on: the nearest, a half going up; first taken to a 64th of a pixel,
+/// so that what is drawn at the same place in a window comes to the same pixel wherever in the compositor's atlas
+/// the frame is drawn (its place there, in DIPs, is rarely exact: 355 px at 1.5 is 236.666…, and a place half
+/// way between two pixels went to one or the other as the frames went, the text shaking by a pixel).
+fn whole_pixel(at: f32) -> f32 {
+    ((at * 64.0).round() / 64.0 + 0.5).floor()
+}
+
 /// The faint one-unit glow `halo` rings what `drawn` draws with (as CSS's `text-shadow: 0 0 1px`; see `Layer::draw`).
 unsafe fn glow(dc: &ID2D1DeviceContext, drawn: &windows::Win32::Graphics::Direct2D::ID2D1CommandList, halo: Color) -> Result<ID2D1Image> {
     let glow = dc.CreateEffect(&CLSID_D2D1Shadow)?;
@@ -1350,8 +1380,8 @@ impl Layer {
             let device = dpi.0 / 96.0;
             let moved_only = (placed.M11 - 1.0).abs() < 1e-4 && (placed.M22 - 1.0).abs() < 1e-4 && placed.M12 == 0.0 && placed.M21 == 0.0;
             if moved_only && (device - scale).abs() < 1e-4 {
-                placed.M31 = ((left + placed.M31) * device).round() / device - left;
-                placed.M32 = ((top + placed.M32) * device).round() / device - top;
+                placed.M31 = whole_pixel((left + placed.M31) * device) / device - left;
+                placed.M32 = whole_pixel((top + placed.M32) * device) / device - top;
             }
             dc.SetTransform(&placed);
             dc.DrawImage(&image, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);

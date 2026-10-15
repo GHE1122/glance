@@ -370,6 +370,25 @@ pub fn pretend(now: Now) {
 
 #[cfg(all(test, windows))]
 mod tests {
+    /// On a desktop, something playing: where its player says it is (reckoned on to now from when it said so), ten
+    /// times a second for ten seconds, and each step back.
+    #[test]
+    #[ignore]
+    fn follows_what_plays() {
+        let start = std::time::Instant::now();
+        let mut last: Option<f64> = None;
+        while start.elapsed() < std::time::Duration::from_secs(10) {
+            if let Some(playing) = crate::media::playing() {
+                if let Some((at, _)) = playing.timeline {
+                    let back = last.map_or(0.0, |last| last - at);
+                    println!("{:6.2} s  {} playing={}  at {at:8.3}  said {:5.2} s ago{}", start.elapsed().as_secs_f64(), playing.app, playing.playing, playing.said_ago.unwrap_or(-1.0), if back > 0.0 { format!("  BACK {back:.3}") } else { String::new() });
+                    last = Some(at);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     /// On a desktop: how long one look takes, and what it sees.
     #[test]
     #[ignore]

@@ -755,6 +755,29 @@ fn sung_to(parts: &[(usize, usize, f64, f64)], t: f64) -> f32 {
     done
 }
 
+/// How far through it is (0 to 1) at `t`: a line without words (the music between), from its start to its end or
+/// the next line's.
+fn between(line: &Line, next: Option<f64>, t: f64) -> f32 {
+    let end = line.end.or(next).unwrap_or(line.at + 4.0).max(line.at + 0.3);
+    ((t - line.at) / (end - line.at)).clamp(0.0, 1.0) as f32
+}
+
+/// The music between lines, where a line of words `size` DIPs tall would be (its box's corner at `(x, y)`): three
+/// dots in `dim`, each coming to `bright` (and a little larger) as its third of it goes (`done`, 0 to 1): how many
+/// are lit, how much of it has gone.
+fn interlude(frame: &Frame, x: f32, y: f32, size: f32, done: f32, dim: Color, bright: Color) {
+    let radius = size * 0.12;
+    let centre_y = y + size * 0.68;
+    for index in 0..3 {
+        let lit = (done * 3.0 - index as f32).clamp(0.0, 1.0);
+        let lit = lit * lit * (3.0 - 2.0 * lit);
+        let color = Color { r: dim.r + (bright.r - dim.r) * lit, g: dim.g + (bright.g - dim.g) * lit, b: dim.b + (bright.b - dim.b) * lit, a: dim.a + (bright.a - dim.a) * lit };
+        if color.a > 0.0 {
+            frame.fill_circle(color, Point { x: x + radius * 1.2 + index as f32 * radius * 3.6, y: centre_y }, radius * (1.0 + 0.25 * lit));
+        }
+    }
+}
+
 /// A line drawn in `dim`, and over it in `bright` as far as it is sung (see `sung_part`).
 #[allow(clippy::too_many_arguments)]
 fn filled(frame: &Frame, layout: &IDWriteTextLayout, text: &str, font: Font, x: f32, y: f32, width: f32, sung: f32, dim: Color, bright: Color, soft: f32) {
@@ -1078,28 +1101,41 @@ impl Shown {
         match (&moment.lines, moment.now) {
             (Some(lines), Some(now)) => {
                 let line = &lines[now];
-                let (text, parts) = parts(line, lines.get(now + 1).map(|line| line.at));
-                let text = if text.trim().is_empty() { "♪".to_string() } else { text };
+                let next = lines.get(now + 1).map(|line| line.at);
+                let (text, parts) = parts(line, next);
                 let came = moment.since.map_or(1.0, |since| (since.elapsed().as_secs_f32() / 0.28).min(1.0));
                 let eased = 1.0 - (1.0 - came).powi(3);
-                // Too long for its room: smaller, down to the size of what is under it, then cut where it wraps.
-                let font = Font { size: (PLAYER_LINE.size * (width / frame.measure(&text, PLAYER_LINE).max(1.0))).clamp(PLAYER_UNDER.size + 1.5, PLAYER_LINE.size), ..PLAYER_LINE };
                 let y = line_top + (1.0 - eased) * 10.0;
-                let layout = frame.gfx.wrapped(&text, font, width);
-                let sung = sung_to(&parts, moment.position);
                 // (What is sung near white, the cover's colour in it, as the card's line sung now: clearly apart from what is not.)
-                filled(frame, &layout, &text, font, left, y, width, sung, Color::hex(0xFFFFFF, 0.36 * eased), colour(toward(tint, [1.0; 3], 0.65), eased), 12.0);
+                let (dim, bright) = (Color::hex(0xFFFFFF, 0.36 * eased), colour(toward(tint, [1.0; 3], 0.65), eased));
+                let font = if text.trim().is_empty() {
+                    interlude(frame, left, y, PLAYER_LINE.size, between(line, next, moment.position), dim, bright);
+                    PLAYER_LINE
+                } else {
+                    // Too long for its room: smaller, down to the size of what is under it, then cut where it wraps.
+                    let font = Font { size: (PLAYER_LINE.size * (width / frame.measure(&text, PLAYER_LINE).max(1.0))).clamp(PLAYER_UNDER.size + 1.5, PLAYER_LINE.size), ..PLAYER_LINE };
+                    let layout = frame.gfx.wrapped(&text, font, width);
+                    let sung = sung_to(&parts, moment.position);
+                    // Its first row only (what wraps would lie over what is under it).
+                    let mut rows = [DWRITE_LINE_METRICS::default()];
+                    let mut count = 0;
+                    let _ = unsafe { layout.GetLineMetrics(Some(&mut rows), &mut count) };
+                    frame.clip(left - 4.0, y - 4.0, width + 8.0, rows[0].height + 4.0);
+                    filled(frame, &layout, &text, font, left, y, width, sung, dim, bright, 12.0);
+                    frame.unclip();
+                    font
+                };
                 let under = line.translation.clone().filter(|_| moment.translated).or_else(|| lines.get(now + 1).map(|line| line.text.clone())).unwrap_or_default();
                 frame.text(&fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(0xFFFFFF, 0.5 * eased), left, line_top + font.size * 1.4 + 2.0, width + 2.0, Align::Start);
             }
-            // None yet, or none to be had: why, in their place.
-            _ => {
-                let said = match &moment.lines {
-                    Some(_) => "♪".to_string(),
-                    None => moment.said.clone().unwrap_or_default(),
-                };
-                frame.text_wrapped(&said, PLAYER_UNDER, Color::hex(0xFFFFFF, 0.62), left, line_top + 2.0, width);
+            // None sung yet: a note, filled as the music before the first line goes on.
+            (Some(lines), None) => {
+                let first = lines.first().map_or(0.0, |line| line.at);
+                let done = if first > 0.0 { (moment.position / first).clamp(0.0, 1.0) as f32 } else { 0.0 };
+                interlude(frame, left, line_top, PLAYER_LINE.size, done, Color::hex(0xFFFFFF, 0.36), colour(toward(tint, [1.0; 3], 0.65), 1.0));
             }
+            // None to be had: why, in their place.
+            (None, _) => frame.text_wrapped(&moment.said.clone().unwrap_or_default(), PLAYER_UNDER, Color::hex(0xFFFFFF, 0.62), left, line_top + 2.0, width),
         }
         unsafe { frame.dc.PopAxisAlignedClip() };
         // Along the bottom, the spectrum moving with the music; the pointer over it, what goes back, pauses or plays,
@@ -1232,16 +1268,22 @@ impl Shown {
         match (&moment.lines, moment.now) {
             (Some(lines), Some(now)) => {
                 let line = &lines[now];
-                let (text, parts) = parts(line, lines.get(now + 1).map(|line| line.at));
-                let text = if text.trim().is_empty() { "♪".to_string() } else { text };
+                let next = lines.get(now + 1).map(|line| line.at);
+                let (text, parts) = parts(line, next);
                 let came = moment.since.map_or(1.0, |since| (since.elapsed().as_secs_f32() / 0.28).min(1.0));
                 let eased = 1.0 - (1.0 - came).powi(3);
-                let font = Font { size: (STRIP_LINE.size * (width / frame.measure(&text, STRIP_LINE).max(1.0))).clamp(STRIP_LEAST, STRIP_LINE.size), ..STRIP_LINE };
-                let y = h / 2.0 - font.size * 0.7 + (1.0 - eased) * 8.0;
-                // (One row: where it would wrap, cut where it wraps.)
-                let layout = frame.gfx.wrapped(&text, font, 100_000.0);
-                let sung = sung_to(&parts, moment.position);
-                filled(frame, &layout, &text, font, left, y, 100_000.0, sung, Color::hex(0xFFFFFF, 0.36 * eased), colour(toward(tint, [1.0; 3], 0.65), eased), 12.0);
+                let (dim, bright) = (Color::hex(0xFFFFFF, 0.36 * eased), colour(toward(tint, [1.0; 3], 0.65), eased));
+                if text.trim().is_empty() {
+                    let y = h / 2.0 - STRIP_LINE.size * 0.7 + (1.0 - eased) * 8.0;
+                    interlude(frame, left, y, STRIP_LINE.size, between(line, next, moment.position), dim, bright);
+                } else {
+                    let font = Font { size: (STRIP_LINE.size * (width / frame.measure(&text, STRIP_LINE).max(1.0))).clamp(STRIP_LEAST, STRIP_LINE.size), ..STRIP_LINE };
+                    let y = h / 2.0 - font.size * 0.7 + (1.0 - eased) * 8.0;
+                    // (One row: where it would wrap, cut where it wraps.)
+                    let layout = frame.gfx.wrapped(&text, font, 100_000.0);
+                    let sung = sung_to(&parts, moment.position);
+                    filled(frame, &layout, &text, font, left, y, 100_000.0, sung, dim, bright, 12.0);
+                }
             }
             _ => {
                 let said = [moment.title.as_str(), moment.artist.as_str()].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · ");
@@ -1293,7 +1335,7 @@ impl Shown {
         let gap = 10.0;
         let height_of = |index: usize, scale: f32| {
             let line = &lines[index];
-            frame.gfx.wrapped_height(if line.text.is_empty() { "♪" } else { &line.text }, Font { size: NOW_FONT.size * scale, ..NOW_FONT }, width) + if Some(index) == current && moment.translated && line.translation.is_some() { 20.0 } else { 0.0 }
+            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "♪" } else { &line.text }, Font { size: NOW_FONT.size * scale, ..NOW_FONT }, width) + if Some(index) == current && moment.translated && line.translation.is_some() { 20.0 } else { 0.0 }
         };
         let rail = self.rail;
         let base = rail.floor().max(-1.0);
@@ -1334,21 +1376,32 @@ impl Shown {
             if Some(index) == current {
                 let next = lines.get(index + 1).map(|line| line.at);
                 let (text, parts) = parts(line, next);
-                let text = if text.trim().is_empty() { "♪".to_string() } else { text };
-                let layout = frame.gfx.wrapped(&text, font, width);
-                let sung = sung_to(&parts, moment.position);
-                let soft = (font.size * 0.45).clamp(6.0, 16.0);
                 let bright = colour(toward([1.0, 1.0, 1.0], self.tint, 0.35), alpha);
-                // What is sung glows in the cover's colour.
-                frame.glow(colour(self.tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, font, x, y, width, sung, bright, soft));
-                filled(frame, &layout, &text, font, x, y, width, sung, Color::hex(0xFFFFFF, 0.34 * alpha), bright, soft);
+                let dim = Color::hex(0xFFFFFF, 0.34 * alpha);
+                if text.trim().is_empty() {
+                    let done = between(line, next, moment.position);
+                    // What has gone glows in the cover's colour.
+                    frame.glow(colour(self.tint, 0.5 * alpha), 6.0, |frame| interlude(frame, x, y, font.size, done, Color::hex(0, 0.0), bright));
+                    interlude(frame, x, y, font.size, done, dim, bright);
+                } else {
+                    let layout = frame.gfx.wrapped(&text, font, width);
+                    let sung = sung_to(&parts, moment.position);
+                    let soft = (font.size * 0.45).clamp(6.0, 16.0);
+                    // What is sung glows in the cover's colour.
+                    frame.glow(colour(self.tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, font, x, y, width, sung, bright, soft));
+                    filled(frame, &layout, &text, font, x, y, width, sung, dim, bright, soft);
+                }
                 if let Some(translation) = line.translation.as_ref().filter(|_| moment.translated) {
                     let under = frame.gfx.wrapped_height(&text, font, width);
                     frame.text(translation, UNDER_FONT, Color::hex(0xFFFFFF, 0.62 * alpha), x, y + under + 2.0, width, Align::Start);
                 }
             } else {
-                let text = if line.text.is_empty() { "♪" } else { line.text.as_str() };
-                frame.text_wrapped(text, font, Color::hex(0xFFFFFF, 0.5 * alpha), x, y, width);
+                let shown = Color::hex(0xFFFFFF, 0.5 * alpha);
+                if line.text.trim().is_empty() {
+                    interlude(frame, x, y, font.size, 0.0, shown, shown);
+                } else {
+                    frame.text_wrapped(&line.text, font, shown, x, y, width);
+                }
             }
         }
         frame.unclip();
@@ -1376,24 +1429,35 @@ impl Shown {
         };
         let Some(now) = moment.now else { return };
         let line = &lines[now];
-        let (text, parts) = parts(line, lines.get(now + 1).map(|line| line.at));
-        let text = if text.trim().is_empty() { "♪".to_string() } else { text };
+        let next = lines.get(now + 1).map(|line| line.at);
+        let (text, parts) = parts(line, next);
         // It rises in over a quarter of a second as it comes.
         let came = moment.since.map_or(1.0, |since| (since.elapsed().as_secs_f32() / 0.28).min(1.0));
         let eased = 1.0 - (1.0 - came).powi(3);
         let font = FLOAT_FONT;
-        let wide = frame.measure(&text, font).min(room);
-        let (x, y) = ((w - wide) / 2.0, 14.0 + (1.0 - eased) * 18.0);
-        let layout = frame.gfx.wrapped(&text, font, wide + 2.0);
-        let sung = sung_to(&parts, moment.position);
-        let room = wide + 2.0;
-        // A dark haze for it to be read on anything; a glow in the cover's colour round what is sung.
-        frame.glow(Color::hex(0x000000, 0.55 * eased), 3.0, |frame| frame.text_wrapped(&text, font, Color::hex(0xFFFFFF, 1.0), x, y + 1.0, room));
-        frame.glow(colour(self.accent, 0.75 * eased), 10.0, |frame| sung_part(frame, &layout, &text, font, x, y, room, sung, Color::hex(0xFFFFFF, 1.0), 14.0));
-        filled(frame, &layout, &text, font, x, y, room, sung, Color::hex(0xFFFFFF, 0.6 * eased), colour(self.tint, eased), 14.0);
+        let y = 14.0 + (1.0 - eased) * 18.0;
+        let (dim, bright) = (Color::hex(0xFFFFFF, 0.6 * eased), colour(self.tint, eased));
+        if text.trim().is_empty() {
+            let x = (w - font.size * 1.15) / 2.0;
+            let done = between(line, next, moment.position);
+            // A dark haze for it to be seen on anything; a glow in the cover's colour round what has gone.
+            frame.glow(Color::hex(0x000000, 0.55 * eased), 3.0, |frame| interlude(frame, x, y + 1.0, font.size, 0.0, Color::hex(0xFFFFFF, 1.0), Color::hex(0xFFFFFF, 1.0)));
+            frame.glow(colour(self.accent, 0.75 * eased), 10.0, |frame| interlude(frame, x, y, font.size, done, Color::hex(0, 0.0), Color::hex(0xFFFFFF, 1.0)));
+            interlude(frame, x, y, font.size, done, dim, bright);
+        } else {
+            let wide = frame.measure(&text, font).min(room);
+            let x = (w - wide) / 2.0;
+            let layout = frame.gfx.wrapped(&text, font, wide + 2.0);
+            let sung = sung_to(&parts, moment.position);
+            let room = wide + 2.0;
+            // A dark haze for it to be read on anything; a glow in the cover's colour round what is sung.
+            frame.glow(Color::hex(0x000000, 0.55 * eased), 3.0, |frame| frame.text_wrapped(&text, font, Color::hex(0xFFFFFF, 1.0), x, y + 1.0, room));
+            frame.glow(colour(self.accent, 0.75 * eased), 10.0, |frame| sung_part(frame, &layout, &text, font, x, y, room, sung, Color::hex(0xFFFFFF, 1.0), 14.0));
+            filled(frame, &layout, &text, font, x, y, room, sung, dim, bright, 14.0);
+        }
         let under = line.translation.clone().filter(|_| moment.translated).or_else(|| lines.get(now + 1).map(|line| line.text.clone())).unwrap_or_default();
         if !under.is_empty() {
-            let wide = frame.measure(&under, FLOAT_UNDER).min(room);
+            let wide = frame.measure(&under, FLOAT_UNDER).min(room + 2.0);
             outlined(frame, &under, FLOAT_UNDER, Color::hex(0xFFFFFF, 0.78 * eased), (w - wide) / 2.0, y + font.size * 1.45, wide + 2.0);
         }
     }
