@@ -1486,6 +1486,9 @@ impl<'a> Panel<'a> {
             }
         }
         self.phase = Phase::Open { entered: false, outside_since: None, dragging: false };
+        // Presses from before it opened are no press elsewhere (what was seen of them is otherwise as old as the
+        // last look while it was away, which may be long ago: opened by the shortcut, it closed at once).
+        self.presses_seen = PRESSES.load(Ordering::Relaxed);
         self.controller.shown.store(true, Ordering::Relaxed);
         self.exclude();
         // Away from the edge it has nowhere to slide from: it fades in.
