@@ -40,7 +40,8 @@ pub fn report() -> String {
     lines.extend(info.gpus.iter().map(|gpu| format!("GPU: {}", gpu.name)));
     lines.extend(info.found.iter().cloned());
     lines.extend(crate::source::sensor_lines());
-    let log = crate::journal::recent(15);
+    // (Enough to see what led up to a fault, well within what a report may hold.)
+    let log = crate::journal::recent(80);
     lines.push(format!("Recent log ({} lines):", log.len()));
     lines.extend(log.into_iter().map(|line| format!("  {line}")));
     // What the phone remote finds, where it is there: the lights, the monitors, what else it sets.
