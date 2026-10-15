@@ -90,10 +90,10 @@ const GAME: [Item; 9] = [
     item("mic", true),
 ];
 
-/// Whether the lyrics are offered in the settings (their module, and the
-/// line the time module shows): not yet, till what plays is known from
-/// every player (NetEase's own says it only with a plugin). Turned on before,
-/// they show as they were.
+/// Whether the lyrics are offered in the settings (their module, as Music,
+/// and the line the time module shows). A player that says no position
+/// (NetEase's own, without its plugin) has the rest of Music, and is told why
+/// it has no lyrics.
 pub const LYRICS_OFFERED: bool = true;
 
 /// Whether module `module` is offered in the settings (see `LYRICS_OFFERED`).
