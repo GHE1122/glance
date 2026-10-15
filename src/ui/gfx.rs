@@ -1296,7 +1296,19 @@ impl Layer {
         let mut parent = Matrix3x2::default();
         unsafe { dc.GetTransform(&mut parent) };
         unsafe {
-            dc.SetTransform(&(local * parent));
+            let mut placed = local * parent;
+            // Drawn pixel for pixel (moved only, at the scale it was kept at), it is put on whole pixels: a bitmap put
+            // between them is resampled, and what is in it (its text) blurred. (A widget sized by its left or top
+            // edge keeps what it shows to its right and bottom ones: rarely on a whole pixel.)
+            let mut dpi = (0.0, 0.0);
+            dc.GetDpi(&mut dpi.0, &mut dpi.1);
+            let device = dpi.0 / 96.0;
+            let moved_only = (placed.M11 - 1.0).abs() < 1e-4 && (placed.M22 - 1.0).abs() < 1e-4 && placed.M12 == 0.0 && placed.M21 == 0.0;
+            if moved_only && (device - scale).abs() < 1e-4 {
+                placed.M31 = ((left + placed.M31) * device).round() / device - left;
+                placed.M32 = ((top + placed.M32) * device).round() / device - top;
+            }
+            dc.SetTransform(&placed);
             dc.DrawImage(&image, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
             dc.SetTransform(&parent);
         }
