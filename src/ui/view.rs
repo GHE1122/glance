@@ -296,7 +296,8 @@ enum Block {
     Sound { level: u8, muted: bool },
     /// What plays (and, under it, by whom and where), with what pauses,
     /// plays and skips it.
-    Playing { title: String, about: String, playing: bool },
+    /// `players`: how many tell Windows what they play (the line under the title switches between them).
+    Playing { title: String, about: String, playing: bool, players: u8 },
     /// How far into its track what plays is and how long the track is (whole seconds), on a track it is dragged
     /// along where its player lets it be (`seekable`).
     Progress { at: u32, length: u32, seekable: bool },
@@ -345,7 +346,7 @@ impl Hash for Block {
             Block::Meter { label, fraction, value, hot, gap, opens } => (label, fraction.to_bits(), value, hot, gap.to_bits(), opens).hash(state),
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
             Block::Sound { level, muted } => (level, muted).hash(state),
-            Block::Playing { title, about, playing } => (title, about, playing).hash(state),
+            Block::Playing { title, about, playing, players } => (title, about, playing, players).hash(state),
             Block::Progress { at, length, seekable } => (at, length, seekable).hash(state),
             Block::Lyric { line, under, said, glide } => (line, under, said, glide).hash(state),
             Block::Lyrics { rows, glide } => (rows, glide).hash(state),
@@ -1086,7 +1087,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     };
                     let state = if heard.playing { lang.pick("正在播放", "Playing") } else { lang.pick("已暂停", "Paused") };
                     let about = if nothing { String::new() } else { [state, heard.artist.as_str(), if heard.title.is_empty() { "" } else { heard.app.as_str() }].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · ") };
-                    blocks.push(Block::Playing { title, about, playing: heard.playing });
+                    blocks.push(Block::Playing { title, about, playing: heard.playing, players: heard.players });
                     if let Some(timeline) = heard.timeline {
                         let whole = |seconds: f64| seconds.max(0.0).round() as u32;
                         blocks.push(Block::Progress { at: whole(timeline.at).min(whole(timeline.length)), length: whole(timeline.length), seekable: timeline.seekable });
@@ -1559,7 +1560,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 part("length");
                 frame.text(&long, theme.small, theme.text3, left + width - long_width, middle - LINE / 2.0, long_width, Align::End);
             }
-            (Block::Playing { title, about, playing }, Pass::Content) => {
+            (Block::Playing { title, about, playing, players }, Pass::Content) => {
                 use crate::playing::Key;
                 // What plays and what is said of it, in the room before the three that are pressed.
                 let top = y + MEDIA_GAP;
@@ -1567,7 +1568,15 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 part("title");
                 frame.text(title, theme.body, theme.text, left, top, pressed_from - 8.0 - left, Align::Start);
                 part("about");
-                frame.text(about, theme.small, theme.text3, left, top + LINE, pressed_from - 8.0 - left, Align::Start);
+                // Where several players tell what they play: the line is pressed to follow the next (lit under the
+                // pointer; what a press does said under it).
+                let switches = *players > 1;
+                let switch = Hit::Media(crate::playing::Key::Player);
+                let lit = switches && scene.hover == Some(switch);
+                frame.text(about, theme.small, if lit { theme.text } else { theme.text3 }, left, top + LINE, pressed_from - 8.0 - left, Align::Start);
+                if switches {
+                    hits.push((left, top + LINE, pressed_from - 8.0 - left, LINE, switch));
+                }
                 let row = top + (2.0 * LINE - MEDIA_ROW) / 2.0;
                 for (place, (key, glyph)) in [(Key::Previous, "\u{E892}"), (Key::Toggle, if *playing { "\u{E769}" } else { "\u{E768}" }), (Key::Next, "\u{E893}")].into_iter().enumerate() {
                     pressed(frame, scene, hits, Hit::Media(key), glyph, pressed_from + place as f32 * (MEDIA_ROW + 2.0), row, false);

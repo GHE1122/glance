@@ -760,20 +760,20 @@ impl Widgets {
         let (lx, ly) = (x - widget.hits_from.0, y - widget.hits_from.1);
         let hit = widget.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4).filter(|hit| hit.takes_press());
         if hit != widget.hit_hover {
-            // A drive's row says what a press on it does, under it (its buttons' own said over it).
-            match hit {
-                Some(view::Hit::Drive(place)) if over.is_none() => {
-                    let found = widget.hits.iter().find(|one| one.4 == view::Hit::Drive(place)).map(|one| (one.0, one.1, one.2, one.3));
-                    if let (Some((hx, hy, hw, hh)), Some(name)) = (found, crate::app().controller.seen.lock().unwrap().volumes.get(place as usize).cloned()) {
+            // What a press does, said under what says so (a drive's row, the line that switches players; its buttons'
+            // own said over it).
+            match hit.and_then(|hit| Some((hit, crate::panel::says(hit, lang)?))) {
+                Some((hit, said)) if over.is_none() => {
+                    if let Some((hx, hy, hw, hh)) = widget.hits.iter().find(|one| one.4 == hit).map(|one| (one.0, one.1, one.2, one.3)) {
                         let on_screen = |dx: f32, dy: f32| {
                             // (Its surface's corner is at `at`; the window's margin is before it.)
                             ((widget.at.x as f32 + (widget.hits_from.0 + dx) * px).round() as i32, (widget.at.y as f32 + (widget.hits_from.1 + dy) * px).round() as i32)
                         };
                         let ((left, top), (right, bottom)) = (on_screen(hx, hy), on_screen(hx + hw, hy + hh));
-                        crate::ui::tip::show(&crate::panel::opens_drive(&name, lang), RECT { left, top, right, bottom }, crate::os::apps_dark());
+                        crate::ui::tip::show(&said, RECT { left, top, right, bottom }, crate::os::apps_dark());
                     }
                 }
-                _ if matches!(widget.hit_hover, Some(view::Hit::Drive(_))) && over.is_none() => crate::ui::tip::hide(),
+                _ if widget.hit_hover.is_some_and(|hit| crate::panel::says(hit, lang).is_some()) && over.is_none() => crate::ui::tip::hide(),
                 _ => {}
             }
             widget.hit_hover = hit;

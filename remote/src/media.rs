@@ -55,18 +55,53 @@ fn timeline(session: &Session, playing: bool) -> Option<(f64, f64)> {
     Some(((position + since).min(end), end))
 }
 
-/// What Windows would act on were a media key pressed now. (Asked of the
-/// one manager, got the first time: it is looked at every second where
-/// what plays is shown.)
-fn session() -> Result<Session> {
+/// The one manager of the programs' media sessions, got the first time
+/// (what plays is looked at every second where it is shown).
+fn manager() -> Result<Manager> {
     static MANAGER: Mutex<Option<Manager>> = Mutex::new(None);
     crate::actions::com();
     let mut kept = MANAGER.lock().unwrap();
-    let manager = match kept.as_ref() {
+    Ok(match kept.as_ref() {
         Some(manager) => manager.clone(),
         None => kept.insert(Manager::RequestAsync()?.join()?).clone(),
-    };
+    })
+}
+
+/// The program chosen to be followed (see `choose`), as Windows identifies it; none: whichever Windows would act on.
+static CHOSEN: Mutex<Option<String>> = Mutex::new(None);
+
+/// The session followed: the chosen program's, while it has one; else what Windows would act on were a media key
+/// pressed now.
+fn session() -> Result<Session> {
+    let manager = manager()?;
+    if let Some(chosen) = CHOSEN.lock().unwrap().clone() {
+        let sessions = manager.GetSessions()?;
+        for session in &sessions {
+            if session.SourceAppUserModelId().is_ok_and(|id| id.to_string() == chosen) {
+                return Ok(session);
+            }
+        }
+    }
     manager.GetCurrentSession()
+}
+
+/// The programs that tell Windows what they play, as Windows identifies each, in its order.
+pub fn players() -> Vec<String> {
+    let Ok(sessions) = manager().and_then(|manager| manager.GetSessions()) else { return Vec::new() };
+    sessions.into_iter().filter_map(|session| session.SourceAppUserModelId().ok().map(|id| id.to_string())).filter(|id| !id.is_empty()).collect()
+}
+
+/// Follows the next of the programs that tell Windows what they play, after the one followed now (round to the
+/// first); whether there was another.
+pub fn follow_next() -> bool {
+    let players = players();
+    if players.len() < 2 {
+        return false;
+    }
+    let now = session().and_then(|session| session.SourceAppUserModelId()).map(|id| id.to_string()).unwrap_or_default();
+    let next = players.iter().position(|id| *id == now).map_or(0, |at| (at + 1) % players.len());
+    *CHOSEN.lock().unwrap() = Some(players[next].clone());
+    true
 }
 
 /// What `find` finds for `key`, found once: a program's name does not

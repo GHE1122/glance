@@ -23,6 +23,8 @@ pub struct Now {
     pub muted: bool,
     /// How far into the track it is and how long it is, where its player says.
     pub timeline: Option<Timeline>,
+    /// How many players tell Windows what they play (one of them followed: see `Key::Player`).
+    pub players: u8,
     /// What is sung, while lyrics are shown and a track plays.
     pub sung: Option<Sung>,
 }
@@ -75,6 +77,8 @@ pub enum Key {
     Toggle,
     Next,
     Mute,
+    /// The next of the players followed (where several tell Windows what they play).
+    Player,
 }
 
 /// What is asked for.
@@ -164,7 +168,8 @@ fn look() -> Option<std::time::Duration> {
         Some((till, asked)) if std::time::Instant::now() < till => asked,
         _ => is_playing,
     };
-    keep(Some(Now { title, artist, app, playing: is_playing, volume: sound.map(|(level, _)| level), muted: sound.is_some_and(|(_, muted)| muted), timeline, sung }));
+    let players = crate::media::players().len().min(u8::MAX as usize) as u8;
+    keep(Some(Now { title, artist, app, playing: is_playing, volume: sound.map(|(level, _)| level), muted: sound.is_some_and(|(_, muted)| muted), timeline, players, sung }));
     next
 }
 
@@ -241,6 +246,9 @@ pub fn act(act: Act) {
             }
             Act::Key(Key::Next) => {
                 let _ = crate::media::ask("next");
+            }
+            Act::Key(Key::Player) => {
+                crate::media::follow_next();
             }
             Act::Key(Key::Mute) => {
                 let muted = crate::actions::volume().is_some_and(|(_, muted)| muted);
