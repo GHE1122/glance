@@ -101,8 +101,8 @@ pub struct Sampler {
     /// The board's chip was not looked at as Glance started, another
     /// program having the bus: looked for again every so often, since when.
     super_io_awaited: Option<Instant>,
-    /// An ASUS laptop's fans, as its firmware reports them.
-    asus_fans: Option<crate::asus::AsusFans>,
+    /// A laptop's fans, as its firmware reports them.
+    laptop_fans: Option<LaptopFans>,
     dimms: Option<Dimms>,
     mic: Option<Microphone>,
     /// Each process's GPU use at the last sample, by process id.
@@ -161,13 +161,13 @@ impl Sampler {
         let cpu_sensors = CpuReader::open();
         let super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")));
         let dimms = Dimms::open();
-        let asus_fans = crate::asus::AsusFans::open();
+        let laptop_fans = LaptopFans::open();
         let missing = || "not found".to_string();
         let mut found = vec![
             format!("CPU sensors: {}", cpu_sensors.as_ref().map_or_else(missing, |cpu| cpu.describe().to_string())),
             format!("Motherboard chip: {}", super_io.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe)),
             format!("Memory sensors: {}", dimms.as_ref().map_or_else(missing, Dimms::describe)),
-            format!("Laptop fans: {}", asus_fans.as_ref().map_or_else(missing, crate::asus::AsusFans::describe)),
+            format!("Laptop fans: {}", laptop_fans.as_ref().map_or_else(missing, LaptopFans::describe)),
         ];
         found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| {
             format!("GPU power, {}: {}", gpu.name, adapter.power.map_or("not available", gpu_power::Reader::describe))
@@ -211,7 +211,7 @@ impl Sampler {
             cpu_sensors,
             super_io_awaited: super_io.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now()),
             super_io: super_io.ok().map(crate::superio::Watched::new),
-            asus_fans,
+            laptop_fans,
             dimms,
             mic: Microphone::open(),
             gpu_by_pid: None,
@@ -1292,6 +1292,33 @@ fn performance_info() -> PERFORMANCE_INFORMATION {
     info
 }
 
+/// A laptop's fans, as its maker's firmware reports them to the maker's own software.
+enum LaptopFans {
+    Asus(crate::asus::AsusFans),
+    Lenovo(crate::lenovo::LenovoFans),
+}
+
+impl LaptopFans {
+    fn open() -> Option<Self> {
+        crate::asus::AsusFans::open().map(LaptopFans::Asus).or_else(|| crate::lenovo::LenovoFans::open().map(LaptopFans::Lenovo))
+    }
+
+    /// Each fan's speed (RPM), by name.
+    fn read(&self) -> Vec<(String, f32)> {
+        match self {
+            LaptopFans::Asus(fans) => fans.read(),
+            LaptopFans::Lenovo(fans) => fans.read(),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            LaptopFans::Asus(fans) => fans.describe(),
+            LaptopFans::Lenovo(fans) => fans.describe(),
+        }
+    }
+}
+
 /// How often the board's chip is looked for again while another program has the bus.
 const SUPER_IO_AGAIN: Duration = Duration::from_secs(30);
 
@@ -1307,7 +1334,7 @@ impl Sampler {
             self.super_io = found.ok().map(crate::superio::Watched::new);
         }
         let mut board = self.super_io.as_ref().map(crate::superio::Watched::read);
-        if let Some(fans) = &self.asus_fans {
+        if let Some(fans) = &self.laptop_fans {
             board.get_or_insert_with(Default::default).fans.extend(fans.read());
         }
         board
