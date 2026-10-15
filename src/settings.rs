@@ -430,6 +430,13 @@ pub struct Settings {
     pub lyric_medium_size: Option<(f32, f32)>,
     #[serde(default)]
     pub lyric_medium_pinned: bool,
+    /// The strip: where it was put (its corner, physical px), its size (DIPs), whether it is pinned.
+    #[serde(default)]
+    pub lyric_strip: Option<(i32, i32)>,
+    #[serde(default)]
+    pub lyric_strip_size: Option<(f32, f32)>,
+    #[serde(default)]
+    pub lyric_strip_pinned: bool,
     #[serde(default)]
     pub lyric_subtitle_pinned: bool,
     #[serde(default)]
@@ -473,6 +480,9 @@ impl Default for Settings {
             lyric_medium: None,
             lyric_medium_size: None,
             lyric_medium_pinned: false,
+            lyric_strip: None,
+            lyric_strip_size: None,
+            lyric_strip_pinned: false,
             lyric_subtitle_pinned: false,
             lyric_subtitle_through: false,
             view: serde_json::Value::Null,

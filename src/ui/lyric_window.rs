@@ -45,6 +45,7 @@ use crate::playing::Sung;
 pub enum Style {
     Card,
     Medium,
+    Strip,
     Subtitle,
 }
 
@@ -54,13 +55,14 @@ impl Style {
         match self {
             Style::Card => (440.0, 330.0),
             Style::Medium => (420.0, 170.0),
+            Style::Strip => (520.0, 56.0),
             Style::Subtitle => (980.0, 120.0),
         }
     }
 
     fn margin(self) -> f32 {
         match self {
-            Style::Card | Style::Medium => 30.0,
+            Style::Card | Style::Medium | Style::Strip => 30.0,
             Style::Subtitle => 0.0,
         }
     }
@@ -70,6 +72,7 @@ impl Style {
         match self {
             Style::Card => (320.0, 230.0),
             Style::Medium => (340.0, 150.0),
+            Style::Strip => (360.0, 56.0),
             Style::Subtitle => (420.0, 100.0),
         }
     }
@@ -77,7 +80,7 @@ impl Style {
     /// The buttons it shows while the pointer is over it, in their row.
     fn buttons(self) -> &'static [Button] {
         match self {
-            Style::Card | Style::Medium => &[Button::Settings, Button::Pin, Button::Close],
+            Style::Card | Style::Medium | Style::Strip => &[Button::Settings, Button::Pin, Button::Close],
             Style::Subtitle => &[Button::Settings, Button::Pin, Button::Through, Button::Close],
         }
     }
@@ -87,6 +90,7 @@ impl Style {
         match self {
             Style::Card => "card",
             Style::Medium => "medium",
+            Style::Strip => "strip",
             Style::Subtitle => "subtitle",
         }
     }
@@ -106,6 +110,9 @@ const PLAYER_ABOUT: Font = Font::new(Family::Segoe, 12.0, 500.0);
 const PLAYER_LINE: Font = Font::new(Family::Segoe, 18.0, 700.0);
 const PLAYER_UNDER: Font = Font::new(Family::Segoe, 12.5, 500.0);
 const PLAYER_TIME: Font = Font::new(Family::Segoe, 11.0, 500.0);
+/// The strip's line sung now, and the least it is made to fit its room.
+const STRIP_LINE: Font = Font::new(Family::Segoe, 16.0, 700.0);
+const STRIP_LEAST: f32 = 12.5;
 /// The player's three that are pressed: the side of each, and the system icon font's glyphs.
 const CONTROL: f32 = 28.0;
 const CONTROL_FONT: Font = Font::new(Family::Icons, 14.0, 400.0);
@@ -195,7 +202,7 @@ pub fn tick(now: Instant) -> Option<Duration> {
         let settings = crate::app().settings.lock().unwrap();
         let view = &settings.view;
         let on = super::prefs::module_on(view, "lyrics");
-        [Style::Card, Style::Medium, Style::Subtitle].into_iter().filter(|style| on && super::prefs::item_on(view, "lyrics", style.item())).collect()
+        [Style::Card, Style::Medium, Style::Strip, Style::Subtitle].into_iter().filter(|style| on && super::prefs::item_on(view, "lyrics", style.item())).collect()
     };
     SHOWN.with_borrow_mut(|shown| {
         shown.retain_mut(|one| {
@@ -315,6 +322,7 @@ impl Shown {
                 crate::app().change(|settings| match style {
                     Style::Card => settings.lyric_card_pinned = pinned,
                     Style::Medium => settings.lyric_medium_pinned = pinned,
+                    Style::Strip => settings.lyric_strip_pinned = pinned,
                     Style::Subtitle => settings.lyric_subtitle_pinned = pinned,
                 });
             }
@@ -349,7 +357,8 @@ impl Shown {
             self.style.buttons().to_vec()
         };
         let (size, gap) = (buttons::SIZE, buttons::GAP);
-        let y = 10.0 + size / 2.0;
+        // (On the strip's middle: it is no taller than a row of them and the room round it.)
+        let y = if self.style == Style::Strip { _h / 2.0 } else { 10.0 + size / 2.0 };
         for (place, button) in shown.iter().rev().enumerate() {
             let x = w - 12.0 - size / 2.0 - place as f32 * (size + gap);
             let lit = (*button == Button::Pin && self.pinned) || (*button == Button::Through && self.through);
@@ -366,7 +375,7 @@ fn edge_at(one: &Shown, (x, y): (f32, f32)) -> Option<u32> {
     let (w, h) = one.room;
     let (left, right, top, bottom) = (x < near, x > w - near, y < near, y > h - near);
     match one.style {
-        Style::Subtitle => {
+        Style::Subtitle | Style::Strip => {
             if left {
                 Some(HTLEFT)
             } else if right {
@@ -387,6 +396,31 @@ fn edge_at(one: &Shown, (x, y): (f32, f32)) -> Option<u32> {
             _ => None,
         },
     }
+}
+
+/// How near an edge of its screen's work area the strip, let go, keeps to it (DIPs).
+const STRIP_SNAP: f32 = 20.0;
+
+/// Where a window at `at` (physical px), drawn `margin` in from its edges (the room for its shadow), goes to keep to
+/// the edges of its screen's work area it is within `near` of: those edges flush with what it draws.
+fn snapped(at: RECT, margin: i32, near: i32) -> (i32, i32) {
+    use windows::Win32::Graphics::Gdi::{MonitorFromRect, MONITOR_DEFAULTTONEAREST};
+    let drawn = RECT { left: at.left + margin, top: at.top + margin, right: at.right - margin, bottom: at.bottom - margin };
+    let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !unsafe { GetMonitorInfoW(MonitorFromRect(&drawn, MONITOR_DEFAULTTONEAREST), &mut screen) }.as_bool() {
+        return (at.left, at.top);
+    }
+    let work = screen.rcWork;
+    let along = |from: i32, to: i32, low: i32, high: i32| {
+        if (from - low).abs() <= near {
+            low - from
+        } else if (to - high).abs() <= near {
+            high - to
+        } else {
+            0
+        }
+    };
+    (at.left + along(drawn.left, drawn.right, work.left, work.right), at.top + along(drawn.top, drawn.bottom, work.top, work.bottom))
 }
 
 /// Does `act` with the window shown as `hwnd`, while nothing else holds them.
@@ -454,7 +488,18 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             unsafe {
                 let _ = GetWindowRect(hwnd, &mut at);
             }
-            if let Some((style, room)) = with(hwnd, |one| (one.style, one.room)) {
+            if let Some((style, room, scale)) = with(hwnd, |one| (one.style, one.room, one.scale)) {
+                // The strip, let go near an edge of its screen's work area, keeps to it: its edge flush with that one.
+                if style == Style::Strip {
+                    let snapped = snapped(at, (style.margin() * scale).round() as i32, (STRIP_SNAP * scale) as i32);
+                    if snapped != (at.left, at.top) {
+                        unsafe {
+                            let _ = SetWindowPos(hwnd, None, snapped.0, snapped.1, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE);
+                        }
+                        (at.right, at.bottom) = (at.right + snapped.0 - at.left, at.bottom + snapped.1 - at.top);
+                        (at.left, at.top) = snapped;
+                    }
+                }
                 crate::app().change(|settings| {
                     let kept = Some((at.left, at.top));
                     match style {
@@ -465,6 +510,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                         Style::Medium => {
                             settings.lyric_medium = kept;
                             settings.lyric_medium_size = Some(room);
+                        }
+                        Style::Strip => {
+                            settings.lyric_strip = kept;
+                            settings.lyric_strip_size = Some(room);
                         }
                         Style::Subtitle => {
                             settings.lyric_subtitle = kept;
@@ -496,6 +545,7 @@ fn make(style: Style) -> Option<Shown> {
         match style {
             Style::Card => (settings.lyric_card, settings.lyric_card_size, settings.lyric_card_pinned, false),
             Style::Medium => (settings.lyric_medium, settings.lyric_medium_size, settings.lyric_medium_pinned, false),
+            Style::Strip => (settings.lyric_strip, settings.lyric_strip_size, settings.lyric_strip_pinned, false),
             Style::Subtitle => (settings.lyric_subtitle, settings.lyric_subtitle_size, settings.lyric_subtitle_pinned, settings.lyric_subtitle_through),
         }
     };
@@ -514,6 +564,7 @@ fn make(style: Style) -> Option<Shown> {
         let (x, y) = kept.unwrap_or(match style {
             Style::Card => (work.right - pw - (12.0 * scale) as i32, work.bottom - ph - (12.0 * scale) as i32),
             Style::Medium => (work.right - pw - (12.0 * scale) as i32, work.top + (12.0 * scale) as i32),
+            Style::Strip => ((work.left + work.right - pw) / 2, work.top + (12.0 * scale) as i32),
             Style::Subtitle => ((work.left + work.right - pw) / 2, work.bottom - ph - (60.0 * scale) as i32),
         });
         // The floating lyrics above all, and layered (as a window that lets clicks through must be).
@@ -839,6 +890,7 @@ impl Shown {
             match self.style {
                 Style::Card => self.card(frame, &moment, (w, h)),
                 Style::Medium => self.medium(frame, &moment, (w, h)),
+                Style::Strip => self.strip(frame, &moment, (w, h)),
                 Style::Subtitle => {
                     // Pointed at, where it is shows, for it to be taken and moved.
                     if self.over.is_some() && !self.through {
@@ -947,7 +999,6 @@ impl Shown {
     /// the start; beside it what plays and by whom, the line sung now filled as it is sung with what is under it,
     /// and along the bottom the spectrum, or (the pointer over it) what pauses, plays and skips it and its track.
     fn medium(&mut self, frame: &Frame, moment: &Moment, (w, h): (f32, f32)) {
-        use crate::playing::Key;
         let radius = 14.0;
         let pad = 18.0;
         if let Some(cover) = &moment.cover {
@@ -1036,30 +1087,46 @@ impl Shown {
         // while shown).
         self.controls.clear();
         let row = pad + side - CONTROL;
-        let shown_in = self.controls_in * self.controls_in * (3.0 - 2.0 * self.controls_in);
+        let shown_in = self.controls_shown();
         if shown_in < 1.0 {
-            let bars = 28;
-            let floor = row + CONTROL - 2.0;
-            let bar = width / bars as f32;
-            for index in 0..bars {
-                let at = index as f32 / (bars - 1) as f32 * (crate::sound::BANDS - 1) as f32;
-                let (low, frac) = (at.floor() as usize, at.fract());
-                let value = moment.sound.bands[low] * (1.0 - frac) + moment.sound.bands[(low + 1).min(crate::sound::BANDS - 1)] * frac;
-                let tall = 2.0 + value.powf(1.6) * (CONTROL - 4.0);
-                let shade = toward(accent, tint, index as f32 / bars as f32);
-                frame.fill_rounded(colour(shade, (0.3 + 0.45 * value) * (1.0 - shown_in)), left + index as f32 * bar + bar * 0.2, floor - tall, bar * 0.6, tall, bar * 0.3);
-            }
+            spectrum(frame, moment, (accent, tint), (left, row + CONTROL - 2.0, width, CONTROL - 4.0), 28, 1.0 - shown_in);
         }
         if shown_in <= 0.0 {
             return;
         }
-        let fade = shown_in;
+        let x = self.keys(frame, moment, left - (CONTROL - 16.0) / 2.0, row, shown_in);
+        if let Some((length, seekable)) = moment.length.filter(|(length, _)| *length > 0.0) {
+            let pointer = self.pointer();
+            let lit = |x: f32, wide: f32| pointer.is_some_and(|(px, py)| px >= x && px < x + wide && py >= row && py < row + CONTROL);
+            let left_over = format!("-{}", super::text::clock((length - moment.position).max(0.0).round() as u32));
+            let time_wide = frame.measure(&left_over, PLAYER_TIME) + 2.0;
+            let track_from = x + 10.0;
+            let track = (left + width - time_wide - 10.0 - track_from).max(0.0);
+            let middle = row + CONTROL / 2.0;
+            let fraction = (moment.position / length).clamp(0.0, 1.0) as f32;
+            let thick = if seekable && lit(track_from, track) { 5.0 } else { 3.0 };
+            frame.fill_rounded(Color::hex(0xFFFFFF, 0.18 * shown_in), track_from, middle - thick / 2.0, track, thick, thick / 2.0);
+            frame.fill_rounded(colour(accent, 0.95 * shown_in), track_from, middle - thick / 2.0, track * fraction, thick, thick / 2.0);
+            frame.text(&left_over, PLAYER_TIME, Color::hex(0xFFFFFF, 0.55 * shown_in), left + width - time_wide, middle - PLAYER_TIME.size * 0.7, time_wide, Align::End);
+            if seekable && self.controls_in >= 0.5 {
+                self.controls.push((track_from, row, track, CONTROL, None));
+            }
+        }
+    }
+
+    /// How far the controls have come in over the spectrum (0 to 1), eased.
+    fn controls_shown(&self) -> f32 {
+        self.controls_in * self.controls_in * (3.0 - 2.0 * self.controls_in)
+    }
+
+    /// What goes back, pauses or plays, and skips, in a row from `x` at `row`, `fade` of them shown (each lit under
+    /// the pointer, pressed only once they are half come); where the row ends.
+    fn keys(&mut self, frame: &Frame, moment: &Moment, mut x: f32, row: f32, fade: f32) -> f32 {
+        use crate::playing::Key;
         let collect = self.controls_in >= 0.5;
         let pointer = self.pointer();
-        let lit = |x: f32, y: f32, wide: f32| pointer.is_some_and(|(px, py)| px >= x && px < x + wide && py >= y && py < y + CONTROL);
-        let mut x = left - (CONTROL - 16.0) / 2.0;
         for (key, glyph) in [(Key::Previous, "\u{E892}"), (Key::Toggle, if moment.playing { "\u{E769}" } else { "\u{E768}" }), (Key::Next, "\u{E893}")] {
-            let on = lit(x, row, CONTROL);
+            let on = pointer.is_some_and(|(px, py)| px >= x && px < x + CONTROL && py >= row && py < row + CONTROL);
             if on {
                 frame.fill_rounded(Color::hex(0xFFFFFF, 0.14 * fade), x, row, CONTROL, CONTROL, CONTROL / 2.0);
             }
@@ -1072,21 +1139,94 @@ impl Shown {
             }
             x += CONTROL + 2.0;
         }
-        if let Some((length, seekable)) = moment.length.filter(|(length, _)| *length > 0.0) {
-            let left_over = format!("-{}", super::text::clock((length - moment.position).max(0.0).round() as u32));
-            let time_wide = frame.measure(&left_over, PLAYER_TIME) + 2.0;
-            let track_from = x + 10.0;
-            let track = (left + width - time_wide - 10.0 - track_from).max(0.0);
-            let middle = row + CONTROL / 2.0;
-            let fraction = (moment.position / length).clamp(0.0, 1.0) as f32;
-            let thick = if seekable && lit(track_from, row, track) { 5.0 } else { 3.0 };
-            frame.fill_rounded(Color::hex(0xFFFFFF, 0.18 * fade), track_from, middle - thick / 2.0, track, thick, thick / 2.0);
-            frame.fill_rounded(colour(accent, 0.95 * fade), track_from, middle - thick / 2.0, track * fraction, thick, thick / 2.0);
-            frame.text(&left_over, PLAYER_TIME, Color::hex(0xFFFFFF, 0.55 * fade), left + width - time_wide, middle - PLAYER_TIME.size * 0.7, time_wide, Align::End);
-            if seekable && collect {
-                self.controls.push((track_from, row, track, CONTROL, None));
+        x
+    }
+
+    /// The strip: the cover small at the start, the line sung now filled as it is sung (what plays where there is
+    /// none), and at the end the spectrum, or (the pointer over it) what goes back, pauses or plays, and skips,
+    /// before its window's buttons.
+    fn strip(&mut self, frame: &Frame, moment: &Moment, (w, h): (f32, f32)) {
+        let radius = 14.0f32.min(h / 2.0);
+        let pad = 10.0;
+        if let Some(cover) = &moment.cover {
+            self.backdrop(frame, cover);
+        }
+        let shown = self.fading.as_ref().map_or(1.0, |(_, since)| (since.elapsed().as_secs_f32() / 1.2).min(1.0));
+        let before = self.fading.as_ref().map(|(before, _)| before.clone());
+        if shown >= 1.0 {
+            self.fading = None;
+        }
+        let backdrop = self.backdrop.as_ref().map(|(key, bitmap)| (*key, bitmap.clone()));
+        let side = (h - 2.0 * pad).max(0.0);
+        let left = pad + side + 12.0;
+        let (accent, tint) = (self.accent, self.tint);
+        let cover = moment.cover.clone();
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (w.to_bits(), h.to_bits(), self.scale.to_bits(), backdrop.as_ref().map(|(key, _)| *key), (shown * 64.0).round() as u32).hash(&mut hasher);
+            accent.iter().chain(&tint).map(|v| (v * 255.0).round() as u8).collect::<Vec<_>>().hash(&mut hasher);
+            cover.as_ref().map(|cover| Arc::as_ptr(cover) as usize).hash(&mut hasher);
+            hasher.finish()
+        };
+        let margin = self.style.margin();
+        let ground = Ground { size: (w, h), radius, backdrop: backdrop.map(|(_, bitmap)| bitmap), before, shown, accent, tint };
+        let _ = self.ground.draw(frame, key, windows_numerics::Matrix3x2::identity(), (-margin, -margin, w + 2.0 * margin, h + 2.0 * margin), self.scale, None, |frame| {
+            ground.paint(frame, |frame| {
+                let corner = 8.0f32.min(side / 4.0);
+                match &cover {
+                    Some(cover) => {
+                        let picture = super::canvas::Picture { key: Arc::as_ptr(cover) as usize as u64, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
+                        frame.picture(&picture, pad, pad, side, corner, 1.0);
+                    }
+                    None => {
+                        frame.fill_rounded(Color::hex(0xFFFFFF, 0.08), pad, pad, side, side, corner);
+                        let note = Font::new(Family::Icons, side * 0.42, 400.0);
+                        let (ink_top, ink_bottom) = frame.ink("\u{E8D6}", note);
+                        let wide = frame.measure("\u{E8D6}", note);
+                        frame.text("\u{E8D6}", note, Color::hex(0xFFFFFF, 0.45), pad + (side - wide) / 2.0, pad + side / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0, Align::Start);
+                    }
+                }
+            })
+        });
+        // The end: the spectrum at rest; the pointer over it, the three that are pressed, before the window's buttons.
+        self.controls.clear();
+        let buttons_room = if self.over.is_some() { self.style.buttons().len() as f32 * (buttons::SIZE + buttons::GAP) } else { 0.0 };
+        let keys_wide = 3.0 * CONTROL + 4.0;
+        let row = (h - CONTROL) / 2.0;
+        let shown_in = self.controls_shown();
+        let spectrum_wide = keys_wide.max(84.0);
+        let end = w - pad - buttons_room * shown_in;
+        if shown_in < 1.0 {
+            spectrum(frame, moment, (accent, tint), (w - pad - spectrum_wide, h / 2.0 + 10.0, spectrum_wide, 20.0), 14, 1.0 - shown_in);
+        }
+        if shown_in > 0.0 {
+            self.keys(frame, moment, end - keys_wide, row, shown_in);
+        }
+        // The line sung now, in the room between; what plays, where none is.
+        let width = (end - spectrum_wide.max(keys_wide) - 12.0 - left).max(0.0);
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(left - 4.0, 0.0, width + 8.0, h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        match (&moment.lines, moment.now) {
+            (Some(lines), Some(now)) => {
+                let line = &lines[now];
+                let (text, parts) = parts(line, lines.get(now + 1).map(|line| line.at));
+                let text = if text.trim().is_empty() { "♪".to_string() } else { text };
+                let came = moment.since.map_or(1.0, |since| (since.elapsed().as_secs_f32() / 0.28).min(1.0));
+                let eased = 1.0 - (1.0 - came).powi(3);
+                let font = Font { size: (STRIP_LINE.size * (width / frame.measure(&text, STRIP_LINE).max(1.0))).clamp(STRIP_LEAST, STRIP_LINE.size), ..STRIP_LINE };
+                let y = h / 2.0 - font.size * 0.7 + (1.0 - eased) * 8.0;
+                // (One row: where it would wrap, cut where it wraps.)
+                let layout = frame.gfx.wrapped(&text, font, 100_000.0);
+                let sung = sung_to(&parts, moment.position);
+                filled(frame, &layout, &text, font, left, y, 100_000.0, sung, Color::hex(0xFFFFFF, 0.36 * eased), colour(toward(tint, [1.0; 3], 0.65), eased), 12.0);
+            }
+            _ => {
+                let said = [moment.title.as_str(), moment.artist.as_str()].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · ");
+                let said = if said.is_empty() { moment.said.clone().unwrap_or_default() } else { said };
+                frame.text(&fitted(frame, &said, PLAYER_ABOUT, width), PLAYER_ABOUT, Color::hex(0xFFFFFF, 0.8), left, h / 2.0 - PLAYER_ABOUT.size * 0.7, width + 2.0, Align::Start);
             }
         }
+        unsafe { frame.dc.PopAxisAlignedClip() };
     }
 
     /// The player's control at `at` (DIPs, inside), if one is there: `Some(None)`, its track.
@@ -1223,6 +1363,20 @@ impl Shown {
             let wide = frame.measure(&under, FLOAT_UNDER).min(w - 20.0);
             outlined(frame, &under, FLOAT_UNDER, Color::hex(0xFFFFFF, 0.78 * eased), (w - wide) / 2.0, y + font.size * 1.45, wide + 2.0);
         }
+    }
+}
+
+/// The spectrum moving with the music: `bars` of them across `width` from `x`, standing on `floor`, `tall` at most,
+/// shaded from the accent to the tint, `alpha` of it shown.
+fn spectrum(frame: &Frame, moment: &Moment, (accent, tint): ([f32; 3], [f32; 3]), (x, floor, width, tall): (f32, f32, f32, f32), bars: usize, alpha: f32) {
+    let bar = width / bars as f32;
+    for index in 0..bars {
+        let at = index as f32 / (bars - 1) as f32 * (crate::sound::BANDS - 1) as f32;
+        let (low, frac) = (at.floor() as usize, at.fract());
+        let value = moment.sound.bands[low] * (1.0 - frac) + moment.sound.bands[(low + 1).min(crate::sound::BANDS - 1)] * frac;
+        let height = 2.0 + value.powf(1.6) * (tall - 2.0);
+        let shade = toward(accent, tint, index as f32 / bars as f32);
+        frame.fill_rounded(colour(shade, (0.3 + 0.45 * value) * alpha), x + index as f32 * bar + bar * 0.2, floor - height, bar * 0.6, height, bar * 0.3);
     }
 }
 
@@ -1374,7 +1528,7 @@ mod pictures {
         let cover = Arc::new(Cover { pixels: Arc::new(pixels), base: [0.85, 0.5, 0.4], accent: [0.95, 0.6, 0.35] });
         let out = format!("{}/target/lyrics", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
-        for style in [Style::Card, Style::Medium, Style::Subtitle] {
+        for style in [Style::Card, Style::Medium, Style::Strip, Style::Subtitle] {
             for over in [false, true] {
                 let moment = Moment {
                     lines: Some(lines.clone()),
@@ -1430,6 +1584,7 @@ mod pictures {
                         match style {
                             Style::Card => shown.card(frame, &moment, (w, h)),
                             Style::Medium => shown.medium(frame, &moment, (w, h)),
+                            Style::Strip => shown.strip(frame, &moment, (w, h)),
                             Style::Subtitle => shown.subtitle(frame, &moment, (w, h)),
                         }
                         shown.paint_buttons(frame, (w, h));
