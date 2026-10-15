@@ -2381,7 +2381,7 @@ impl Ui {
             ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在唱的这一句和下一句；会把歌名发给网易云音乐或 LRCLIB 来查找", "The line sung now and the next; the track's title is sent to NetEase Cloud Music or LRCLIB to find them"))),
             ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在正在唱的这一句下面", "Under the line sung now, where there is one"))),
             ("lyrics", "card") => (p("歌词卡片", "Lyrics card"), Some(p("桌面上的一张卡片：模糊的专辑封面、逐字填色的歌词，随音乐律动；拖动可移动", "A card on the desktop: the cover blurred behind lyrics filled word by word, moving with the music; drag it where you like"))),
-            ("lyrics", "medium") => (p("播放器", "Player"), Some(p("桌面上的中号播放器：专辑封面、歌名、逐字填色的当前歌词、播放进度与播放控制；拖动可移动", "A player of middle size on the desktop: the cover, the track's title, the line sung now filled word by word, its progress and its controls; drag it where you like"))),
+            ("lyrics", "medium") => (p("播放器", "Player"), Some(p("桌面上的中号播放器：专辑封面、歌名、逐字填色的当前歌词，随音乐律动；指针移入时显示播放控制与进度；拖动可移动", "A player of middle size on the desktop: the cover, the track's title, the line sung now filled word by word, moving with the music; with the pointer over it, its controls and progress; drag it where you like"))),
             ("lyrics", "subtitle") => (p("悬浮歌词", "Floating lyrics"), Some(p("浮在所有窗口之上的发光歌词，像字幕一样；拖动可移动", "Glowing lyrics over every window, as subtitles are; drag them where you like"))),
             ("overlay", "low") => (p("1% low", "1% low"), Some(p("最慢 1% 的帧换算成的帧率", "The slowest 1% of frames, as frames a second"))),
             ("overlay", "frametime") => (p("帧时间", "Frame time"), Some(p("最近一秒里最慢的一帧", "The slowest frame of the last second"))),

@@ -109,6 +109,8 @@ const PLAYER_TIME: Font = Font::new(Family::Segoe, 11.0, 500.0);
 /// The player's three that are pressed: the side of each, and the system icon font's glyphs.
 const CONTROL: f32 = 28.0;
 const CONTROL_FONT: Font = Font::new(Family::Icons, 14.0, 400.0);
+/// How long they take to come in over its spectrum (or go), seconds.
+const CONTROLS_FADE: f32 = 0.18;
 /// The floating lyrics' line and what is under it.
 const FLOAT_FONT: Font = Font::new(Family::Segoe, 36.0, 800.0);
 const FLOAT_UNDER: Font = Font::new(Family::Segoe, 18.0, 600.0);
@@ -178,6 +180,8 @@ struct Shown {
     /// The card's ground (its shadow, the cover blurred, the colour washed over it, what plays), kept and drawn
     /// again only as it changes: what moves at every frame is drawn over it.
     ground: super::gfx::Layer,
+    /// How far the player's controls have come in over its spectrum (0 to 1: in while the pointer is over it).
+    controls_in: f32,
 }
 
 thread_local! {
@@ -559,6 +563,7 @@ fn make(style: Style) -> Option<Shown> {
             tint: [1.0, 1.0, 1.0],
             accent: [0.55, 0.65, 1.0],
             ground: Default::default(),
+            controls_in: 0.0,
             showing: None,
         })
     }
@@ -810,6 +815,10 @@ impl Shown {
             left -= dt;
         }
         let settling = (self.rail - target).abs() > 0.002 || self.rail_speed.abs() > 0.002;
+        // The player's controls, in toward the pointer over it and out after it.
+        let controls_to = if self.over.is_some() { 1.0 } else { 0.0 };
+        self.controls_in = if controls_to > self.controls_in { (self.controls_in + step / CONTROLS_FADE).min(1.0) } else { (self.controls_in - step / CONTROLS_FADE).max(0.0) };
+        let coming = self.controls_in != controls_to;
         if self.surface.is_none() {
             // (What it drew with was the device's before, if it was another: made again on the new one.)
             self.gone();
@@ -845,7 +854,7 @@ impl Shown {
         } else {
             gfx::lost();
         }
-        moment.playing || settling || self.fading.is_some()
+        moment.playing || settling || coming || self.fading.is_some()
     }
 
     /// The cover behind the card, blurred: made once for each cover (the one before fading out over a moment).
@@ -936,7 +945,7 @@ impl Shown {
 
     /// The cover blurred behind it, its colour washed over it (as the card's ground), and on it the cover itself at
     /// the start; beside it what plays and by whom, the line sung now filled as it is sung with what is under it,
-    /// and along the bottom what pauses, plays and skips it and its track.
+    /// and along the bottom the spectrum, or (the pointer over it) what pauses, plays and skips it and its track.
     fn medium(&mut self, frame: &Frame, moment: &Moment, (w, h): (f32, f32)) {
         use crate::playing::Key;
         let radius = 14.0;
@@ -1022,22 +1031,45 @@ impl Shown {
             }
         }
         unsafe { frame.dc.PopAxisAlignedClip() };
-        // Along the bottom: what goes back, pauses or plays, and skips; then its track, and how long is left.
+        // Along the bottom, the spectrum moving with the music; the pointer over it, what goes back, pauses or plays,
+        // and skips, its track and how long is left, in its place (each fading as the other comes; pressed only
+        // while shown).
         self.controls.clear();
         let row = pad + side - CONTROL;
+        let shown_in = self.controls_in * self.controls_in * (3.0 - 2.0 * self.controls_in);
+        if shown_in < 1.0 {
+            let bars = 28;
+            let floor = row + CONTROL - 2.0;
+            let bar = width / bars as f32;
+            for index in 0..bars {
+                let at = index as f32 / (bars - 1) as f32 * (crate::sound::BANDS - 1) as f32;
+                let (low, frac) = (at.floor() as usize, at.fract());
+                let value = moment.sound.bands[low] * (1.0 - frac) + moment.sound.bands[(low + 1).min(crate::sound::BANDS - 1)] * frac;
+                let tall = 2.0 + value.powf(1.6) * (CONTROL - 4.0);
+                let shade = toward(accent, tint, index as f32 / bars as f32);
+                frame.fill_rounded(colour(shade, (0.3 + 0.45 * value) * (1.0 - shown_in)), left + index as f32 * bar + bar * 0.2, floor - tall, bar * 0.6, tall, bar * 0.3);
+            }
+        }
+        if shown_in <= 0.0 {
+            return;
+        }
+        let fade = shown_in;
+        let collect = self.controls_in >= 0.5;
         let pointer = self.pointer();
         let lit = |x: f32, y: f32, wide: f32| pointer.is_some_and(|(px, py)| px >= x && px < x + wide && py >= y && py < y + CONTROL);
         let mut x = left - (CONTROL - 16.0) / 2.0;
         for (key, glyph) in [(Key::Previous, "\u{E892}"), (Key::Toggle, if moment.playing { "\u{E769}" } else { "\u{E768}" }), (Key::Next, "\u{E893}")] {
             let on = lit(x, row, CONTROL);
             if on {
-                frame.fill_rounded(Color::hex(0xFFFFFF, 0.14), x, row, CONTROL, CONTROL, CONTROL / 2.0);
+                frame.fill_rounded(Color::hex(0xFFFFFF, 0.14 * fade), x, row, CONTROL, CONTROL, CONTROL / 2.0);
             }
             let font = if key == Key::Toggle { Font { size: 16.0, ..CONTROL_FONT } } else { CONTROL_FONT };
             let (ink_top, ink_bottom) = frame.ink(glyph, font);
             let wide = frame.measure(glyph, font);
-            frame.text(glyph, font, Color::hex(0xFFFFFF, if on { 1.0 } else { 0.85 }), x + (CONTROL - wide) / 2.0, row + CONTROL / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0, Align::Start);
-            self.controls.push((x, row, CONTROL, CONTROL, Some(key)));
+            frame.text(glyph, font, Color::hex(0xFFFFFF, (if on { 1.0 } else { 0.85 }) * fade), x + (CONTROL - wide) / 2.0, row + CONTROL / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0, Align::Start);
+            if collect {
+                self.controls.push((x, row, CONTROL, CONTROL, Some(key)));
+            }
             x += CONTROL + 2.0;
         }
         if let Some((length, seekable)) = moment.length.filter(|(length, _)| *length > 0.0) {
@@ -1048,10 +1080,10 @@ impl Shown {
             let middle = row + CONTROL / 2.0;
             let fraction = (moment.position / length).clamp(0.0, 1.0) as f32;
             let thick = if seekable && lit(track_from, row, track) { 5.0 } else { 3.0 };
-            frame.fill_rounded(Color::hex(0xFFFFFF, 0.18), track_from, middle - thick / 2.0, track, thick, thick / 2.0);
-            frame.fill_rounded(colour(accent, 0.95), track_from, middle - thick / 2.0, track * fraction, thick, thick / 2.0);
-            frame.text(&left_over, PLAYER_TIME, Color::hex(0xFFFFFF, 0.55), left + width - time_wide, middle - PLAYER_TIME.size * 0.7, time_wide, Align::End);
-            if seekable {
+            frame.fill_rounded(Color::hex(0xFFFFFF, 0.18 * fade), track_from, middle - thick / 2.0, track, thick, thick / 2.0);
+            frame.fill_rounded(colour(accent, 0.95 * fade), track_from, middle - thick / 2.0, track * fraction, thick, thick / 2.0);
+            frame.text(&left_over, PLAYER_TIME, Color::hex(0xFFFFFF, 0.55 * fade), left + width - time_wide, middle - PLAYER_TIME.size * 0.7, time_wide, Align::End);
+            if seekable && collect {
                 self.controls.push((track_from, row, track, CONTROL, None));
             }
         }
@@ -1385,6 +1417,7 @@ mod pictures {
                     tint: readable(cover.base, 0.72),
                     accent: readable(cover.accent, 0.62),
                     ground: Default::default(),
+                    controls_in: if over { 1.0 } else { 0.0 },
                 };
                 let (w, h) = style.size();
                 let margin = style.margin();
