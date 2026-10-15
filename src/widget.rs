@@ -110,6 +110,8 @@ const REST_FRAME: Duration = Duration::from_millis(250);
 /// Without live refraction, how long after a frame of what is behind is taken another is looked for (see
 /// `collect`).
 pub const LOOK_AGAIN: Duration = Duration::from_millis(250);
+/// How long a frame of what is behind is awaited before its scene is arranged anew (see `collect`).
+const ASK_AGAIN: Duration = Duration::from_secs(1);
 /// How long the glass takes to frost fully from clear, or to clear (see `draw`).
 const FROST_EASE: Duration = Duration::from_millis(400);
 /// How often, the time up, a frame being read meanwhile is waited for.
@@ -1199,9 +1201,18 @@ impl Widget {
             if self.pending.is_some() || self.behind.is_none() || again {
                 scene.want();
             }
-            if let Some(request) = self.pending.as_ref().filter(|request| request.since.elapsed() >= Duration::from_secs(3)) {
-                let (area, waited, shown) = (request.area, request.since.elapsed().as_secs(), self.behind.is_some());
-                note_sparingly("waiting", || format!("widget: the desktop behind awaited {waited} s ({area:?}, something shown: {shown}, reading: {})", scene.reading()));
+            // Asked for a while ago, and none come (nor being read): arranged anew. A frame comes only as what the
+            // scene shows changes, and one passed over (put together before the desktop was in it, as it can be just
+            // after Glance starts) is followed by none while nothing behind changes: the widget, waiting for its
+            // first, would never show.
+            if self.pending.as_ref().is_some_and(|request| request.since.elapsed() >= ASK_AGAIN) && !scene.reading() {
+                note_sparingly("ask again", || "widget: the desktop behind asked for again (none came)".into());
+                if let Some(scene) = &mut self.backdrop {
+                    scene.rest();
+                }
+                self.pending = None;
+                self.look_again = None;
+                self.retake |= self.behind.is_some();
             }
             return;
         };
