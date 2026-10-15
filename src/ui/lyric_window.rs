@@ -25,7 +25,7 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::Foundation::{COLORREF, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, GetWindowRect, LoadCursorW, RegisterClassExW, SetCursor, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, GWL_EXSTYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOPMOST, IDC_ARROW, IDC_SIZEALL, LWA_ALPHA, MA_NOACTIVATE,
+    ShowWindow, GWL_EXSTYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, MA_NOACTIVATE,
     MINMAXINFO, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -385,11 +385,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             LRESULT(hit.unwrap_or(HTCAPTION) as isize)
         }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
-        WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCAPTION => {
-            unsafe { SetCursor(LoadCursorW(None, IDC_SIZEALL).ok()) };
-            LRESULT(1)
-        }
-        WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
+        // (Over its body, which moves it, the plain arrow, as over any window and as over the panel and widgets.)
+        WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCAPTION || (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
             unsafe { SetCursor(LoadCursorW(None, IDC_ARROW).ok()) };
             LRESULT(1)
         }
