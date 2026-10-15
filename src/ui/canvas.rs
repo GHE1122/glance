@@ -91,6 +91,21 @@ pub enum Fill {
     Down { top: f32, from: Color, bottom: f32, to: Color },
 }
 
+/// A picture to draw (a track's cover): its pixels, premultiplied BGRA rows, `side` square and opaque; known by
+/// `key` (the same pixels, the same key: what is made of them on the card is made once).
+#[derive(Clone, Debug)]
+pub struct Picture {
+    pub key: u64,
+    pub side: u32,
+    pub pixels: std::sync::Arc<Vec<u8>>,
+}
+
+impl PartialEq for Picture {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
 /// What the panel's readings are painted with: each platform paints these
 /// with its own graphics (Direct2D and DirectWrite on Windows). Coordinates
 /// are in DIPs; text is placed by the top of its line box.
@@ -139,6 +154,10 @@ pub trait Canvas {
     fn arc(&self, centre: Point, radius: f32, from: f32, sweep: f32, color: Color, width: f32);
     /// `icon` stroked in `color`, `size` DIPs square, centred on `centre`.
     fn icon(&self, icon: super::icons::Icon, centre: Point, size: f32, color: Color);
+
+    /// `picture` drawn into the square `size` wide from (`x`, `y`), its corners rounded by `radius`, `opacity` of it.
+    #[allow(clippy::too_many_arguments)]
+    fn picture(&self, picture: &Picture, x: f32, y: f32, size: f32, radius: f32, opacity: f32);
     /// Names what is drawn from here on (`""`: nothing), for a canvas that
     /// tells one drawing's parts from another's (see `morph`).
     fn key(&self, _key: &str) {}

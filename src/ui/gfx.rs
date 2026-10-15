@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 /// How long laid-out text no window draws is kept.
 const TEXT_KEPT: Duration = Duration::from_secs(2);
+/// How long a picture not drawn again is kept on the card (a track's cover: drawn each second while it plays).
+const PICTURE_KEPT: Duration = Duration::from_secs(10);
 
 use windows::core::{w, Interface, Result, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, POINT};
@@ -96,6 +98,8 @@ pub struct Gfx {
     dashed: ID2D1StrokeStyle,
     /// Each icon's figures as a geometry, made when first drawn.
     icon_paths: RefCell<HashMap<Icon, ID2D1PathGeometry1>>,
+    /// The pictures drawn (see `Canvas::picture`), as bitmaps on the card, by key, and when each was last drawn.
+    pictures: RefCell<HashMap<u64, (ID2D1Bitmap1, Instant)>>,
     /// Bitmaps made from nothing but their key (the glass's displacement
     /// maps, by size, radius and scale): kept while frames keep drawing
     /// them, as text is.
@@ -246,6 +250,7 @@ impl Gfx {
             round: round.into(),
             dashed: dashed.into(),
             icon_paths: RefCell::new(HashMap::new()),
+            pictures: RefCell::new(HashMap::new()),
         })
     }
 
@@ -417,6 +422,7 @@ impl Gfx {
     /// Gives back what drawing holds on to while nothing is on screen.
     pub fn trim(&self) {
         self.trimmed.set(true);
+        self.pictures.borrow_mut().clear();
         self.layouts.borrow_mut().clear();
         self.made.borrow_mut().clear();
         self.spare.borrow_mut().clear();
@@ -441,6 +447,7 @@ impl Gfx {
 
     /// Forgets the text, and the fonts, no window has drawn for a while.
     pub fn sweep(&self) {
+        self.pictures.borrow_mut().retain(|_, (_, used)| used.elapsed() < PICTURE_KEPT);
         self.layouts.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
         self.formats.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
         let mut gone = Vec::new();
@@ -505,6 +512,28 @@ impl Gfx {
     /// many pixels and no more than twice as many each way, its memory taken at `dpi`; else a new one. What is
     /// made for keys anew frame by frame (a window sized by hand) draws on the same memory, not on new memory
     /// each frame (each new one is the graphics card's, given back only a while after it is let go).
+    /// `picture` as a bitmap on the card: made the first time it is drawn, and kept while it is drawn again (see
+    /// `PICTURE_KEPT`).
+    fn picture_bitmap(&self, dc: &ID2D1DeviceContext, picture: &super::canvas::Picture) -> Option<ID2D1Bitmap1> {
+        if let Some((bitmap, used)) = self.pictures.borrow_mut().get_mut(&picture.key) {
+            *used = Instant::now();
+            return Some(bitmap.clone());
+        }
+        if picture.pixels.len() < (picture.side * picture.side * 4) as usize {
+            return None;
+        }
+        let properties = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            ..Default::default()
+        };
+        let size = D2D_SIZE_U { width: picture.side, height: picture.side };
+        let bitmap = unsafe { dc.CreateBitmap(size, Some(picture.pixels.as_ptr().cast()), picture.side * 4, &properties) }.ok()?;
+        self.pictures.borrow_mut().insert(picture.key, (bitmap.clone(), Instant::now()));
+        Some(bitmap)
+    }
+
     pub fn drawn_on(&self, dc: &ID2D1DeviceContext, pixels: D2D_SIZE_U, dpi: f32) -> Result<ID2D1Bitmap1> {
         let properties = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
@@ -785,6 +814,22 @@ impl Canvas for Frame<'_> {
             self.dc.SetTransform(&placed);
             self.dc.DrawGeometry(&path, self.brush(color), icons::STROKE, &self.gfx.round);
             self.dc.SetTransform(&parent);
+        }
+    }
+
+    fn picture(&self, picture: &super::canvas::Picture, x: f32, y: f32, size: f32, radius: f32, opacity: f32) {
+        let Some(bitmap) = self.gfx.picture_bitmap(&self.dc, picture) else { return };
+        let scale = size / picture.side.max(1) as f32;
+        unsafe {
+            let properties = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_BRUSH_PROPERTIES1 {
+                extendModeX: windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP,
+                extendModeY: windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP,
+                interpolationMode: windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR,
+            };
+            let placed = windows::Win32::Graphics::Direct2D::D2D1_BRUSH_PROPERTIES { opacity, transform: Matrix3x2::scale(scale, scale) * Matrix3x2::translation(x, y) };
+            let Ok(brush) = self.dc.CreateBitmapBrush(&bitmap, Some(&properties), Some(&placed)) else { return };
+            let radius = radius.max(0.0).min(size / 2.0);
+            self.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(x, y, size, size), radiusX: radius, radiusY: radius }, &brush);
         }
     }
 

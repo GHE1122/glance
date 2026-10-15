@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 
-use super::canvas::{Align, Canvas, Color, Fill, Font, Point};
+use super::canvas::{Align, Canvas, Color, Fill, Font, Picture, Point};
 use super::icons::Icon;
 
 /// One thing drawn, in the coordinates it was recorded at.
@@ -26,6 +26,7 @@ pub enum Op {
     Shadow { color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, drop: f32 },
     Arc { centre: Point, radius: f32, from: f32, sweep: f32, color: Color, width: f32 },
     Icon { icon: Icon, centre: Point, size: f32, color: Color },
+    Picture { picture: Picture, x: f32, y: f32, size: f32, radius: f32, opacity: f32 },
 }
 
 /// A part of a drawing: what was drawn under one name, or one thing drawn
@@ -126,6 +127,7 @@ impl Op {
             }
             Op::Circle { centre, radius, .. } | Op::Arc { centre, radius, .. } => Bounds { x: centre.x - radius, y: centre.y - radius, w: 2.0 * radius, h: 2.0 * radius },
             Op::Icon { centre, size, .. } => Bounds { x: centre.x - size / 2.0, y: centre.y - size / 2.0, w: *size, h: *size },
+            Op::Picture { x, y, size, .. } => Bounds { x: *x, y: *y, w: *size, h: *size },
             Op::Stroke { points, .. } | Op::Shape { points, .. } => of_points(points)?,
             Op::Unclip => return None,
         })
@@ -145,6 +147,7 @@ impl Op {
             Op::Text { color, .. } | Op::Fill { color, .. } | Op::Rounded { color, .. } | Op::Circle { color, .. } | Op::Stroke { color, .. } => fade(color),
             Op::Shadow { color, .. } | Op::Arc { color, .. } | Op::Icon { color, .. } => fade(color),
             Op::Shape { fill, .. } | Op::Outline { fill, .. } => fade_fill(fill),
+            Op::Picture { opacity, .. } => *opacity *= alpha,
             Op::Clip { .. } | Op::Unclip => {}
         }
         self
@@ -162,6 +165,7 @@ impl Op {
             Op::Text { color, .. } | Op::Fill { color, .. } | Op::Rounded { color, .. } | Op::Circle { color, .. } | Op::Stroke { color, .. } => color.a >= LEAST,
             Op::Shadow { color, .. } | Op::Arc { color, .. } | Op::Icon { color, .. } => color.a >= LEAST,
             Op::Shape { fill: f, .. } | Op::Outline { fill: f, .. } => fill(f),
+            Op::Picture { opacity, .. } => *opacity >= LEAST,
             Op::Clip { .. } | Op::Unclip => true,
         }
     }
@@ -205,6 +209,10 @@ impl Op {
             Op::Circle { color, centre, radius } => Op::Circle { color, centre: map.point(centre), radius: map.length(radius) },
             Op::Arc { centre, radius, from, sweep, color, width } => Op::Arc { centre: map.point(centre), radius: map.length(radius), from, sweep, color, width: map.length(width) },
             Op::Icon { icon, centre, size, color } => Op::Icon { icon, centre: map.point(centre), size: map.length(size), color },
+            Op::Picture { picture, x, y, size, radius, opacity } => {
+                let at = map.point(Point { x, y });
+                Op::Picture { picture, x: at.x, y: at.y, size: map.length(size), radius: map.length(radius), opacity }
+            }
             Op::Stroke { points, color, width, dashed } => Op::Stroke { points: points.iter().map(|p| map.point(*p)).collect(), color, width: map.length(width), dashed },
             Op::Shape { points, fill } => {
                 let fill = match fill {
@@ -272,6 +280,9 @@ impl Op {
             (Op::Icon { icon: ai, centre: ac, size: asz, color: acol }, Op::Icon { icon: bi, centre: bc, size: bsz, color: bcol }) if ai == bi => {
                 vec![Op::Icon { icon: *bi, centre: lerp_point(*ac, *bc, t), size: lerp(*asz, *bsz, t), color: lerp_color(*acol, *bcol, t) }]
             }
+            (Op::Picture { picture: ap, x: ax, y: ay, size: asz, radius: ar, opacity: ao }, Op::Picture { picture: bp, x: bx, y: by, size: bsz, radius: br, opacity: bo }) if ap == bp => {
+                vec![Op::Picture { picture: bp.clone(), x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), size: lerp(*asz, *bsz, t), radius: lerp(*ar, *br, t), opacity: lerp(*ao, *bo, t) }]
+            }
             (Op::Stroke { points: ap, color: ac, width: aw, dashed: ad }, Op::Stroke { points: bp, color: bc, width: bw, dashed: bd }) if ad == bd => {
                 let color = lerp_color(*ac, *bc, t);
                 let width = lerp(*aw, *bw, t);
@@ -326,6 +337,7 @@ impl Op {
             Op::Shadow { color, x, y, w, h, radius, blur, drop } => canvas.shadow(*color, *x, *y, *w, *h, *radius, *blur, *drop),
             Op::Arc { centre, radius, from, sweep, color, width } => canvas.arc(*centre, *radius, *from, *sweep, *color, *width),
             Op::Icon { icon, centre, size, color } => canvas.icon(*icon, *centre, *size, *color),
+            Op::Picture { picture, x, y, size, radius, opacity } => canvas.picture(picture, *x, *y, *size, *radius, *opacity),
         }
     }
 }
@@ -528,6 +540,10 @@ impl Canvas for Recorder<'_> {
         self.push(Op::Icon { icon, centre, size, color });
     }
 
+    fn picture(&self, picture: &Picture, x: f32, y: f32, size: f32, radius: f32, opacity: f32) {
+        self.push(Op::Picture { picture: picture.clone(), x, y, size, radius, opacity });
+    }
+
     fn key(&self, key: &str) {
         *self.key.borrow_mut() = (!key.is_empty()).then(|| key.to_string());
     }
@@ -655,6 +671,7 @@ mod tests {
             fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
             fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
             fn icon(&self, _: Icon, _: Point, _: f32, _: Color) {}
+            fn picture(&self, _: &Picture, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         }
         let recorder = Recorder::new(&Measure, 2.0, (5.0, 5.0));
         recorder.key("cpu.chart");
