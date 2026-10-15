@@ -83,7 +83,7 @@ const WATCH_MS: u32 = 100;
 /// How soon to try again when drawing failed for want of a device.
 const DEVICE_RETRY: Duration = Duration::from_millis(250);
 /// How often a live backdrop is taken again as it changes (see `widget::LIVE_INTERVAL`).
-const LIVE_INTERVAL: Duration = Duration::from_millis(66);
+const LIVE_INTERVAL: Duration = Duration::from_millis(33);
 /// Rows a wheel notch scrolls the process list by.
 pub(crate) const WHEEL_ROWS: f32 = 3.0;
 /// How quickly the process list catches up with the wheel.

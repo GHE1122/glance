@@ -113,10 +113,9 @@ pub const LOOK_AGAIN: Duration = Duration::from_millis(250);
 /// How often, the time up, a frame being read meanwhile is waited for.
 const LOOK_AGAIN_STEP: Duration = Duration::from_millis(16);
 /// With live refraction, how often the desktop behind is taken again as it
-/// changes, as the panel's is: fifteen times a second (what shows through
-/// the glass is blurred; faster cost twice the processor for little that
-/// shows).
-const LIVE_INTERVAL: Duration = Duration::from_millis(66);
+/// changes, as the panel's is: thirty times a second (at fifteen, what moves
+/// behind the glass, a game's picture, was seen to step).
+const LIVE_INTERVAL: Duration = Duration::from_millis(33);
 /// Without live refraction, how old the desktop taken behind a widget is
 /// before letting go of it takes it again.
 const RETAKE_AFTER: Duration = Duration::from_secs(3);
