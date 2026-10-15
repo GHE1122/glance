@@ -6,7 +6,7 @@
 //! each time something in it changes, none while nothing does.
 //!
 //! The window is cloaked (no one sees it, it is in no list of windows), and
-//! owned, with no extended style: the capture refuses tool windows and
+//! owned, with no surface of its own and no other extended style: the capture refuses tool windows and
 //! windows that are not to be activated. The thumbnails show what the
 //! windows show, those of elevated programs too, and live (a video plays
 //! on in them); not the shadows the system draws around windows.
@@ -48,7 +48,7 @@ use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDe
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, GetWindowRect, IsIconic, IsWindowVisible, RegisterClassW, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_POPUP,
+    SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP,
 };
 
 use super::backdrop::{Capture, Spare, Texture};
@@ -81,9 +81,9 @@ impl Device {
 
 /// What a scene's frames meet as they come, on whatever thread they come on.
 struct Shared {
-    /// What its frames are of: the area, and when it was last arranged anew (the system's clock of frames, in
-    /// 100 ns): a frame from before is of what was there before.
-    of: Mutex<(RECT, i64)>,
+    /// What its frames are of: the area, when it was last arranged anew (the system's clock of frames, in 100 ns:
+    /// a frame from before is of what was there before), and where in it the windows behind are put.
+    of: Mutex<(RECT, i64, Vec<RECT>)>,
     /// The latest frame come and not read (none was wanted as it came).
     latest: Mutex<Option<Direct3D11CaptureFrame>>,
     /// A frame is wanted: read as it comes.
@@ -118,7 +118,7 @@ unsafe impl Send for Halves {}
 impl Shared {
     /// Reads `frame` back (if it is of the area as it is now), for it to be taken; whether it was.
     fn read(&self, frame: &Direct3D11CaptureFrame) -> bool {
-        let (area, arranged) = *self.of.lock().unwrap();
+        let (area, arranged, covered) = self.of.lock().unwrap().clone();
         let read = (|| {
             if frame.SystemRelativeTime().ok()?.Duration < arranged {
                 return None;
@@ -129,7 +129,7 @@ impl Shared {
                 return None;
             }
             let texture: ID3D11Texture2D = unsafe { frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface() }.ok()?;
-            let (kept, luma) = keep(&self.device, &mut self.halves.lock().unwrap(), &self.spare, &texture, width as u32, height as u32)?;
+            let (kept, luma) = keep(&self.device, &mut self.halves.lock().unwrap(), &self.spare, &texture, width as u32, height as u32, area, &covered)?;
             let taken = self.taken.fetch_add(1, Ordering::Relaxed) + 1;
             Some(Capture::from_texture(area, Texture { texture: kept, spare: self.spare.clone() }, luma, taken))
         })();
@@ -152,7 +152,13 @@ impl Shared {
 /// its own to be drawn from (one let go of before, of that size, from `spare`; else a new one); and how light it is,
 /// a value (0–255) for each square of two by two pixels, as `Capture::from_pixels` makes it (the card averaging each
 /// square, through `halves`: made, or made anew, for that size).
-fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Spare, texture: &ID3D11Texture2D, width: u32, height: u32) -> Option<(ID3D11Texture2D, Vec<u8>)> {
+///
+/// None where the frame was put together before the windows behind were (the compositor puts them in a frame or
+/// so after it is asked, and says nothing of it): somewhere one of them is put (`covered`, screen coordinates, the
+/// frame's top left at `area`'s), it holds nothing at all. Once they are put, nothing there is clear: the desktop's
+/// own window is under all the others.
+#[allow(clippy::too_many_arguments)]
+fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, texture: &ID3D11Texture2D, width: u32, height: u32, area: RECT, covered: &[RECT]) -> Option<(ID3D11Texture2D, Vec<u8>)> {
     unsafe {
         let make = |description: &D3D11_TEXTURE2D_DESC| -> Option<ID3D11Texture2D> {
             let mut made = None;
@@ -232,15 +238,27 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Spare, texture: &I
         // As `Capture::from_pixels` reads it: a square for each two pixels each way, rounded up.
         let (columns, down) = ((width as usize).div_ceil(2), (height as usize).div_ceil(2));
         let mut luma = Vec::with_capacity(columns * down);
+        let mut whole = true;
         for y in 0..down {
             let line = std::slice::from_raw_parts((mapped.pData as *const u8).add(y.min(rows - 1) * mapped.RowPitch as usize), row_width * 4);
+            // (Each square's middle, on the screen.)
+            let screen_y = area.top + (2 * y.min(rows - 1)) as i32 + 1;
             for x in 0..columns {
                 let i = x.min(row_width - 1) * 4;
                 let lightness = (0.2126 * line[i + 2] as f64 + 0.7152 * line[i + 1] as f64 + 0.0722 * line[i] as f64) / 255.0;
                 luma.push((lightness * 255.0).round() as u8);
+                if line[i + 3] == 0 && whole {
+                    let screen_x = area.left + (2 * x.min(row_width - 1)) as i32 + 1;
+                    whole = !covered.iter().any(|rect| screen_x >= rect.left && screen_x < rect.right && screen_y >= rect.top && screen_y < rect.bottom);
+                }
             }
         }
         context.Unmap(staging, 0);
+        if !whole {
+            // (The texture it was copied into, spare again.)
+            drop(Texture { texture: kept, spare: spare.clone() });
+            return None;
+        }
         Some((kept, luma))
     }
 }
@@ -371,14 +389,16 @@ impl Scene {
             RegisterClassW(&class);
             let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
             let owner = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!(""), WS_POPUP, 0, 0, 0, 0, None, None, Some(module.into()), None).ok()?;
-            let window = match CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!("Glance scene"), WS_POPUP, area.left, area.top, width, height, Some(owner), None, Some(module.into()), None) {
+            // With no surface of its own (nothing draws it): where no window behind is put, it holds nothing (clear),
+            // never what its surface would hold, which no one wrote (what was in that memory before, on some cards).
+            let window = match CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, class.lpszClassName, w!("Glance scene"), WS_POPUP, area.left, area.top, width, height, Some(owner), None, Some(module.into()), None) {
                 Ok(window) => window,
                 Err(_) => {
                     let _ = DestroyWindow(owner);
                     return None;
                 }
             };
-            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), spare: Arc::default(), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0) });
+            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns(), Vec::new())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), spare: Arc::default(), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0) });
             let made = (|| {
                 let cloak: BOOL = true.into();
                 DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).ok()?;
@@ -472,7 +492,8 @@ impl Scene {
         }
         // Frames from before all of it was in place are not of what is there now (one may be put together while it
         // is being put in place).
-        *self.shared.of.lock().unwrap() = (area, now_100ns());
+        let covered = self.shown.iter().map(|(.., rect)| *rect).collect();
+        *self.shared.of.lock().unwrap() = (area, now_100ns(), covered);
         // (Nor what was read of it before and not taken yet.)
         *self.shared.ready.lock().unwrap() = None;
         close(self.shared.latest.lock().unwrap().take());
@@ -487,7 +508,7 @@ impl Scene {
     pub fn rest(&mut self) {
         let least = RECT { left: self.area.left, top: self.area.top, right: self.area.left + 1, bottom: self.area.top + 1 };
         // (A frame being read meanwhile is of what was there: marked so first, see `Shared::read`.)
-        *self.shared.of.lock().unwrap() = (least, now_100ns());
+        *self.shared.of.lock().unwrap() = (least, now_100ns(), Vec::new());
         self.shared.resting.store(true, Ordering::Release);
         self.forget();
         self.shared.wanted.store(false, Ordering::Release);
@@ -599,6 +620,117 @@ impl Drop for Scene {
         unsafe {
             let _ = DestroyWindow(self.window);
             let _ = DestroyWindow(self.owner);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scene arranged again and again at another place and size (as a widget moved and shown), one frame taken
+    /// after each: how many of those were not yet of what is behind (dark, where the windows behind are light).
+    /// `cargo test --lib -- --ignored scene_first_frames --nocapture`.
+    #[test]
+    #[ignore]
+    fn scene_first_frames() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        let mut all: Vec<HWND> = Vec::new();
+        unsafe {
+            let _ = EnumWindows(Some(each), LPARAM(&mut all as *mut _ as isize));
+        }
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let mut scene = Scene::new(RECT { left: 100, top: 100, right: 400, bottom: 300 }, wake, &gfx).expect("scene");
+        let pump = || unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        };
+        let mut means = Vec::new();
+        for step in 0..60 {
+            let (x, grow) = (100 + (step % 7) * 53, (step % 5) * 61);
+            let area = RECT { left: x, top: 100 + grow / 2, right: x + 300 + grow, bottom: 300 + grow };
+            if step % 10 == 9 {
+                scene.rest();
+            }
+            scene.arrange(area, all[0]);
+            let began = std::time::Instant::now();
+            scene.want();
+            let mut capture = None;
+            while began.elapsed() < std::time::Duration::from_secs(2) && capture.is_none() {
+                pump();
+                capture = scene.ready();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let Some(capture) = capture else {
+                means.push(-1.0);
+                continue;
+            };
+            let seen = capture.luminances(area, RECT::default(), 7);
+            means.push(seen.iter().sum::<f32>() / seen.len() as f32);
+        }
+        let dark = means.iter().filter(|mean| (0.0..0.02).contains(*mean)).count();
+        println!("first frames: {dark} of {} dark; none {}; {:?}", means.len(), means.iter().filter(|m| **m < 0.0).count(), means.iter().map(|m| (m * 100.0).round() as i32).collect::<Vec<_>>());
+    }
+
+    /// What a scene with nothing behind it holds (its window's own surface, which nothing draws), beside one with the
+    /// desktop behind it: `cargo test --lib -- --ignored scene_shows --nocapture`.
+    #[test]
+    #[ignore]
+    fn scene_shows() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        let area = RECT { left: 100, top: 100, right: 700, bottom: 500 };
+        for (name, over) in [("bare", HWND(usize::MAX as *mut _)), ("desktop", HWND::default())] {
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+            let mut scene = Scene::new(area, wake, &gfx).expect("scene");
+            // (Over nothing: the windows after the first are all behind it.)
+            let over = if over.is_invalid() {
+                let mut all: Vec<HWND> = Vec::new();
+                unsafe {
+                    let _ = EnumWindows(Some(each), LPARAM(&mut all as *mut _ as isize));
+                }
+                all[0]
+            } else {
+                over
+            };
+            let changed = scene.arrange(area, over);
+            println!("{name}: arranged {changed}, {} thumbnails, area {:?}, frames {}x{}", scene.shown.len(), scene.area, scene.size.Width, scene.size.Height);
+            let arranged = std::time::Instant::now();
+            for taken in 0..3 {
+                let began = std::time::Instant::now();
+                scene.want();
+                let mut capture = None;
+                while began.elapsed() < std::time::Duration::from_secs(3) && capture.is_none() {
+                    capture = scene.ready();
+                    // (Its window's messages handled, as the thread that draws handles them.)
+                    unsafe {
+                        use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
+                        let mut message = MSG::default();
+                        while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                            let _ = TranslateMessage(&message);
+                            DispatchMessageW(&message);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                let Some(capture) = capture else {
+                    println!("{name} {taken}: no frame in 3 s");
+                    continue;
+                };
+                let seen = capture.luminances(capture.rect, RECT::default(), 9);
+                let mean = seen.iter().sum::<f32>() / seen.len() as f32;
+                let spread = (seen.iter().map(|l| (l - mean).powi(2)).sum::<f32>() / seen.len() as f32).sqrt();
+                println!("{name} {taken}: at {:?} after arranging, mean {mean:.3}, spread {spread:.3}", arranged.elapsed());
+            }
         }
     }
 }
