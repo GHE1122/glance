@@ -94,7 +94,7 @@ const GAME: [Item; 9] = [
 /// line the time module shows): not yet, till what plays is known from
 /// every player (NetEase's own says it only with a plugin). Turned on before,
 /// they show as they were.
-pub const LYRICS_OFFERED: bool = false;
+pub const LYRICS_OFFERED: bool = true;
 
 /// Whether module `module` is offered in the settings (see `LYRICS_OFFERED`).
 pub fn offered(module: &str) -> bool {
