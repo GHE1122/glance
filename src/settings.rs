@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use windows::Win32::System::Com::CoTaskMemFree;
 #[cfg(windows)]
-use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 
 #[cfg(windows)]
 const FILE: &str = "settings.json";
@@ -485,9 +485,21 @@ impl Settings {
 /// rewrites an installed Glance's).
 #[cfg(windows)]
 pub fn config_dir() -> PathBuf {
-    let roaming = unsafe { SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None) }.expect("application data folder");
-    let path = PathBuf::from(unsafe { roaming.to_string() }.expect("folder path"));
-    unsafe { CoTaskMemFree(Some(roaming.0 as *const _)) };
+    own_folder_in(&FOLDERID_RoamingAppData)
+}
+
+/// Where Glance keeps what it can fetch again (what it has fetched, so as not to ask again): the user's local
+/// application data, which goes with no roaming profile, under Glance's identifier as `config_dir`.
+#[cfg(windows)]
+pub fn local_dir() -> PathBuf {
+    own_folder_in(&FOLDERID_LocalAppData)
+}
+
+#[cfg(windows)]
+fn own_folder_in(known: &windows::core::GUID) -> PathBuf {
+    let folder = unsafe { SHGetKnownFolderPath(known, KF_FLAG_DEFAULT, None) }.expect("application data folder");
+    let path = PathBuf::from(unsafe { folder.to_string() }.expect("folder path"));
+    unsafe { CoTaskMemFree(Some(folder.0 as *const _)) };
     path.join(if cfg!(debug_assertions) { "dev.weiyi.glance.debug" } else { "dev.weiyi.glance" })
 }
 

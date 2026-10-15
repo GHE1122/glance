@@ -630,17 +630,22 @@ fn get(url: &str) -> Option<Vec<u8>> {
 /// What a release's places are asked for as: GitHub's API's JSON, or a file itself.
 const RELEASES: &str = "application/vnd.github+json, application/octet-stream";
 
-/// The body of an HTTPS GET of `url` asked for as JSON (any other site's API), if it answered 200.
-pub fn get_json(url: &str) -> Option<Vec<u8>> {
-    ask(url, None, "application/json, */*")
-}
-
 /// What `url` answers to JSON sent to it (an HTTPS POST), if it answered 200.
 pub fn post(url: &str, json: &[u8]) -> Option<Vec<u8>> {
     ask(url, Some(json), "application/json")
 }
 
+/// What `url` answered to an HTTPS GET asked for as JSON (any other site's API), whatever its status: its status and body (none, where it
+/// was not reached, or its answer was cut short).
+pub fn answer_json(url: &str) -> Option<(u32, Vec<u8>)> {
+    answered(url, None, "application/json, */*")
+}
+
 fn ask(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<Vec<u8>> {
+    answered(url, sent, accept).filter(|(status, _)| *status == 200).map(|(_, body)| body)
+}
+
+fn answered(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<(u32, Vec<u8>)> {
     let rest = url.strip_prefix("https://")?;
     let (host, path) = rest.split_at(rest.find('/')?);
     let agent = HSTRING::from(format!("Glance/{}", env!("CARGO_PKG_VERSION")));
@@ -687,16 +692,13 @@ fn ask(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<Vec<u8>> {
             std::ptr::null_mut(),
         )
         .ok()?;
-        if status != 200 {
-            return None;
-        }
         let mut body = Vec::new();
         let mut chunk = vec![0u8; 64 << 10];
         loop {
             let mut read = 0u32;
             WinHttpReadData(request.0, chunk.as_mut_ptr().cast(), chunk.len() as u32, &mut read).ok()?;
             if read == 0 {
-                return Some(body);
+                return Some((status, body));
             }
             body.extend_from_slice(&chunk[..read as usize]);
             if body.len() > MOST {

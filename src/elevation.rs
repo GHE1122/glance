@@ -907,7 +907,10 @@ pub fn remove_settings() -> bool {
     let remote = std::env::var_os("APPDATA").map(|roaming| std::path::PathBuf::from(roaming).join("dev.weiyi.glance.remote"));
     let own = remove_kept(&crate::settings::config_dir(), &["settings.json", crate::journal::FILE]);
     let remotes = remote.is_none_or(|folder| remove_kept(&folder, &["config.json", "config.json.new", "remote.log"]));
-    own && remotes
+    // And what it fetched and kept (the lyrics found), then its local folder.
+    let lyrics = crate::lyrics::kept::names();
+    let fetched = remove_kept(&crate::lyrics::kept::folder(), &lyrics.iter().map(String::as_str).collect::<Vec<_>>()) && remove_kept(&crate::settings::local_dir(), &[]);
+    own && remotes && fetched
 }
 
 /// Takes the files named out of `folder`, and the folder if nothing else

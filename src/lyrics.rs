@@ -7,16 +7,20 @@
 //! collection (lyrics timed word by word, public domain, kept by that
 //! number), then of NetEase itself; else of LRCLIB (an open collection of
 //! lyrics timed by line), by the track's title, artist, album and length.
-//! Each track's are asked for once while Glance runs, on a thread of their
-//! own.
+//! Each track's are asked for on a thread of their own, and kept on disk
+//! (see `kept`): asked for again only once they may have changed.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
+
+use serde::{Deserialize, Serialize};
 
 /// One line: when it is sung (seconds into the track) and till when, where
 /// that is said; what is sung, and word by word where that is known; what is
 /// sung behind it (backing vocals); and its translation where one is given.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Line {
     pub at: f64,
     pub end: Option<f64>,
@@ -28,7 +32,7 @@ pub struct Line {
 
 /// A word (or a syllable, or a character), as it is sung: from when, till when, and what it is (with the space
 /// after it, where there is one).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Word {
     pub at: f64,
     pub end: f64,
@@ -41,7 +45,7 @@ pub type Lyrics = Arc<Vec<Line>>;
 /// The track whose lyrics are asked for: its number on NetEase Cloud Music
 /// where its player says it, what it is called, by whom, on which album, and
 /// how long it is (seconds).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Track {
     pub netease: Option<u64>,
     pub title: String,
@@ -58,57 +62,138 @@ pub enum Known {
 }
 
 /// The tracks asked about, and what was found; the most kept.
-static KNOWN: Mutex<Option<HashMap<Track, Known>>> = Mutex::new(None);
+static KNOWN: Mutex<Option<HashMap<Track, Held>>> = Mutex::new(None);
 const KEPT_MOST: usize = 200;
 
-/// What is known of `track`'s lyrics; asked for (on a thread of its own) the first time.
+/// What is held of a track's lyrics while Glance runs: as `Known`, or, where a source could not be reached and
+/// none of the others had them, none for now (since then), to be asked for again a while later.
+#[derive(Clone)]
+enum Held {
+    Asking,
+    Found(Option<Lyrics>),
+    Unreached(Instant),
+}
+
+/// How long lyrics a source could not be reached for are taken to be none before they are asked for again.
+const UNREACHED_FOR: Duration = Duration::from_secs(60);
+
+/// What is known of `track`'s lyrics; asked for (on a thread of its own) the first time, and again a while after
+/// a source could not be reached.
 pub fn of(track: &Track) -> Known {
     let mut known = KNOWN.lock().unwrap();
     let known = known.get_or_insert_with(HashMap::new);
-    if let Some(found) = known.get(track) {
-        return found.clone();
+    match known.get(track) {
+        Some(Held::Asking) => return Known::Asking,
+        Some(Held::Found(found)) => return Known::Found(found.clone()),
+        Some(Held::Unreached(since)) if since.elapsed() < UNREACHED_FOR => return Known::Found(None),
+        _ => {}
     }
     if known.len() >= KEPT_MOST {
-        known.retain(|_, found| *found == Known::Asking);
+        known.retain(|_, held| matches!(held, Held::Asking));
     }
-    known.insert(track.clone(), Known::Asking);
+    known.insert(track.clone(), Held::Asking);
     let track = track.clone();
     std::thread::spawn(move || {
-        let found = find(&track).map(Arc::new);
-        KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, Known::Found(found));
+        let held = match kept::read(&track) {
+            Some(kept) if kept.fresh() => Held::Found(kept.lines.map(Arc::new)),
+            kept => {
+                let said = find(&track);
+                // (That none has them, only where each source said so.)
+                if said.sure || said.found.is_some() {
+                    kept::write(&track, said.found.as_deref(), said.sure);
+                }
+                match (said.found, kept) {
+                    (Some(lines), _) => Held::Found(Some(Arc::new(lines))),
+                    // Not found now, a source unreached: what was found before, where there was.
+                    (None, Some(kept)) if !said.sure => Held::Found(kept.lines.map(Arc::new)),
+                    (None, _) if !said.sure => Held::Unreached(Instant::now()),
+                    (None, _) => Held::Found(None),
+                }
+            }
+        };
+        KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, held);
     });
     Known::Asking
 }
 
+/// A source that could not be reached, or would not answer: what it has is not known.
+pub(crate) struct Unreached;
+
+/// What a source has of what it was asked for (none, where it said it has none), where it answered.
+pub(crate) type Answer<T> = Result<Option<T>, Unreached>;
+
+/// What the sources asked had of a track's lyrics, and whether each answered (else they may yet have them).
+struct Said {
+    found: Option<Vec<Line>>,
+    sure: bool,
+}
+
 /// Asks each source in turn: by the track's NetEase number, the word-timed collection and then NetEase; by its
 /// name, LRCLIB, and then the same by the number NetEase finds it by.
-fn find(track: &Track) -> Option<Vec<Line>> {
-    let by_number = |id: u64| amll(id).or_else(|| netease(id));
-    match track.netease {
+fn find(track: &Track) -> Said {
+    let sure = std::cell::Cell::new(true);
+    // What a source has, none where it was not reached (and then what the sources have is not sure).
+    fn answered<T>(sure: &std::cell::Cell<bool>, answer: Answer<T>) -> Option<T> {
+        answer.unwrap_or_else(|Unreached| {
+            sure.set(false);
+            None
+        })
+    }
+    let by_number = |id: u64| {
+        let worded = answered(&sure, amll(id));
+        // The collection's, with NetEase's translation where it gives none.
+        if worded.as_ref().is_some_and(|lines| lines.iter().any(|line| line.translation.is_some())) {
+            return worded;
+        }
+        let theirs = answered(&sure, netease(id));
+        match (worded, theirs) {
+            (Some(mut lines), Some(theirs)) => {
+                translated(&mut lines, &theirs);
+                Some(lines)
+            }
+            (worded, theirs) => worded.or(theirs),
+        }
+    };
+    let found = match track.netease {
         Some(id) => by_number(id),
-        None => lrclib(track).or_else(|| netease_search(track).and_then(by_number)),
+        None => answered(&sure, lrclib(track)).or_else(|| answered(&sure, netease_search(track)).and_then(by_number)),
+    };
+    Said { found, sure: sure.get() }
+}
+
+/// `lines` with the translation of the line of `theirs` nearest in time to each, within a second.
+fn translated(lines: &mut [Line], theirs: &[Line]) {
+    for line in lines {
+        let nearest = theirs.iter().filter(|their| their.translation.is_some()).min_by(|a, b| (a.at - line.at).abs().total_cmp(&(b.at - line.at).abs()));
+        if let Some(their) = nearest.filter(|their| (their.at - line.at).abs() <= 1.0) {
+            line.translation = their.translation.clone();
+        }
+    }
+}
+
+/// The body of `url` (fetched as JSON is): none where it is not there (404).
+fn fetched(url: &str) -> Answer<Vec<u8>> {
+    match crate::update::answer_json(url) {
+        Some((200, body)) => Ok(Some(body)),
+        Some((404, _)) => Ok(None),
+        _ => Err(Unreached),
+    }
+}
+
+/// The JSON `url` answers with: none where it is not there (404).
+fn fetched_json(url: &str) -> Answer<serde_json::Value> {
+    match fetched(url)? {
+        Some(body) => serde_json::from_slice(&body).map(Some).map_err(|_| Unreached),
+        None => Ok(None),
     }
 }
 
 /// The AMLL TTML collection's lyrics of NetEase's track `id`, timed word by word (through a CDN that is reached
-/// from mainland China too); where it gives no translation, NetEase's own, to the line nearest in time.
-pub(crate) fn amll(id: u64) -> Option<Vec<Line>> {
-    let file = crate::update::get_json(&format!("https://cdn.jsdelivr.net/gh/Steve-xmh/amll-ttml-db@main/ncm-lyrics/{id}.ttml"))?;
-    let mut lines = ttml(&String::from_utf8(file).ok()?);
-    if !lines.iter().any(|line| !line.words.is_empty()) {
-        return None;
-    }
-    if lines.iter().all(|line| line.translation.is_none()) {
-        if let Some(theirs) = netease(id) {
-            for line in &mut lines {
-                let nearest = theirs.iter().filter(|their| their.translation.is_some()).min_by(|a, b| (a.at - line.at).abs().total_cmp(&(b.at - line.at).abs()));
-                if let Some(their) = nearest.filter(|their| (their.at - line.at).abs() <= 1.0) {
-                    line.translation = their.translation.clone();
-                }
-            }
-        }
-    }
-    Some(lines)
+/// from mainland China too).
+pub(crate) fn amll(id: u64) -> Answer<Vec<Line>> {
+    let Some(file) = fetched(&format!("https://cdn.jsdelivr.net/gh/Steve-xmh/amll-ttml-db@main/ncm-lyrics/{id}.ttml"))? else { return Ok(None) };
+    let lines = ttml(&String::from_utf8(file).map_err(|_| Unreached)?);
+    Ok(lines.iter().any(|line| !line.words.is_empty()).then_some(lines))
 }
 
 /// The lines of a TTML lyrics file as Apple Music and the AMLL collection write them: a `<p>` each (`begin`,
@@ -231,14 +316,20 @@ fn clock(time: &str) -> Option<f64> {
 
 /// NetEase Cloud Music's lyrics of its track `id`, with their translation: timed word by word where it has them
 /// (its `yrc`), else line by line.
-fn netease(id: u64) -> Option<Vec<Line>> {
-    let said: serde_json::Value = serde_json::from_slice(&crate::update::get_json(&format!("https://music.163.com/api/song/lyric/v1?id={id}&lv=1&tv=-1&yv=1"))?).ok()?;
+fn netease(id: u64) -> Answer<Vec<Line>> {
+    let said = netease_said(&format!("https://music.163.com/api/song/lyric/v1?id={id}&lv=1&tv=-1&yv=1"))?;
     let translation = said["tlyric"]["lyric"].as_str();
     if let Some(lines) = said["yrc"]["lyric"].as_str().map(|yrc| word_timed(yrc, translation)).filter(|lines| lines.iter().any(|line| !line.words.is_empty())) {
-        return Some(lines);
+        return Ok(Some(lines));
     }
-    let lines = merged(said["lrc"]["lyric"].as_str()?, translation);
-    lines.iter().any(|line| !line.text.is_empty()).then_some(lines)
+    let lines = said["lrc"]["lyric"].as_str().map(|lrc| merged(lrc, translation));
+    Ok(lines.filter(|lines| lines.iter().any(|line| !line.text.is_empty())))
+}
+
+/// What NetEase's API says to `url`, where it answers (its own `code` 200; another, such as when it is asked too
+/// often, is no answer).
+fn netease_said(url: &str) -> Result<serde_json::Value, Unreached> {
+    fetched_json(url)?.filter(|said| said["code"].as_i64() == Some(200)).ok_or(Unreached)
 }
 
 /// The lines of NetEase's word-timed lyrics (`yrc`): `[start,length]` (milliseconds) before each, then each word as
@@ -280,18 +371,18 @@ pub fn word_timed(yrc: &str, translation: Option<&str>) -> Vec<Line> {
 
 /// The track on NetEase Cloud Music that is `track`: of those found by its title and artist, the first of its
 /// title and of its length (to two seconds).
-fn netease_search(track: &Track) -> Option<u64> {
+fn netease_search(track: &Track) -> Answer<u64> {
     let asked = format!("{} {}", track.title, track.artist);
-    let said: serde_json::Value = serde_json::from_slice(&crate::update::get_json(&format!("https://music.163.com/api/search/get?s={}&type=1&limit=10", escaped(&asked)))?).ok()?;
-    said["result"]["songs"].as_array()?.iter().find_map(|song| {
+    let said = netease_said(&format!("https://music.163.com/api/search/get?s={}&type=1&limit=10", escaped(&asked)))?;
+    Ok(said["result"]["songs"].as_array().into_iter().flatten().find_map(|song| {
         let length = song["duration"].as_f64()? / 1000.0;
         (same(song["name"].as_str()?, &track.title) && (length - track.seconds as f64).abs() <= 2.0).then(|| song["id"].as_u64()).flatten()
-    })
+    }))
 }
 
 /// LRCLIB's timed lyrics of `track`: the one it has of that title, artist, album and length; else, of those
 /// it finds by title and artist, the first of that length (to two seconds) with timed lyrics.
-fn lrclib(track: &Track) -> Option<Vec<Line>> {
+fn lrclib(track: &Track) -> Answer<Vec<Line>> {
     let timed = |said: &serde_json::Value| said["syncedLyrics"].as_str().map(|lrc| merged(lrc, None)).filter(|lines| lines.iter().any(|line| !line.text.is_empty()));
     let exact = format!(
         "https://lrclib.net/api/get?track_name={}&artist_name={}&album_name={}&duration={}",
@@ -300,12 +391,12 @@ fn lrclib(track: &Track) -> Option<Vec<Line>> {
         escaped(&track.album),
         track.seconds
     );
-    if let Some(found) = crate::update::get_json(&exact).and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok()).and_then(|said| timed(&said)) {
-        return Some(found);
+    if let Some(found) = fetched_json(&exact)?.and_then(|said| timed(&said)) {
+        return Ok(Some(found));
     }
     let search = format!("https://lrclib.net/api/search?track_name={}&artist_name={}", escaped(&track.title), escaped(&track.artist));
-    let said: serde_json::Value = serde_json::from_slice(&crate::update::get_json(&search)?).ok()?;
-    said.as_array()?.iter().filter(|one| one["duration"].as_f64().is_some_and(|length| (length - track.seconds as f64).abs() <= 2.0)).find_map(timed)
+    let said = fetched_json(&search)?.unwrap_or_default();
+    Ok(said.as_array().into_iter().flatten().filter(|one| one["duration"].as_f64().is_some_and(|length| (length - track.seconds as f64).abs() <= 2.0)).find_map(timed))
 }
 
 /// Whether two titles are the same, but for case and spaces.
@@ -376,6 +467,106 @@ pub fn sung_at(lines: &[Line], position: f64) -> Option<usize> {
 /// How early a line is shown (seconds).
 pub const EARLY: f64 = 0.2;
 
+/// The lyrics found of the tracks asked about, kept on disk (a file each, in `folder`), so that a track played again
+/// shows them at once without asking: lyrics timed word by word, for good; timed only line by line, for a month (a
+/// source may come to have them word by word); that none has them, for a week; and what was found while a source
+/// could not be reached (which may have had better), for a day. The most kept, the files written longest ago go
+/// first.
+pub mod kept {
+    use super::*;
+
+    const LINED_FOR: Duration = Duration::from_secs(30 * 24 * 3600);
+    const NONE_FOR: Duration = Duration::from_secs(7 * 24 * 3600);
+    const UNSURE_FOR: Duration = Duration::from_secs(24 * 3600);
+    const KEPT_MOST: usize = 2000;
+    /// The largest file read (larger: not one Glance wrote).
+    const FILE_MOST: u64 = 4 << 20;
+
+    /// A file: the track (as the name it is kept under could be another's too), when its lyrics were asked for
+    /// (seconds since 1970), what was found, and whether each source asked answered.
+    #[derive(Serialize, Deserialize)]
+    struct File {
+        track: Track,
+        asked: u64,
+        lines: Option<Vec<Line>>,
+        sure: bool,
+    }
+
+    /// A track's lyrics as kept (none: none had them), when they were asked for, and whether each source answered.
+    pub struct Kept {
+        pub lines: Option<Vec<Line>>,
+        asked: SystemTime,
+        sure: bool,
+    }
+
+    impl Kept {
+        /// Whether they are still as the sources would now give them, so far as can be told.
+        pub fn fresh(&self) -> bool {
+            let age = SystemTime::now().duration_since(self.asked).unwrap_or_default();
+            match &self.lines {
+                _ if !self.sure => age < UNSURE_FOR,
+                Some(lines) if lines.iter().any(|line| !line.words.is_empty()) => true,
+                Some(_) => age < LINED_FOR,
+                None => age < NONE_FOR,
+            }
+        }
+    }
+
+    /// Where they are kept: `lyrics` in Glance's local application data.
+    pub fn folder() -> PathBuf {
+        crate::settings::local_dir().join("lyrics")
+    }
+
+    /// The name `track`'s are kept under: a hash (64-bit FNV-1a, the same in every build) of all it is.
+    pub(super) fn name(track: &Track) -> String {
+        let hash = serde_json::to_string(track).unwrap_or_default().bytes().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3));
+        format!("{hash:016x}.json")
+    }
+
+    pub fn read(track: &Track) -> Option<Kept> {
+        let text = crate::elevation::read_in_place(&folder(), &name(track), FILE_MOST)?;
+        let file: File = serde_json::from_str(&text).ok()?;
+        (file.track == *track).then(|| Kept { lines: file.lines, asked: SystemTime::UNIX_EPOCH + Duration::from_secs(file.asked), sure: file.sure })
+    }
+
+    /// Keeps what was found of `track`'s lyrics (none: none had them), asked for now, and whether each source
+    /// answered; and, kept the most, lets the files written longest ago go. (Not kept where it cannot be written:
+    /// they are asked for again.)
+    pub fn write(track: &Track, lines: Option<&[Line]>, sure: bool) {
+        let folder = folder();
+        if folder.parent().is_none_or(|own| crate::elevation::ensure_folder(own).is_err()) || crate::elevation::ensure_folder(&folder).is_err() {
+            return;
+        }
+        let asked = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let file = File { track: track.clone(), asked, lines: lines.map(<[Line]>::to_vec), sure };
+        let Ok(json) = serde_json::to_vec(&file) else { return };
+        if crate::elevation::write_in_place(&folder, &name(track), &json).is_ok() {
+            trimmed(&folder);
+        }
+    }
+
+    fn trimmed(folder: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(folder) else { return };
+        let mut files: Vec<(SystemTime, PathBuf)> = entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "json"))
+            .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+            .collect();
+        if files.len() <= KEPT_MOST {
+            return;
+        }
+        files.sort();
+        for (_, path) in &files[..files.len() - KEPT_MOST] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// The names of the files kept (for the uninstaller to take away).
+    pub fn names() -> Vec<String> {
+        std::fs::read_dir(folder()).map(|entries| entries.flatten().filter_map(|entry| entry.file_name().into_string().ok()).collect()).unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +613,21 @@ mod tests {
     }
 
     #[test]
+    fn keeps_lyrics_while_they_are_fresh() {
+        let track = Track { netease: Some(7), title: "kept test".into(), artist: "nobody".into(), album: String::new(), seconds: 1 };
+        let worded = word_timed("[1000,500](1000,500,0)la", None);
+        kept::write(&track, Some(&worded), true);
+        let read = kept::read(&track).expect("kept");
+        assert_eq!(read.lines.as_deref(), Some(&worded[..]));
+        assert!(read.fresh());
+        kept::write(&track, None, true);
+        assert!(kept::read(&track).is_some_and(|kept| kept.lines.is_none() && kept.fresh()));
+        let other = Track { seconds: 2, ..track.clone() };
+        assert!(kept::read(&other).is_none());
+        std::fs::remove_file(kept::folder().join(kept::name(&track))).unwrap();
+    }
+
+    #[test]
     fn escapes_a_query() {
         assert_eq!(escaped("我爱你 A&B"), "%E6%88%91%E7%88%B1%E4%BD%A0%20A%26B");
         assert!(same("Yellow ", "yel low"));
@@ -431,17 +637,20 @@ mod tests {
     #[test]
     #[ignore]
     fn finds_lyrics() {
-        let worded = amll(1901371647).expect("the collection's, word by word");
+        let worded = amll(1901371647).ok().flatten().expect("the collection's, word by word");
         println!("AMLL: {} lines; {:?}", worded.len(), worded.iter().find(|line| line.words.len() > 2).map(|line| (&line.text, line.words.len(), &line.translation)));
-        let by_id = find(&Track { netease: Some(2124385847), title: String::new(), artist: String::new(), album: String::new(), seconds: 330 }).expect("NetEase's, by number");
+        let by_id = find(&Track { netease: Some(2124385847), title: String::new(), artist: String::new(), album: String::new(), seconds: 330 }).found.expect("NetEase's, by number");
         println!("NetEase by number: {} lines, {} timed word by word, the second {:?}", by_id.len(), by_id.iter().filter(|line| !line.words.is_empty()).count(), by_id.get(1));
-        let worded = netease(1974443814).expect("NetEase's, word by word");
+        let worded = netease(1974443814).ok().flatten().expect("NetEase's, word by word");
         println!("NetEase word by word: {} lines; {:?}", worded.len(), worded.iter().find(|line| line.words.len() > 2).map(|line| (&line.text, &line.words, &line.translation)));
         assert!(worded.iter().any(|line| line.words.len() > 2));
-        let by_name = find(&Track { netease: None, title: "Yellow".into(), artist: "Coldplay".into(), album: "Parachutes".into(), seconds: 267 }).expect("LRCLIB's");
+        let by_name = find(&Track { netease: None, title: "Yellow".into(), artist: "Coldplay".into(), album: "Parachutes".into(), seconds: 267 }).found.expect("LRCLIB's");
         println!("by name: {} lines, the first sung {:?}", by_name.len(), by_name.iter().find(|line| !line.text.is_empty()));
         let searched = netease_search(&Track { netease: None, title: "我爱你中国 (live)".into(), artist: "孙楠".into(), album: String::new(), seconds: 330 });
-        println!("NetEase by its title: {searched:?}");
-        assert!(searched.is_some());
+        println!("NetEase by its title: {:?}", searched.as_ref().ok());
+        assert!(matches!(searched, Ok(Some(_))));
+        let none = find(&Track { netease: None, title: "zzqqxx no such song".into(), artist: "qqqww".into(), album: String::new(), seconds: 100 });
+        assert!(none.sure && none.found.is_none(), "that no source has a track's lyrics is known");
+        assert!(matches!(netease(1), Ok(None)), "NetEase says it has none");
     }
 }

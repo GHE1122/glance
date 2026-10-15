@@ -1094,7 +1094,7 @@ mod pictures {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         eprintln!("asking for the lyrics");
-        let lines = Arc::new(crate::lyrics::amll(1901371647).expect("lyrics"));
+        let lines = Arc::new(crate::lyrics::amll(1901371647).ok().flatten().expect("lyrics"));
         eprintln!("lyrics: {} lines", lines.len());
         let now = lines.iter().position(|line| line.words.len() > 4).unwrap() + 3;
         let line = &lines[now];
