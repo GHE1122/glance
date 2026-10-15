@@ -109,7 +109,7 @@ const SLOW_FRAME: Duration = Duration::from_millis(12);
 const REST_FRAME: Duration = Duration::from_millis(250);
 /// Without live refraction, how long after a frame of what is behind is taken another is looked for (see
 /// `collect`).
-const LOOK_AGAIN: Duration = Duration::from_millis(250);
+pub const LOOK_AGAIN: Duration = Duration::from_millis(250);
 /// With live refraction, how often the desktop behind is taken again as it
 /// changes, as the panel's is: fifteen times a second (what shows through
 /// the glass is blurred; faster cost twice the processor for little that

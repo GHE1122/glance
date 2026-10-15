@@ -1247,6 +1247,9 @@ struct Panel<'a> {
     /// A capture of the desktop behind under way on another thread (see
     /// `take_behind`).
     capturing: Option<PanelRequest>,
+    /// Without live refraction, a frame taken: till when another is looked for before the scene rests (see
+    /// `collect_behind`).
+    look_again: Option<Instant>,
     /// Counts what makes a capture under way of no use: the panel closing,
     /// the settings coming in front of it.
     generation: u64,
@@ -1318,6 +1321,7 @@ impl<'a> Panel<'a> {
             sliding: false,
             recapture: false,
             capturing: None,
+            look_again: None,
             generation: 0,
             failed_behind: None,
             backdrop: None,
@@ -1732,6 +1736,8 @@ impl<'a> Panel<'a> {
         if changed || self.behind.is_none() {
             let menus = crate::ui::menu::SHOWN.load(Ordering::Relaxed);
             self.capturing = Some(PanelRequest { generation: self.generation, menus, afresh });
+            // (Its first frame looked past as the last were.)
+            self.look_again = None;
         }
     }
 
@@ -1744,6 +1750,12 @@ impl<'a> Panel<'a> {
     fn collect_behind(&mut self, now: Instant) {
         let Some(scene) = &mut self.backdrop else { return };
         let Some(capture) = scene.ready() else {
+            // Looked for again a while, and none came: what was taken stands, and the scene rests.
+            if self.look_again.is_some_and(|till| now >= till) {
+                self.look_again = None;
+                scene.rest();
+                return;
+            }
             // (Live, as often as it is looked at: see `refresh_behind`.)
             if self.capturing.is_some() || (self.live && self.behind.as_ref().is_none_or(|behind| now.duration_since(behind.taken) >= LIVE_INTERVAL)) {
                 scene.want();
@@ -1751,10 +1763,15 @@ impl<'a> Panel<'a> {
             return;
         };
         // Without live refraction, what is behind is as it was when taken, till it is taken again: the scene rests
-        // meanwhile.
+        // meanwhile. Not at once: a frame put together while the compositor had put in only some of the windows
+        // behind is followed by one with all of them, which is looked for a while (see `widget::LOOK_AGAIN`), and
+        // taken in its place if it comes; then it rests.
         if !self.live {
-            if let Some(scene) = &mut self.backdrop {
+            if self.look_again.take().is_some() {
                 scene.rest();
+            } else {
+                self.look_again = Some(now + crate::widget::LOOK_AGAIN);
+                scene.want();
             }
         }
         let capture = Some(capture);
