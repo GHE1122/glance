@@ -50,6 +50,27 @@ pub struct Dimms {
     last: Vec<f32>,
 }
 
+/// Why no module's sensor was found.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Missing {
+    /// The driver the SMBus is reached through is not there (or not to be had without rights).
+    NoDriver,
+    /// Another program had the bus all the while it was waited for (one that lights the modules, as a rule).
+    BusHeld,
+    /// None answered as a module's sensor.
+    None,
+}
+
+impl Missing {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Missing::NoDriver => "not found (the SMBus driver not available)",
+            Missing::BusHeld => "not found yet (another program had the SMBus; looked for again)",
+            Missing::None => "not found",
+        }
+    }
+}
+
 impl Dimms {
     /// What was found, for a report.
     pub fn describe(&self) -> String {
@@ -60,10 +81,10 @@ impl Dimms {
         format!("{} {kind} sensor(s)", self.sensors.len())
     }
 
-    /// Finds the modules' sensors, if the chipset's SMBus can be reached.
-    pub fn open() -> Option<Self> {
-        let module = Module::load(SMBUS_PIIX4).or_else(|_| Module::load(SMBUS_I801)).ok()?;
-        let _lock = NamedLock::acquire(SMBUS_LOCK, 1000)?;
+    /// Finds the modules' sensors, if the chipset's SMBus can be reached; else says why not.
+    pub fn open() -> Result<Self, Missing> {
+        let module = Module::load(SMBUS_PIIX4).or_else(|_| Module::load(SMBUS_I801)).map_err(|_| Missing::NoDriver)?;
+        let _lock = NamedLock::acquire(SMBUS_LOCK, 1000).ok_or(Missing::BusHeld)?;
         let byte = |address, register| transfer(&module, address, register, BYTE_DATA);
         // A DDR5 hub names its type in its first two registers, and its
         // sensor is in use only when not switched off.
@@ -72,7 +93,7 @@ impl Dimms {
             .filter(|&address| byte(address, SPD5118_TEMP_CONFIG).is_some_and(|config| config & 1 == 0))
             .collect();
         if !spd5118.is_empty() {
-            return Some(Dimms { module, kind: Kind::Spd5118, last: Vec::new(), sensors: spd5118 });
+            return Ok(Dimms { module, kind: Kind::Spd5118, last: Vec::new(), sensors: spd5118 });
         }
         // A DDR4 sensor: as Linux's jc42 checks, reserved bits clear and a
         // manufacturer set.
@@ -87,7 +108,10 @@ impl Dimms {
                 capability & 0xFE00 == 0 && config & 0xF800 == 0 && maker != 0 && maker != 0xFFFF
             })
             .collect();
-        (!jc42.is_empty()).then(|| Dimms { module, kind: Kind::Jc42, last: Vec::new(), sensors: jc42 })
+        if jc42.is_empty() {
+            return Err(Missing::None);
+        }
+        Ok(Dimms { module, kind: Kind::Jc42, last: Vec::new(), sensors: jc42 })
     }
 
     /// Each module's temperature (°C), in slot order. While another program

@@ -104,6 +104,9 @@ pub struct Sampler {
     /// A laptop's fans, as its firmware reports them.
     laptop_fans: Option<LaptopFans>,
     dimms: Option<Dimms>,
+    /// The modules' sensors were not looked at as Glance started, another program having the bus: looked for again
+    /// every so often, since when.
+    dimms_awaited: Option<Instant>,
     mic: Option<Microphone>,
     /// Each process's GPU use at the last sample, by process id.
     /// Each process's use of the GPUs (unread where an instance of its
@@ -161,12 +164,13 @@ impl Sampler {
         let cpu_sensors = CpuReader::open();
         let super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")));
         let dimms = Dimms::open();
+        let dimms_awaited = (dimms.as_ref().err() == Some(&crate::dimm::Missing::BusHeld)).then(Instant::now);
         let laptop_fans = LaptopFans::open();
         let missing = || "not found".to_string();
         let mut found = vec![
             format!("CPU sensors: {}", cpu_sensors.as_ref().map_or_else(missing, |cpu| cpu.describe().to_string())),
             format!("Motherboard chip: {}", super_io.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe)),
-            format!("Memory sensors: {}", dimms.as_ref().map_or_else(missing, Dimms::describe)),
+            format!("Memory sensors: {}", dimms.as_ref().map_or_else(|why| why.describe().to_string(), Dimms::describe)),
             format!("Laptop fans: {}", laptop_fans.as_ref().map_or_else(missing, LaptopFans::describe)),
         ];
         found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| {
@@ -212,7 +216,8 @@ impl Sampler {
             super_io_awaited: super_io.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now()),
             super_io: super_io.ok().map(crate::superio::Watched::new),
             laptop_fans,
-            dimms,
+            dimms: dimms.ok(),
+            dimms_awaited,
             mic: Microphone::open(),
             gpu_by_pid: None,
             adapter_by_pid: HashMap::new(),
@@ -446,7 +451,7 @@ impl Sampler {
             cpu_sensors: self.cpu_sensors.as_mut().map(CpuReader::read),
             board: self.board(),
             drive_temps: crate::drives::temperatures(),
-            dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
+            dimm_temps: self.dimms().map(Dimms::read).unwrap_or_default(),
             mic_muted: self.mic.as_ref().and_then(Microphone::muted),
             wsl: self.wsl.as_mut().map(|wsl| wsl.read(self.gpu_by_pid.as_ref(), &self.processes.names)),
             docker: self.docker.as_ref().and_then(crate::docker::Docker::read),
@@ -1323,6 +1328,26 @@ impl LaptopFans {
 const SUPER_IO_AGAIN: Duration = Duration::from_secs(30);
 
 impl Sampler {
+    /// The modules' sensors; looked for again, every half minute, while another program had the bus as Glance
+    /// started (and till it is free).
+    fn dimms(&mut self) -> Option<&mut Dimms> {
+        if self.dimms_awaited.is_some_and(|since| since.elapsed() >= SUPER_IO_AGAIN) {
+            match Dimms::open() {
+                Ok(found) => {
+                    crate::journal::note(format!("memory sensors, looked for again: {}", found.describe()));
+                    self.dimms = Some(found);
+                    self.dimms_awaited = None;
+                }
+                Err(crate::dimm::Missing::BusHeld) => self.dimms_awaited = Some(Instant::now()),
+                Err(why) => {
+                    crate::journal::note(format!("memory sensors, looked for again: {}", why.describe()));
+                    self.dimms_awaited = None;
+                }
+            }
+        }
+        self.dimms.as_mut()
+    }
+
     /// The motherboard's sensors, and a laptop's fans its firmware reports.
     fn board(&mut self) -> Option<crate::reading::BoardSensors> {
         // Another program had the bus as Glance started: the chip is looked for again, every half minute,
