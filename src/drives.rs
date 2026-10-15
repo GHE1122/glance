@@ -31,9 +31,104 @@ pub fn models() -> Vec<(u32, String)> {
 pub fn temperatures() -> Vec<DriveTemperature> {
     let mut found = Vec::new();
     each_drive(|index, handle| {
-        if let Some(celsius) = temperature(handle).or_else(|| smart_temperature(index, handle)) {
+        if let Some(celsius) = temperature(handle).or_else(|| nvme_temperature(index, handle)).or_else(|| smart_temperature(index, handle)) {
             found.push(DriveTemperature { id: index, name: model(handle).unwrap_or_else(|| format!("Disk {index}")), celsius });
         }
+    });
+    found
+}
+
+/// The NVMe bus, as STORAGE_BUS_TYPE numbers it.
+const BUS_NVME: i32 = 17;
+/// What an NVMe drive is asked for its health log with: the property (StorageDeviceProtocolSpecificProperty), the
+/// protocol (ProtocolTypeNvme), what is asked (NVMeDataTypeLogPage), and which page (SMART / health information).
+const PROTOCOL_PROPERTY: i32 = 50;
+const PROTOCOL_NVME: u32 = 3;
+const NVME_LOG_PAGE: u32 = 2;
+const NVME_HEALTH_LOG: u32 = 2;
+const NVME_LOG_SIZE: usize = 512;
+
+/// STORAGE_PROTOCOL_SPECIFIC_DATA.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ProtocolData {
+    protocol: u32,
+    kind: u32,
+    request: u32,
+    sub_request: u32,
+    offset: u32,
+    length: u32,
+    fixed_return: u32,
+    sub_request2: u32,
+    sub_request3: u32,
+    sub_request4: u32,
+}
+
+/// An NVMe drive's temperature from its health log (its composite temperature, in kelvin, in bytes 1 and 2), for a
+/// drive whose driver gives Windows none as a property (some vendors' drivers, and RAID ones, do not). Asked as
+/// Windows documents for NVMe drives; through the handle opened for properties, else opened to read and write
+/// (which some drivers want for it; it touches none of the drive's data).
+fn nvme_temperature(index: u32, properties: HANDLE) -> Option<f32> {
+    if bus(properties)? != BUS_NVME {
+        return None;
+    }
+    health_celsius(properties).or_else(|| {
+        let path: Vec<u16> = format!("\\\\.\\PhysicalDrive{index}").encode_utf16().chain([0]).collect();
+        let drive = unsafe { CreateFileW(PCWSTR(path.as_ptr()), 0xC000_0000, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }.ok()?;
+        let celsius = health_celsius(drive);
+        let _ = unsafe { CloseHandle(drive) };
+        celsius
+    })
+}
+
+/// The composite temperature in an NVMe drive's health log, read through `handle`.
+fn health_celsius(handle: HANDLE) -> Option<f32> {
+    // The query (its property and kind), what is asked of the protocol, and room for the page after it.
+    #[repr(C)]
+    struct Asked {
+        property: i32,
+        query: i32,
+        data: ProtocolData,
+        page: [u8; NVME_LOG_SIZE],
+    }
+    let mut asked = Asked {
+        property: PROTOCOL_PROPERTY,
+        query: PropertyStandardQuery.0,
+        data: ProtocolData { protocol: PROTOCOL_NVME, kind: NVME_LOG_PAGE, request: NVME_HEALTH_LOG, offset: size_of::<ProtocolData>() as u32, length: NVME_LOG_SIZE as u32, ..Default::default() },
+        page: [0; NVME_LOG_SIZE],
+    };
+    let mut returned = 0u32;
+    let size = size_of::<Asked>() as u32;
+    let pointer = &mut asked as *mut Asked as *mut core::ffi::c_void;
+    unsafe { DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, Some(pointer), size, Some(pointer), size, Some(&mut returned), None) }.ok()?;
+    // Answered as STORAGE_PROTOCOL_DATA_DESCRIPTOR: its version and size, then the protocol's data as given back,
+    // whose offset says where the page is from there.
+    let answered: &[u8] = unsafe { std::slice::from_raw_parts(pointer as *const u8, size as usize) };
+    let data: ProtocolData = unsafe { std::ptr::read_unaligned(answered.as_ptr().add(8) as *const ProtocolData) };
+    let at = 8 + data.offset as usize;
+    let kelvin = u16::from_le_bytes([*answered.get(at + 1)?, *answered.get(at + 2)?]);
+    let celsius = kelvin as i32 - 273;
+    (kelvin > 0 && plausible(celsius as i16)).then_some(celsius as f32)
+}
+
+/// Each physical drive, for a report: its number, model and bus (as STORAGE_BUS_TYPE numbers it), and which way
+/// its temperature is read, if any is.
+pub fn describe() -> Vec<String> {
+    let mut found = Vec::new();
+    each_drive(|index, handle| {
+        let read = if temperature(handle).is_some() {
+            "its property"
+        } else if nvme_temperature(index, handle).is_some() {
+            "its NVMe health log"
+        } else if smart_temperature(index, handle).is_some() {
+            "SMART"
+        } else if !crate::elevation::is_elevated() && bus(handle).is_some_and(|bus| matches!(bus, BUS_ATA | BUS_SATA)) {
+            // (Asked of the drive itself, which needs an administrator's rights: the sensors' program asks it.)
+            "SMART, if the sensors' program reads it"
+        } else {
+            "none"
+        };
+        found.push(format!("Drive {index}: {}, bus {}, temperature: {read}", model(handle).unwrap_or_default(), bus(handle).map_or("unknown".to_string(), |bus| bus.to_string())));
     });
     found
 }
@@ -279,5 +374,20 @@ mod tests {
         for drive in &drives {
             println!("  {} {} °C", drive.name, drive.celsius);
         }
+    }
+}
+
+#[cfg(test)]
+mod nvme_tests {
+    /// Each NVMe drive's temperature, as its property says and as its health log does:
+    /// `cargo test --lib -- --ignored reads_nvme_logs --nocapture`.
+    #[test]
+    #[ignore = "reads this PC's drives"]
+    fn reads_nvme_logs() {
+        super::each_drive(|index, handle| {
+            if super::bus(handle) == Some(super::BUS_NVME) {
+                println!("drive {index} {:?}: property {:?}, health log {:?}", super::model(handle), super::temperature(handle), super::health_celsius(handle));
+            }
+        });
     }
 }

@@ -40,6 +40,7 @@ pub fn report() -> String {
     lines.extend(info.gpus.iter().map(|gpu| format!("GPU: {}", gpu.name)));
     lines.extend(info.found.iter().cloned());
     lines.extend(crate::source::sensor_lines());
+    lines.extend(crate::drives::describe());
     // (Enough to see what led up to a fault, well within what a report may hold.)
     let log = crate::journal::recent(80);
     lines.push(format!("Recent log ({} lines):", log.len()));
