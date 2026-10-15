@@ -1182,7 +1182,9 @@ fn graphics_clock(kmt_handle: u32) -> Option<f32> {
         PrivateDriverDataSize: size_of::<D3DKMT_NODE_PERFDATA>() as u32,
     };
     let answered = unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok();
-    (answered && perf.MaxFrequency != 0).then(|| (perf.Frequency as f64 / 1e6) as f32)
+    // (A clock past the most the node may run at, overclocked too, is no reading: one integrated GPU said 8550 MHz.)
+    let most = perf.MaxFrequency.max(perf.MaxFrequencyOC);
+    (answered && perf.MaxFrequency != 0 && perf.Frequency <= most).then(|| (perf.Frequency as f64 / 1e6) as f32)
 }
 
 /// Octets received and sent by each hardware network interface, by its LUID. Virtual
