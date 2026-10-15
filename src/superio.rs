@@ -155,6 +155,9 @@ pub struct SuperIo {
     chip: u16,
     layout: Option<&'static Layout>,
     base: u64,
+    /// The configuration port it was found at (0x2E, 0x4E), and its slot as the driver numbers them.
+    port: u64,
+    slot: u64,
     /// On an embedded controller's chip: the channels that are temperatures
     /// (register, and name), and the fans in use (register, and name).
     ec_temps: Vec<(u16, String)>,
@@ -237,7 +240,7 @@ impl SuperIo {
                 seen.push(format!("{port:#X}: chip {chip:04X} with its monitor at {base:#X}, not usable"));
                 continue;
             }
-            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, ec_temps: Vec::new(), ec_fans: Vec::new(), last: BoardSensors::default() };
+            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, port, slot, ec_temps: Vec::new(), ec_fans: Vec::new(), last: BoardSensors::default() };
             let failed = match kind {
                 Kind::NuvotonEc => found.set_up_ec().err(),
                 // A Nuvoton monitor that answers is one from Nuvoton.
@@ -377,6 +380,13 @@ impl SuperIo {
                 }
             }
             Kind::Nuvoton { temps, fans } => {
+                // Its monitor no longer answering as Nuvoton's, another program has locked it again (ASUS's own
+                // software does, on its boards: every register then reads all ones, which reads as nothing
+                // connected): unlocked again, as it was found.
+                if !self.answers() && !self.unlocked_again() {
+                    self.last = sensors.clone();
+                    return sensors;
+                }
                 for (register, name) in NUVOTON_TEMPERATURES[..temps].iter().copied() {
                     if let Some(value) = self.register(register).and_then(celsius) {
                         sensors.temps.push((name.to_string(), value));
@@ -398,6 +408,30 @@ impl SuperIo {
         sensors
     }
 
+    /// Whether a Nuvoton monitor answers as Nuvoton's.
+    fn answers(&self) -> bool {
+        let vendor = self.register(NUVOTON_VENDOR.0).zip(self.register(NUVOTON_VENDOR.1));
+        vendor.map(|(high, low)| (high as u16) << 8 | low as u16) == Some(NUVOTON_VENDOR_ID)
+    }
+
+    /// Unlocks a Nuvoton monitor locked again since it was found (under the bus's lock, held by the caller), as it
+    /// was then; whether it answers now. Said once in the log each time it is found locked after answering, and
+    /// counted for a report.
+    fn unlocked_again(&mut self) -> bool {
+        let found = self.module.call("ioctl_select_slot", &[self.slot], &mut []).ok().and_then(|_| find_nuvoton(&self.module, self.port).ok());
+        if let Some((Kind::Nuvoton { .. }, _, base)) = found.filter(|(_, chip, _)| *chip == self.chip) {
+            self.base = base;
+        }
+        let answers = self.answers();
+        if answers {
+            RELOCKED.fetch_add(1, Ordering::Relaxed);
+            if RELOCKED.load(Ordering::Relaxed) <= 3 {
+                crate::journal::note(format!("board chip: its monitor was locked again by another program, unlocked (at {:#X})", self.base));
+            }
+        }
+        answers
+    }
+
     /// The input's name on this board, or its number from 1.
     fn name(&self, index: usize, names: fn(&Layout) -> &'static [&'static str]) -> String {
         self.layout
@@ -412,9 +446,11 @@ const ISA_LOCK: windows::core::PCWSTR = windows::core::w!("Global\\Access_ISABUS
 /// waited for (the readings then stood as they were), for a report.
 static READS: AtomicU64 = AtomicU64::new(0);
 static MISSED: AtomicU64 = AtomicU64::new(0);
+/// How many times a Nuvoton monitor was found locked again by another program, and unlocked.
+static RELOCKED: AtomicU64 = AtomicU64::new(0);
 
-pub fn reads() -> (u64, u64) {
-    (READS.load(Ordering::Relaxed), MISSED.load(Ordering::Relaxed))
+pub fn reads() -> (u64, u64, u64) {
+    (READS.load(Ordering::Relaxed), MISSED.load(Ordering::Relaxed), RELOCKED.load(Ordering::Relaxed))
 }
 
 /// How often the chip is read, and how long the bus is waited for each time (other programs that monitor the

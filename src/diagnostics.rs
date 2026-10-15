@@ -91,9 +91,9 @@ pub fn sensor_lines() -> Vec<String> {
     if let Some(later) = crate::superio::found_later() {
         lines.push(format!("Motherboard chip, looked for again: {later}"));
     }
-    let (reads, missed) = crate::superio::reads();
+    let (reads, missed, relocked) = crate::superio::reads();
     if reads > 0 {
-        lines.push(format!("Motherboard chip reads: {reads}, the bus another program's all the while at {missed}"));
+        lines.push(format!("Motherboard chip reads: {reads}, the bus another program's all the while at {missed}, its monitor found locked again by another program and unlocked {relocked} times"));
     }
     // Other programs that read the board or light it, running now: they share the bus Glance reads the board by.
     let sharing = sharing_the_bus();
