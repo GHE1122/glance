@@ -229,11 +229,53 @@ fn clock(time: &str) -> Option<f64> {
     Some(seconds)
 }
 
-/// NetEase Cloud Music's lyrics of its track `id`, with their translation.
+/// NetEase Cloud Music's lyrics of its track `id`, with their translation: timed word by word where it has them
+/// (its `yrc`), else line by line.
 fn netease(id: u64) -> Option<Vec<Line>> {
-    let said: serde_json::Value = serde_json::from_slice(&crate::update::get_json(&format!("https://music.163.com/api/song/lyric?id={id}&lv=1&tv=-1"))?).ok()?;
-    let lines = merged(said["lrc"]["lyric"].as_str()?, said["tlyric"]["lyric"].as_str());
+    let said: serde_json::Value = serde_json::from_slice(&crate::update::get_json(&format!("https://music.163.com/api/song/lyric/v1?id={id}&lv=1&tv=-1&yv=1"))?).ok()?;
+    let translation = said["tlyric"]["lyric"].as_str();
+    if let Some(lines) = said["yrc"]["lyric"].as_str().map(|yrc| word_timed(yrc, translation)).filter(|lines| lines.iter().any(|line| !line.words.is_empty())) {
+        return Some(lines);
+    }
+    let lines = merged(said["lrc"]["lyric"].as_str()?, translation);
     lines.iter().any(|line| !line.text.is_empty()).then_some(lines)
+}
+
+/// The lines of NetEase's word-timed lyrics (`yrc`): `[start,length]` (milliseconds) before each, then each word as
+/// `(start,length,0)` and what is sung; lines of another kind (its credits, written as JSON) are left out. Each
+/// with the line of `translation` (an LRC text) nearest in time, within a second.
+pub fn word_timed(yrc: &str, translation: Option<&str>) -> Vec<Line> {
+    let mut lines = Vec::new();
+    for raw in yrc.lines() {
+        let Some((head, mut rest)) = raw.trim().strip_prefix('[').and_then(|after| after.split_once(']')) else { continue };
+        let Some((start, length)) = head.split_once(',').and_then(|(a, b)| Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))) else { continue };
+        let mut words = Vec::new();
+        while let Some((timing, after)) = rest.strip_prefix('(').and_then(|after| after.split_once(')')) {
+            let mut parts = timing.split(',').map(|part| part.trim().parse::<f64>());
+            let (Some(Ok(at)), Some(Ok(lasts))) = (parts.next(), parts.next()) else { break };
+            // What is sung runs to the next word's timing, or the line's end.
+            let end = after.find('(').unwrap_or(after.len());
+            let text = &after[..end];
+            if !text.is_empty() {
+                words.push(Word { at: at / 1000.0, end: (at + lasts) / 1000.0, text: text.to_string() });
+            }
+            rest = &after[end..];
+        }
+        let text: String = words.iter().map(|word| word.text.as_str()).collect::<String>().trim().to_string();
+        lines.push(Line { at: start / 1000.0, end: Some((start + length) / 1000.0), text, words, backing: None, translation: None });
+    }
+    lines.sort_by(|a, b| a.at.total_cmp(&b.at));
+    for (at, text) in translation.map(timed).unwrap_or_default() {
+        // (A translation of nothing is written "//".)
+        if text.is_empty() || text == "//" {
+            continue;
+        }
+        let nearest = lines.iter_mut().min_by(|a, b| (a.at - at).abs().total_cmp(&(b.at - at).abs()));
+        if let Some(line) = nearest.filter(|line| (line.at - at).abs() <= 1.0 && line.translation.is_none()) {
+            line.translation = Some(text);
+        }
+    }
+    lines
 }
 
 /// The track on NetEase Cloud Music that is `track`: of those found by its title and artist, the first of its
@@ -364,6 +406,22 @@ mod tests {
     }
 
     #[test]
+    fn reads_netease_word_by_word() {
+        let yrc = "{\"t\":0,\"c\":[{\"tx\":\"作词: \"},{\"tx\":\"某人\"}]}
+[16210,3070](16210,670,0)Hello (16880,410,0)wor(17290,1990,0)ld
+[20000,1000](20000,1000,0)Again
+";
+        let lines = word_timed(yrc, Some("[00:16.20]你好世界
+[00:20.00]//"));
+        assert_eq!(lines.len(), 2);
+        let line = &lines[0];
+        assert_eq!((line.at, line.end, line.text.as_str(), line.translation.as_deref()), (16.21, Some(19.28), "Hello world", Some("你好世界")));
+        assert_eq!(line.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(), ["Hello ", "wor", "ld"]);
+        assert_eq!((line.words[1].at, line.words[1].end), (16.88, 17.29));
+        assert_eq!((lines[1].text.as_str(), lines[1].translation.as_deref()), ("Again", None));
+    }
+
+    #[test]
     fn escapes_a_query() {
         assert_eq!(escaped("我爱你 A&B"), "%E6%88%91%E7%88%B1%E4%BD%A0%20A%26B");
         assert!(same("Yellow ", "yel low"));
@@ -376,7 +434,10 @@ mod tests {
         let worded = amll(1901371647).expect("the collection's, word by word");
         println!("AMLL: {} lines; {:?}", worded.len(), worded.iter().find(|line| line.words.len() > 2).map(|line| (&line.text, line.words.len(), &line.translation)));
         let by_id = find(&Track { netease: Some(2124385847), title: String::new(), artist: String::new(), album: String::new(), seconds: 330 }).expect("NetEase's, by number");
-        println!("NetEase by number: {} lines, the second {:?}", by_id.len(), by_id.get(1));
+        println!("NetEase by number: {} lines, {} timed word by word, the second {:?}", by_id.len(), by_id.iter().filter(|line| !line.words.is_empty()).count(), by_id.get(1));
+        let worded = netease(1974443814).expect("NetEase's, word by word");
+        println!("NetEase word by word: {} lines; {:?}", worded.len(), worded.iter().find(|line| line.words.len() > 2).map(|line| (&line.text, &line.words, &line.translation)));
+        assert!(worded.iter().any(|line| line.words.len() > 2));
         let by_name = find(&Track { netease: None, title: "Yellow".into(), artist: "Coldplay".into(), album: "Parachutes".into(), seconds: 267 }).expect("LRCLIB's");
         println!("by name: {} lines, the first sung {:?}", by_name.len(), by_name.iter().find(|line| !line.text.is_empty()));
         let searched = netease_search(&Track { netease: None, title: "我爱你中国 (live)".into(), artist: "孙楠".into(), album: String::new(), seconds: 330 });
