@@ -136,6 +136,11 @@ static LYRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 #[cfg(windows)]
 static POSITION: Mutex<Option<(f64, std::time::Instant, bool)>> = Mutex::new(None);
 
+/// Paused: where it was held (seconds), and when its player had last said how far in it was as that was taken (see
+/// `look`).
+#[cfg(windows)]
+static HELD: Mutex<Option<(f64, std::time::Instant)>> = Mutex::new(None);
+
 /// How far into the track it is now (seconds), from the last look on by the time since while it plays; none where
 /// its player does not say.
 #[cfg(windows)]
@@ -156,16 +161,33 @@ fn look() -> Option<std::time::Duration> {
     if let (Some(at), Some((position, _))) = (seeking, playing.as_mut().and_then(|playing| playing.timeline.as_mut())) {
         *position = at;
     }
-    let was = *POSITION.lock().unwrap();
-    *POSITION.lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, std::time::Instant::now(), playing.playing)));
-    // Paused since it was last looked at: where it was reckoned to be then, and where its player says it stopped
-    // (for the journal: a line sung that moves as it pauses, told apart from the player's own saying).
-    if let (Some((at, when, true)), Some(now)) = (was, playing.as_ref().filter(|playing| !playing.playing)) {
-        if let Some((said, _)) = now.timeline {
-            let reckoned = at + when.elapsed().as_secs_f64();
-            crate::journal::note(format!("media: paused: reckoned at {reckoned:.2} s, {} says {said:.2} s, said {:.2} s ago", now.app, now.said_ago.unwrap_or(-1.0)));
+    // Paused, where its player last said how far in it was while it still played (as NetEase's does: it says
+    // nothing more as it pauses), it went on from there till it paused: where it was as the pause was first seen,
+    // held till the player says again. (Taken as said, the line sung went back as much as a second.)
+    let now = std::time::Instant::now();
+    if let (Some(playing), seeking) = (playing.as_mut(), seeking) {
+        let said_at = playing.said_ago.map(|ago| now - std::time::Duration::from_secs_f64(ago));
+        let mut held = HELD.lock().unwrap();
+        match (playing.playing, playing.timeline.as_mut()) {
+            (false, Some((position, _))) if seeking.is_none() => {
+                let was_playing = POSITION.lock().unwrap().is_some_and(|(_, _, playing)| playing);
+                match *held {
+                    // The same saying as when the pause was seen: where it was held.
+                    Some((at, by)) if said_at.is_some_and(|said| said <= by + std::time::Duration::from_millis(50)) => *position = at,
+                    // Paused just now: on from what was said, to now.
+                    _ if was_playing => {
+                        let at = *position + playing.said_ago.unwrap_or(0.0);
+                        *position = at;
+                        *held = said_at.map(|said| (at, said));
+                    }
+                    // Said again since (or paused before it was first looked at): as said.
+                    _ => *held = None,
+                }
+            }
+            _ => *held = None,
         }
     }
+    *POSITION.lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, now, playing.playing)));
     let timeline = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, length)| Timeline { at: at.floor(), length, seekable: playing.seekable }));
     let sound = crate::actions::volume();
     let (sung, next) = match playing.as_ref().filter(|playing| LYRICS.load(Ordering::Relaxed) && !playing.title.is_empty()) {
