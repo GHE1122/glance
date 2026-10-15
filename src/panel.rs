@@ -1061,16 +1061,17 @@ enum Kept {
     Docked,
 }
 
-/// The pointer's shape over edges `edges` of what is dragged by them (none:
-/// the whole of it, moved).
+/// The pointer's shape over edges `edges` of what is dragged by them (none: the plain arrow, as over a window,
+/// which is moved by its body all the same: the shape says what a press does where it is, and over the readings,
+/// a list among them, a press does what it does over any window).
 pub(crate) fn sizing(left: bool, right: bool, top: bool, bottom: bool) -> windows::core::PCWSTR {
-    use windows::Win32::UI::WindowsAndMessaging::{IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE};
+    use windows::Win32::UI::WindowsAndMessaging::{IDC_ARROW, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE};
     match (left || right, top || bottom) {
         (true, true) if left == top => IDC_SIZENWSE,
         (true, true) => IDC_SIZENESW,
         (true, false) => IDC_SIZEWE,
         (false, true) => IDC_SIZENS,
-        (false, false) => IDC_SIZEALL,
+        (false, false) => IDC_ARROW,
     }
 }
 
