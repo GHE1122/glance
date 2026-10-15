@@ -68,6 +68,8 @@ mod playing;
 #[cfg(windows)]
 mod lyrics;
 #[cfg(windows)]
+mod library;
+#[cfg(windows)]
 mod sound;
 #[cfg(windows)]
 mod cover;

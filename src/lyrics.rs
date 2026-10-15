@@ -10,7 +10,8 @@
 //! The sources are asked all at once (see `find`): where one far away cannot
 //! be reached, as may be in mainland China, NetEase's still come at once.
 //! Each track's are asked for on a thread of their own, and kept on disk
-//! (see `kept`): asked for again only once they may have changed.
+//! (see `kept`): asked for again only once they may have changed. Before
+//! all of these, a file of the track on this PC (see `library`): its own.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -96,6 +97,11 @@ pub fn of(track: &Track) -> Known {
     known.insert(track.clone(), Held::Asking);
     let track = track.clone();
     std::thread::spawn(move || {
+        // A file of it on this PC with lyrics: those (as they are now; not kept, as the file can change).
+        if let Some(lines) = crate::library::lyrics(&track) {
+            KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, Held::Found(Some(Arc::new(lines))));
+            return;
+        }
         let held = match kept::read(&track) {
             Some(kept) if kept.fresh() => Held::Found(kept.lines.map(Arc::new)),
             kept => {
@@ -447,6 +453,63 @@ pub fn merged(lrc: &str, translation: Option<&str>) -> Vec<Line> {
     lines
 }
 
+/// The lines of an LRC text as players keep it beside a track or in its tags: a line at the same time as the one
+/// before it is that one's translation; words timed within a line (`<mm:ss.xx>` before each, as the "enhanced"
+/// LRC times them, and after the last, where its end is said) are timed word by word.
+pub fn lrc(text: &str) -> Vec<Line> {
+    let mut lines: Vec<Line> = Vec::new();
+    for (at, said) in timed(text) {
+        let (words, closed) = worded(&said);
+        let plain = if words.is_empty() { said } else { words.iter().map(|(_, word)| word.as_str()).collect::<String>().trim().to_string() };
+        if let Some(line) = lines.last_mut().filter(|line| line.at == at && !line.text.is_empty() && line.translation.is_none()) {
+            if !plain.is_empty() {
+                line.translation = Some(plain);
+            }
+            continue;
+        }
+        // Each word ends as the next begins; the last, where its end is said, else as the next line begins.
+        let words = (0..words.len()).map(|i| (words[i].0, words.get(i + 1).map(|next| next.0).or(closed), words[i].1.clone())).collect::<Vec<_>>();
+        let mut line = Line { at, end: None, text: plain, words: Vec::new(), backing: None, translation: None };
+        line.words = words.into_iter().map(|(at, end, text)| Word { at, end: end.unwrap_or(f64::NAN), text }).collect();
+        lines.push(line);
+    }
+    for i in 0..lines.len() {
+        let next = lines.get(i + 1).map(|line| line.at);
+        if let Some(last) = lines[i].words.last_mut().filter(|last| last.end.is_nan()) {
+            last.end = next.unwrap_or(last.at).max(last.at);
+        }
+    }
+    lines
+}
+
+/// The words timed in an LRC line (`<mm:ss.xx>` before each): when each begins and what it is (with the space
+/// after it); and when the last ends, where a time follows it. None where no word is timed.
+fn worded(said: &str) -> (Vec<(f64, String)>, Option<f64>) {
+    let mut words: Vec<(f64, String)> = Vec::new();
+    let mut rest = said;
+    let mut closed = None;
+    while let Some(open) = rest.find('<') {
+        let Some((tag, after)) = rest[open + 1..].split_once('>') else { break };
+        let Some(at) = time(tag) else { break };
+        if let Some(last) = words.last_mut() {
+            last.1.push_str(&rest[..open]);
+        }
+        let end = after.find('<').unwrap_or(after.len());
+        if after[..end].is_empty() && end == after.len() {
+            closed = Some(at);
+            rest = "";
+            break;
+        }
+        words.push((at, after[..end].to_string()));
+        rest = &after[end..];
+    }
+    if let Some(last) = words.last_mut() {
+        last.1.push_str(rest);
+    }
+    words.retain(|(_, word)| !word.is_empty());
+    (words, closed)
+}
+
 /// Each timed line of an LRC text: when, and what (trimmed; empty where nothing is sung from then).
 fn timed(lrc: &str) -> Vec<(f64, String)> {
     let mut found = Vec::new();
@@ -596,6 +659,16 @@ mod tests {
         assert_eq!(sung_at(&lines, 35.95), Some(1));
         assert_eq!(sung_at(&lines, 500.0), Some(4));
         assert_eq!(sung_at(&merged("[00:10.00]a", None), 1.0), None);
+    }
+
+    #[test]
+    fn reads_a_local_lrc() {
+        let lines = lrc("[ti:x]\n[00:01.00]第一行\n[00:01.00]First line\n[00:02.50]<00:02.50>Hel<00:03.00>lo <00:03.40>you<00:04.00>\n[00:05.00]<00:05.00>end\n[00:07.00]\n");
+        let said: Vec<(f64, &str, Option<&str>)> = lines.iter().map(|l| (l.at, l.text.as_str(), l.translation.as_deref())).collect();
+        assert_eq!(said, vec![(1.0, "第一行", Some("First line")), (2.5, "Hello you", None), (5.0, "end", None), (7.0, "", None)]);
+        let words: Vec<(f64, f64, &str)> = lines[1].words.iter().map(|w| (w.at, w.end, w.text.as_str())).collect();
+        assert_eq!(words, vec![(2.5, 3.0, "Hel"), (3.0, 3.4, "lo "), (3.4, 4.0, "you")]);
+        assert_eq!((lines[2].words[0].at, lines[2].words[0].end), (5.0, 7.0));
     }
 
     #[test]
