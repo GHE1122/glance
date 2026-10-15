@@ -491,6 +491,9 @@ struct Widget {
     /// What of its lanes takes a press (what plays, the sound), where each
     /// is from the corner of what it shows (its own DIPs), as last drawn.
     hits: Vec<view::HitBox>,
+    /// How far its process list is turned (DIPs), and where the wheel turns it to (see `Widgets::wheel`).
+    scroll: f32,
+    scroll_target: f32,
     hits_from: (f32, f32),
     behind: Option<Behind>,
     /// When it is next drawn: at once while it moves, else after a rest (as
@@ -773,6 +776,24 @@ impl Widgets {
         widget.window.point(shape);
     }
 
+    /// Turns the process list under the pointer (`screen`, physical px) by the wheel's `delta`, as the panel's.
+    pub fn wheel(&mut self, hwnd: HWND, screen: POINT, delta: i16) {
+        let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
+        let mut client = screen;
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
+        }
+        let px = widget.contact.scale * widget.zoom;
+        let margin = widget.margin_px();
+        let (x, y) = ((client.x - margin) as f32 / px - widget.hits_from.0, (client.y - margin) as f32 / px - widget.hits_from.1);
+        let most = widget.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).and_then(|hit| hit.4.max_scroll());
+        if let Some(most) = most {
+            let rows = -(delta as f32) / 120.0 * crate::panel::WHEEL_ROWS;
+            widget.scroll_target = (widget.scroll_target + rows * view::TABLE_ROW).clamp(0.0, most);
+            widget.next_frame = Instant::now();
+        }
+    }
+
     /// Let go of a press on a widget, or (`cancelled`) its capture lost: then no press is completed.
     pub fn release(&mut self, hwnd: HWND, now: Instant, cancelled: bool) {
         let Some(index) = self.list.iter().position(|w| w.window.hwnd == hwnd) else { return };
@@ -998,6 +1019,8 @@ impl Widget {
             surface,
             layers: PanelLayers::default(),
             showing: None,
+            scroll: 0.0,
+            scroll_target: 0.0,
             contact,
             at,
             choice,
@@ -1631,7 +1654,9 @@ impl Widget {
         self.last_frame = now;
         // Each part of a frame timed, and a slow one noted.
         let started = Instant::now();
-        let mut moving = self.drag.is_some() || self.settle.is_some();
+        // Its process list turned on toward where the wheel turned it, as the panel's is.
+        self.scroll += (self.scroll_target - self.scroll) * (1.0 - std::f32::consts::E.powf(-dt / 1000.0 / crate::panel::SCROLL_EASE));
+        let mut moving = self.drag.is_some() || self.settle.is_some() || (self.scroll_target - self.scroll).abs() > 0.05;
         // Settling this frame (its last too): its far edges held.
         let settling = self.settle.is_some();
         // Flung: on along its way, slowing; gone once it has left the
@@ -1683,7 +1708,7 @@ impl Widget {
         let theme = Theme::new(look.skin, dark);
         // Room round it for its shadow, and above it for its buttons.
         self.margin = theme.margin.max(BUTTON + 2.0 * BUTTON_INSET);
-        let scene = view::Scene { hover: self.hit_hover, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hit_hover, process_scroll: self.scroll, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -1957,7 +1982,7 @@ impl Widget {
         // been taken: a first frame drawn before that would show the other.
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| sees));
         let theme = if dark == theme.dark { theme } else { Theme::new(look.skin, dark) };
-        let scene = view::Scene { hover: self.hit_hover, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hit_hover, process_scroll: self.scroll, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, now);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).

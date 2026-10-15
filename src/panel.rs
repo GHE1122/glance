@@ -85,9 +85,9 @@ const DEVICE_RETRY: Duration = Duration::from_millis(250);
 /// How often a live backdrop is taken again as it changes (see `widget::LIVE_INTERVAL`).
 const LIVE_INTERVAL: Duration = Duration::from_millis(66);
 /// Rows a wheel notch scrolls the process list by.
-const WHEEL_ROWS: f32 = 3.0;
+pub(crate) const WHEEL_ROWS: f32 = 3.0;
 /// How quickly the process list catches up with the wheel.
-const SCROLL_EASE: f32 = 0.06;
+pub(crate) const SCROLL_EASE: f32 = 0.06;
 
 /// The panel slides in from past the edge and fades up, and goes the same way.
 pub(crate) const OPEN: (Duration, Easing) = (Duration::from_millis(260), Easing(0.16, 1.0, 0.3, 1.0));
@@ -845,6 +845,7 @@ impl Controller {
                     let notches = (msg.wParam.0 >> 16) as u16 as i16 as f32 / 120.0;
                     std::thread::spawn(move || crate::app().clear_overlay(notches * 0.05));
                 }
+                WM_MOUSEWHEEL if widgets.owns(msg.hwnd) => widgets.wheel(msg.hwnd, lparam_point(msg.lParam), (msg.wParam.0 >> 16) as u16 as i16),
                 WM_MOUSEWHEEL if msg.hwnd == panel.window.hwnd => {
                     let delta = (msg.wParam.0 >> 16) as u16 as i16;
                     panel.wheel(lparam_point(msg.lParam), delta);
