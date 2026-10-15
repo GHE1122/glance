@@ -451,8 +451,9 @@ struct Widget {
     /// What is behind it, put together live where no one sees it (see
     /// `scene`): while it sees the desktop and shows.
     backdrop: Option<crate::ui::scene::Scene>,
-    /// When the windows behind it were last looked at for it.
+    /// When the windows behind it were last looked at for it, and the screen it was on then.
     arranged: Option<Instant>,
+    arranged_on: Option<RECT>,
     /// Looking at what is behind it again is due (let go, the settings
     /// gone from the front).
     retake: bool,
@@ -1062,6 +1063,7 @@ impl Widget {
             hint: None,
             backdrop: None,
             arranged: None,
+            arranged_on: None,
             retake: false,
             pending: None,
             look_again: None,
@@ -1936,7 +1938,9 @@ impl Widget {
             let taken = behind.capture.rect;
             let ahead = if self.drag.is_some() { (on_screen.right - on_screen.left).max(on_screen.bottom - on_screen.top) / 6 } else { 0 };
             let past = on_screen.left - ahead < taken.left || on_screen.top - ahead < taken.top || on_screen.right + ahead > taken.right || on_screen.bottom + ahead > taken.bottom;
-            let other_screen = clip(taken, self.contact.monitor) != taken;
+            // (What was taken may reach past its screen, onto others or where there is none: only its being on
+            // another screen than it was on when it was taken counts.)
+            let other_screen = self.arranged_on.is_some_and(|on| on != self.contact.monitor);
             other_screen || past
         });
         let retake = self.retake && self.drag.is_none() && !sizing;
@@ -1971,6 +1975,7 @@ impl Widget {
                 self.backdrop = crate::ui::scene::Scene::new(area, wake, &self.gfx);
             }
             self.arranged = Some(now);
+            self.arranged_on = Some(self.contact.monitor);
             // In hand, light or dark holds (measured again as it is let go:
             // see `retone`).
             let moved = (elsewhere && self.drag.is_none()) || self.replace == Some(true);
