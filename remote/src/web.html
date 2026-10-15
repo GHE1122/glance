@@ -153,15 +153,15 @@ async function act(path, body, expect) {
   busy--; draw();
 }
 function failed(error) {
-  if (error.status === 401) { said(t("需要重新配对", "Pair again"), "bad"); unpaired(t("电脑不再认这个浏览器", "The PC no longer takes this browser")); }
-  else said(error.status ? t("没有做成", "Not done") : t("连不上", "No answer"), "bad");
+  if (error.status === 401) { said(t("需要重新配对", "Pair again"), "bad"); unpaired(t("电脑已不再信任此浏览器", "The PC no longer takes this browser")); }
+  else said(error.status ? t("操作未完成", "Not done") : t("无法连接", "No answer"), "bad");
 }
 function unpaired(title) {
   main.hidden = true;
   document.getElementById("rig").hidden = true;
   document.getElementById("unpaired").hidden = false;
   document.getElementById("unpaired-title").textContent = title;
-  document.getElementById("unpaired-how").textContent = t("在电脑上打开 Glance 的手机遥控，生成网页配对码，用这部手机扫描。", "On the PC, open Glance's remote control, show the code for the web page, and scan it with this phone.");
+  document.getElementById("unpaired-how").textContent = t("请在电脑上打开 Glance 的手机遥控，生成网页配对码，并用本手机扫描。", "On the PC, open Glance's remote control, show the code for the web page, and scan it with this phone.");
 }
 
 const EFFECTS = [["steady", t("常亮", "Steady")], ["breathing", t("呼吸", "Breathing")], ["rainbow", t("彩虹", "Rainbow")], ["heat", t("跟随温度", "By heat")]];
@@ -214,9 +214,9 @@ function draw() {
   }
   const tiles = el("div", "tiles");
   tiles.append(
-    tile(t("夜间模式", "Night mode"), night ? t("已开启，电脑还在运行。再点一次结束", "On; the PC is still running. Tap again to end it") : t("电脑继续运行：关屏、关灯、静音、切到节能", "The PC keeps running: screens off, lights off, sound muted, power saving"), night, () => act("/v1/night", { on: !night }, s => { s.night = !night; s.screen = night; s.lights = night; }), true),
-    tile(t("屏幕", "Screens"), screen ? t("亮着，点一下全部关闭", "On. Tap to turn them all off") : t("已关闭，点一下打开", "Off. Tap to turn them on"), screen, () => act("/v1/screen", { on: !screen }, s => { s.screen = !screen; })),
-    ...(state.lights_there === false ? [] : [tile(t("灯光", "Lights"), lights === false ? t("关着，点一下打开", "Off. Tap to turn them on") : t("开着", "On"), lights !== false, () => act("/v1/lights", { on: lights === false }, s => { s.lights = lights === false; }))]),
+    tile(t("夜间模式", "Night mode"), night ? t("已开启，电脑仍在运行。再次点按即可结束", "On; the PC is still running. Tap again to end it") : t("电脑保持运行，关闭屏幕与灯光、静音并切换至节能", "The PC keeps running: screens off, lights off, sound muted, power saving"), night, () => act("/v1/night", { on: !night }, s => { s.night = !night; s.screen = night; s.lights = night; }), true),
+    tile(t("屏幕", "Screens"), screen ? t("已开启，点按关闭全部屏幕", "On. Tap to turn them all off") : t("已关闭，点按开启", "Off. Tap to turn them on"), screen, () => act("/v1/screen", { on: !screen }, s => { s.screen = !screen; })),
+    ...(state.lights_there === false ? [] : [tile(t("灯光", "Lights"), lights === false ? t("已关闭，点按开启", "Off. Tap to turn them on") : t("已开启", "On"), lights !== false, () => act("/v1/lights", { on: lights === false }, s => { s.lights = lights === false; }))]),
   );
   main.append(tiles);
   if ((state.power || []).length > 1) {
@@ -225,7 +225,7 @@ function draw() {
     main.append(c);
   }
   if (lights === true && !night && state.light && state.colours_there !== false) {
-    const light = state.light, c = card(t("灯光的效果和颜色", "Lighting effect and colour"));
+    const light = state.light, c = card(t("灯光效果与颜色", "Lighting effect and colour"));
     c.append(
       chips(EFFECTS.filter(([id]) => id !== "heat" || reads).map(([id, name]) => [name, light.effect === id, () => act("/v1/lights", { on: true, effect: id }, s => { s.light.effect = id; })])),
       chips(COLOURS.map(colour => ["", light.color.toUpperCase() === colour, () => act("/v1/lights", { on: true, color: colour }, s => { s.light.color = colour; }), colour]), "swatches"),
@@ -269,17 +269,17 @@ function draw() {
       for (const [sign, what, cls, said] of [["previous", "previous", "", t("上一首", "Previous")], [media.playing ? "pause" : "play", "toggle", "main", media.playing ? t("暂停", "Pause") : t("播放", "Play")], ["next", "next", "", t("下一首", "Next")]]) { const b = el("button", cls || ""); b.setAttribute("aria-label", said); b.append(sign_of(sign)); b.onclick = () => act("/v1/media", { do: what }); keys.append(b); }
       row.append(text, keys); c.append(row);
       // A player known only by its sound: how it may be made to say what it plays.
-      if (!media.title) c.append(el("span", "note small", t("这个播放器没有把歌名告诉系统。网易云音乐可以在它的设置里打开“开启 SMTC”。", "This player does not tell Windows what it plays. In NetEase Cloud Music, turn on “SMTC” in its settings.")));
+      if (!media.title) c.append(el("span", "note small", t("该播放器未向系统提供歌曲信息。网易云音乐可在其设置中开启“SMTC”。", "This player does not tell Windows what it plays. In NetEase Cloud Music, turn on “SMTC” in its settings.")));
     }
     main.append(c);
   }
-  main.append(tile(t("睡眠", "Sleep"), t("整台电脑停下来，最省电。不能从手机唤醒，要在电脑上按键盘或电源键", "The whole PC stops: the least power. The phone cannot wake it; press a key or the power button on the PC"), false, () => { question = true; draw(); }, true));
+  main.append(tile(t("睡眠", "Sleep"), t("整台电脑暂停运行，最为省电。无法通过手机唤醒，需在电脑上按键盘或电源键", "The whole PC stops: the least power. The phone cannot wake it; press a key or the power button on the PC"), false, () => { question = true; draw(); }, true));
   if (question) {
     const over = el("div", "ask"), box = el("div"), nav = el("nav"), no = el("button", "", t("取消", "Cancel")), yes = el("button", "do", t("睡眠", "Sleep"));
     no.onclick = () => { question = null; draw(); };
     yes.onclick = () => { question = null; act("/v1/sleep", {}); };
     nav.append(no, yes);
-    box.append(el("h3", "", t("让电脑睡眠？", "Put the PC to sleep?")), el("p", "", t("电脑上的一切都会停下：下载、远程连接、正在跑的程序。睡着后不能从手机唤醒，要在电脑上按键盘或电源键。", "Everything on the PC stops: downloads, remote connections, programs at work. Asleep, it cannot be woken from the phone; press a key or the power button on the PC.")), el("p", "", t("只想关屏关灯、让电脑继续运行，请用夜间模式。", "To turn off only the screens and the lights and leave the PC running, use night mode.")), nav);
+    box.append(el("h3", "", t("使电脑进入睡眠？", "Put the PC to sleep?")), el("p", "", t("电脑上的所有活动都将暂停，包括下载、远程连接和正在运行的程序。进入睡眠后无法通过手机唤醒，需在电脑上按键盘或电源键。", "Everything on the PC stops: downloads, remote connections, programs at work. Asleep, it cannot be woken from the phone; press a key or the power button on the PC.")), el("p", "", t("如仅需关闭屏幕与灯光并保持电脑运行，请使用夜间模式。", "To turn off only the screens and the lights and leave the PC running, use night mode.")), nav);
     over.append(box); main.append(over);
   }
 }
@@ -326,7 +326,7 @@ function fan(g, centre, u, v, r) {
 // Builds the picture once; what it gives back puts the PC's state into it.
 function rig(host) {
   const W = 56, D = 124, H = 128, R = 9;
-  const svg = svgEl("svg", { viewBox: "-190 -148 320 254", role: "img", "aria-label": t("电脑机箱，各部件的温度", "The PC's case, and how warm its parts are") }, host);
+  const svg = svgEl("svg", { viewBox: "-190 -148 320 254", role: "img", "aria-label": t("电脑示意图及各部件温度", "The PC's case, and how warm its parts are") }, host);
   const scene = svgEl("g", {}, svg);
   const inside = svgEl("g", { color: "#3a424d" }, scene), walls = [];
   for (const points of [[[0, 0, 0], [W, 0, 0], [W, D, 0], [0, D, 0]], [[0, 0, 0], [0, D, 0], [0, D, H], [0, 0, H]], [[0, 0, 0], [W, 0, 0], [W, 0, H], [0, 0, H]]]) walls.push(svgEl("path", Object.assign({ d: loop(points, R), stroke: "currentColor", "stroke-width": 1 }, LINE), inside));
@@ -411,7 +411,7 @@ async function look() {
   try { const answer = await ask("/v1/state"); if (!busy) { state = answer; said(t("已连接", "Connected"), "good"); draw(); } }
   catch (error) { if (!busy) failed(error); }
 }
-if (!key) { said(""); unpaired(t("这个浏览器还没有和电脑配对", "This browser is not paired with the PC")); }
+if (!key) { said(""); unpaired(t("此浏览器尚未与电脑配对", "This browser is not paired with the PC")); }
 else { said(t("正在连接…", "Reaching it…")); look(); setInterval(look, 2000); document.addEventListener("visibilitychange", look); }
 </script>
 </body>

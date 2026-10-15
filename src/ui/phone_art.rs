@@ -714,16 +714,16 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     };
 
     // Night, the screens, the lights.
-    tile(&picture, &mut parts, Rect { x: side, y, w: wide, h: 76.0 }, night, lang.pick("夜间模式", "Night mode"), if night { lang.pick("已开启，电脑还在运行。再点一次结束", "On; the PC is still running. Press again to end it") } else { lang.pick("电脑继续运行：关屏、关灯、切到节能", "The PC keeps running: screens off, lights off, power saver") }, Part::Night);
+    tile(&picture, &mut parts, Rect { x: side, y, w: wide, h: 76.0 }, night, lang.pick("夜间模式", "Night mode"), if night { lang.pick("已开启，电脑仍在运行。再次点按即可结束", "On. The PC is still running. Tap again to end it") } else { lang.pick("电脑保持运行，关闭屏幕与灯光、静音并切换至节能", "The PC keeps running: screens off, lights off, sound muted, power saver") }, Part::Night);
     y += 76.0 + 12.0;
     let half = if lights_there { (wide - 12.0) / 2.0 } else { wide };
-    tile(&picture, &mut parts, Rect { x: side, y, w: half, h: 88.0 }, screens != Some(false), lang.pick("屏幕", "Screens"), if screens == Some(false) { lang.pick("已关闭，点一下打开", "Off. Press to turn them on") } else { lang.pick("亮着，点一下全部关闭", "On. Press to turn them all off") }, Part::Screen);
+    tile(&picture, &mut parts, Rect { x: side, y, w: half, h: 88.0 }, screens != Some(false), lang.pick("屏幕", "Screens"), if screens == Some(false) { lang.pick("已关闭，点按开启", "Off. Tap to turn them on") } else { lang.pick("已开启，点按关闭全部屏幕", "On. Tap to turn them all off") }, Part::Screen);
     if lights_there {
         let how = match lights {
-            Some(true) if colours_there => format!("{} · {effect_name}", lang.pick("开着", "On")),
-            Some(true) => lang.pick("开着", "On").to_string(),
-            Some(false) => lang.pick("关着，点一下打开", "Off. Press to turn them on").to_string(),
-            None => lang.pick("点一下关灯", "Press to turn them off").to_string(),
+            Some(true) if colours_there => format!("{} · {effect_name}", lang.pick("已开启", "On")),
+            Some(true) => lang.pick("已开启", "On").to_string(),
+            Some(false) => lang.pick("已关闭，点按开启", "Off. Tap to turn them on").to_string(),
+            None => lang.pick("点按关闭灯光", "Tap to turn them off").to_string(),
         };
         tile(&picture, &mut parts, Rect { x: side + half + 12.0, y, w: half, h: 88.0 }, lights != Some(false), if keys_alone { lang.pick("键盘背光", "Keyboard light") } else { lang.pick("灯光", "Lights") }, &how, Part::Lights);
     }
@@ -776,9 +776,9 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
         let more = (rows - 1) as f32 * apart;
         let at = |place: usize| Vector2 { X: side + 16.0 + 18.0 + (place % across) as f32 * apart, Y: y + 62.0 + (place / across) as f32 * apart };
         picture.plate(Rect { x: side, y, w: wide, h: tall + more }, 20.0, CARD);
-        picture.words(lang.pick("灯光的效果和颜色", "Lighting effect and colour"), label, DIM, side + 16.0, y + 27.0, false);
+        picture.words(lang.pick("灯光效果与颜色", "Lighting effect and colour"), label, DIM, side + 16.0, y + 27.0, false);
         // How one is taken away, said at the card's other end; while they are, what ends that.
-        let word = if removing { lang.pick("完成", "Done") } else { lang.pick("长按颜色可删除", "Hold a colour to remove it") };
+        let word = if removing { lang.pick("完成", "Done") } else { lang.pick("长按颜色即可删除", "Hold a colour to remove it") };
         picture.words(word, label, if removing { ACCENT } else { FAINT }, side + wide - 16.0, y + 27.0, true);
         if live && removing {
             let across = frame.gfx.measure(word, label);
@@ -863,7 +863,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             // How much colour: from none of it to all of it.
             let row = centre.Y + across / 2.0 + 16.0 + 14.0;
             let (x, width) = (side + 64.0, wide - 64.0 - 16.0 - 44.0);
-            picture.words(lang.pick("浓度", "Depth"), label, DIM, side + 16.0, row + 4.0, false);
+            picture.words(lang.pick("饱和度", "Depth"), label, DIM, side + 16.0, row + 4.0, false);
             if let Some(fading) = frame.gradient(Vector2 { X: x, Y: 0.0 }, hued(hue, 0.0), Vector2 { X: x + width, Y: 0.0 }, hued(hue, 1.0)) {
                 unsafe { frame.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(x, row - 4.0, width, 8.0), radiusX: 4.0, radiusY: 4.0 }, &fading) };
             }
@@ -873,7 +873,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
             }
             picture.words(&format!("{:.0}%", depth * 100.0), label, INK, side + wide - 16.0, row + 4.0, true);
             let (top, each) = (row + 14.0 + 16.0, (wide - 32.0 - 12.0) / 2.0);
-            for (place, (word, part)) in [(lang.pick("取消", "Cancel"), Part::GiveUp), (lang.pick("用这个颜色", "Use this colour"), Part::Use)].into_iter().enumerate() {
+            for (place, (word, part)) in [(lang.pick("取消", "Cancel"), Part::GiveUp), (lang.pick("使用此颜色", "Use this colour"), Part::Use)].into_iter().enumerate() {
                 let r = Rect { x: side + 16.0 + place as f32 * (each + 12.0), y: top, w: each, h: 44.0 };
                 let kept = part == Part::Use;
                 picture.plate(r, 14.0, if kept { INK } else { TILE });
@@ -1008,7 +1008,7 @@ pub fn paint(frame: &Frame, at: Rect, lang: Lang, name: &str, reads: &Value, sta
     }
 
     // Sleep says what it means where it is pressed (and is asked about again before it is done).
-    tile(&picture, &mut parts, Rect { x: side, y, w: wide, h: 96.0 }, false, lang.pick("睡眠", "Sleep"), lang.pick("整台电脑停下来，最省电。不能从手机唤醒，要在电脑上按键盘或电源键", "The whole PC stops: the least power. A phone cannot wake it; press a key or the power button on the PC"), Part::Sleep);
+    tile(&picture, &mut parts, Rect { x: side, y, w: wide, h: 96.0 }, false, lang.pick("睡眠", "Sleep"), lang.pick("整台电脑暂停运行，最为省电。无法通过手机唤醒，需在电脑上按键盘或电源键", "The whole PC stops: the least power. A phone cannot wake it; press a key or the power button on the PC"), Part::Sleep);
     y += 96.0 + 24.0;
 
     unsafe { frame.dc.PopAxisAlignedClip() };
