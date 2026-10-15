@@ -48,7 +48,7 @@ use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDe
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, GetShellWindow, GetWindowRect, IsIconic, IsWindowVisible, RegisterClassW, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP,
+    SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP,
 };
 
 use super::backdrop::{Capture, Spare, Texture};
@@ -489,12 +489,15 @@ impl Scene {
         // holds nothing. Not behind, as while Explorer is not running: nothing then tells such a frame.)
         let shell = unsafe { GetShellWindow() };
         let opaque: Vec<RECT> = behind.iter().find(|(window, _)| *window == shell).map_or_else(Vec::new, |(_, desktop)| {
-            crate::screens::all().iter().filter_map(|screen| meeting(meeting(*desktop, screen.monitor)?, area)).collect()
+            crate::screens::monitors().into_iter().filter_map(|monitor| meeting(meeting(*desktop, monitor)?, area)).collect()
         });
         let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
         if area != self.area {
+            // (Only moved, where its size is as it was: sizing a window costs more.)
+            let same_size = (area.right - area.left, area.bottom - area.top) == (self.area.right - self.area.left, self.area.bottom - self.area.top);
+            let flags = SWP_NOACTIVATE | SWP_NOZORDER | if same_size { SWP_NOSIZE } else { Default::default() };
             unsafe {
-                let _ = SetWindowPos(self.window, None, area.left, area.top, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+                let _ = SetWindowPos(self.window, None, area.left, area.top, width, height, flags);
             }
             self.area = area;
         }
@@ -682,13 +685,16 @@ mod tests {
             }
         };
         let mut means = Vec::new();
+        let mut arranged = Vec::new();
         for step in 0..60 {
             let (x, grow) = (100 + (step % 7) * 53, (step % 5) * 61);
             let area = RECT { left: x, top: 100 + grow / 2, right: x + 300 + grow, bottom: 300 + grow };
             if step % 10 == 9 {
                 scene.rest();
             }
+            let arranging = std::time::Instant::now();
             scene.arrange(area, all[0]);
+            arranged.push(arranging.elapsed().as_secs_f64() * 1000.0);
             let began = std::time::Instant::now();
             scene.want();
             let mut capture = None;
@@ -705,6 +711,8 @@ mod tests {
             means.push(seen.iter().sum::<f32>() / seen.len() as f32);
         }
         let dark = means.iter().filter(|mean| (0.0..0.02).contains(*mean)).count();
+        arranged.sort_by(f64::total_cmp);
+        println!("arranging took {:.2} ms at the median, {:.2} at most", arranged[arranged.len() / 2], arranged[arranged.len() - 1]);
         println!("first frames: {dark} of {} dark; none {}; {:?}", means.len(), means.iter().filter(|m| **m < 0.0).count(), means.iter().map(|m| (m * 100.0).round() as i32).collect::<Vec<_>>());
     }
 
