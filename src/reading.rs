@@ -285,7 +285,11 @@ pub struct SystemSample {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BatterySample {
     pub percent: u8,
+    /// Taking charge now (not merely plugged in: a full battery on mains power takes none).
     pub charging: bool,
+    /// On mains power.
+    #[serde(default)]
+    pub plugged: bool,
     pub seconds_left: Option<u32>,
     /// Watts going in (charging, above 0) or out (below 0): on battery
     /// power, what the whole machine draws.

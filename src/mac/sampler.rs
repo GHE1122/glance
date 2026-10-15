@@ -476,6 +476,7 @@ fn battery() -> Option<BatterySample> {
         Some(BatterySample {
             percent: (current * 100 / most).clamp(0, 100) as u8,
             charging: flag("Is Charging"),
+            plugged: !on_battery,
             seconds_left: left.map(|minutes| minutes as u32 * 60),
             watts,
             health,

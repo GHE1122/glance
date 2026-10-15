@@ -1371,6 +1371,7 @@ fn battery() -> Option<BatterySample> {
     let mut status = SYSTEM_POWER_STATUS::default();
     unsafe { GetSystemPowerStatus(&mut status) }.ok()?;
     const NO_BATTERY: u8 = 128;
+    const CHARGING: u8 = 8;
     const UNKNOWN: u8 = 255;
     if status.BatteryFlag & NO_BATTERY != 0 || status.BatteryLifePercent == UNKNOWN {
         return None;
@@ -1378,7 +1379,9 @@ fn battery() -> Option<BatterySample> {
     let figures = crate::battery::read();
     Some(BatterySample {
         percent: status.BatteryLifePercent,
-        charging: status.ACLineStatus == 1,
+        // (Charging, as the system says it apart from being plugged in.)
+        charging: status.BatteryFlag & CHARGING != 0,
+        plugged: status.ACLineStatus == 1,
         seconds_left: (status.BatteryLifeTime != u32::MAX).then_some(status.BatteryLifeTime),
         watts: figures.watts,
         health: figures.health,

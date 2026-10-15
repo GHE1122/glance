@@ -914,6 +914,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let battery = s.battery.as_ref();
             let state = match battery {
                 Some(battery) if battery.charging => lang.pick("正在充电", "Charging").to_string(),
+                Some(battery) if battery.plugged => lang.pick("已接通电源", "Plugged in").to_string(),
                 Some(battery) => match battery.seconds_left {
                     Some(left) => {
                         let left = lang.duration(left as u64);
@@ -944,7 +945,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 Block::Readout {
                     figure: shown(battery, |b| b.percent.to_string()),
                     unit: "%",
-                    hot: battery.is_some_and(|b| !b.charging && b.percent <= 20),
+                    hot: battery.is_some_and(|b| !b.plugged && b.percent <= 20),
                     plot: chart.then(|| Plot::new(scene, vec![Box::new(|s| s.battery.as_ref().map(|b| b.percent as f64))], Some(100.0), None)),
                 },
                 Block::Facts { rows: facts, gap: 8.0 },
@@ -1942,7 +1943,7 @@ mod tests {
             volumes: Vec::new(),
             processes: Vec::new(),
             system: SystemSample { uptime_s: 60, processes: 1, threads: 1, handles: 1 },
-            battery: battery.map(|percent| BatterySample { percent, charging: false, seconds_left: None, watts: None, health: None }),
+            battery: battery.map(|percent| BatterySample { percent, charging: false, plugged: false, seconds_left: None, watts: None, health: None }),
             cpu_sensors: None,
             board: fan.map(|rpm| BoardSensors { temps: Vec::new(), fans: vec![("1".into(), rpm)] }),
             drive_temps: Vec::new(),
