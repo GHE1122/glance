@@ -1097,7 +1097,10 @@ impl Shown {
         });
         // The line sung now, rising in as it comes, filled as it is sung; under it its translation or the next.
         let line_top = pad + 46.0;
-        unsafe { frame.dc.PushAxisAlignedClip(&rect(left - 4.0, line_top - 4.0, width + 8.0, 48.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        // Down to a little above the bottom row (the spectrum, or the controls in its place).
+        let bottom = pad + side - CONTROL - 8.0;
+        let under_tall = PLAYER_UNDER.size * 1.35;
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(left - 4.0, line_top - 4.0, width + 8.0, bottom - line_top + 4.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         match (&moment.lines, moment.now) {
             (Some(lines), Some(now)) => {
                 let line = &lines[now];
@@ -1108,22 +1111,31 @@ impl Shown {
                 let y = line_top + (1.0 - eased) * 10.0;
                 // (What is sung near white, the cover's colour in it, as the card's line sung now: clearly apart from what is not.)
                 let (dim, bright) = (Color::hex(0xFFFFFF, 0.36 * eased), colour(toward(tint, [1.0; 3], 0.65), eased));
-                let font = if text.trim().is_empty() {
+                let tall = if text.trim().is_empty() {
                     interlude(frame, left, y, PLAYER_LINE.size, between(line, next, moment.position), dim, bright);
-                    PLAYER_LINE
+                    PLAYER_LINE.size * 1.4
                 } else {
-                    // Too long for its room: smaller, down to the size of what is under it, then cut where it wraps.
-                    let font = Font { size: (PLAYER_LINE.size * (width / frame.measure(&text, PLAYER_LINE).max(1.0))).clamp(PLAYER_UNDER.size + 1.5, PLAYER_LINE.size), ..PLAYER_LINE };
+                    // Too long for a row: wrapped, at the largest size (down to that of what is under it) at which
+                    // all its rows fit with what is under it; else all its rows alone; else at the least, its rows
+                    // as far as they fit.
+                    let room = bottom - line_top;
+                    let sizes = || (0..).map(|step| PLAYER_LINE.size - step as f32).take_while(|size| *size >= PLAYER_UNDER.size).map(|size| Font { size, ..PLAYER_LINE });
+                    let height = |font: Font| frame.gfx.wrapped_height(&text, font, width);
+                    let font = sizes()
+                        .find(|font| height(*font) + 2.0 + under_tall <= room)
+                        .or_else(|| sizes().find(|font| height(*font) <= room))
+                        .unwrap_or(Font { size: PLAYER_UNDER.size, ..PLAYER_LINE });
                     let layout = frame.gfx.wrapped(&text, font, width);
                     let sung = sung_to(&parts, moment.position);
-                    // Its first row only (what wraps would lie over what is under it).
-                    frame.clip(left - 4.0, y - 4.0, width + 8.0, gfx::first_row(&layout).height + 4.0);
                     filled(frame, &layout, &text, font, left, y, width, sung, dim, bright, 12.0);
-                    frame.unclip();
-                    font
+                    height(font)
                 };
-                let under = line.translation.clone().filter(|_| moment.translated).or_else(|| lines.get(now + 1).map(|line| line.text.clone())).unwrap_or_default();
-                frame.text(&fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(0xFFFFFF, 0.5 * eased), left, line_top + font.size * 1.4 + 2.0, width + 2.0, Align::Start);
+                // Under it, where there is room, its translation or the next line.
+                let under_top = line_top + tall + 2.0;
+                if under_top + under_tall <= bottom {
+                    let under = line.translation.clone().filter(|_| moment.translated).or_else(|| lines.get(now + 1).map(|line| line.text.clone())).unwrap_or_default();
+                    frame.text(&fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(0xFFFFFF, 0.5 * eased), left, under_top, width + 2.0, Align::Start);
+                }
             }
             // None sung yet: a note, filled as the music before the first line goes on.
             (Some(lines), None) => {
@@ -1574,6 +1586,37 @@ mod tests {
 mod pictures {
     use super::*;
     use crate::lyrics::Word;
+
+    /// The same text drawn at a window's corner as the compositor's atlas might put it (at 1, 355, 533 and 549
+    /// pixels down): drawn the same, pixel for pixel, at each.
+    #[test]
+    #[ignore]
+    fn text_is_drawn_the_same_wherever_in_the_atlas() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let gfx = gfx::current().unwrap();
+        let places = [1u32, 355, 533, 549];
+        let (w, h) = (400u32, 120u32);
+        let pixels = gfx
+            .draw_offscreen((w, 700), 1.5, |frame| {
+                for at in places {
+                    frame.origin(0.0, at as f32 / 1.5);
+                    let y = 14.0 + FLOAT_FONT.size * 1.45;
+                    outlined(frame, "Oh oh 终于成人", FLOAT_UNDER, Color::hex(0xFFFFFF, 0.78), 20.0, y - 40.0, 300.0);
+                    frame.text("Love Story", PLAYER_TITLE, Color::hex(0xFFFFFF, 0.95), 20.333, 70.0 / 1.5 + 0.1, 300.0, Align::Start);
+                }
+            })
+            .unwrap();
+        let region = |at: u32| -> Vec<u8> { (at..at + h).flat_map(|y| pixels[(y * w * 4) as usize..((y + 1) * w * 4) as usize].to_vec()).collect() };
+        let first = region(places[0]);
+        for at in places {
+            let other = region(at);
+            let differing = first.chunks(4).zip(other.chunks(4)).filter(|(a, b)| a != b).count();
+            println!("at {at}: {differing} pixels differ from at {}", places[0]);
+        }
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/atlas.png", env!("CARGO_MANIFEST_DIR"))), w, 700, &pixels).unwrap();
+    }
 
     /// Draws the card, the player and the floating lyrics as they would show a made-up track (its lines timed word
     /// by word, a cover of two colours, a made-up spectrum), with the pointer away and over them, into PNG files in
