@@ -796,7 +796,7 @@ impl Controller {
                 }
                 // The sound's track let go (or the button found up as the pointer moves, or the capture lost).
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST | WM_MOUSEMOVE
-                    if msg.hwnd == panel.window.hwnd && panel.sliding && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
+                    if msg.hwnd == panel.window.hwnd && panel.sliding.is_some() && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
                 {
                     panel.slid()
                 }
@@ -1240,7 +1240,7 @@ struct Panel<'a> {
     /// the pointer is past, if it is (shown on it as it is dragged).
     sizing: Option<(f32, Option<Limit>)>,
     /// The sound's track is being slid along.
-    sliding: bool,
+    sliding: Option<crate::playing::Slider>,
     /// The desktop behind the glass is to be taken again (the panel moved
     /// or grew past what was taken).
     recapture: bool,
@@ -1318,7 +1318,7 @@ impl<'a> Panel<'a> {
             drag: None,
             largest: SIZES.1,
             sizing: None,
-            sliding: false,
+            sliding: None,
             recapture: false,
             capturing: None,
             look_again: None,
@@ -1887,8 +1887,8 @@ impl<'a> Panel<'a> {
     /// `grip_at`) to move it.
     fn press(&mut self, client: POINT) {
         // On the sound's track: it is slid along till let go.
-        if self.hit_at(client) == Some(Hit::Volume) {
-            self.sliding = true;
+        if let Some(slider) = self.hit_at(client).and_then(Hit::slider) {
+            self.sliding = Some(slider);
             self.slide(client);
             unsafe {
                 windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd);
@@ -1907,37 +1907,36 @@ impl<'a> Panel<'a> {
 
     /// Whether it is being dragged (or the sound's track is): till its window is told the button went up.
     fn held(&self) -> bool {
-        self.drag.is_some() || self.sliding
+        self.drag.is_some() || self.sliding.is_some()
     }
 
-    /// The sound as loud as where `client` is along its track (the pointer may have left the track: as far as it goes).
-    fn slide(&mut self, client: POINT) -> Option<u8> {
+    /// The track slid along as far as where `client` is along it (the pointer may have left the track: as far as it
+    /// goes).
+    fn slide(&mut self, client: POINT) -> Option<()> {
+        let slider = self.sliding?;
         let px = self.placement.as_ref()?.px;
         let x = client.x as f32 / px - self.corner.0;
-        let (from, wide) = self.hits.iter().find(|hit| hit.4 == Hit::Volume).map(|(hx, _, w, ..)| (*hx, *w))?;
-        let level = (((x - from) / wide).clamp(0.0, 1.0) * 100.0).round() as u8;
-        crate::playing::slide(level);
+        let (from, wide) = self.hits.iter().find(|hit| hit.4.slider() == Some(slider)).map(|(hx, _, w, ..)| (*hx, *w))?;
+        crate::playing::slide_along(slider, (x - from) / wide);
         self.next_frame = Instant::now();
-        Some(level)
+        Some(())
     }
 
-    /// The sound's track let go: as loud as it was left.
+    /// The track let go: as it was left.
     fn slid(&mut self) {
-        self.sliding = false;
+        let Some(slider) = self.sliding.take() else { return };
         unsafe {
             let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
         }
-        if let Some(level) = crate::playing::now().and_then(|now| now.volume) {
-            crate::playing::act(crate::playing::Act::Volume(level));
-        }
+        crate::playing::slid(slider, true);
     }
 
     /// Follows the pointer while it is dragged: the panel moves with it,
     /// onto another screen too; or, held by its edges, grows and shrinks as
     /// a whole from the corner opposite them (its shape is its lanes').
     fn dragged(&mut self, now: Instant) {
-        if self.sliding {
+        if self.sliding.is_some() {
             if let (Some(cursor), Some(window)) = (cursor_position(), self.placement.as_ref().map(|p| p.window)) {
                 self.slide(POINT { x: cursor.x - window.left, y: cursor.y - window.top });
             }

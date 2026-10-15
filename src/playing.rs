@@ -276,12 +276,48 @@ pub fn slide(level: u8) {
     std::thread::spawn(move || drop(crate::actions::set_volume(Some(level), None)));
 }
 
-/// What plays as if `at` seconds into its track while its track is dragged along (none: let go without moving
-/// it, as it was): shown so at once; asked for when it is let go (see `act`).
+/// A track dragged along: the sound's, or that of what plays.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Slider {
+    Volume,
+    Seek,
+}
+
+/// `slider` dragged to `fraction` of the way along it: the sound as loud, set at once; what plays shown as that far
+/// into its track, and played from there once let go (see `slid`).
 #[cfg(windows)]
-pub fn seek_slide(at: Option<f64>) {
-    *SEEKING.lock().unwrap() = at.map(|at| (at, None));
-    let _ = look();
+pub fn slide_along(slider: Slider, fraction: f32) {
+    let fraction = fraction.clamp(0.0, 1.0);
+    match slider {
+        Slider::Volume => slide((fraction * 100.0).round() as u8),
+        Slider::Seek => {
+            let Some(length) = now().and_then(|now| now.timeline).map(|timeline| timeline.length) else { return };
+            *SEEKING.lock().unwrap() = Some((fraction as f64 * length, None));
+            let _ = look();
+        }
+    }
+}
+
+/// `slider` let go (`kept`: where it was left; else, the drag given up, as it was before).
+#[cfg(windows)]
+pub fn slid(slider: Slider, kept: bool) {
+    match slider {
+        Slider::Volume => {
+            if let Some(level) = now().and_then(|now| now.volume).filter(|_| kept) {
+                act(Act::Volume(level));
+            }
+        }
+        Slider::Seek => {
+            let left_at = SEEKING.lock().unwrap().and_then(|(at, settling)| settling.is_none().then_some(at));
+            match left_at.filter(|_| kept) {
+                Some(at) => act(Act::Seek(at)),
+                None => {
+                    *SEEKING.lock().unwrap() = None;
+                    let _ = look();
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -305,5 +341,21 @@ mod tests {
             super::look();
         }
         println!("a look takes {:.2} ms; it sees {:?}", from.elapsed().as_secs_f64() * 1000.0 / 20.0, super::now());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod seek_tests {
+    /// Moves what plays to a minute in and back to where it was: `cargo test --lib -- --ignored seeks_and_back --nocapture`.
+    #[test]
+    #[ignore = "moves this PC's player"]
+    fn seeks_and_back() {
+        let was = crate::media::playing().and_then(|playing| playing.timeline).expect("something playing, with a timeline").0;
+        println!("was at {was:.1}; asked 60: {}", crate::media::seek(60.0));
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        println!("now at {:?}", crate::media::playing().and_then(|playing| playing.timeline).map(|t| t.0));
+        println!("asked back: {}", crate::media::seek(was));
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        println!("back at {:?}", crate::media::playing().and_then(|playing| playing.timeline).map(|t| t.0));
     }
 }

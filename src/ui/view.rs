@@ -196,6 +196,15 @@ impl Hit {
         !matches!(self, Hit::Processes(_) | Hit::Thread(_))
     }
 
+    /// The track it is, where it is one dragged along.
+    pub fn slider(self) -> Option<crate::playing::Slider> {
+        match self {
+            Hit::Volume => Some(crate::playing::Slider::Volume),
+            Hit::Seek => Some(crate::playing::Slider::Seek),
+            _ => None,
+        }
+    }
+
     /// How far the process list scrolls, for a hit on it.
     pub fn max_scroll(self) -> Option<f32> {
         match self {
