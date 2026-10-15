@@ -176,6 +176,8 @@ pub enum Hit {
     Processes(u32),
     /// The overlay's switch.
     Overlay,
+    /// The game button: the window in front taken for a game, or games turned off (see `presents::GameMode`).
+    Game,
     /// A thread's cell in the CPU's grid: its clock and load shown while the
     /// pointer is on it.
     Thread(u16),
@@ -226,8 +228,7 @@ pub struct Scene<'a> {
     /// The overlay is on.
     pub overlay: bool,
     /// The bar has its buttons: the panel's, not a widget's (a widget has
-    /// its own pin and menu, and its game button: a game asked for or
-    /// turned off by hand shows in widgets, not the panel).
+    /// its own, round it).
     pub buttons: bool,
     /// A newer Glance is out: a dot on the settings button, for whoever
     /// did not see it said.
@@ -365,17 +366,15 @@ impl Hash for Lane {
     }
 }
 
-/// Whether the window in front is taken for a game, asked for by hand
-/// The game in `s`: in the panel (`panel`), only one found, not one taken
-/// for a game by hand (that is the widgets' own).
-fn found_game(s: &Sample, panel: bool) -> Option<&crate::reading::GameSample> {
-    s.game.as_ref().filter(|game| !(panel && game.by_hand))
+/// The game in `s`: one found, or the window in front taken for one by hand.
+fn found_game(s: &Sample) -> Option<&crate::reading::GameSample> {
+    s.game.as_ref()
 }
 
 /// The game in `s`, if it is the process `pid`: a chart of a game's frames
 /// is of that game's alone, not of another's before it.
-fn same_game(s: &Sample, panel: bool, pid: Option<u32>) -> Option<&crate::reading::GameSample> {
-    found_game(s, panel).filter(|game| Some(game.pid) == pid)
+fn same_game(s: &Sample, pid: Option<u32>) -> Option<&crate::reading::GameSample> {
+    found_game(s).filter(|game| Some(game.pid) == pid)
 }
 
 /// (see `presents::GameMode`).
@@ -824,14 +823,14 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         }
         "game" => {
             // A game played, or asked for by hand (waiting for its frames).
-            let by_hand = !scene.buttons;
-            if !(scene.seen.game || by_hand && front_is_game()) || (by_hand && game_hidden()) {
+            // (In the panel as in the widgets: the game button is the same everywhere.)
+            let by_hand = front_is_game();
+            if !(scene.seen.game || by_hand) || game_hidden() {
                 return None;
             }
             // In the panel, only a game found (one taken for a game by hand is
             // the widgets' own).
-            let panel = scene.buttons;
-            let game = found_game(s, panel);
+            let game = found_game(s);
             let pid = game.map(|g| g.pid);
             // Its screen's refresh rate in the corner: the most frames it can show.
             let refresh = game.and_then(|g| g.refresh_hz);
@@ -882,7 +881,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             // Full scale: the screen's rate, or the most frames drawn, if more
             // (a game not held to the screen's rate draws frames it never shows).
-            let most = scene.history.iter().filter_map(|s| same_game(s, panel, pid).map(|g| g.fps as f64)).fold(0.0, f64::max);
+            let most = scene.history.iter().filter_map(|s| same_game(s, pid).map(|g| g.fps as f64)).fold(0.0, f64::max);
             let scale = refresh.map(f64::from).map(|hz| hz.max(most));
             let mut blocks = vec![
                 head(lang.pick("游戏", "Game"), game.map_or_else(|| if by_hand { waiting(lang) } else { String::new() }, |g| g.name.clone()), shown(refresh, |hz| lang.pick(&format!("屏幕 {hz} Hz"), &format!("Screen {hz} Hz")).to_string()), false),
@@ -890,7 +889,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     figure: shown(game.map(|g| g.fps), |fps| format!("{fps:.0}")),
                     unit: "FPS",
                     hot: false,
-                    plot: chart.then(|| Plot::new(scene, vec![Box::new(move |s| same_game(s, panel, pid).map(|g| g.fps as f64))], scale, None)),
+                    plot: chart.then(|| Plot::new(scene, vec![Box::new(move |s| same_game(s, pid).map(|g| g.fps as f64))], scale, None)),
                 },
             ];
             if !full {
@@ -899,7 +898,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if full && frametimes {
                 // Full scale: two frames at the screen's rate, or the longest
                 // frame on screen, if longer, rounded up.
-                let series: Series = Box::new(move |s| same_game(s, panel, pid).map(|g| g.longest_ms as f64));
+                let series: Series = Box::new(move |s| same_game(s, pid).map(|g| g.longest_ms as f64));
                 let floor = stutter.map_or(MIN_FRAME_SCALE, |stutter| (stutter * 2.0 / 3.0).max(MIN_FRAME_SCALE));
                 let peak = visible_peak(scene, &series).max(floor);
                 blocks.push(Block::Trace {
@@ -1848,6 +1847,7 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
     let settings = bar.x + bar.w - theme.bar_pad.1 - BUTTON;
     let pin = settings - BUTTON_GAP - BUTTON;
     let overlay = pin - BUTTON_GAP - BUTTON;
+    let game = overlay - BUTTON_GAP - BUTTON;
     let uptime = scene.lang.duration(scene.latest().system.uptime_s);
     if !scene.buttons {
         let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
@@ -1858,18 +1858,27 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
     }
     let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
     let start = bar.x + theme.bar_pad.0;
-    frame.text(&label, theme.small, theme.text2, start, bar.y + (bar.h - LINE) / 2.0, overlay - 8.0 - start, Align::Start);
+    frame.text(&label, theme.small, theme.text2, start, bar.y + (bar.h - LINE) / 2.0, game - 8.0 - start, Align::Start);
     let pin_glyph = if scene.pinned { "\u{E840}" } else { "\u{E718}" };
     // The overlay's: a window with a trace in it, lit while it is on.
-    let buttons = [(overlay, "\u{E9D9}", Hit::Overlay, scene.overlay), (pin, pin_glyph, Hit::Pin, scene.pinned), (settings, "\u{E713}", Hit::Settings, false)];
+    // And the game button before it, lit while a game shows (found, or asked for by hand), as a widget's is.
+    let game_lit = crate::widget::game_shown(scene.history.last().map(std::slice::from_ref).unwrap_or_default());
+    let buttons = [(game, "", Hit::Game, game_lit), (overlay, "\u{E9D9}", Hit::Overlay, scene.overlay), (pin, pin_glyph, Hit::Pin, scene.pinned), (settings, "\u{E713}", Hit::Settings, false)];
     for (left, glyph, hit, lit) in buttons {
         let hovered = scene.hover == Some(hit);
         if hovered || lit {
             frame.fill_rounded(theme.hover, left, top, BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
         }
+        let colour = if hovered || lit { theme.text } else { theme.text2 };
+        if hit == Hit::Game {
+            // (Glance's own game icon, as on a widget's button.)
+            frame.icon(super::icons::Icon::Game, Point { x: left + BUTTON / 2.0, y: top + BUTTON / 2.0 }, 16.0, colour);
+            hits.push((left, top, BUTTON, BUTTON, hit));
+            continue;
+        }
         let icon = Font::new(Family::Icons, 16.0, 400.0);
         let glyph_left = left + (BUTTON - frame.measure(glyph, icon)) / 2.0;
-        frame.text(glyph, icon, if hovered || lit { theme.text } else { theme.text2 }, glyph_left, top + 8.0, BUTTON, Align::Start);
+        frame.text(glyph, icon, colour, glyph_left, top + 8.0, BUTTON, Align::Start);
         if hit == Hit::Settings && scene.newer {
             frame.fill_circle(super::theme::accent(theme.dark), Point { x: left + BUTTON - 7.0, y: top + 7.0 }, 3.0);
         }

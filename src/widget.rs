@@ -1524,11 +1524,7 @@ impl Widget {
                         Some(Button::Close) => Released::Closed,
                         Some(Button::Settings) => Released::Settings,
                         Some(Button::Game) => {
-                            // Showing a game (found or asked for): off; else on.
-                            let history = crate::app().controller.history.lock().unwrap();
-                            let shown = game_shown(history.iter().last().map(std::slice::from_ref).unwrap_or_default());
-                            drop(history);
-                            crate::source::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
+                            press_game();
                             Released::Nothing
                         }
                         // No button: what of its lanes is there (what plays, the sound).
@@ -2323,6 +2319,14 @@ fn clip(r: RECT, bounds: RECT) -> RECT {
 
 /// Whether a game shows (its button lit): one found and not turned off, or
 /// one asked for by hand.
+/// The game button pressed (a widget's or the panel's): showing a game (found or asked for), off; else on.
+pub(crate) fn press_game() {
+    let history = crate::app().controller.history.lock().unwrap();
+    let shown = game_shown(history.iter().last().map(std::slice::from_ref).unwrap_or_default());
+    drop(history);
+    crate::source::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
+}
+
 pub(crate) fn game_shown(history: &[Sample]) -> bool {
     use crate::presents::{game_mode, GameMode};
     match game_mode() {

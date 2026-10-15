@@ -2437,6 +2437,15 @@ impl<'a> Panel<'a> {
                     crate::app().pin_panel(at);
                 }
             }
+            Some(Hit::Game) => {
+                crate::widget::press_game();
+                // Its lane comes or goes with it: laid out anew at once (as when the settings change), not as it next
+                // opens.
+                if let Some(opening) = self.opening.take().filter(|_| self.is_shown()) {
+                    self.held = Some(opening.seen);
+                }
+                self.next_frame = Instant::now();
+            }
             Some(Hit::Overlay) => {
                 // As it is on screen now: shown, it closes; not, it opens.
                 self.controller.set_overlay(!self.controller.overlay_wanted());
