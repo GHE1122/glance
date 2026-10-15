@@ -1117,7 +1117,8 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         }
         // The lyrics of what plays, as it plays (looked for and followed by `playing`).
         // Music: what plays (its cover, what it is, its track, how loud) and its lyrics as they are sung (looked for and
-        // followed by `playing`). Kept by the name it had as the lyrics' alone.
+        // followed by `playing`). Kept by the name it had as the lyrics' alone. Compact (a widget of middle size): what
+        // plays, its track, and the line sung now with the one under it; not how loud, nor the lines round it.
         "lyrics" => {
             let heard = crate::playing::now();
             let mut blocks = vec![head(lang.pick("音乐", "Music"), heard.as_ref().map_or(String::new(), |heard| heard.app.clone()), "", false)];
@@ -1134,11 +1135,16 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     let whole = |seconds: f64| seconds.max(0.0).round() as u32;
                     blocks.push(Block::Progress { at: whole(timeline.at).min(whole(timeline.length)), length: whole(timeline.length), seekable: timeline.seekable });
                 }
-                if let Some(level) = heard.volume {
+                if let Some(level) = heard.volume.filter(|_| full) {
                     blocks.push(Block::Sound { level, muted: heard.muted });
                 }
             }
-            blocks.push(Block::Lyrics { rows: lyric_rows(heard.as_ref(), lang, on("translation")), glide: glide_of(heard.as_ref()) });
+            if full {
+                blocks.push(Block::Lyrics { rows: lyric_rows(heard.as_ref(), lang, on("translation")), glide: glide_of(heard.as_ref()) });
+            } else {
+                let (line, under, said) = sung_now(heard.as_ref(), lang, on("translation"));
+                blocks.push(Block::Lyric { line, under, said, glide: glide_of(heard.as_ref()) });
+            }
             blocks
         }
         "system" => {
