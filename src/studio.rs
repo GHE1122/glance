@@ -1074,14 +1074,17 @@ pub fn phone_page(out: &Path) -> Result<(), String> {
     laptop["laptop"] = true.into();
     laptop["colours_there"] = false.into();
     laptop["keys"] = serde_json::json!({ "level": 2, "most": 3 });
-    for (name, making, scroll) in [("shut", None, 0.0), ("ring", Some(&making), 330.0), ("ring-top", None, 330.0), ("laptop", None, 0.0)] {
-        let state = if name == "laptop" { &laptop } else { &state };
-        let pixels = gfx
-            .draw_offscreen((w, h), px, |frame| {
-                phone_art::paint(frame, view::Rect { x: 0.0, y: 0.0, w: SCREEN.0, h: SCREEN.1 }, Lang::Zh, "DESKTOP", &reads, Some(state), false, 3.0, scroll, None, making, name == "ring-top");
-            })
-            .map_err(|e| e.to_string())?;
-        save_png(&out.join(format!("{name}.png")), w, h, &pixels).map_err(|e| e.to_string())?;
+    // (In each language: the site's phone page shows the one it is in.)
+    for (lang, suffix) in [(Lang::Zh, ""), (Lang::En, "-en")] {
+        for (name, making, scroll) in [("shut", None, 0.0), ("ring", Some(&making), 330.0), ("ring-top", None, 330.0), ("laptop", None, 0.0)] {
+            let state = if name == "laptop" { &laptop } else { &state };
+            let pixels = gfx
+                .draw_offscreen((w, h), px, |frame| {
+                    phone_art::paint(frame, view::Rect { x: 0.0, y: 0.0, w: SCREEN.0, h: SCREEN.1 }, lang, "DESKTOP", &reads, Some(state), false, 3.0, scroll, None, making, name == "ring-top");
+                })
+                .map_err(|e| e.to_string())?;
+            save_png(&out.join(format!("{name}{suffix}.png")), w, h, &pixels).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
