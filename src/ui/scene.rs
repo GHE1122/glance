@@ -102,6 +102,8 @@ struct Shared {
     spare: Arc<Spare>,
     /// How many frames have been taken: what tells one from another.
     taken: std::sync::atomic::AtomicU64,
+    /// How many frames are being read now (on whatever thread).
+    reading: std::sync::atomic::AtomicU32,
 }
 
 /// For a frame `size`: a texture it is copied into whose second level the card makes of it (each texel the
@@ -119,6 +121,13 @@ unsafe impl Send for Halves {}
 impl Shared {
     /// Reads `frame` back (if it is of the area as it is now), for it to be taken; whether it was.
     fn read(&self, frame: &Direct3D11CaptureFrame) -> bool {
+        self.reading.fetch_add(1, Ordering::AcqRel);
+        let read = self.read_counted(frame);
+        self.reading.fetch_sub(1, Ordering::AcqRel);
+        read
+    }
+
+    fn read_counted(&self, frame: &Direct3D11CaptureFrame) -> bool {
         let (area, arranged, covered) = self.of.lock().unwrap().clone();
         let read = (|| {
             if frame.SystemRelativeTime().ok()?.Duration < arranged {
@@ -417,7 +426,7 @@ impl Scene {
                     return None;
                 }
             };
-            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns(), Vec::new())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), spare: Arc::default(), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0) });
+            let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns(), Vec::new())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), spare: Arc::default(), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0), reading: std::sync::atomic::AtomicU32::new(0) });
             let made = (|| {
                 let cloak: BOOL = true.into();
                 DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).ok()?;
@@ -621,6 +630,11 @@ impl Scene {
     }
 
     /// Whether a frame has come that was not wanted as it came (and is not read yet).
+    /// Whether a frame is being read now (to be told as it is: see `ready`).
+    pub fn reading(&self) -> bool {
+        self.shared.reading.load(Ordering::Acquire) > 0
+    }
+
     pub fn fresh(&self) -> bool {
         self.shared.latest.lock().unwrap().is_some()
     }
