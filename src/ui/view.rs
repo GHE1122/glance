@@ -183,6 +183,8 @@ pub enum Hit {
     /// sound's track, pressed where along it the sound is to be.
     Media(crate::playing::Key),
     Volume,
+    /// The track of what plays, pressed (and dragged along) where in it it is to play from.
+    Seek,
     /// A drive's row in the storage lane: the drive opened (by its place among the drives seen).
     Drive(u16),
 }
@@ -286,6 +288,9 @@ enum Block {
     /// What plays (and, under it, by whom and where), with what pauses,
     /// plays and skips it.
     Playing { title: String, about: String, playing: bool },
+    /// How far into its track what plays is and how long the track is (whole seconds), on a track it is dragged
+    /// along where its player lets it be (`seekable`).
+    Progress { at: u32, length: u32, seekable: bool },
     /// The line sung now, and under it its translation (or the next line); `said`, where they say why there are
     /// none instead.
     Lyric { line: String, under: String, said: bool, glide: Glide },
@@ -309,6 +314,7 @@ impl Block {
             Block::Facts { .. } => 0.0,
             Block::Sound { .. } => MEDIA_GAP + MEDIA_ROW,
             Block::Playing { .. } => MEDIA_GAP + 2.0 * LINE,
+            Block::Progress { .. } => MEDIA_ROW,
             Block::Lyric { .. } => MEDIA_GAP + 2.0 * LINE,
             Block::Lyrics { .. } => MEDIA_GAP + LYRIC_ROWS as f32 * LYRIC_ROW,
             Block::Table { visible, .. } => *visible as f32 * TABLE_ROW,
@@ -331,6 +337,7 @@ impl Hash for Block {
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
             Block::Sound { level, muted } => (level, muted).hash(state),
             Block::Playing { title, about, playing } => (title, about, playing).hash(state),
+            Block::Progress { at, length, seekable } => (at, length, seekable).hash(state),
             Block::Lyric { line, under, said, glide } => (line, under, said, glide).hash(state),
             Block::Lyrics { rows, glide } => (rows, glide).hash(state),
             Block::Table { headings, sort, rows, visible, scrolls, widths } => {
@@ -1070,6 +1077,10 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     let state = if heard.playing { lang.pick("正在播放", "Playing") } else { lang.pick("已暂停", "Paused") };
                     let about = if nothing { String::new() } else { [state, heard.artist.as_str(), if heard.title.is_empty() { "" } else { heard.app.as_str() }].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · ") };
                     blocks.push(Block::Playing { title, about, playing: heard.playing });
+                    if let Some(timeline) = heard.timeline {
+                        let whole = |seconds: f64| seconds.max(0.0).round() as u32;
+                        blocks.push(Block::Progress { at: whole(timeline.at).min(whole(timeline.length)), length: whole(timeline.length), seekable: timeline.seekable });
+                    }
                 }
             }
             if on("lyrics") {
@@ -1389,6 +1400,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Facts { .. } => "facts",
             Block::Sound { .. } => "sound",
             Block::Playing { .. } => "playing",
+            Block::Progress { .. } => "progress",
             Block::Lyric { .. } => "lyric",
             Block::Lyrics { .. } => "lyrics",
             Block::Table { .. } => "table",
@@ -1511,47 +1523,31 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let said_width = frame.measure("100%", theme.small);
                 let mute = left + width - MEDIA_ROW;
                 let track = (mute - 6.0 - said_width - LABEL_GAP - plot_left).max(0.0);
-                let (tall, radius) = (theme.meter_height, theme.meter_radius);
                 part("track");
-                // What is filled, its knob, and the rest of the track: each beside the next, none over another
-                // (their colours are not solid: where two lay over each other, it would show).
-                let filled = track * (*level as f32 / 100.0).clamp(0.0, 1.0);
-                let knob = 5.0;
-                let colour = if *muted { theme.text3 } else { ink.trace };
-                // What is filled and its knob are one shape, drawn once: from the track's rounded end along it,
-                // round the knob, and back.
-                let centre = Point { x: plot_left + filled, y: middle };
-                let half = tall / 2.0;
-                // (Where the track's edges meet the knob.)
-                let meets = (knob * knob - half * half).sqrt();
-                let mut shape: Vec<Point> = Vec::new();
-                if filled > meets + half {
-                    // Its end at the left, rounded: from its lower corner up round to its upper one.
-                    shape.extend((0..=8).map(|turn| {
-                        let angle = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * turn as f32 / 8.0;
-                        Point { x: plot_left + half + half * angle.cos(), y: middle + half * angle.sin() }
-                    }));
-                    // Round the knob, from where the upper edge meets it, over, to where the lower one does.
-                    let from = (-half).atan2(-meets);
-                    let round = 2.0 * std::f32::consts::PI - 2.0 * (half / knob).asin();
-                    shape.extend((0..=32).map(|turn| {
-                        let angle = from + round * turn as f32 / 32.0;
-                        Point { x: centre.x + knob * angle.cos(), y: centre.y + knob * angle.sin() }
-                    }));
-                    frame.fill_shape(&shape, Fill::Solid(colour));
-                } else {
-                    frame.fill_circle(colour, centre, knob);
-                }
-                if track - filled > knob {
-                    frame.clip(plot_left + filled + knob, middle - tall / 2.0, track - filled - knob, tall);
-                    frame.fill_rounded(theme.track, plot_left, middle - tall / 2.0, track, tall, radius);
-                    frame.unclip();
-                }
+                slider(frame, theme, if *muted { theme.text3 } else { ink.trace }, plot_left, middle, track, *level as f32 / 100.0, true);
                 hits.push((plot_left, row, track, MEDIA_ROW, Hit::Volume));
                 part("level");
                 frame.text(&said, theme.small, if *muted { theme.text3 } else { theme.text2 }, mute - 6.0 - said_width, middle - LINE / 2.0, said_width, Align::End);
                 let hit = Hit::Media(crate::playing::Key::Mute);
                 pressed(frame, scene, hits, hit, if *muted { "\u{E74F}" } else { "\u{E767}" }, mute, row, *muted);
+            }
+            (Block::Progress { at, length, seekable }, Pass::Content) => {
+                // How far in it is where a meter's name is; the track, with a knob where it is dragged along; how
+                // long it is at the end.
+                let middle = y + MEDIA_ROW / 2.0;
+                part("at");
+                frame.text(&text::clock(*at), theme.small, theme.text2, left, middle - LINE / 2.0, LABEL, Align::Start);
+                let long = text::clock(*length);
+                let long_width = frame.measure(&long, theme.small);
+                let track = (left + width - long_width - LABEL_GAP - plot_left).max(0.0);
+                part("track");
+                let fraction = if *length > 0 { *at as f32 / *length as f32 } else { 0.0 };
+                slider(frame, theme, ink.trace, plot_left, middle, track, fraction, *seekable);
+                if *seekable {
+                    hits.push((plot_left, y, track, MEDIA_ROW, Hit::Seek));
+                }
+                part("length");
+                frame.text(&long, theme.small, theme.text3, left + width - long_width, middle - LINE / 2.0, long_width, Align::End);
             }
             (Block::Playing { title, about, playing }, Pass::Content) => {
                 use crate::playing::Key;
@@ -1809,6 +1805,55 @@ fn paint_plot(frame: &dyn Canvas, scene: &Scene, ink: Ink, plot: &Plot, left: f3
     let value = from + (to - from) * progress;
     let color = if plot.hot.is_some_and(|hot| value > hot) { theme.signal } else { ink.trace };
     frame.fill_circle(color, Point { x: right, y: y(value) }, 2.5);
+}
+
+/// A track `track` wide from `from` along `middle`, filled `fraction` of the way in `colour`; with a knob where
+/// the filling ends, where it is dragged along (`knob`). What is filled, its knob and the rest of the track are
+/// each beside the next, none over another (their colours are not solid: where two lay over each other, it would
+/// show).
+#[allow(clippy::too_many_arguments)]
+fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f32, track: f32, fraction: f32, knob: bool) {
+    let (tall, radius) = (theme.meter_height, theme.meter_radius);
+    let filled = track * fraction.clamp(0.0, 1.0);
+    let half = tall / 2.0;
+    if !knob {
+        frame.fill_rounded(theme.track, from, middle - half, track, tall, radius);
+        if filled > 0.0 {
+            frame.clip(from, middle - half, filled, tall);
+            frame.fill_rounded(colour, from, middle - half, track, tall, radius);
+            frame.unclip();
+        }
+        return;
+    }
+    let knob = 5.0;
+    // What is filled and its knob are one shape, drawn once: from the track's rounded end along it, round the
+    // knob, and back.
+    let centre = Point { x: from + filled, y: middle };
+    // (Where the track's edges meet the knob.)
+    let meets = (knob * knob - half * half).sqrt();
+    let mut shape: Vec<Point> = Vec::new();
+    if filled > meets + half {
+        // Its end at the left, rounded: from its lower corner up round to its upper one.
+        shape.extend((0..=8).map(|turn| {
+            let angle = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * turn as f32 / 8.0;
+            Point { x: from + half + half * angle.cos(), y: middle + half * angle.sin() }
+        }));
+        // Round the knob, from where the upper edge meets it, over, to where the lower one does.
+        let start = (-half).atan2(-meets);
+        let round = 2.0 * std::f32::consts::PI - 2.0 * (half / knob).asin();
+        shape.extend((0..=32).map(|turn| {
+            let angle = start + round * turn as f32 / 32.0;
+            Point { x: centre.x + knob * angle.cos(), y: centre.y + knob * angle.sin() }
+        }));
+        frame.fill_shape(&shape, Fill::Solid(colour));
+    } else {
+        frame.fill_circle(colour, centre, knob);
+    }
+    if track - filled > knob {
+        frame.clip(from + filled + knob, middle - half, track - filled - knob, tall);
+        frame.fill_rounded(theme.track, from, middle - half, track, tall, radius);
+        frame.unclip();
+    }
 }
 
 /// Something pressed, as the bar's are: its glyph in a square from (`left`,

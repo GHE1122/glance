@@ -34,6 +34,8 @@ pub struct Playing {
     /// How far into the track it is now and how long the track is
     /// (seconds), where the program says.
     pub timeline: Option<(f64, f64)>,
+    /// Whether the program lets it be moved along its track (see `seek`).
+    pub seekable: bool,
 }
 
 /// How far into its track `session` is now, and how long the track is
@@ -104,7 +106,9 @@ fn told() -> Option<Playing> {
     if title.is_empty() {
         return None;
     }
-    let playing = session.GetPlaybackInfo().and_then(|info| info.PlaybackStatus()).is_ok_and(|status| status == Status::Playing);
+    let info = session.GetPlaybackInfo().ok();
+    let playing = info.as_ref().and_then(|info| info.PlaybackStatus().ok()).is_some_and(|status| status == Status::Playing);
+    let seekable = info.and_then(|info| info.Controls().ok()).and_then(|controls| controls.IsPlaybackPositionEnabled().ok()).unwrap_or(false);
     let app_id = session.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default();
     Some(Playing {
         title,
@@ -117,7 +121,14 @@ fn told() -> Option<Playing> {
         app_id,
         playing,
         timeline: timeline(&session, playing),
+        seekable,
     })
+}
+
+/// Moves what plays to `seconds` into its track, where its program lets it; whether it took it.
+pub fn seek(seconds: f64) -> bool {
+    let Ok(session) = session() else { return false };
+    session.TryChangePlaybackPositionAsync((seconds.max(0.0) * 1e7) as i64).and_then(|asking| asking.join()).unwrap_or(false)
 }
 
 /// The programs with sound of their own on the device the sound plays
@@ -226,7 +237,7 @@ fn heard() -> Option<Playing> {
     *heard = Some(name.clone());
     // As its file describes it; one that does not say, by its file's name.
     let app = programs.iter().find(|(program, _, _)| *program == name).and_then(|(_, path, _)| described(path)).unwrap_or(name);
-    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None })
+    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None, seekable: false })
 }
 
 /// What is playing (or paused); none, when nothing is.

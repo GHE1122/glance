@@ -21,8 +21,19 @@ pub struct Now {
     /// How loud the sound is (0 to 100), where it could be read, and whether it is muted.
     pub volume: Option<u8>,
     pub muted: bool,
+    /// How far into the track it is and how long it is, where its player says.
+    pub timeline: Option<Timeline>,
     /// What is sung, while lyrics are shown and a track plays.
     pub sung: Option<Sung>,
+}
+
+/// How far into its track what plays is (whole seconds, as last looked at, or as it is being dragged to), how
+/// long the track is (seconds), and whether its player lets it be moved along it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Timeline {
+    pub at: f64,
+    pub length: f64,
+    pub seekable: bool,
 }
 
 /// What is sung of the track that plays.
@@ -72,6 +83,8 @@ pub enum Act {
     Key(Key),
     /// The sound as loud as this (0 to 100).
     Volume(u8),
+    /// The track played from this far into it (seconds).
+    Seek(f64),
 }
 
 static NOW: Mutex<Option<Now>> = Mutex::new(None);
@@ -106,6 +119,11 @@ static ASKED: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
 #[cfg(windows)]
 const SETTLES: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// Where along its track what plays is being dragged to, while it is (shown so, whatever its player says); then,
+/// asked to go there, till when what was asked for stands for what is said.
+#[cfg(windows)]
+static SEEKING: Mutex<Option<(f64, Option<std::time::Instant>)>> = Mutex::new(None);
+
 /// Whether lyrics are shown (and so asked for), as `watch` was last told.
 #[cfg(windows)]
 static LYRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -124,8 +142,18 @@ pub fn position() -> Option<f64> {
 /// Looks at how it is; how long till the next line of the lyrics is due, where one is.
 #[cfg(windows)]
 fn look() -> Option<std::time::Duration> {
-    let playing = crate::media::playing();
+    let mut playing = crate::media::playing();
+    // Dragged along, or just asked to go somewhere along it: there.
+    let seeking = match *SEEKING.lock().unwrap() {
+        Some((at, None)) => Some(at),
+        Some((at, Some(till))) if std::time::Instant::now() < till => Some(at),
+        _ => None,
+    };
+    if let (Some(at), Some((position, _))) = (seeking, playing.as_mut().and_then(|playing| playing.timeline.as_mut())) {
+        *position = at;
+    }
     *POSITION.lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, std::time::Instant::now(), playing.playing)));
+    let timeline = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, length)| Timeline { at: at.floor(), length, seekable: playing.seekable }));
     let sound = crate::actions::volume();
     let (sung, next) = match playing.as_ref().filter(|playing| LYRICS.load(Ordering::Relaxed) && !playing.title.is_empty()) {
         Some(playing) => sung(playing),
@@ -136,7 +164,7 @@ fn look() -> Option<std::time::Duration> {
         Some((till, asked)) if std::time::Instant::now() < till => asked,
         _ => is_playing,
     };
-    keep(Some(Now { title, artist, app, playing: is_playing, volume: sound.map(|(level, _)| level), muted: sound.is_some_and(|(_, muted)| muted), sung }));
+    keep(Some(Now { title, artist, app, playing: is_playing, volume: sound.map(|(level, _)| level), muted: sound.is_some_and(|(_, muted)| muted), timeline, sung }));
     next
 }
 
@@ -219,6 +247,13 @@ pub fn act(act: Act) {
                 let _ = crate::actions::set_volume(None, Some(!muted));
             }
             Act::Volume(level) => drop(crate::actions::set_volume(Some(level), None)),
+            Act::Seek(at) => {
+                // Shown there at once, and till the player says it is.
+                *SEEKING.lock().unwrap() = Some((at, Some(std::time::Instant::now() + SETTLES)));
+                if !crate::media::seek(at) {
+                    *SEEKING.lock().unwrap() = None;
+                }
+            }
         }
         // (The last, once what was asked for no longer stands for what is said.)
         for wait in [0, 150, 500, 900] {
@@ -239,6 +274,14 @@ pub fn slide(level: u8) {
     }
     keep(shown);
     std::thread::spawn(move || drop(crate::actions::set_volume(Some(level), None)));
+}
+
+/// What plays as if `at` seconds into its track while its track is dragged along (none: let go without moving
+/// it, as it was): shown so at once; asked for when it is let go (see `act`).
+#[cfg(windows)]
+pub fn seek_slide(at: Option<f64>) {
+    *SEEKING.lock().unwrap() = at.map(|at| (at, None));
+    let _ = look();
 }
 
 #[cfg(not(windows))]

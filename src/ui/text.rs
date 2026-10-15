@@ -76,6 +76,17 @@ impl Lang {
     }
 }
 
+/// A time into a track as a player shows it: minutes and seconds ("3:07"), with the hours before them past an
+/// hour ("1:02:07").
+pub fn clock(seconds: u32) -> String {
+    let (hours, minutes, seconds) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// Three significant figures at most, in the largest unit that keeps the value above one.
