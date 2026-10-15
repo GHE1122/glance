@@ -1596,6 +1596,7 @@ impl Widget {
                 Released::Nothing
             }
             Drag::Size { .. } => {
+                note(format!("widget: let go, sized to {:.0} x {:.0}{}", self.surface_size.0 * self.zoom, self.surface_size.1 * self.zoom, if cancelled { " (its capture lost)" } else { "" }));
                 // It settles from the surface it shows (the hand's room, given
                 // as a band gives) onto what it shows, the edges not dragged
                 // where they are.

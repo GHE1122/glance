@@ -136,6 +136,10 @@ static LYRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 #[cfg(windows)]
 static POSITION: Mutex<Option<(f64, std::time::Instant, bool)>> = Mutex::new(None);
 
+/// Played from elsewhere along its track: where (seconds), when, and the track (its title).
+#[cfg(windows)]
+static SOUGHT: Mutex<Option<(f64, std::time::Instant, String)>> = Mutex::new(None);
+
 /// Paused: where it was held (seconds), and when its player had last said how far in it was as that was taken (see
 /// `look`).
 #[cfg(windows)]
@@ -165,6 +169,20 @@ fn look() -> Option<std::time::Duration> {
     // nothing more as it pauses), it went on from there till it paused: where it was as the pause was first seen,
     // held till the player says again. (Taken as said, the line sung went back as much as a second.)
     let now = std::time::Instant::now();
+    // Played from elsewhere along its track: what its player said before that stands for where it was then, not where
+    // it is (Media Player says nothing more after it is moved along, and was taken back where it had been): where it
+    // was asked to go, on from then while it plays, till its player says again, or another track plays.
+    if let Some(playing) = playing.as_mut() {
+        let mut sought = SOUGHT.lock().unwrap();
+        if let (Some((at, when, title)), Some((position, _))) = (sought.as_ref(), playing.timeline.as_mut()) {
+            let said_at = playing.said_ago.map(|ago| now - std::time::Duration::from_secs_f64(ago));
+            if *title != playing.title || said_at.is_some_and(|said| said > *when) {
+                *sought = None;
+            } else if seeking.is_none() {
+                *position = at + if playing.playing { now.duration_since(*when).as_secs_f64() } else { 0.0 };
+            }
+        }
+    }
     if let (Some(playing), seeking) = (playing.as_mut(), seeking) {
         let said_at = playing.said_ago.map(|ago| now - std::time::Duration::from_secs_f64(ago));
         let mut held = HELD.lock().unwrap();
@@ -289,7 +307,9 @@ pub fn act(act: Act) {
             Act::Seek(at) => {
                 // Shown there at once, and till the player says it is.
                 *SEEKING.lock().unwrap() = Some((at, Some(std::time::Instant::now() + SETTLES)));
-                if !crate::media::seek(at) {
+                if crate::media::seek(at) {
+                    *SOUGHT.lock().unwrap() = now().map(|now| (at, std::time::Instant::now(), now.title));
+                } else {
                     *SEEKING.lock().unwrap() = None;
                 }
             }
