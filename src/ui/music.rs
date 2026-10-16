@@ -90,6 +90,22 @@ const STAGE_FROM: f32 = 600.0;
 const HOLD: f32 = 12.0;
 /// The least a music widget is (DIPs).
 pub const LEAST: (f32, f32) = (240.0, 56.0);
+/// The tallest the strip and the player are at rest (DIPs; the player a row more with its controls kept): sized
+/// taller, short of where the next layout begins, they come back to it as they are let go.
+const STRIP_MOST: f32 = 96.0;
+const PLAYER_MOST: f32 = 236.0;
+
+/// The size a music widget sized to `room` (DIPs) comes to rest at: the room, within the range its layout is right
+/// in (as a widget of readings settles onto the form it shows, the hand having pulled it past it).
+pub fn rests_at(room: (f32, f32), shows: &Shows) -> (f32, f32) {
+    let room = (room.0.max(LEAST.0), room.1.max(LEAST.1));
+    let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
+    match Layout::for_room(room, shows, None) {
+        Layout::Strip => (room.0, room.1.min(STRIP_MOST)),
+        Layout::Player => (room.0, room.1.min(PLAYER_MOST + more)),
+        Layout::Card | Layout::Tall | Layout::Stage => room,
+    }
+}
 
 /// What a music widget shows, as the lyrics module's items say (the same for every one).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -168,8 +184,12 @@ const SPECTRUM_FALL: f32 = 1.7;
 const CONTROLS_FADE: f32 = 0.18;
 /// How long it takes to turn from one layout into the next (as long as a widget of readings takes).
 const TURN: Duration = Duration::from_millis(260);
-/// How long the record takes to turn once (seconds).
+/// How long the record takes to turn once, and its arm to swing onto it or off (seconds).
 const RECORD_TURN: f32 = 24.0;
+const ARM_SWING: f32 = 0.6;
+/// The record's arm, from its pivot (degrees, clockwise from the right): its stylus on the record, and off it.
+const ARM_ON: f32 = 105.0;
+const ARM_OFF: f32 = 87.0;
 /// The stage's rows along the bottom: the spectrum's (DIPs).
 const STAGE_SPECTRUM: f32 = 40.0;
 /// How long a line turned to by the wheel is held before the lines go back to the one sung now.
@@ -205,8 +225,10 @@ pub struct Music {
     controls_in: f32,
     /// Its spectrum as shown: up at once with the sound, down no faster than `SPECTRUM_FALL`.
     bands: [f32; crate::sound::BANDS],
-    /// How far the record has turned (degrees).
+    /// How far the record has turned (degrees), and how far its arm has swung onto it (0 off it, 1 on it: on as
+    /// something plays).
     turned_by: f32,
+    arm: f32,
     /// Laid out anew (another layout, or what it shows switched): since when, and where its parts were (they move
     /// from there to where they go, what else it shows coming in, over `TURN`); what it showed last.
     turning: Option<(Instant, Placed)>,
@@ -240,6 +262,7 @@ impl Default for Music {
             controls_in: 0.0,
             bands: [0.0; crate::sound::BANDS],
             turned_by: 0.0,
+            arm: 0.0,
             turning: None,
             shown: None,
             turned: 0,
@@ -395,6 +418,9 @@ impl Music {
         if moment.playing {
             self.turned_by = (self.turned_by + step * 360.0 / RECORD_TURN) % 360.0;
         }
+        let arm_to = if moment.playing { 1.0 } else { 0.0 };
+        self.arm = if arm_to > self.arm { (self.arm + step / ARM_SWING).min(1.0) } else { (self.arm - step / ARM_SWING).max(0.0) };
+        let swinging = self.arm != arm_to;
         let layout = Layout::for_room(size, shows, self.layout);
         if self.layout != Some(layout) {
             crate::journal::note(format!("music widget: {}", layout.key()));
@@ -435,7 +461,7 @@ impl Music {
             unsafe { frame.dc.PopLayer() };
         }
         let hits = drawing.hits;
-        Painted { hits, busy: moment.playing || settling || coming || falling || self.fading.is_some() || self.turned != 0 || moment.dragged_to.is_some() || turn.is_some() }
+        Painted { hits, busy: moment.playing || settling || coming || falling || swinging || self.fading.is_some() || self.turned != 0 || moment.dragged_to.is_some() || turn.is_some() }
     }
 }
 
@@ -1044,8 +1070,35 @@ impl Drawing<'_> {
             None => frame.fill_circle(Color::hex(0x2A2A30, 1.0), Point { x: cx, y: cy }, label),
         }
         unsafe { frame.dc.SetTransform(&parent) };
+        // Round the cover, a ring of the cover's colour; over the record, a sheen of it catching the light.
+        frame.stroke_rounded(Fill::Solid(colour(self.accent, 0.9)), cx - label - 2.0, cy - label - 2.0, 2.0 * label + 4.0, 2.0 * label + 4.0, label + 2.0, 2.5);
+        let mut sheen = r - 6.0;
+        while sheen > label + 8.0 {
+            frame.stroke_rounded(Fill::Solid(colour(self.accent, 0.05 * (sheen - label) / (r - label))), cx - sheen, cy - sheen, 2.0 * sheen, 2.0 * sheen, sheen, 1.5);
+            sheen -= 11.0;
+        }
         // Its hole.
         frame.fill_circle(Color::hex(0x0E0E10, 1.0), Point { x: cx, y: cy }, (r * 0.04).max(3.0));
+        self.arm_of(cx, cy, r);
+    }
+
+    /// The record's arm: its pivot past the record's top right, its stylus on the record while something plays and
+    /// swung off it (to its right) while nothing does, swinging between as it starts and stops.
+    fn arm_of(&self, cx: f32, cy: f32, r: f32) {
+        let frame = self.frame;
+        let pivot = Point { x: cx + r * 1.02, y: cy - r * 0.9 };
+        let reach = r * 1.5;
+        let swung = self.music.arm * self.music.arm * (3.0 - 2.0 * self.music.arm);
+        let angle = (ARM_OFF + (ARM_ON - ARM_OFF) * swung).to_radians();
+        let head = Point { x: pivot.x + reach * angle.cos(), y: pivot.y + reach * angle.sin() };
+        let thick = (r * 0.03).max(2.0);
+        frame.stroke(&[pivot, head], Color::hex(0x000000, 0.35), thick + 2.0);
+        frame.stroke(&[pivot, head], Color::hex(0xD8D8DC, 1.0), thick);
+        // Its stylus, in the cover's colour; its pivot, a disc of steel.
+        frame.fill_circle(colour(self.accent, 1.0), head, (r * 0.05).max(4.0));
+        frame.fill_circle(Color::hex(0x2A2A2E, 1.0), pivot, (r * 0.11).max(7.0));
+        frame.fill_circle(Color::hex(0xC8C8CC, 1.0), pivot, (r * 0.06).max(4.0));
+        frame.stroke_rounded(Fill::Solid(colour(self.accent, 0.8)), pivot.x - (r * 0.11).max(7.0), pivot.y - (r * 0.11).max(7.0), 2.0 * (r * 0.11).max(7.0), 2.0 * (r * 0.11).max(7.0), (r * 0.11).max(7.0), 1.5);
     }
 
     /// The card (and the card stood on end): what plays at the top, the lines round the one sung now gliding past
@@ -1080,7 +1133,10 @@ impl Drawing<'_> {
     /// the one turned to, its time beside it.
     fn rail_of_lines(&mut self, lines: &[Line], x: f32, top: f32, bottom: f32, width: f32) {
         let frame = self.frame;
-        let anchor = top + (bottom - top) * 0.38;
+        // (Short, the line aimed at in its middle, as much shown above as below it; tall, a little above the middle,
+        // more of what is to come shown.)
+        let anchor = top + (bottom - top) * if bottom - top < 220.0 { 0.5 } else { 0.38 };
+        let (fade_top, fade_bottom) = (((bottom - top) * 0.12).min(28.0), ((bottom - top) * 0.15).min(34.0));
         let current = self.moment.now;
         let turned = (self.music.turned != 0).then(|| (current.map_or(0, |now| now as i32) + self.music.turned).clamp(0, lines.len() as i32 - 1) as usize);
         let translated = self.shows.translation;
@@ -1136,7 +1192,7 @@ impl Drawing<'_> {
                 continue;
             }
             // Faded toward the rail's edges.
-            let edge = ((y - top) / 28.0).clamp(0.0, 1.0).min(((bottom + 12.0 - (y + tall)) / 34.0).clamp(0.0, 1.0));
+            let edge = ((y - top) / fade_top).clamp(0.0, 1.0).min(((bottom + 12.0 - (y + tall)) / fade_bottom).clamp(0.0, 1.0));
             let alpha = opacity_at(d) * edge;
             let line = &lines[index];
             let font = Font { size: size * scale, ..NOW_FONT };
@@ -1205,7 +1261,7 @@ impl Drawing<'_> {
 
     /// A line drawn in `dim`, and over it in `bright` as far as it is sung; edged, with no ground.
     #[allow(clippy::too_many_arguments)]
-    fn filled(&self, layout: &IDWriteTextLayout, text: &str, font: Font, x: f32, y: f32, width: f32, sung: f32, dim: Color, bright: Color, soft: f32) {
+    fn filled(&self, layout: &IDWriteTextLayout, text: &str, font: Font, x: f32, y: f32, width: f32, sung: Filling, dim: Color, bright: Color, soft: f32) {
         if self.edged {
             for (dx, dy) in [(0.0, 1.2), (0.8, 0.8), (-0.8, 0.8)] {
                 self.frame.text_wrapped(text, font, Color::hex(0x000000, 0.45 * bright.a), x + dx, y + dy, width);
@@ -1305,14 +1361,25 @@ fn parts(line: &Line, next: Option<f64>) -> (String, Vec<(usize, usize, f64, f64
     (text, parts)
 }
 
-/// How much of the text drawn is sung at `t`: its place, in UTF-16 units, fractional within the part being sung.
-fn sung_to(parts: &[(usize, usize, f64, f64)], t: f64) -> f32 {
-    let mut done = 0.0;
+/// How far a line is sung: all of it before `from` (UTF-16), and `part` (0 to 1) of the way across what runs from
+/// `from` to `to`, the part being sung, by how wide it is drawn: filled at an even pace across it, however wide each
+/// of its characters (a character and the space after it share a part's time: by units, the fill crossed the one fast
+/// and crawled over the other).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Filling {
+    from: usize,
+    to: usize,
+    part: f32,
+}
+
+/// How far the text drawn is sung at `t`.
+fn sung_to(parts: &[(usize, usize, f64, f64)], t: f64) -> Filling {
+    let mut done = Filling { from: 0, to: 0, part: 0.0 };
     for (from, to, at, end) in parts {
         if t < *at {
             break;
         }
-        done = if t >= *end { *to as f32 } else { *from as f32 + (*to - *from) as f32 * ((t - at) / (end - at)) as f32 };
+        done = if t >= *end { Filling { from: *to, to: *to, part: 0.0 } } else { Filling { from: *from, to: *to, part: ((t - at) / (end - at)) as f32 } };
     }
     done
 }
@@ -1342,16 +1409,16 @@ fn interlude(frame: &Frame, x: f32, y: f32, size: f32, done: f32, dim: Color, br
 
 /// A line drawn in `dim`, and over it in `bright` as far as it is sung (see `sung_part`).
 #[allow(clippy::too_many_arguments)]
-fn filled(frame: &Frame, layout: &IDWriteTextLayout, text: &str, font: Font, x: f32, y: f32, width: f32, sung: f32, dim: Color, bright: Color, soft: f32) {
+fn filled(frame: &Frame, layout: &IDWriteTextLayout, text: &str, font: Font, x: f32, y: f32, width: f32, sung: Filling, dim: Color, bright: Color, soft: f32) {
     frame.text_wrapped(text, font, dim, x, y, width);
     sung_part(frame, layout, text, font, x, y, width, sung, bright, soft);
 }
 
-/// As much of a line as is sung (`sung`, UTF-16 units), in `bright`, its edge soft: row by row as `layout` breaks
+/// As much of a line as is sung (`sung`), in `bright`, its edge soft: row by row as `layout` breaks
 /// it, the row being sung up to the place sung, the rows before it whole.
 #[allow(clippy::too_many_arguments)]
-fn sung_part(frame: &Frame, layout: &IDWriteTextLayout, text: &str, font: Font, x: f32, y: f32, width: f32, sung: f32, bright: Color, soft: f32) {
-    if sung <= 0.0 {
+fn sung_part(frame: &Frame, layout: &IDWriteTextLayout, text: &str, font: Font, x: f32, y: f32, width: f32, sung: Filling, bright: Color, soft: f32) {
+    if sung.to == 0 {
         return;
     }
     let mut count = 0;
@@ -1364,10 +1431,9 @@ fn sung_part(frame: &Frame, layout: &IDWriteTextLayout, text: &str, font: Font, 
         let _ = unsafe { layout.HitTestTextPosition(unit as u32, false, &mut px, &mut py, &mut metrics) };
         (px, metrics.top)
     };
-    let whole = sung.floor() as usize;
-    let (x0, top) = place(whole);
-    let (x1, top1) = place(whole + 1);
-    let at = if (top1 - top).abs() < 0.5 { x0 + (x1 - x0) * sung.fract() } else { x0 };
+    let (x0, top) = place(sung.from);
+    let (x1, top1) = place(sung.to);
+    let at = if (top1 - top).abs() < 0.5 { x0 + (x1 - x0) * sung.part } else { x0 };
     let mut row_top = 0.0;
     for row in &rows {
         let height = row.height;
@@ -1553,23 +1619,28 @@ mod tests {
         Line { at: 10.0, end: None, text: text.into(), words, backing: None, translation: None }
     }
 
+    /// How far it is sung, in UTF-16 units (fractional across the part being sung).
+    fn units(sung: Filling) -> f32 {
+        sung.from as f32 + (sung.to - sung.from) as f32 * sung.part
+    }
+
     #[test]
     fn a_line_sung_part_by_part() {
         // Word by word: as the words say.
         let worded = line("ab cd", vec![Word { at: 10.0, end: 11.0, text: "ab ".into() }, Word { at: 11.0, end: 12.0, text: "cd".into() }]);
         let (text, worded) = parts(&worded, None);
         assert_eq!(text, "ab cd");
-        assert_eq!(sung_to(&worded, 10.5), 1.5);
-        assert_eq!(sung_to(&worded, 11.5), 4.0);
-        assert_eq!(sung_to(&worded, 20.0), 5.0);
-        assert_eq!(sung_to(&worded, 9.0), 0.0);
+        assert_eq!(units(sung_to(&worded, 10.5)), 1.5);
+        assert_eq!(units(sung_to(&worded, 11.5)), 4.0);
+        assert_eq!(units(sung_to(&worded, 20.0)), 5.0);
+        assert_eq!(units(sung_to(&worded, 9.0)), 0.0);
         // By line: each Chinese character a part, the time shared.
         let (_, shared) = parts(&line("你好 hi", Vec::new()), Some(14.0));
         assert_eq!(shared.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), [(0, 1), (1, 3), (3, 5)]);
         // The spaces between characters filled with the one before them: no jump over them.
         let (_, spaced) = parts(&line("微 微 微 微", Vec::new()), Some(14.0));
         assert_eq!(spaced.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), [(0, 2), (2, 4), (4, 6), (6, 7)]);
-        let between = |t: f64| sung_to(&spaced, t);
+        let between = |t: f64| units(sung_to(&spaced, t));
         assert!((between(10.0 + 0.9 * 0.75) - 1.5).abs() < 1e-6, "three quarters through the first part, the fill is half across its space");
         assert!((shared.last().unwrap().3 - (10.0 + 4.0 * 0.9)).abs() < 1e-9);
     }
@@ -1591,6 +1662,18 @@ mod tests {
         assert_eq!(Layout::for_room((470.0, 245.0), &all, Some(Layout::Card)), Layout::Card);
         assert_eq!(Layout::for_room((470.0, 255.0), &all, Some(Layout::Player)), Layout::Player);
         assert_eq!(Layout::for_room((470.0, 270.0), &all, Some(Layout::Player)), Layout::Card);
+    }
+
+    #[test]
+    fn a_size_comes_to_rest_where_its_layout_is_right() {
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false };
+        // A strip pulled taller, short of a player: back to the strip's tallest; a player short of a card: its.
+        assert_eq!(rests_at((420.0, 110.0), &all), (420.0, STRIP_MOST));
+        assert_eq!(rests_at((420.0, 245.0), &all), (420.0, PLAYER_MOST));
+        // Within the range: where it was let go; the card, however tall; never under the least.
+        assert_eq!(rests_at((420.0, 180.0), &all), (420.0, 180.0));
+        assert_eq!(rests_at((470.0, 520.0), &all), (470.0, 520.0));
+        assert_eq!(rests_at((100.0, 20.0), &all), LEAST);
     }
 }
 
@@ -1736,6 +1819,33 @@ mod pictures {
         }
     }
 
+    /// Where the fill's edge is (DIPs from the line's start) as a line of characters with spaces between them is sung,
+    /// shared out evenly (the line 微 微 微 微 of 微微, from 43.06 s, the next at 48.09 s): printed every 50 ms.
+    #[test]
+    #[ignore]
+    fn the_fill_goes_on_evenly() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let gfx = crate::ui::gfx::current().unwrap();
+        let line = Line { at: 43.06, end: None, text: "微 微 微 微".into(), words: Vec::new(), backing: None, translation: None };
+        let (text, parts) = parts(&line, Some(48.09));
+        let layout = gfx.wrapped(&text, PLAYER_LINE, 1000.0);
+        let place = |unit: usize| {
+            let (mut px, mut py, mut metrics) = (0.0, 0.0, DWRITE_HIT_TEST_METRICS::default());
+            let _ = unsafe { layout.HitTestTextPosition(unit as u32, false, &mut px, &mut py, &mut metrics) };
+            px
+        };
+        println!("units: {:?}", (0..=text.encode_utf16().count()).map(place).collect::<Vec<_>>());
+        let mut t = 43.0;
+        while t < 47.5 {
+            let sung = sung_to(&parts, t);
+            let at = place(sung.from) + (place(sung.to) - place(sung.from)) * sung.part;
+            println!("{t:.2} s  {sung:?}  edge {at:.1}");
+            t += 0.05;
+        }
+    }
+
     /// What plays in each layout, at each size, with its switches as each case says, drawn to PNGs in the target
     /// folder: `cargo test --features studio -- --ignored draws_what_plays --nocapture`.
     #[test]
@@ -1771,7 +1881,7 @@ mod pictures {
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::current().unwrap();
         for (name, (w, h), shows, over, turned, dragged, between) in cases {
-            let mut music = Music { controls_in: if over || shows.controls { 1.0 } else { 0.0 }, turned, turned_at: Instant::now(), ..Music::default() };
+            let mut music = Music { controls_in: if over || shows.controls { 1.0 } else { 0.0 }, turned, turned_at: Instant::now(), arm: 1.0, turned_by: 30.0, ..Music::default() };
             let mut moment = playing(between);
             moment.dragged_to = dragged.then_some(150.0);
             music.bands = moment.sound.bands;

@@ -1934,11 +1934,12 @@ impl Widget {
                 }
                 moving |= readings.morph.is_some();
             }
-            // What plays is laid out for the room it is given (see `music::Layout`): as large as the hand makes it,
-            // down to the least it can be.
+            // What plays is laid out for the room it is given (see `music::Layout`): it comes to rest as large as the
+            // hand made it, within the range its layout is right in (the hand pulling it past that part of the way, as
+            // it pulls a widget of readings past its form: see `GIVE`).
             Content::Music(shown) => {
                 if let Some(room) = sized_to {
-                    shown.size = (room.0.max(music::LEAST.0), room.1.max(music::LEAST.1));
+                    shown.size = music::rests_at(room, &Shows::from(&crate::app().settings.lock().unwrap().view));
                 }
                 self.zoom = 1.0;
                 self.shown = shown.size;
