@@ -81,7 +81,9 @@ impl Layout {
 
 /// Where each layout begins (DIPs): the player from this tall (and the strip below this wide), the card from this
 /// tall, stood on end below this wide.
-const PLAYER_FROM: f32 = 120.0;
+/// (As tall as its edges, what plays, a row of the line sung now and the rows along the bottom: no less, so that the
+/// line sung now is never shown cut.)
+const PLAYER_FROM: f32 = 146.0;
 const STRIP_UNDER: f32 = 230.0;
 const CARD_FROM: f32 = 250.0;
 const TALL_UNDER: f32 = 360.0;
@@ -611,6 +613,8 @@ fn pad(layout: Layout) -> f32 {
 const RADIUS: f32 = 14.0;
 /// The strip's cover inside another widget, at most (DIPs).
 const HOSTED_COVER: f32 = 44.0;
+/// How tall a line's translation under it is in the lines round the one sung now (DIPs, at the line sung now's size).
+const TRANSLATION_ROW: f32 = 20.0;
 /// The cover in the card's top row, beside what plays (DIPs).
 const CARD_COVER: f32 = 64.0;
 
@@ -1023,7 +1027,7 @@ impl Drawing<'_> {
             return;
         }
         let frame = self.frame;
-        frame.clip(left - 4.0, line_top - 4.0, width + 8.0, bottom - line_top + 4.0);
+        frame.clip(left - 4.0, line_top - 4.0, width + 8.0, bottom - line_top + 8.0);
         let (lines, now) = (self.moment.lines.clone(), self.moment.now);
         match (&lines, now) {
             (Some(lines), _) if self.music.turned != 0 => {
@@ -1042,29 +1046,35 @@ impl Drawing<'_> {
                 let eased = self.came();
                 let under = self.under(lines, now);
                 // A line's size: too long for a row, wrapped, at the largest size (down to that of what is under it) at
-                // which all its rows fit with what is under it; else all its rows alone; else at the least, its rows
-                // as far as they fit. How tall it is, so.
+                // which all its rows fit with what is under it; else all its rows alone; else one row at the least, cut
+                // short with an ellipsis (never a row shown cut through). How tall it is, so, and whether it is one row
+                // cut short.
                 let room = bottom - line_top;
-                let fit = |text: &str, with_under: bool| -> (Font, f32) {
+                let fit = |text: &str, with_under: bool| -> (Font, f32, bool) {
                     let sizes = || (0..).map(|step| self.fonts.line.size - step as f32).take_while(|size| *size >= self.fonts.under.size).map(|size| Font { size, ..self.fonts.line });
                     let height = |font: Font| frame.gfx.wrapped_height(text, font, width);
                     let wants_under = if with_under { 2.0 + under_tall } else { 0.0 };
-                    let font = sizes()
-                        .find(|font| height(*font) + wants_under <= room)
-                        .or_else(|| sizes().find(|font| height(*font) <= room))
-                        .unwrap_or(Font { size: self.fonts.under.size, ..self.fonts.line });
-                    (font, height(font))
+                    match sizes().find(|font| height(*font) + wants_under <= room).or_else(|| sizes().find(|font| height(*font) <= room)) {
+                        Some(font) => (font, height(font), false),
+                        None => {
+                            let font = Font { size: self.fonts.under.size, ..self.fonts.line };
+                            (font, frame.gfx.wrapped_height("M", font, 100_000.0), true)
+                        }
+                    }
                 };
+                // As it is drawn: whole, or one row cut short.
+                let shown = |text: &str, font: Font, cut: bool| if cut { fitted(frame, text, font, width) } else { text.to_string() };
                 // Come from under the line before (the next line, shown under it): it grows into its place as that
                 // goes up and out, and the line after it comes in under it.
                 let before = now.checked_sub(1).filter(|&before| eased < 1.0 && !text.trim().is_empty() && !lines[before].text.trim().is_empty() && self.under(lines, before) == line.text);
                 // How far down what is under it goes: under the line as it is now, wherever that is.
                 let (line_y, tall) = match before {
                     Some(before) => {
-                        let (old_font, old_tall) = fit(&lines[before].text, true);
+                        let (old_font, old_tall, old_cut) = fit(&lines[before].text, true);
                         let (_, sung_colour) = self.line_colours(1.0);
-                        frame.text_wrapped(&lines[before].text, old_font, sung_colour.alpha(1.0 - eased), left, line_top - eased * old_tall * 0.7, width);
-                        let (font, tall) = fit(&text, !under.is_empty());
+                        frame.text_wrapped(&shown(&lines[before].text, old_font, old_cut), old_font, sung_colour.alpha(1.0 - eased), left, line_top - eased * old_tall * 0.7, width);
+                        let (font, tall, cut) = fit(&text, !under.is_empty());
+                        let text = shown(&text, font, cut);
                         let from = line_top + old_tall + 2.0;
                         let y = from + (line_top - from) * eased;
                         let size = self.fonts.under.size + (font.size - self.fonts.under.size) * eased;
@@ -1077,18 +1087,42 @@ impl Drawing<'_> {
                         self.filled(&layout, &text, grown, left, y, width, sung, dim, bright, 12.0);
                         (y, frame.gfx.wrapped_height(&text, grown, width).max(tall * eased))
                     }
-                    // Else it rises in as it comes.
+                    // Else it rises in as it comes, what is under it with it, as the one before (with what was under it)
+                    // goes up and out.
                     None => {
-                        let y = line_top + (1.0 - eased) * 10.0;
+                        // (The two move on together as the lines of a page do, the one before gone as it nears the
+                        // edge, never shown cut by it.)
+                        let mut step = 18.0;
+                        if let Some(before) = now.checked_sub(1).filter(|_| eased < 1.0) {
+                            let was = &lines[before];
+                            if !was.text.trim().is_empty() {
+                                let (old_font, old_tall, old_cut) = fit(&was.text, true);
+                                let was_under = self.under(lines, before);
+                                let with_under = !was_under.is_empty() && line_top + old_tall + 2.0 + under_tall <= bottom;
+                                step = old_tall + 4.0 + if with_under { under_tall } else { 0.0 };
+                                let up = line_top - eased * step;
+                                let going = (1.0 - eased * 1.8).max(0.0);
+                                let (_, sung_colour) = self.line_colours(1.0);
+                                frame.text_wrapped(&shown(&was.text, old_font, old_cut), old_font, sung_colour.alpha(going), left, up, width);
+                                if with_under {
+                                    words(frame, &fitted(frame, &was_under, self.fonts.under, width), self.fonts.under, Color::hex(self.ink, 0.5 * going), left, up + old_tall + 2.0, width + 2.0, Align::Start, self.edged);
+                                }
+                            }
+                        }
+                        let y = line_top + (1.0 - eased) * step;
                         let (dim, bright) = self.line_colours(eased);
                         if text.trim().is_empty() {
                             interlude(frame, left, y, self.fonts.line.size, between(line, next, self.moment.position), dim, bright);
                             (y, self.fonts.line.size * 1.4)
                         } else {
-                            let (font, tall) = fit(&text, !under.is_empty());
-                            let layout = frame.gfx.wrapped(&text, font, width);
-                            let sung = sung_to(&parts, self.moment.position);
-                            self.filled(&layout, &text, font, left, y, width, sung, dim, bright, 12.0);
+                            let (font, tall, cut) = fit(&text, !under.is_empty());
+                            // (Not a row of it, where not one fits.)
+                            if tall <= room {
+                                let text = shown(&text, font, cut);
+                                let layout = frame.gfx.wrapped(&text, font, width);
+                                let sung = sung_to(&parts, self.moment.position);
+                                self.filled(&layout, &text, font, left, y, width, sung, dim, bright, 12.0);
+                            }
                             (y, tall)
                         }
                     }
@@ -1291,7 +1325,7 @@ impl Drawing<'_> {
         let size = (width / 16.0).clamp(18.0, self.fonts.now.size);
         let height_of = |index: usize, scale: f32| {
             let line = &lines[index];
-            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, Font { size: size * scale, ..self.fonts.now }, width) + if Some(index) == current && translated && line.translation.is_some() { 20.0 } else { 0.0 }
+            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, Font { size: size * scale, ..self.fonts.now }, width) + if translated && line.translation.is_some() { TRANSLATION_ROW * scale } else { 0.0 }
         };
         let rail = self.music.rail;
         let base = rail.floor().max(-1.0);
@@ -1371,6 +1405,12 @@ impl Drawing<'_> {
                     outlined(frame, &line.text, font, shown, x, y, width);
                 } else {
                     frame.text_wrapped(&line.text, font, shown, x, y, width);
+                }
+                // Its translation under it, as the line sung now's is (smaller with it).
+                if let Some(translation) = line.translation.as_ref().filter(|_| translated && !line.text.trim().is_empty()) {
+                    let under = frame.gfx.wrapped_height(&line.text, font, width);
+                    let small = Font { size: self.fonts.under_font.size * scale, ..self.fonts.under_font };
+                    words(frame, &fitted(frame, translation, small, width), small, Color::hex(self.ink, 0.42 * alpha), x, y + under + 2.0 * scale, width, Align::Start, clear);
                 }
                 // Pressed, played from (where the wheel has turned the lines: as the line turned to is).
                 if turned.is_some() {
@@ -1843,6 +1883,9 @@ mod pictures {
             worded(28.0, "And the morning finds us singing "),
         ];
         lines[1].translation = Some("We run through the night".into());
+        lines[0].translation = Some("远在城市灯火之外".into());
+        lines[3].translation = Some("每一次心跳都像雷声".into());
+        lines[4].translation = Some("Till the dawn lights the way home".into());
         let now = if between { 2 } else { 1 };
         let position = if between { 17.6 } else { lines[1].words[2].at + 0.2 };
         let mut bands = [0.0; crate::sound::BANDS];
@@ -2023,6 +2066,29 @@ mod pictures {
             sheet.extend(pixels);
         }
         crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/coming.png")), one.0, one.1 * 4, &sheet).unwrap();
+    }
+
+    /// What plays as a row under readings on a light skin (inside another widget, its margins the skin's), to a PNG.
+    #[test]
+    #[ignore]
+    fn draws_what_plays_hosted() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
+        let gfx = crate::ui::gfx::current().unwrap();
+        let (w, h) = (780.0, 64.0);
+        let size = ((w * 1.5) as u32, (h * 1.5) as u32);
+        let mut music = Music::default();
+        let moment = playing(false);
+        music.bands = moment.sound.bands;
+        let pixels = gfx
+            .draw_offscreen(size, 1.5, |frame| {
+                frame.fill(Color::hex(0xF4F4F6, 1.0), 0.0, 0.0, w, h);
+                music.paint_moment(frame, (w, h), &all, Ground::Host { dark: false, family: Family::Inter, inset: 18.0 }, 1.5, None, Instant::now(), moment);
+            })
+            .unwrap();
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/music/hosted.png", env!("CARGO_MANIFEST_DIR"))), size.0, size.1, &pixels).unwrap();
     }
 
     /// What plays in each layout, at each size, with its switches as each case says, drawn to PNGs in the target

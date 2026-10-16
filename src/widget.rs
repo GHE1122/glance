@@ -546,6 +546,8 @@ struct Merged {
     moving: Option<(Instant, Vec<Option<(f32, f32, f32, f32)>>)>,
     /// Where its parts were as the journal was last told.
     told: Vec<(f32, f32, f32, f32)>,
+    /// What plays is in one of the readings' lanes as last laid out (else in a row of its own beside or under them).
+    in_lane: bool,
     /// Laid out once since it was merged: its size then made at least what its parts need at their own size (a part
     /// merged in brings what it shows; what was there is not made smaller for it).
     grown: bool,
@@ -574,7 +576,7 @@ const READINGS_BAND: f32 = 0.3;
 
 impl Merged {
     fn new(parts: Vec<Content>, beside: bool, size: (f32, f32)) -> Self {
-        Merged { parts, beside, size, rects: Vec::new(), touch: Vec::new(), least: (0.0, 0.0), moving: None, told: Vec::new(), grown: false }
+        Merged { parts, beside, size, rects: Vec::new(), touch: Vec::new(), least: (0.0, 0.0), moving: None, told: Vec::new(), grown: false, in_lane: false }
     }
 
     /// Whether the one dropped onto (whose look it has) is what plays.
@@ -637,6 +639,7 @@ impl Merged {
             });
             match (lanes, room) {
                 (Some(opening), Some((room, lane))) => {
+                    self.in_lane = true;
                     let size = on_screen(&opening);
                     self.show_readings(&opening, now);
                     rects[readings] = (0.0, 0.0, size.0, size.1);
@@ -645,7 +648,7 @@ impl Merged {
                     self.size = size;
                 }
                 // Short and wide: one row, the readings' strip and what plays after it, as tall.
-                _ if h < ONE_ROW && readings_for(scene, theme, work, seen, (1.0, h), false).is_some_and(|least| w - on_screen(&least).0 >= music::LEAST.0) => {
+                _ if { self.in_lane = false; h < ONE_ROW } && readings_for(scene, theme, work, seen, (1.0, h), false).is_some_and(|least| w - on_screen(&least).0 >= music::LEAST.0) => {
                     let Some(opening) = readings_for(scene, theme, work, seen, (w - music::LEAST.0, h), false) else { return false };
                     let size = on_screen(&opening);
                     self.show_readings(&opening, now);
@@ -656,6 +659,7 @@ impl Merged {
                 }
                 // A small layout: what plays in a row of its own under it, as wide.
                 _ => {
+                    self.in_lane = false;
                     let Some(opening) = readings_for(scene, theme, work, seen, (w, (h - MUSIC_ROW).max(1.0)), false) else { return false };
                     let size = on_screen(&opening);
                     self.show_readings(&opening, now);
@@ -730,7 +734,7 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
     let theme = scene.theme;
     let size = merged.size;
     let host_plays = merged.host_plays();
-    let apart = merged.music_apart();
+    let apart = merged.music_apart() && merged.in_lane;
     let rects = merged.rects.clone();
     let moving = merged.moving.as_ref().map(|(since, from)| (morph::ease((now.duration_since(*since).as_secs_f32() / MORPH.as_secs_f32()).min(1.0)), from.clone()));
     let mut hits = Vec::new();
