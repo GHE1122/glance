@@ -50,7 +50,7 @@ pub(crate) fn note_sparingly(kind: &'static str, what: impl FnOnce() -> String) 
     }
 }
 use crate::mouse::{cursor_position, monitor_at, Contact};
-use crate::settings::{WidgetAt, WidgetSide};
+use crate::settings::{WidgetAt, WidgetSide, MUSIC_FORM};
 use crate::ui::buttons::{self, Button};
 use crate::ui::arrange::{self, Choice, Form, Want};
 use crate::ui::backdrop::Capture;
@@ -1087,18 +1087,24 @@ impl Widgets {
     /// from its corner; on the desktop the panel had taken (`lent`: its
     /// capture, as a bitmap, and its tone), if it had, till it takes its own
     /// (on another thread: it is drawn at once). `from`: the edge the panel
-    /// was at, if it was at one.
-    pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, size: (f32, f32), lent: Option<Lent>, from: Option<Edge>) -> bool {
+    /// was at, if it was at one; `parts`: what the panel showed, in its order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, size: (f32, f32), lent: Option<Lent>, from: Option<Edge>, parts: &[crate::settings::Part]) -> bool {
         let Some(contact) = monitor_at(at) else { return false };
         let choice = Choice { form, scale, extra: (0.0, 0.0) };
         let made = Instant::now();
-        // With its music lane, the readings and what plays merged below them, as large as the panel was (what plays
-        // a part of its own: readings show no music lane).
-        let readings = Content::Readings(Readings::new(choice));
-        let content = if crate::ui::prefs::module_on(&crate::app().settings.lock().unwrap().view, "lyrics") {
-            Content::Merged(Box::new(Merged::new(vec![readings, Content::Music(MusicShown::new(music::LEAST))], false, size)))
-        } else {
-            readings
+        // What the panel showed, each a part of its own in its order (readings show no music lane), merged where
+        // there are both, as large as the panel was.
+        let mut shown: Vec<Content> = parts
+            .iter()
+            .map(|part| match part {
+                crate::settings::Part::Monitor => Content::Readings(Readings::new(choice)),
+                crate::settings::Part::Music => Content::Music(MusicShown::new(music::LEAST)),
+            })
+            .collect();
+        let content = match shown.len() {
+            1 => shown.remove(0),
+            _ => Content::Merged(Box::new(Merged::new(shown, false, size))),
         };
         let Some(mut widget) = Widget::new(contact, at, content) else { return false };
         let made = made.elapsed();
@@ -1747,10 +1753,6 @@ struct Request {
     /// When it was asked for.
     since: Instant,
 }
-
-/// What a music widget is kept as (in place of the readings' form: an older Glance, which has no such form, leaves it
-/// out rather than show something else).
-const MUSIC_FORM: &str = "music";
 
 /// Posted to a widget's window as a frame of what is behind it has come.
 pub const CAPTURED: u32 = WM_APP + 12;

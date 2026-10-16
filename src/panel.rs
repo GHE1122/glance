@@ -38,7 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::mouse::{cursor_position, cursor_showing, monitor_at, read_mouse, Contact, CORNER_EXCLUSION};
 use crate::reading::{Sample, StaticInfo};
 use crate::overlay::{Choice as OverlayChoice, Overlay};
-use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, Settings, EDGES};
+use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, Part, Settings, EDGES};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::arrange::{self, Form, GAP};
@@ -150,7 +150,7 @@ struct Config {
 
 fn config_from(settings: &Settings) -> Config {
     Config {
-        edges: crate::push::Edges { screens: settings.screens.clone(), rest: settings.rest(), pressure: settings.sensitivity.pressure() },
+        edges: crate::push::Edges { places: settings.places().clone(), pressure: settings.sensitivity.pressure() },
         skin: settings.skin.clone(),
         live: settings.live_backdrop,
         tear_off: settings.tear_off,
@@ -598,7 +598,7 @@ impl Controller {
             // How the edges of a screen open the panel.
             let lit = |monitor: RECT| {
                 let config = self.config.lock().unwrap();
-                crate::screens::lit(&config.edges.screens, config.edges.rest, monitor)
+                crate::screens::lit(&config.edges.places, monitor)
             };
             let (fullscreen_hotkey, fullscreen_edge) = match over_fullscreen {
                 OverFullscreen::Never => (false, false),
@@ -635,13 +635,13 @@ impl Controller {
                 // on no screen: this is asked at every move of the mouse.)
                 let sought = {
                     let config = self.config.lock().unwrap();
-                    EDGES.map(|edge| crate::settings::seam_anywhere(&config.edges.screens, config.edges.rest, edge))
+                    EDGES.map(|edge| config.edges.places.anywhere(edge))
                 };
                 let found = EDGES
                     .into_iter()
                     .zip(sought)
                     .filter_map(|(edge, sought)| sought.then_some(edge))
-                    .filter_map(|edge| seam_contact(cursor, edge, came_from).filter(|contact| lit(contact.monitor).seams.has(edge)).map(|contact| (contact, edge)))
+                    .filter_map(|edge| seam_contact(cursor, edge, came_from).filter(|contact| lit(contact.monitor).has(edge)).map(|contact| (contact, edge)))
                     .min_by_key(|(contact, _)| Some(contact.monitor) != here);
                 let Some((contact, edge)) = found else {
                     seam_rest = None;
@@ -743,7 +743,7 @@ impl Controller {
                         });
                         // The edge it was at, unless it had been moved away.
                         let from = panel.placement.as_ref().filter(|placement| placement.floating.is_none()).map(|_| panel.edge);
-                        if !widgets.tear(form, scale, at, grab, size, lent, from) {
+                        if !widgets.tear(form, scale, at, grab, size, lent, from, &panel.parts) {
                             panel.torn = false;
                             panel.exclude();
                         }
@@ -1183,6 +1183,8 @@ struct Panel<'a> {
     theme: Theme,
     lang: Lang,
     edge: Edge,
+    /// What it shows: what the edge it opened from holds, in its order.
+    parts: Vec<Part>,
     /// The columns chosen in the settings; none, as few as fit.
     columns: Option<usize>,
     /// The size chosen in the settings, 1 as designed.
@@ -1298,6 +1300,7 @@ impl<'a> Panel<'a> {
             theme: Theme::new(Skin::Paper, false),
             lang: Lang::En,
             edge: Edge::Right,
+            parts: vec![Part::Monitor],
             columns: None,
             size: 1.0,
             live: false,
@@ -1355,7 +1358,7 @@ impl<'a> Panel<'a> {
     fn restyle(&mut self) {
         self.next_frame = Instant::now();
         let config = self.controller.config.lock().unwrap();
-        self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
+        self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules()).holding(&self.parts);
         self.columns = config.columns;
         // Mid-drag, the size is the drag's.
         if self.drag.is_none() {
@@ -1427,13 +1430,13 @@ impl<'a> Panel<'a> {
     }
 
     /// The edge the panel opens from on `contact`'s screen when nothing
-    /// pushed into one (the shortcut, the tray): of those that open it
-    /// there, the nearest to `point`; where none does, the one of a screen
-    /// not set otherwise.
+    /// pushed into one (the shortcut, the tray): of those that open one
+    /// there, the nearest to `point`; where none does, the one a panel
+    /// opened so shows (see `Places::by_hand`).
     fn edge_for(&self, point: POINT, contact: Contact) -> Edge {
         let config = self.controller.config.lock().unwrap();
         let m = contact.monitor;
-        crate::screens::lit(&config.edges.screens, config.edges.rest, m).any().nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(config.edges.rest.edge)
+        crate::screens::lit(&config.edges.places, m).nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(config.edges.places.by_hand().0)
     }
 
     /// Opens the panel on `contact`'s screen: along its `edge` at `cursor`,
@@ -1447,6 +1450,12 @@ impl<'a> Panel<'a> {
         // A reopening during the way out picks the panel up where it is.
         if !self.is_shown() {
             self.edge = edge;
+            // What that edge holds (where it holds nothing, opened by hand: what a panel opened so shows).
+            self.parts = {
+                let places = &self.controller.config.lock().unwrap().edges.places;
+                let held = crate::screens::id_of(contact.monitor).map(|id| places.parts(&id, edge).to_vec()).unwrap_or_default();
+                if held.is_empty() { places.by_hand().1 } else { held }
+            };
             self.restyle();
             // A new opening is laid out for what the machine shows now.
             self.opening = None;
@@ -2085,7 +2094,7 @@ impl<'a> Panel<'a> {
         // and open from the edge again.
         let lit = {
             let config = self.controller.config.lock().unwrap();
-            crate::screens::lit(&config.edges.screens, config.edges.rest, contact.monitor).any()
+            crate::screens::lit(&config.edges.places, contact.monitor)
         };
         if let Some(edge) = lit.each().find(|edge| docks(*edge, contact, panel)) {
             self.edge = edge;

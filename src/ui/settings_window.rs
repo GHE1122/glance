@@ -64,7 +64,10 @@ use super::view::{self, Rect, Scene};
 use super::wallpaper;
 use crate::elevation;
 use crate::metrics;
-use crate::settings::{Anchor, Edge, OverFullscreen, Sensitivity, Settings, Shortcut, EDGES};
+use crate::settings::{Anchor, Edge, OverFullscreen, Part, Sensitivity, Settings, Shortcut, EDGES};
+
+mod layout_page;
+use layout_page::{Carry, Zone};
 use crate::panel::SIZES;
 use crate::update;
 
@@ -113,23 +116,11 @@ const ITEM_INSET: f32 = 12.0 + 20.0 + 12.0;
 const CHEVRON_ROOM: f32 = 28.0;
 /// How large a chevron is drawn.
 const CHEVRON: f32 = 14.0;
-/// The map of the screens: the most height it takes; the room around a
-/// screen's picture inside its place, where its edges are drawn; how deep
-/// into its place an edge takes a click; how thick an edge is drawn and how
-/// far inside the place; the picture's corners; the plate its number is on
-/// (its radius); and the dashes of an edge the pointer passes on from (the
-/// least they are long, and apart).
-const MAP_MOST: f32 = 180.0;
-const MAP_ROOM: f32 = 6.0;
-const MAP_BAND: f32 = 18.0;
-const MAP_BAR: f32 = 2.0;
-const MAP_INSET: f32 = 1.5;
+/// The screens in the layout's editor: a screen's picture's corners; and the dashes of an edge the pointer passes on
+/// from (the least they are long, and apart).
 const MAP_RADIUS: f32 = 3.0;
-const MAP_PLATE: f32 = 9.0;
 const MAP_DASH: f32 = 4.0;
 const MAP_GAP: f32 = 3.0;
-/// The well the map lies in: the room around the map inside it.
-const MAP_WELL: f32 = 14.0;
 const SKINS_ROW: f32 = 16.0 + 72.0 + 10.0 + 18.0 + 16.0;
 /// Desktop shown beside the panel in the preview (DIPs of screen).
 const PREVIEW_MARGIN: f32 = 160.0;
@@ -616,12 +607,19 @@ enum Target {
     ClearShortcut,
     /// A slider's track.
     Slider(Field),
-    /// An edge of a screen (by its name) in the map of the screens, where
-    /// the pointer stops at it or (true) where it passes on to another
-    /// screen: it opens the panel there, or does not.
-    ScreenEdge(String, Edge, bool),
-    /// A screen (by its name) in the map: the preview shows it.
-    Screen(String),
+    /// A component in the layout's library, to be dragged onto an edge.
+    Library(Part),
+    /// A component on an edge of a screen (by its name) in the layout's editor: dragged along it, to another, or off;
+    /// pressed, the panel that edge opens shows.
+    Chip(String, Edge, Part),
+    /// The button on it that takes it off the edge.
+    Unplace(String, Edge, Part),
+    /// An edge of a screen shown large in the editor: pressed, the panel it opens shows.
+    Zone(String, Edge),
+    /// Every screen small in the editor (none), or the one by its name, large.
+    View(Option<String>),
+    /// Every screen alike, or each set apart.
+    Same,
     /// A page (or the components' heading), in the pages' list.
     Nav(NavItem),
     /// One of the monitor's tabs.
@@ -664,9 +662,8 @@ enum Row {
     /// The fold of the modules few want, and how many it holds.
     More(usize),
     Skins,
-    /// The screens as they are arranged, each with the edges that open
-    /// the panel.
-    Screens,
+    /// The components, to be dragged onto the screens' edges in the preview's room (see `layout_page`).
+    Library,
     Choice(Field),
     Switch(Switch),
     Module(String),
@@ -710,14 +707,6 @@ struct Drag {
     id: String,
     grab: f32,
     pointer: f32,
-}
-
-/// An edge of a screen in the map (the screen by its place among them): its
-/// stretches (see `screens::stretches`).
-struct MapEdge {
-    screen: usize,
-    edge: Edge,
-    stretches: Vec<(i32, i32, bool)>,
 }
 
 /// A screen's desktop, small, for the map: the screen by its name, the
@@ -857,11 +846,15 @@ struct Ui {
     pressed: Option<Target>,
     /// The screens, as the map shows them.
     screens: Vec<crate::screens::Screen>,
-    /// The edge last turned on in the map: the one the preview opens from.
+    /// The edge last pressed in the layout's editor: the panel it opens slides out from it there.
     shown_edge: Option<Edge>,
-    /// The screen whose edge was last chosen in the map: the one the
-    /// preview shows on that page.
-    map_screen: Option<String>,
+    /// The screen the layout's editor shows large, by its name (none: every screen, small).
+    view: Option<String>,
+    /// A component carried in the layout's editor, and its edges as last drawn (where they take it).
+    carry: Option<Carry>,
+    zones: Vec<Zone>,
+    /// What plays, as the layout's library shows it.
+    library_music: super::music::Music,
     /// When the screens were last asked for.
     screens_at: Instant,
     map_art: Vec<MapArt>,
@@ -921,6 +914,7 @@ impl Lives for Ui {
             art.bitmap = None;
         }
         self.music.release();
+        self.library_music.release();
     }
 }
 
@@ -1034,7 +1028,10 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             pressed: None,
             screens: crate::screens::all(),
             shown_edge: None,
-            map_screen: None,
+            view: None,
+            carry: None,
+            zones: Vec::new(),
+            library_music: super::music::Music::default(),
             screens_at: Instant::now(),
             map_art: Vec::new(),
             kept_stages: Vec::new(),
@@ -1195,7 +1192,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == 1 => {
             // Over the client area: a hand on what can be dragged.
-            let grip = with_ui(|ui| matches!(ui.hovered(), Some(Target::Grip(_))) || ui.drag.is_some()).unwrap_or(false);
+            let grip = with_ui(|ui| matches!(ui.hovered(), Some(Target::Grip(_) | Target::Library(_) | Target::Chip(..))) || ui.drag.is_some() || ui.carry.as_ref().is_some_and(|carry| carry.moved)).unwrap_or(false);
             if grip {
                 unsafe { SetCursor(LoadCursorW(None, IDC_HAND).ok()) };
                 return LRESULT(1);
@@ -1300,7 +1297,8 @@ impl Ui {
         let mut rows = vec![Row::Title];
         match (self.page, self.tab) {
             (Page::Layout, _) => rows.extend([
-                Row::Screens,
+                Row::Library,
+                Row::Group(pick(self.lang, "呼出方式", "How it opens")),
                 Row::Choice(Field::Anchor),
                 Row::Choice(Field::Push),
                 Row::Choice(Field::CloseDelay),
@@ -1354,7 +1352,7 @@ impl Ui {
                     }
                 };
                 let (folded, listed): (Vec<&prefs::ModuleEntry>, Vec<&prefs::ModuleEntry>) =
-                    self.prefs.modules.iter().filter(|entry| prefs::offered(&entry.id)).partition(|entry| self.folded(&entry.id));
+                    self.prefs.modules.iter().filter(|entry| entry.id != "lyrics").partition(|entry| self.folded(&entry.id));
                 for entry in listed {
                     module(rows, &entry.id);
                 }
@@ -1490,7 +1488,7 @@ impl Ui {
                 Row::Note(words) => (12.0, self.gfx.wrapped_height(words, Font::new(Family::Segoe, 12.0, 400.0), PANE - 2.0 * PAD_SIDE - GUTTER - 8.0) + 8.0),
                 Row::Slider(_) => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
-                Row::Screens => (if after_heading { 8.0 } else { ROW_GAP }, self.map_head() + self.map().2 + 2.0 * MAP_WELL + ROW_SIDE),
+                Row::Library => (if after_heading { 8.0 } else { ROW_GAP }, self.library_height()),
                 // A choice with a word on it: the word above, the choices on
                 // a line of their own.
                 Row::Choice(field) if self.choice_hint(*field).is_some() => {
@@ -1519,54 +1517,6 @@ impl Ui {
         }
         let _ = y;
         placed
-    }
-
-    /// The map of the screens in the room a row has: how many DIPs a pixel
-    /// of the desktop is on it, its width and height, and the desktop's
-    /// corner.
-    fn map(&self) -> (f32, f32, f32, i32, i32) {
-        let room = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE - 2.0 * MAP_WELL;
-        let bound = |pick: fn(&RECT) -> i32, most: bool| {
-            let all = self.screens.iter().map(|screen| pick(&screen.monitor));
-            if most { all.max() } else { all.min() }.unwrap_or(0)
-        };
-        let (left, top, right, bottom) = (bound(|m| m.left, false), bound(|m| m.top, false), bound(|m| m.right, true), bound(|m| m.bottom, true));
-        let (across, down) = ((right - left).max(1) as f32, (bottom - top).max(1) as f32);
-        let k = (room / across).min(MAP_MOST / down);
-        (k, across * k, down * k, left, top)
-    }
-
-    /// The map's name, and its word.
-    fn map_words(&self) -> (&'static str, &'static str) {
-        (
-            pick(self.lang, "呼出位置", "Where it opens"),
-            pick(
-                self.lang,
-                "点屏幕的一条边，面板就能从那里呼出，再点一次取消。实线：鼠标推到边上呼出；虚线连着另一块屏幕：鼠标贴着它停半秒呼出",
-                "Click an edge of a screen for the panel to open from it, and again to turn it off. Solid: push the pointer into it. Dashed, where it leads to another screen: rest the pointer on it for half a second",
-            ),
-        )
-    }
-
-    /// The room above the map for its name and its word (as a row's: see
-    /// `words_height`).
-    fn map_head(&self) -> f32 {
-        let room = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
-        22.0 + self.gfx.wrapped_height(self.map_words().1, Font::new(Family::Segoe, 12.0, 400.0), room) + 18.0
-    }
-
-    /// How the edges of the screen named `screen` open the panel.
-    fn edges_of(&self, screen: &str) -> crate::settings::Opens {
-        crate::settings::lit(&self.settings.screens, self.settings.rest(), screen)
-    }
-
-    /// The edges of each screen as the map has them: where the pointer
-    /// stops at them and where it passes on (see `screens::stretches`), in
-    /// physical pixels along the edge.
-    fn map_edges(&self) -> Vec<MapEdge> {
-        let monitors: Vec<RECT> = self.screens.iter().map(|screen| screen.monitor).collect();
-        let eased = crate::screens::eased();
-        (0..monitors.len()).flat_map(|index| EDGES.map(|edge| MapEdge { screen: index, edge, stretches: crate::screens::stretches(&monitors, index, edge, eased) })).collect()
     }
 
     /// The preview shows the screen named `screen`: its desktop, at its
@@ -1645,8 +1595,8 @@ impl Ui {
         });
     }
 
-    /// The screen the preview shows, by its name: on the page of the map,
-    /// the one whose edge was last chosen there; on the overlay's, the one
+    /// The screen the preview shows, by its name: on the layout's page, the
+    /// one its editor shows large; on the overlay's, the one
     /// the overlay was put on; and the one this window is on, for the
     /// other pages and until either was.
     fn stage_screen(&self) -> Option<String> {
@@ -1655,7 +1605,7 @@ impl Ui {
             self.screens.iter().find(|screen| screen.monitor == here).map(|screen| screen.id.clone())
         };
         let chosen = match self.page {
-            Page::Layout => self.map_screen.clone().filter(|id| self.screens.iter().any(|screen| screen.id == *id)),
+            Page::Layout => self.editor_screen(),
             Page::Monitor if self.tab == Tab::Overlay => self.settings.overlay.screen.and_then(|(x, y)| at(POINT { x, y })),
             _ => None,
         };
@@ -1666,18 +1616,17 @@ impl Ui {
         })
     }
 
-    /// The edge the preview's panel opens from, on the screen it shows:
-    /// on the page of the map, the one last turned on there; else the
-    /// first of that screen's that opens the panel (the one of a screen not
-    /// set otherwise, where none does).
+    /// The edge the preview's panel opens from, on the screen it shows: the first of that screen's that opens the
+    /// readings, else the first that opens anything; where none does, the one a panel opened by hand opens from.
     fn preview_edge(&self) -> Edge {
-        let lit = self.stage.screen.as_deref().map(|screen| self.edges_of(screen).any()).unwrap_or_default();
-        let chosen = self.shown_edge.filter(|edge| self.page == Page::Layout && lit.has(*edge));
-        chosen.or(lit.each().next()).unwrap_or(self.settings.edge)
+        let places = self.settings.places();
+        let screen = self.stage.screen.as_deref().unwrap_or_default();
+        let lit = places.lit(screen);
+        lit.each().find(|edge| places.parts(screen, *edge).contains(&Part::Monitor)).or(lit.each().next()).unwrap_or(places.by_hand().0)
     }
 
     /// The desktop of the screen named `id` at `monitor`, `size` physical
-    /// pixels large, for the map: taken once, and again when the map's
+    /// pixels large, for the layout's editor: taken once, and again when its
     /// size changes.
     fn map_picture(&mut self, frame: &Frame, id: &str, monitor: RECT, size: (u32, u32)) -> Option<ID2D1Bitmap1> {
         let at = match self.map_art.iter().position(|art| art.id == id) {
@@ -2583,6 +2532,7 @@ impl Ui {
             drag.pointer = y + self.scroll;
             self.reorder();
         }
+        self.carry_to(x, y);
         self.next_frame = Instant::now();
     }
 
@@ -2611,6 +2561,12 @@ impl Ui {
                 unsafe { SetCapture(self.hwnd) };
             }
         }
+        if let Some(target) = self.pressed.clone() {
+            if self.take_up(&target, x, y) {
+                self.next_frame = Instant::now();
+                return;
+            }
+        }
         if let Some(Target::Grip(id)) = &self.pressed {
             // A card travels closed.
             let id = id.clone();
@@ -2626,6 +2582,11 @@ impl Ui {
     /// A slider or a module let go (or the pointer taken away mid-drag, by
     /// another window or the window closing): kept where it was left.
     fn let_go(&mut self) {
+        // A component in hand is put down nowhere: where it came from, it stays.
+        if self.carry.as_ref().is_some_and(|carry| carry.moved) {
+            self.carry = None;
+            self.pressed = None;
+        }
         // Shown live as it slid.
         if let Some((field, _)) = self.sliding.take() {
             self.pressed = None;
@@ -2655,6 +2616,11 @@ impl Ui {
             self.let_go();
             return;
         }
+        if self.carry.is_some() {
+            self.put_down();
+            self.next_frame = Instant::now();
+            return;
+        }
         let pressed = self.pressed.take();
         if pressed.is_none() || pressed != self.hovered() {
             self.next_frame = Instant::now();
@@ -2679,22 +2645,10 @@ impl Ui {
                 self.save();
             }
             Target::Choice(field, index) => self.choose(field, index),
-            Target::Screen(screen) => {
-                // The panel opening from the first of its edges that
-                // opens it.
-                self.shown_edge = None;
-                self.map_screen = Some(screen);
-            }
-            Target::ScreenEdge(screen, edge, seam) => {
-                let rest = self.settings.rest();
-                crate::settings::flip_edge(&mut self.settings.screens, rest, &screen, edge, seam);
-                // The preview shows that screen: the panel opening from the
-                // edge turned on; from another of its edges that opens it,
-                // one turned off.
-                let any = self.edges_of(&screen).any();
-                self.shown_edge = Some(edge).filter(|edge| any.has(*edge)).or(any.each().next());
-                self.map_screen = Some(screen);
-                self.save();
+            // (Carried, or pressed and let go: see `put_down`.)
+            Target::Library(_) | Target::Chip(..) => {}
+            Target::View(_) | Target::Same | Target::Zone(..) | Target::Unplace(..) => {
+                self.press_editor(&target);
             }
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
@@ -2786,21 +2740,13 @@ impl Ui {
     /// view or not).
     fn stops(&self) -> Vec<Target> {
         let pages = NAV_ITEMS.iter().filter(|item| **item != NavItem::Components).map(|item| Target::Nav(*item));
+        let editor = if self.page == Page::Layout { self.editor_stops() } else { Vec::new() };
         pages.chain(self.layout().into_iter()
             .flat_map(|(row, ..)| match row {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
                 // The screens; then each edge where the pointer stops at
                 // it, then where it passes on.
-                Row::Screens => self
-                    .screens
-                    .iter()
-                    .map(|screen| Target::Screen(screen.id.clone()))
-                    .chain(self.map_edges().into_iter()
-                    .flat_map(|MapEdge { screen: index, edge, stretches }| {
-                        let id = &self.screens[index].id;
-                        [false, true].into_iter().filter(|seam| stretches.iter().any(|(.., is)| is == seam)).map(|seam| Target::ScreenEdge(id.clone(), edge, seam)).collect::<Vec<_>>()
-                    }))
-                    .collect(),
+                Row::Library => vec![],
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 // A switch's own button comes first.
                 Row::Shortcut if self.settings.shortcut.is_some() => vec![Target::Shortcut, Target::ClearShortcut],
@@ -2830,6 +2776,7 @@ impl Ui {
                 Row::Element(name) => vec![Target::Element(name)],
                 Row::Title | Row::Note(_) => vec![],
             }))
+            .chain(editor)
             .collect()
     }
 
@@ -2928,7 +2875,7 @@ impl Ui {
         if folded(id) {
             return;
         }
-        let skip: Vec<String> = self.prefs.modules.iter().filter(|entry| folded(&entry.id) || !prefs::offered(&entry.id)).map(|entry| entry.id.clone()).collect();
+        let skip: Vec<String> = self.prefs.modules.iter().filter(|entry| folded(&entry.id) || entry.id == "lyrics").map(|entry| entry.id.clone()).collect();
         let (list, bare) = self.list(id);
         let Some(at) = list.iter().position(|entry| entry.id == bare) else { return };
         let mut to = at;
@@ -3451,100 +3398,7 @@ impl Ui {
                         self.targets.push((Rect { x, y: y + 16.0, w: cell, h: 72.0 + 10.0 + 18.0 }, Target::Skin(skin)));
                     }
                 }
-                Row::Screens => {
-                    card(frame, palette, left, y, width, row_height, palette.card);
-                    let (name, word) = self.map_words();
-                    let head = self.map_head();
-                    field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + head / 2.0, width - 2.0 * ROW_SIDE);
-                    let (k, map_width, map_height, desk_left, desk_top) = self.map();
-                    // The well the map lies in.
-                    let well = Rect { x: left + ROW_SIDE, y: y + head, w: width - 2.0 * ROW_SIDE, h: map_height + 2.0 * MAP_WELL };
-                    fill(frame, palette.control, well.x, well.y, well.w, well.h, 6.0);
-                    let (ox, oy) = (well.x + (well.w - map_width) / 2.0, well.y + MAP_WELL);
-                    let across = |x: i32| ox + (x - desk_left) as f32 * k;
-                    let down = |y: i32| oy + (y - desk_top) as f32 * k;
-                    // A screen's place, a hair from the next; its picture
-                    // inside, its edges in the room around the picture.
-                    let boxed = |m: RECT| Rect { x: across(m.left) + 1.0, y: down(m.top) + 1.0, w: (m.right - m.left) as f32 * k - 2.0, h: (m.bottom - m.top) as f32 * k - 2.0 };
-                    let pictured = |r: Rect| Rect { x: r.x + MAP_ROOM, y: r.y + MAP_ROOM, w: (r.w - 2.0 * MAP_ROOM).max(1.0), h: (r.h - 2.0 * MAP_ROOM).max(1.0) };
-                    let screens = self.screens.clone();
-                    let shown = self.stage.screen.clone();
-                    let number = Font::new(Family::Segoe, 12.0, 600.0);
-                    for (index, screen) in screens.iter().enumerate() {
-                        let r = pictured(boxed(screen.monitor));
-                        // The one the preview shows stands out: the others'
-                        // desktops paler (less so under the pointer, which
-                        // a click makes it), its number on the accent.
-                        let shown = shown.as_deref() == Some(screen.id.as_str());
-                        let pointed = hovered == Some(Target::Screen(screen.id.clone()));
-                        let pixels = ((r.w * self.scale).round().max(1.0) as u32, (r.h * self.scale).round().max(1.0) as u32);
-                        match self.map_picture(frame, &screen.id, screen.monitor, pixels) {
-                            Some(picture) => picture_rounded(frame, &picture, r, MAP_RADIUS, if shown { 1.0 } else if pointed { 0.8 } else { 0.55 }),
-                            None => fill(frame, palette.switch_off, r.x, r.y, r.w, r.h, MAP_RADIUS),
-                        }
-                        stroke_inside(frame, r, MAP_RADIUS, palette.card_stroke);
-                        let digit = (index + 1).to_string();
-                        let digit_width = frame.gfx.measure(&digit, number);
-                        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-                        let (plate, ink) = if shown { (palette.switch_on, Color::hex(0xFFFFFF, 1.0)) } else { (palette.window.alpha(0.92), palette.text) };
-                        fill(frame, plate, cx - MAP_PLATE, cy - MAP_PLATE, 2.0 * MAP_PLATE, 2.0 * MAP_PLATE, MAP_PLATE);
-                        text_centred(frame, &digit, number, ink, cx - digit_width / 2.0, cy, digit_width + 1.0, Align::Start);
-                    }
-                    for MapEdge { screen: index, edge, stretches } in self.map_edges() {
-                        let (screen, r) = (&screens[index], boxed(screens[index].monitor));
-                        let opens = self.edges_of(&screen.id);
-                        let upright = edge != Edge::Top;
-                        // Along the edge, as long as the picture.
-                        let (from, to) = if upright { (r.y + MAP_ROOM, r.y + r.h - MAP_ROOM) } else { (r.x + MAP_ROOM, r.x + r.w - MAP_ROOM) };
-                        for (a, b, seam) in stretches {
-                            let (a, b) = if upright { (down(a), down(b)) } else { (across(a), across(b)) };
-                            let (a, b) = (a.max(from), b.min(to));
-                            if b <= a {
-                                continue;
-                            }
-                            let target = Target::ScreenEdge(screen.id.clone(), edge, seam);
-                            let on = if seam { opens.seams.has(edge) } else { opens.edges.has(edge) };
-                            // Lit, it opens the panel; under the pointer, it
-                            // shows what a click would light; else a pale
-                            // line.
-                            let color = if on {
-                                palette.selection
-                            } else if hovered.as_ref() == Some(&target) {
-                                palette.selection.alpha(0.5)
-                            } else {
-                                palette.text3.alpha(0.5)
-                            };
-                            let bar = |a: f32, b: f32| match edge {
-                                Edge::Left => fill(frame, color, r.x + MAP_INSET, a, MAP_BAR, b - a, MAP_BAR / 2.0),
-                                Edge::Right => fill(frame, color, r.x + r.w - MAP_INSET - MAP_BAR, a, MAP_BAR, b - a, MAP_BAR / 2.0),
-                                Edge::Top => fill(frame, color, a, r.y + MAP_INSET, b - a, MAP_BAR, MAP_BAR / 2.0),
-                            };
-                            // Where the pointer passes on, dashed: as many
-                            // dashes as fit, each as long as the others.
-                            if seam {
-                                let count = ((b - a + MAP_GAP) / (MAP_DASH + MAP_GAP)).floor().max(1.0);
-                                let dash = ((b - a) - (count - 1.0) * MAP_GAP) / count;
-                                for i in 0..count as usize {
-                                    let at = a + i as f32 * (dash + MAP_GAP);
-                                    bar(at, at + dash);
-                                }
-                            } else {
-                                bar(a, b);
-                            }
-                            let band = match edge {
-                                Edge::Left => Rect { x: r.x, y: a, w: MAP_BAND, h: b - a },
-                                Edge::Right => Rect { x: r.x + r.w - MAP_BAND, y: a, w: MAP_BAND, h: b - a },
-                                Edge::Top => Rect { x: a, y: r.y, w: b - a, h: MAP_BAND },
-                            };
-                            self.targets.push((band, target));
-                        }
-                    }
-                    // A screen's picture takes a click where no edge does
-                    // (those, pushed first, are found first).
-                    for screen in &screens {
-                        self.targets.push((pictured(boxed(screen.monitor)), Target::Screen(screen.id.clone())));
-                    }
-                }
+                Row::Library => self.paint_library(frame, palette, left, y, width, row_height, &hovered),
                 Row::Choice(field) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, options, chosen) = self.choices(field);
@@ -4211,9 +4065,10 @@ impl Ui {
         let lang = self.lang;
         let x0 = NAV + PANE + PAD_SIDE;
         let head = Font::new(Family::SegoeDisplay, 20.0, 600.0);
-        let title = pick(lang, "预览", "Preview");
+        let title = if self.page == Page::Layout { pick(lang, "屏幕", "Screens") } else { pick(lang, "预览", "Preview") };
         text_centred(frame, title, head, palette.text, x0, PAD_TOP + 18.0, 200.0, Align::Start);
         let detail = match self.page {
+            Page::Layout => pick(lang, "屏幕的排列与 Windows 设置一致，桌面为当前壁纸", "The screens as Windows arranges them, over your wallpaper"),
             Page::General => pick(lang, "手机上的 Glance", "Glance on the phone"),
             Page::Music => pick(lang, "正在播放的内容，桌面为当前壁纸", "What plays now, over your wallpaper"),
             _ => pick(lang, "实时数据，桌面为当前壁纸", "Live readings over your wallpaper"),
@@ -4234,32 +4089,50 @@ impl Ui {
         if self.page == Page::Music {
             return self.paint_music_preview(frame, area);
         }
+        if self.page == Page::Layout {
+            return self.paint_layout(frame, palette, area, Instant::now());
+        }
         // The general page: the phone app as a phone shows it, in a phone's outline.
         if self.page == Page::General {
             // (Its fans turn: drawn again some thirty times a second while they do.)
             return self.paint_phone(frame, area).then_some(7.5);
         }
 
-        // The panel laid out for the screen the window opened on, centred
-        // along its edge.
+        // The readings, laid out for the screen the window opened on, centred along the edge they open from.
+        let prefs = self.prefs.clone().holding(&[Part::Monitor]);
+        let edge = self.preview_edge();
+        self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false).0
+    }
+
+    /// The stage's desktop in `area` and, where `edge` is one, the panel showing `prefs` slid out from it, running
+    /// live: the whole screen (`whole`), else the whole height of it (along the top, the panel and the screen below)
+    /// with the whole panel and a strip of desktop beside it. Returns how fast the panel's charts move (physical pixels
+    /// a second), and where the screen was drawn.
+    fn panel_on_stage(&mut self, frame: &Frame, area: Rect, edge: Option<Edge>, prefs: Option<&Prefs>, whole: bool) -> (Option<f32>, Rect) {
+        let lang = self.lang;
+        let (sw, sh) = self.stage.size;
+        let fit = (area.w / sw).min(area.h / sh).min(1.0);
+        let (Some(edge), Some(prefs)) = (edge, prefs) else {
+            let (ox, oy) = (area.x + (area.w - sw * fit) / 2.0, area.y + (area.h - sh * fit) / 2.0);
+            self.stage_picture(frame, area, (ox, oy), fit, 1.0);
+            return (None, Rect { x: ox, y: oy, w: sw * fit, h: sh * fit });
+        };
         let app = crate::app();
         let skin = Skin::named(&self.settings.skin);
-        let edge = self.preview_edge();
         let interval = self.settings.interval_ms as f64;
         // Held while the preview is drawn; the sampler waits that long.
         let mut history = app.controller.history.lock().unwrap();
         let samples = history.make_contiguous();
         if samples.is_empty() {
-            return None;
+            return (None, Rect { x: area.x, y: area.y, w: area.w, h: area.h });
         }
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
         let pen = wall - interval - PEN_LAG_MS;
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { music_apart: false, info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
+        let probe = Scene { music_apart: false, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let heights: Vec<f32> = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
-        let (sw, sh) = self.stage.size;
         self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), self.settings.columns, SIZES.1);
         let size = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns, size);
@@ -4276,16 +4149,17 @@ impl Ui {
         let behind = RECT { left: pos.0 as i32, top: pos.1 as i32, right: (pos.0 + pw) as i32, bottom: (pos.1 + ph) as i32 };
         // (As grey, till the desktop has been read.)
         let tone = self.stage.desktop.as_ref().map_or((0.5, 0.0), |desktop| desktop.luminance(behind, 1.0));
-        let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
+        let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { music_apart: false, info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
+        let scene = Scene { music_apart: false, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let lanes = view::lanes(&scene);
 
-        // The whole height of the screen, and the whole panel with a strip of
-        // desktop beside it; along the top, the panel and the screen below.
-        let (k, stage_x, stage_y) = match edge {
-            Edge::Left | Edge::Right => {
+        let (k, stage_x, stage_y) = match (whole, edge) {
+            (true, _) => (fit, (area.w - sw * fit) / 2.0, (area.h - sh * fit) / 2.0),
+            // The whole height of the screen, and the whole panel with a strip of
+            // desktop beside it; along the top, the panel and the screen below.
+            (false, Edge::Left | Edge::Right) => {
                 let k = (area.h / sh).min(area.w / (pw + PREVIEW_MARGIN).min(sw)).min(1.0);
                 // A screen that fits whole, in the middle; one that does
                 // not, its side the panel is on.
@@ -4298,7 +4172,7 @@ impl Ui {
                 };
                 (k, x, (area.h - sh * k) / 2.0)
             }
-            Edge::Top => {
+            (false, Edge::Top) => {
                 let shown = ph + PREVIEW_MARGIN;
                 let k = (area.w / sw).min(area.h / shown).min(1.0);
                 (k, (area.w - sw * k) / 2.0, ((area.h - shown * k) / 2.0).max(0.0))
@@ -4317,16 +4191,8 @@ impl Ui {
             ..Default::default()
         };
         unsafe { frame.dc.PushLayer(&layer, None) };
-        let zoom_key = zoom.to_bits();
-        if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != zoom_key) {
-            // The desktop in the panel's units, which a zoomed panel shrinks.
-            self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, zoom).ok()).map(|b| (zoom_key, b));
-        }
-        if let Some((_, bitmap)) = &self.stage.bitmap {
-            unsafe {
-                frame.dc.DrawBitmap(bitmap, Some(&rect(ox, oy, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
-            }
-        }
+        // The desktop in the panel's units, which a zoomed panel shrinks.
+        self.stage_picture(frame, area, (ox, oy), k, zoom);
         let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(pos.0, pos.1) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy);
         // The stage's desktop is a pixel a DIP: a panel DIP covers `zoom` of them.
         let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.as_ref().map_or(0, |desktop| desktop.digest), zoom));
@@ -4339,7 +4205,24 @@ impl Ui {
             Ok(_) => {}
             Err(_) => self.failed = true,
         }
-        Some(layout.plot_width(&theme) * self.scale * zoom * k / self.prefs.chart_seconds as f32)
+        (Some(layout.plot_width(&theme) * self.scale * zoom * k / prefs.chart_seconds as f32), Rect { x: ox, y: oy, w: sw * k, h: sh * k })
+    }
+
+    /// The stage's desktop at `at`, `k` DIPs to one of its own, clipped to `area`: made a bitmap for the panel's
+    /// `zoom` (a zoomed panel's units shrink it), as it is drawn under it.
+    fn stage_picture(&mut self, frame: &Frame, area: Rect, at: (f32, f32), k: f32, zoom: f32) {
+        let (sw, sh) = self.stage.size;
+        let zoom_key = zoom.to_bits();
+        if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != zoom_key) {
+            self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, zoom).ok()).map(|b| (zoom_key, b));
+        }
+        if let Some((_, bitmap)) = &self.stage.bitmap {
+            unsafe {
+                frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                frame.dc.DrawBitmap(bitmap, Some(&rect(at.0, at.1, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+                frame.dc.PopAxisAlignedClip();
+            }
+        }
     }
 }
 

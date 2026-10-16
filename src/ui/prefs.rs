@@ -298,6 +298,27 @@ impl Prefs {
         prefs
     }
 
+    /// As a panel showing `parts` draws them: the readings' modules where it shows the readings (none of them, where
+    /// not), and the lane of what plays (it is the music lane, whatever the readings' lanes say) where it shows that,
+    /// before the readings where it comes before them, else after them.
+    pub fn holding(mut self, parts: &[crate::settings::Part]) -> Prefs {
+        use crate::settings::Part;
+        let music = self.modules.iter().position(|module| module.id == "lyrics").map(|at| self.modules.remove(at));
+        if !parts.contains(&Part::Monitor) {
+            for module in &mut self.modules {
+                module.on = false;
+            }
+        }
+        let mut music = music.unwrap_or(ModuleEntry { id: "lyrics".into(), on: false, items: BTreeMap::new() });
+        music.on = parts.contains(&Part::Music);
+        if parts.iter().position(|part| *part == Part::Music) < parts.iter().position(|part| *part == Part::Monitor) {
+            self.modules.insert(0, music);
+        } else {
+            self.modules.push(music);
+        }
+        self
+    }
+
     /// Whether module `id` shows its item `name` (whether or not the module
     /// itself is on).
     pub fn shows(&self, id: &str, name: &str) -> bool {
@@ -361,6 +382,18 @@ impl Prefs {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_panel_shows_what_its_edge_holds() {
+        use crate::settings::Part::{Monitor, Music};
+        let known: Vec<String> = ["cpu", "memory", "lyrics", "time"].map(String::from).to_vec();
+        let prefs = super::Prefs::resolve(&serde_json::json!({ "modules": [{ "id": "cpu", "on": true }, { "id": "memory", "on": true }, { "id": "lyrics", "on": false }] }), &known);
+        let on = |prefs: &super::Prefs| prefs.modules.iter().filter(|module| module.on).map(|module| module.id.clone()).collect::<Vec<_>>();
+        assert_eq!(on(&prefs.clone().holding(&[Monitor])), ["cpu", "memory"]);
+        assert_eq!(on(&prefs.clone().holding(&[Monitor, Music])), ["cpu", "memory", "lyrics"]);
+        assert_eq!(on(&prefs.clone().holding(&[Music, Monitor])), ["lyrics", "cpu", "memory"]);
+        assert_eq!(on(&prefs.clone().holding(&[Music])), ["lyrics"]);
+    }
+
     use super::*;
 
     fn known() -> Vec<String> {

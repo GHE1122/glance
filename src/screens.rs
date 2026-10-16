@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, EnumDisplayMonitors, Ge
 
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 
-use crate::settings::{Edge, Opens, Rest, ScreenEdges, EDGES};
+use crate::settings::{Edge, Lit, Places, EDGES};
 
 /// The first Windows that eases the pointer between displays (see `eased`).
 const FIRST_EASING_BUILD: u32 = 22557;
@@ -152,13 +152,19 @@ pub fn changed() {
     KNOWN.with(|known| *known.borrow_mut() = Known::none());
 }
 
-/// How the edges of the screen at `monitor` open the panel (see
-/// `settings::lit`); none does, for no screen of the desktop.
-pub fn lit(kept: &[ScreenEdges], rest: Rest, monitor: RECT) -> Opens {
+/// The edges of the screen at `monitor` that open a panel (see `Places::lit`); none does, for no screen of the
+/// desktop.
+pub fn lit(places: &Places, monitor: RECT) -> Lit {
+    id_of(monitor).map(|id| places.lit(&id)).unwrap_or_default()
+}
+
+/// The name that stays the screen's own (see `Screen::id`) of the screen at `monitor`; none, for no screen of the
+/// desktop.
+pub fn id_of(monitor: RECT) -> Option<String> {
     let eased = eased();
     KNOWN.with(|known| {
         let mut known = known.borrow_mut();
-        known.find(monitor, eased).map(|index| crate::settings::lit(kept, rest, &known.screens[index].id)).unwrap_or_default()
+        known.find(monitor, eased).map(|index| known.screens[index].id.clone())
     })
 }
 

@@ -12,27 +12,26 @@ use windows::Win32::Foundation::POINT;
 
 use crate::detector::{Detector, Motion};
 use crate::mouse::{edge_contact, monitor_at, Contact, Moved};
-use crate::settings::{Edge, Rest, ScreenEdges};
+use crate::settings::{Edge, Places};
 
-/// Which edges of which screens open the panel to a push, and how hard the
-/// pointer has to push there (none: pushing opens nothing).
+/// Which edges of which screens open a panel to a push (those that hold anything), and how hard the pointer has
+/// to push there (none: pushing opens nothing).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Edges {
-    pub screens: Vec<ScreenEdges>,
-    pub rest: Rest,
+    pub places: Places,
     pub pressure: Option<i32>,
 }
 
 impl Edges {
     /// No edge opening the panel (till Glance says which do).
     pub const fn none() -> Self {
-        Edges { screens: Vec::new(), rest: Rest { edge: Edge::Right, pushed: false, seam: false }, pressure: None }
+        Edges { places: Places { same: true, every: Vec::new(), screens: Vec::new() }, pressure: None }
     }
 
     /// As told over the link: no more screens than a desktop has, and a push neither so light that any move opens
     /// the panel nor beyond what a hand gives.
     pub fn checked(mut self) -> Self {
-        self.screens.truncate(32);
+        self.places.screens.truncate(32);
         self.pressure = self.pressure.map(|pressure| pressure.clamp(20, 2000));
         self
     }
@@ -42,7 +41,7 @@ impl Edges {
     pub fn at(&self, cursor: POINT) -> Option<(Contact, Edge, i32)> {
         let pressure = self.pressure?;
         let here = monitor_at(cursor)?;
-        crate::screens::lit(&self.screens, self.rest, here.monitor).edges.each().find_map(|edge| edge_contact(cursor, edge).map(|contact| (contact, edge, pressure)))
+        crate::screens::lit(&self.places, here.monitor).each().find_map(|edge| edge_contact(cursor, edge).map(|contact| (contact, edge, pressure)))
     }
 }
 

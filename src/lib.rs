@@ -453,8 +453,11 @@ pub fn run() {
         // What plays and how loud, while the module that shows them is on.
         // The lyrics too, while either shows them.
         playing::watch(|| {
-            let view = &app().settings.lock().unwrap().view;
-            let lyrics = ui::prefs::module_on(view, "lyrics") || (ui::prefs::module_on(view, "time") && ui::prefs::item_on(view, "time", "lyrics"));
+            let settings = app().settings.lock().unwrap();
+            let view = &settings.view;
+            // What plays, shown by an edge or a widget.
+            let music = settings.places().shows(settings::Part::Music) || settings.widgets.iter().any(settings::WidgetAt::shows_music);
+            let lyrics = music || (ui::prefs::module_on(view, "time") && ui::prefs::item_on(view, "time", "lyrics"));
             (ui::prefs::module_on(view, "time") || lyrics, lyrics)
         }, || app().controller.lyric_changed());
         let mut watch = watch::Watch::default();
