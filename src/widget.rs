@@ -920,11 +920,18 @@ struct Readings {
     /// How far its process list is turned (DIPs), and where the wheel turns it to (see `Widgets::wheel`).
     scroll: f32,
     scroll_target: f32,
+    /// Its lanes the workbench's (torn off a workbench's panel), not the readings'.
+    workbench: bool,
 }
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, before: None, before_size: None, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scroll: 0.0, scroll_target: 0.0 }
+        Readings { layers: PanelLayers::default(), choice, before: None, before_size: None, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scroll: 0.0, scroll_target: 0.0, workbench: false }
+    }
+
+    /// What it shows, as the settings keep it.
+    fn kept(&self) -> crate::settings::PanelLayout {
+        crate::settings::PanelLayout { workbench: self.workbench, ..self.choice.kept() }
     }
 }
 
@@ -980,7 +987,13 @@ impl Content {
     /// The preferences its readings are drawn by, where they are not the panel's (`prefs`): without the music lane
     /// (what plays is a widget of its own); merged with what plays as one of their lanes, with it, on.
     fn prefs(&self, prefs: &crate::ui::prefs::Prefs) -> Option<crate::ui::prefs::Prefs> {
-        let mut prefs = prefs.clone();
+        // The workbench's lanes, for readings torn off its panel.
+        let workbench = match self {
+            Content::Readings(readings) => readings.workbench,
+            Content::Merged(merged) => merged.parts.iter().any(|part| matches!(part, Content::Readings(readings) if readings.workbench)),
+            Content::Music(_) => false,
+        };
+        let mut prefs = if workbench { prefs.clone().holding(crate::settings::Part::Workbench) } else { prefs.clone() };
         match self {
             Content::Merged(merged) if merged.music_apart() => match prefs.modules.iter_mut().find(|module| module.id == "lyrics") {
                 Some(module) => module.on = true,
@@ -1087,24 +1100,17 @@ impl Widgets {
     /// from its corner; on the desktop the panel had taken (`lent`: its
     /// capture, as a bitmap, and its tone), if it had, till it takes its own
     /// (on another thread: it is drawn at once). `from`: the edge the panel
-    /// was at, if it was at one; `parts`: what the panel showed, in its order.
+    /// was at, if it was at one; `part`: what the panel showed.
     #[allow(clippy::too_many_arguments)]
-    pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, size: (f32, f32), lent: Option<Lent>, from: Option<Edge>, parts: &[crate::settings::Part]) -> bool {
+    pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, size: (f32, f32), lent: Option<Lent>, from: Option<Edge>, part: crate::settings::Part) -> bool {
         let Some(contact) = monitor_at(at) else { return false };
         let choice = Choice { form, scale, extra: (0.0, 0.0) };
         let made = Instant::now();
-        // What the panel showed, each a part of its own in its order (readings show no music lane), merged where
-        // there are both, as large as the panel was.
-        let mut shown: Vec<Content> = parts
-            .iter()
-            .map(|part| match part {
-                crate::settings::Part::Monitor => Content::Readings(Readings::new(choice)),
-                crate::settings::Part::Music => Content::Music(MusicShown::new(music::LEAST)),
-            })
-            .collect();
-        let content = match shown.len() {
-            1 => shown.remove(0),
-            _ => Content::Merged(Box::new(Merged::new(shown, false, size))),
+        // What the panel showed, as large as it was.
+        let content = match part {
+            crate::settings::Part::Monitor => Content::Readings(Readings::new(choice)),
+            crate::settings::Part::Workbench => Content::Readings(Readings { workbench: true, ..Readings::new(choice) }),
+            crate::settings::Part::Music => Content::Music(MusicShown::new(size)),
         };
         let Some(mut widget) = Widget::new(contact, at, content) else { return false };
         let made = made.elapsed();
@@ -1829,7 +1835,7 @@ impl Widget {
         let one = |layout: &crate::settings::PanelLayout| -> Option<Content> {
             Some(match layout.form.as_str() {
                 MUSIC_FORM => Content::Music(MusicShown::new(kept.size.unwrap_or(music::LEAST))),
-                _ => Content::Readings(Readings { before: kept.before.as_ref().and_then(Choice::from_kept), ..Readings::new(Choice::from_kept(layout)?) }),
+                _ => Content::Readings(Readings { before: kept.before.as_ref().and_then(Choice::from_kept), workbench: layout.workbench, ..Readings::new(Choice::from_kept(layout)?) }),
             })
         };
         let content = match &kept.parts {
@@ -1852,11 +1858,11 @@ impl Widget {
 
     fn kept(&self) -> WidgetAt {
         let layout_of = |content: &Content| match content {
-            Content::Readings(readings) => readings.choice.kept(),
-            _ => crate::settings::PanelLayout { form: MUSIC_FORM.into(), scale: 1.0, extra: (0.0, 0.0) },
+            Content::Readings(readings) => readings.kept(),
+            _ => crate::settings::PanelLayout { form: MUSIC_FORM.into(), scale: 1.0, extra: (0.0, 0.0), workbench: false },
         };
         let (layout, before, size, parts, beside) = match &self.content {
-            Content::Readings(readings) => (readings.choice.kept(), readings.before.map(Choice::kept), None, None, false),
+            Content::Readings(readings) => (readings.kept(), readings.before.map(Choice::kept), None, None, false),
             Content::Music(shown) => (layout_of(&self.content), None, Some(shown.size), None, false),
             Content::Merged(merged) => (layout_of(&merged.parts[0]), None, Some(merged.size), Some(merged.parts.iter().map(layout_of).collect()), merged.beside),
         };

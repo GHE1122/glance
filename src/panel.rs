@@ -743,7 +743,7 @@ impl Controller {
                         });
                         // The edge it was at, unless it had been moved away.
                         let from = panel.placement.as_ref().filter(|placement| placement.floating.is_none()).map(|_| panel.edge);
-                        if !widgets.tear(form, scale, at, grab, size, lent, from, &panel.parts) {
+                        if !widgets.tear(form, scale, at, grab, size, lent, from, panel.part) {
                             panel.torn = false;
                             panel.exclude();
                         }
@@ -973,9 +973,6 @@ enum Phase {
     Closing,
 }
 
-/// Where the panel is, for the opening under way.
-/// How tall a music widget torn off the panel's music lane is (DIPs): a player's.
-const MUSIC_TORN_TALL: f32 = 170.0;
 
 struct Placement {
     contact: Contact,
@@ -1146,6 +1143,7 @@ impl crate::ui::life::Lives for Panel<'_> {
             surface.release(&self.gfx);
         }
         self.layers.release();
+        self.music.release();
         self.last_layout = None;
         self.turning = None;
         self.turned.clear();
@@ -1173,18 +1171,23 @@ struct Panel<'a> {
     /// None after the device was lost, until it is made again on the new one.
     surface: Option<Surface>,
     layers: PanelLayers,
+    /// What plays, drawn whole where the edge it opened from holds it.
+    music: crate::ui::music::Music,
     phase: Phase,
     /// 0 at rest on screen, 1 slid out.
     shift: Transition,
     opacity: Transition,
     placement: Option<Placement>,
+    /// What is shown and how, as the settings have it (the widgets draw by it too); and as the panel draws what it
+    /// shows (see `Prefs::holding`).
     prefs: Prefs,
+    drawn: Prefs,
     skin: Skin,
     theme: Theme,
     lang: Lang,
     edge: Edge,
-    /// What it shows: what the edge it opened from holds, in its order.
-    parts: Vec<Part>,
+    /// What it shows: the component the edge it opened from holds.
+    part: Part,
     /// The columns chosen in the settings; none, as few as fit.
     columns: Option<usize>,
     /// The size chosen in the settings, 1 as designed.
@@ -1290,17 +1293,19 @@ impl<'a> Panel<'a> {
             window,
             surface,
             layers: PanelLayers::default(),
+            music: crate::ui::music::Music::default(),
             showing: None,
             phase: Phase::Hidden,
             shift: Transition::settled(1.0),
             opacity: Transition::settled(0.0),
             placement: None,
             prefs: Prefs::default(),
+            drawn: Prefs::default(),
             skin: Skin::Paper,
             theme: Theme::new(Skin::Paper, false),
             lang: Lang::En,
             edge: Edge::Right,
-            parts: vec![Part::Monitor],
+            part: Part::Monitor,
             columns: None,
             size: 1.0,
             live: false,
@@ -1358,7 +1363,8 @@ impl<'a> Panel<'a> {
     fn restyle(&mut self) {
         self.next_frame = Instant::now();
         let config = self.controller.config.lock().unwrap();
-        self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules()).holding(&self.parts);
+        self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
+        self.drawn = self.prefs.clone().holding(self.part);
         self.columns = config.columns;
         // Mid-drag, the size is the drag's.
         if self.drag.is_none() {
@@ -1377,7 +1383,7 @@ impl<'a> Panel<'a> {
         // What is shown, and how, changed: it is laid out anew. The
         // process list's order (sorted from the panel itself) changes no
         // lane's size, and leaves it be.
-        let mut sized = self.prefs.clone();
+        let mut sized = self.drawn.clone();
         sized.processes.sort = Default::default();
         let style = format!("{} {:?} {} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.columns, self.size, self.skin, serde_json::to_string(&sized).unwrap_or_default());
         if style != self.style {
@@ -1451,10 +1457,9 @@ impl<'a> Panel<'a> {
         if !self.is_shown() {
             self.edge = edge;
             // What that edge holds (where it holds nothing, opened by hand: what a panel opened so shows).
-            self.parts = {
+            self.part = {
                 let places = &self.controller.config.lock().unwrap().edges.places;
-                let held = crate::screens::id_of(contact.monitor).map(|id| places.parts(&id, edge).to_vec()).unwrap_or_default();
-                if held.is_empty() { places.by_hand().1 } else { held }
+                crate::screens::id_of(contact.monitor).and_then(|id| places.part(&id, edge)).unwrap_or(places.by_hand().1)
             };
             self.restyle();
             // A new opening is laid out for what the machine shows now.
@@ -1985,20 +1990,17 @@ impl<'a> Panel<'a> {
             if !self.controller.config.lock().unwrap().tear_off {
                 return;
             }
-            let Some(opening) = &self.opening else { return };
-            // Taken by its music lane: what plays, torn off alone (a music widget as wide as the lane, under the hand
-            // where it was taken; the panel stays).
-            let (x, y) = ((drag.from.x - placement.window.left) as f32 / placement.px - self.corner.0, (drag.from.y - placement.window.top) as f32 / placement.px - self.corner.1);
-            let music = opening.lane_ids().iter().zip(opening.layout.lanes()).find(|(id, lane)| *id == "lyrics" && x >= lane.x && x < lane.x + lane.w && y >= lane.y && y < lane.y + lane.h).map(|(_, lane)| lane);
-            if let Some(lane) = music {
+            // What plays, torn off whole: a music widget as large as the panel, under the hand where it was taken.
+            if self.part == Part::Music {
                 let scale = placement.contact.scale;
-                let size = ((lane.w * placement.px / scale).max(crate::ui::music::LEAST.0), MUSIC_TORN_TALL);
-                let grab = POINT { x: (((x - lane.x) * placement.px / scale).min(size.0 - 8.0) * scale) as i32, y: (((y - lane.y) * placement.px / scale).min(size.1 - 8.0) * scale) as i32 };
-                let at = POINT { x: cursor.x - grab.x, y: cursor.y - grab.y };
-                self.tear_music = Some((size, at, grab));
+                let size = ((placement.panel.right - placement.panel.left) as f32 / scale, (placement.panel.bottom - placement.panel.top) as f32 / scale);
+                let at = POINT { x: placement.panel.left + dx, y: placement.panel.top + dy };
+                self.tear_music = Some((size, at, POINT { x: cursor.x - at.x, y: cursor.y - at.y }));
                 self.end_drag();
+                self.torn = true;
                 return;
             }
+            let Some(opening) = &self.opening else { return };
             let form = Form::Lanes { detail: Detail::Full, columns: opening.layout.columns };
             let at = POINT { x: placement.panel.left + dx, y: placement.panel.top + dy };
             let size = ((placement.panel.right - placement.panel.left) as f32 / placement.contact.scale, (placement.panel.bottom - placement.panel.top) as f32 / placement.contact.scale);
@@ -2148,9 +2150,32 @@ impl<'a> Panel<'a> {
         Some(PanelAt { at, screen: (panel.left + width / 2, panel.top + height / 2), locked: self.pinned })
     }
 
+    /// The window placed for what it shows: its lanes laid out (see `arrange_lanes`), or what plays at its size.
+    fn arrange(&mut self) {
+        match self.part {
+            Part::Music => {
+                self.music_size();
+            }
+            Part::Monitor | Part::Workbench => {
+                self.arrange_lanes();
+            }
+        }
+    }
+
+    /// What plays, as large as it is shown from the edge the panel is at (as a card from a side, as a player across
+    /// from the top; the panel's size makes it larger or smaller), the window placed for it.
+    fn music_size(&mut self) -> (f32, f32) {
+        let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
+        let room = if self.edge == Edge::Top { crate::ui::music::PANEL_TOP } else { crate::ui::music::PANEL_SIDE };
+        let size = crate::ui::music::rests_at(room, &shows);
+        let placement = self.placement.as_mut().unwrap();
+        place(placement, &self.window, self.edge, &self.theme, size, self.size, false);
+        size
+    }
+
     /// The panel's lanes, laid out (once each opening, and held), and the
     /// window placed for them.
-    fn arrange(&mut self) -> (Vec<view::Lane>, Layout) {
+    fn arrange_lanes(&mut self) -> (Vec<view::Lane>, Layout) {
         let controller = self.controller;
         let now = controller.seen.lock().unwrap().clone();
         let mut history = controller.history.lock().unwrap();
@@ -2169,7 +2194,7 @@ impl<'a> Panel<'a> {
             }
             self.game_at = game;
         }
-        let (prefs, theme, lang, scroll, hover, pinned) = (&self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned);
+        let (prefs, theme, lang, scroll, hover, pinned) = (&self.drawn, &self.theme, self.lang, self.scroll, self.hover, self.pinned);
         let opening = match &mut self.opening {
             Some(opening) => {
                 // What the machine has shown since joins its lane where it
@@ -2251,7 +2276,10 @@ impl<'a> Panel<'a> {
         self.last_frame = now;
         self.scroll += (self.scroll_target - self.scroll) * (1.0 - E.powf(-dt / SCROLL_EASE));
 
-        let (lanes, layout) = self.arrange();
+        if self.part == Part::Music {
+            return self.frame_music(now);
+        }
+        let (lanes, layout) = self.arrange_lanes();
         let zoom = self.opening.as_ref().map_or(1.0, |opening| opening.zoom);
         // Laid out in other columns (sized, or the readings grown): it turns into the new layout, each reading moved
         // from where it was to where it goes, as a widget turns between its forms. One turning already turns on from
@@ -2298,7 +2326,7 @@ impl<'a> Panel<'a> {
         let controller = self.controller;
         let mut history = controller.history.lock().unwrap();
         let seen = &self.opening.as_ref().unwrap().seen;
-        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous(), seen);
+        let scene = scene(controller, &self.drawn, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous(), seen);
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -2422,6 +2450,58 @@ impl<'a> Panel<'a> {
         };
     }
 
+    /// Draws what plays as it is at `now`, slid out by as much of the way as it has come (its frame's start is
+    /// `frame`'s: a closing done is finished there, and the device followed).
+    fn frame_music(&mut self, now: Instant) {
+        let size = self.music_size();
+        let placement = self.placement.as_ref().unwrap();
+        let px = placement.px;
+        let window = placement.painted;
+        let surface_size = ((window.right - window.left) as u32, (window.bottom - window.top) as u32);
+        let offset = (window.left - placement.window.left, window.top - placement.window.top);
+        let rest = ((placement.panel.left - window.left) as f32 / px, (placement.panel.top - window.top) as f32 / px);
+        let (shift, opacity) = (self.shift.value(now), self.opacity.value(now));
+        // In from beyond the edge, its shadow's room too.
+        let travel = if self.edge == Edge::Top { size.1 } else { size.0 } + self.theme.margin;
+        let (mut x, mut y) = rest;
+        match self.edge {
+            Edge::Left => x -= shift * travel,
+            Edge::Right => x += shift * travel,
+            Edge::Top => y -= shift * travel,
+        }
+        let pointer = cursor_position().map(|cursor| ((cursor.x - window.left) as f32 / px - x, (cursor.y - window.top) as f32 / px - y)).filter(|(px_x, px_y)| *px_x >= 0.0 && *px_y >= 0.0 && *px_x < size.0 && *px_y < size.1);
+        let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
+        let music = &mut self.music;
+        let mut painted = None;
+        let surface = self.surface.as_mut().unwrap();
+        surface.offset(offset);
+        let drawn = surface.draw(&self.gfx, surface_size, px, |frame| {
+            if opacity < 1.0 {
+                let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+                let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
+                unsafe { frame.dc.PushLayer(&layer, None) };
+            }
+            frame.origin(x, y);
+            painted = Some(music.paint(frame, size, &shows, crate::ui::music::Ground::of(&shows), px, pointer, now));
+            frame.origin(0.0, 0.0);
+            if opacity < 1.0 {
+                unsafe { frame.dc.PopLayer() };
+            }
+        });
+        let Some(painted) = painted.filter(|_| drawn.is_ok()) else {
+            // The device is gone; a new one is made for the next frame.
+            gfx::lost();
+            self.next_frame = now + DEVICE_RETRY;
+            return;
+        };
+        self.gfx.sweep();
+        self.hits = painted.hits;
+        self.corner = (x + offset.0 as f32 / px, y + offset.1 as f32 / px);
+        self.bar = view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+        let moving = !self.shift.done(now) || !self.opacity.done(now) || painted.busy;
+        self.next_frame = if moving { now } else { now + Duration::from_millis(250) };
+    }
+
     /// Which hit region a point in the window's client area (physical px) is in.
     fn hit_at(&self, client: POINT) -> Option<Hit> {
         let px = self.placement.as_ref()?.px;
@@ -2487,9 +2567,14 @@ impl<'a> Panel<'a> {
                 self.controller.set_overlay(!self.controller.overlay_wanted());
             }
             Some(Hit::Media(key)) => crate::playing::act(crate::playing::Act::Key(key)),
+            Some(Hit::Line(index)) => {
+                crate::ui::music::play_line(index);
+                self.music.back_to_now();
+            }
             Some(Hit::Drive(place)) => open_drive(place),
-            Some(Hit::Sort(sort)) if sort != self.prefs.processes.sort => {
+            Some(Hit::Sort(sort)) if sort != self.drawn.processes.sort => {
                 self.prefs.processes.sort = sort;
+                self.drawn.processes.sort = sort;
                 self.scroll = 0.0;
                 self.scroll_target = 0.0;
                 // Kept for next time, as if chosen in the settings.
@@ -2503,6 +2588,12 @@ impl<'a> Panel<'a> {
     /// A wheel turn with the pointer at `screen`: scrolls the process list under it.
     fn wheel(&mut self, screen: POINT, delta: i16) {
         let Some(window) = self.placement.as_ref().map(|p| p.window) else { return };
+        // What plays: its lines turned.
+        if self.part == Part::Music {
+            self.music.wheel(delta);
+            self.next_frame = Instant::now();
+            return;
+        }
         let client = POINT { x: screen.x - window.left, y: screen.y - window.top };
         if let Some(max_scroll) = self.hit_at(client).and_then(Hit::max_scroll) {
             let rows = -(delta as f32) / 120.0 * WHEEL_ROWS;

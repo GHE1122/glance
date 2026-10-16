@@ -107,6 +107,8 @@ const TITLE: f32 = 52.0;
 /// What the overlay's groups' rows are told from the panel's modules by:
 /// the start of their ids.
 const OVERLAY: &str = "overlay:";
+/// What the workbench's modules' rows are told from the readings' by: the start of their ids.
+const WORKBENCH: &str = "workbench:";
 
 /// A row inside a module's open card, and how far in from the card's edge
 /// its label starts: under the module's name, past the grip.
@@ -439,6 +441,7 @@ fn module_fields(id: &str) -> &'static [Field] {
 enum Page {
     Layout,
     Monitor,
+    Workbench,
     Music,
     General,
 }
@@ -473,7 +476,14 @@ enum NavItem {
     Components,
 }
 
-const NAV_ITEMS: [NavItem; 5] = [NavItem::Page(Page::Layout), NavItem::Components, NavItem::Page(Page::Monitor), NavItem::Page(Page::Music), NavItem::Page(Page::General)];
+const NAV_ITEMS: [NavItem; 6] = [
+    NavItem::Page(Page::Layout),
+    NavItem::Components,
+    NavItem::Page(Page::Monitor),
+    NavItem::Page(Page::Workbench),
+    NavItem::Page(Page::Music),
+    NavItem::Page(Page::General),
+];
 
 impl NavItem {
     fn name(self, lang: Lang) -> &'static str {
@@ -481,6 +491,7 @@ impl NavItem {
             NavItem::Page(Page::Layout) => pick(lang, "布局", "Layout"),
             NavItem::Components => pick(lang, "组件", "Components"),
             NavItem::Page(Page::Monitor) => pick(lang, "监控", "Monitor"),
+            NavItem::Page(Page::Workbench) => pick(lang, "工作台", "Workbench"),
             NavItem::Page(Page::Music) => pick(lang, "音乐", "Music"),
             NavItem::Page(Page::General) => pick(lang, "通用", "General"),
         }
@@ -491,6 +502,7 @@ impl NavItem {
             NavItem::Page(Page::Layout) => Icon::LayoutGrid,
             NavItem::Components => Icon::Layers,
             NavItem::Page(Page::Monitor) => Icon::Gauge,
+            NavItem::Page(Page::Workbench) => Icon::Briefcase,
             NavItem::Page(Page::Music) => Icon::Music,
             NavItem::Page(Page::General) => Icon::Settings,
         }
@@ -498,7 +510,7 @@ impl NavItem {
 
     /// Whether it is listed under the components' heading, set in.
     fn under(self) -> bool {
-        matches!(self, NavItem::Page(Page::Monitor | Page::Music))
+        matches!(self, NavItem::Page(Page::Monitor | Page::Workbench | Page::Music))
     }
 
     /// The page it shows.
@@ -613,7 +625,7 @@ enum Target {
     /// pressed, the panel that edge opens shows.
     Chip(String, Edge, Part),
     /// The button on it that takes it off the edge.
-    Unplace(String, Edge, Part),
+    Unplace(String, Edge),
     /// An edge of a screen shown large in the editor: pressed, the panel it opens shows.
     Zone(String, Edge),
     /// Every screen small in the editor (none), or the one by its name, large.
@@ -1310,6 +1322,20 @@ impl Ui {
                 rows.push(Row::Tabs);
                 self.monitor_rows(&mut rows, tab);
             }
+            (Page::Workbench, _) => {
+                for entry in &self.prefs.workbench {
+                    let id = format!("{WORKBENCH}{}", entry.id);
+                    rows.push(Row::Module(id.clone()));
+                    if self.opened(&id) > 0.0 {
+                        rows.extend(self.items_here(&id).into_iter().map(|name| Row::Item(id.clone(), name)));
+                    }
+                }
+                rows.push(Row::Note(pick(
+                    self.lang,
+                    "工作台放手头常用的东西。时间与媒体在监控和工作台里各有一份，分别开关。中转站、便签、快捷 App 做好后会加到这里",
+                    "The workbench holds what is at hand. The time and media are in the monitor and in the workbench alike, each switched on its own. The station, notes and quick launch will come here",
+                )));
+            }
             (Page::Music, _) => {
                 rows.extend(super::prefs::items("lyrics").iter().map(|item| Row::Element(item.name)));
                 rows.push(Row::Note(pick(
@@ -1616,13 +1642,19 @@ impl Ui {
         })
     }
 
-    /// The edge the preview's panel opens from, on the screen it shows: the first of that screen's that opens the
-    /// readings, else the first that opens anything; where none does, the one a panel opened by hand opens from.
+    /// The component the preview shows: the workbench on its page, else the readings.
+    fn previewed(&self) -> Part {
+        if self.page == Page::Workbench { Part::Workbench } else { Part::Monitor }
+    }
+
+    /// The edge the preview's panel opens from, on the screen it shows: the first of that screen's that opens what it
+    /// shows, else the first that opens anything; where none does, the one a panel opened by hand opens from.
     fn preview_edge(&self) -> Edge {
         let places = self.settings.places();
         let screen = self.stage.screen.as_deref().unwrap_or_default();
         let lit = places.lit(screen);
-        lit.each().find(|edge| places.parts(screen, *edge).contains(&Part::Monitor)).or(lit.each().next()).unwrap_or(places.by_hand().0)
+        let part = self.previewed();
+        lit.each().find(|edge| places.part(screen, *edge) == Some(part)).or(lit.each().next()).unwrap_or(places.by_hand().0)
     }
 
     /// The desktop of the screen named `id` at `monitor`, `size` physical
@@ -2280,6 +2312,9 @@ impl Ui {
 
     /// A module's title and what it describes on this machine.
     fn module(&self, id: &str) -> (String, Option<String>) {
+        if let Some(bare) = id.strip_prefix(WORKBENCH) {
+            return self.module(bare);
+        }
         let (lang, info) = (self.lang, &crate::app().info);
         let p = |zh, en| pick(lang, zh, en).to_string();
         if let Some(group) = id.strip_prefix(OVERLAY) {
@@ -2327,15 +2362,20 @@ impl Ui {
 
     /// Whether module `id` is on.
     fn module_on(&self, id: &str) -> bool {
+        if let Some(bare) = id.strip_prefix(WORKBENCH) {
+            return self.prefs.workbench.iter().any(|entry| entry.id == bare && entry.on);
+        }
         match id.strip_prefix(OVERLAY) {
             Some(group) => self.settings.overlay.groups.iter().any(|entry| entry.id == group && entry.on),
             None => self.prefs.modules.iter().any(|entry| entry.id == id && entry.on),
         }
     }
 
-    /// The list a row's module (`id`) is in, the panel's or the overlay's,
-    /// and its id there.
+    /// The list a row's module (`id`) is in, the readings', the workbench's or the overlay's, and its id there.
     fn list<'a>(&mut self, id: &'a str) -> (&mut Vec<super::prefs::ModuleEntry>, &'a str) {
+        if let Some(bare) = id.strip_prefix(WORKBENCH) {
+            return (&mut self.prefs.workbench, bare);
+        }
         match id.strip_prefix(OVERLAY) {
             Some(group) => (&mut self.settings.overlay.groups, group),
             None => (&mut self.prefs.modules, id),
@@ -2344,6 +2384,9 @@ impl Ui {
 
     /// Whether item `name` of a row's module `id` is chosen.
     fn item_on(&self, id: &str, name: &str) -> bool {
+        if let Some(bare) = id.strip_prefix(WORKBENCH) {
+            return prefs::shows_in(&self.prefs.workbench, bare, name);
+        }
         match id.strip_prefix(OVERLAY) {
             Some(group) => super::overlay::shows(&self.settings.overlay.groups, group, name),
             None => self.prefs.shows(id, name),
@@ -2353,6 +2396,9 @@ impl Ui {
     /// The items of module `id` this machine has shown it can read: only
     /// those are listed.
     fn items_here(&self, id: &str) -> Vec<String> {
+        if let Some(bare) = id.strip_prefix(WORKBENCH) {
+            return self.items_here(bare);
+        }
         // An overlay's group of one item has no card: its switch is the item's.
         if let Some(group) = id.strip_prefix(OVERLAY) {
             let items = super::overlay::GROUPS.iter().find(|(g, _)| *g == group).map_or(&[][..], |(_, items)| *items);
@@ -2422,11 +2468,12 @@ impl Ui {
 
     /// Whether module `id` has a card to open: items, or choices of its own.
     fn opens(&self, id: &str) -> bool {
-        !module_fields(id).is_empty() || !self.items_here(id).is_empty()
+        !module_fields(id.trim_start_matches(WORKBENCH)).is_empty() || !self.items_here(id).is_empty()
     }
 
     /// What an item of module `id` is called, and a word on it.
     fn item_label(&self, id: &str, name: &str) -> (Cow<'static, str>, Option<&'static str>) {
+        let id = id.trim_start_matches(WORKBENCH);
         match name.split_once(':') {
             // A drive, by its letter.
             Some(("volumes", volume)) => (Cow::Owned(volume.to_string()), None),
@@ -2679,9 +2726,10 @@ impl Ui {
             // An item is changed only while its module is on.
             Target::Item(id, name) if self.module_on(&id) => {
                 let on = self.item_on(&id, &name);
-                match id.strip_prefix(OVERLAY) {
-                    Some(group) => super::overlay::set_item(&mut self.settings.overlay.groups, group, &name, !on),
-                    None => self.prefs.set_item(&id, &name, !on),
+                match (id.strip_prefix(OVERLAY), id.strip_prefix(WORKBENCH)) {
+                    (Some(group), _) => super::overlay::set_item(&mut self.settings.overlay.groups, group, &name, !on),
+                    (None, Some(bare)) => prefs::set_item_in(&mut self.prefs.workbench, bare, &name, !on),
+                    (None, None) => self.prefs.set_item(&id, &name, !on),
                 }
                 self.save();
             }
@@ -2871,7 +2919,7 @@ impl Ui {
         let before = self.row_tops();
         // Past the next module listed with it: one in the fold, or listed
         // there, is passed over.
-        let folded = |other: &str| !id.starts_with(OVERLAY) && self.folded(other);
+        let folded = |other: &str| !id.starts_with(OVERLAY) && !id.starts_with(WORKBENCH) && self.folded(other);
         if folded(id) {
             return;
         }
@@ -2958,7 +3006,7 @@ impl Ui {
         let middle = drag.pointer - drag.grab + ROW / 2.0;
         let before = self.row_tops();
         let id = drag.id.clone();
-        let prefix = if id.starts_with(OVERLAY) { OVERLAY } else { "" };
+        let prefix = [OVERLAY, WORKBENCH].into_iter().find(|prefix| id.starts_with(prefix)).unwrap_or("");
         let (list, bare) = self.list(&id);
         let held = list.iter().position(|entry| entry.id == bare).unwrap();
         let entry = list.remove(held);
@@ -4098,8 +4146,9 @@ impl Ui {
             return self.paint_phone(frame, area).then_some(7.5);
         }
 
-        // The readings, laid out for the screen the window opened on, centred along the edge they open from.
-        let prefs = self.prefs.clone().holding(&[Part::Monitor]);
+        // The readings (or the workbench), laid out for the screen the window opened on, centred along the edge they
+        // open from.
+        let prefs = self.prefs.clone().holding(self.previewed());
         let edge = self.preview_edge();
         self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false).0
     }

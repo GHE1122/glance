@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Prefs {
+    /// The readings' modules, in their order, each on or off with its items.
     pub modules: Vec<ModuleEntry>,
+    /// The workbench's, as the readings' are (the time and what plays in it are its own, apart from the readings').
+    pub workbench: Vec<ModuleEntry>,
     /// The switches each module's items had before they were the modules'
     /// own (up to 0.1.7): read once, to carry the choices over, and not
     /// written again.
@@ -211,6 +214,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             modules: Vec::new(),
+            workbench: Vec::new(),
             cpu: None,
             gpu: None,
             memory: None,
@@ -241,6 +245,37 @@ impl Default for GpuPrefs {
 impl Default for ProcessPrefs {
     fn default() -> Self {
         ProcessPrefs { count: 5, sort: ProcessSort::Cpu }
+    }
+}
+
+/// The workbench's modules, in default order (each on until chosen otherwise).
+pub const WORKBENCH: [&str; 1] = ["time"];
+
+/// Whether module `id` among `entries` shows its item `name` (whether or not the module itself is on).
+pub fn shows_in(entries: &[ModuleEntry], id: &str, name: &str) -> bool {
+    let chosen = entries.iter().find(|entry| entry.id == id).and_then(|entry| entry.items.get(name).copied());
+    chosen.unwrap_or_else(|| shows_by_default(entries, id, name))
+}
+
+/// Whether module `id` among `entries` shows item `name` unless it is switched: as the module's items are by default;
+/// one of a group the machine names ("temps:CPU", a board's sensor), as the group is.
+fn shows_by_default(entries: &[ModuleEntry], id: &str, name: &str) -> bool {
+    match name.split_once(':') {
+        Some((group, _)) => shows_in(entries, id, group),
+        None => items(id).iter().find(|item| item.name == name).is_some_and(|item| item.on),
+    }
+}
+
+/// Turns module `id`'s item `name` among `entries` on or off.
+pub fn set_item_in(entries: &mut [ModuleEntry], id: &str, name: &str, on: bool) {
+    let default = shows_by_default(entries, id, name);
+    if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
+        // Only what differs from the default is kept.
+        if on == default {
+            entry.items.remove(name);
+        } else {
+            entry.items.insert(name.to_string(), on);
+        }
     }
 }
 
@@ -294,27 +329,18 @@ impl Prefs {
         prefs.hot_temp = prefs.hot_temp.clamp(1.0, 150.0);
         prefs.processes.count = prefs.processes.count.clamp(1, 30);
         fit(&mut prefs.modules, known, |id| !DEFAULT_OFF.contains(&id));
+        fit(&mut prefs.workbench, &WORKBENCH.map(String::from), |_| true);
         prefs.carry_over();
         prefs
     }
 
-    /// As a panel showing `parts` draws them: the readings' modules where it shows the readings (none of them, where
-    /// not), and the lane of what plays (it is the music lane, whatever the readings' lanes say) where it shows that,
-    /// before the readings where it comes before them, else after them.
-    pub fn holding(mut self, parts: &[crate::settings::Part]) -> Prefs {
+    /// As a panel showing `part` draws its lanes: the readings' modules (what plays not among them: it is a
+    /// component of its own), or the workbench's.
+    pub fn holding(mut self, part: crate::settings::Part) -> Prefs {
         use crate::settings::Part;
-        let music = self.modules.iter().position(|module| module.id == "lyrics").map(|at| self.modules.remove(at));
-        if !parts.contains(&Part::Monitor) {
-            for module in &mut self.modules {
-                module.on = false;
-            }
-        }
-        let mut music = music.unwrap_or(ModuleEntry { id: "lyrics".into(), on: false, items: BTreeMap::new() });
-        music.on = parts.contains(&Part::Music);
-        if parts.iter().position(|part| *part == Part::Music) < parts.iter().position(|part| *part == Part::Monitor) {
-            self.modules.insert(0, music);
-        } else {
-            self.modules.push(music);
+        match part {
+            Part::Workbench => self.modules = std::mem::take(&mut self.workbench),
+            Part::Monitor | Part::Music => self.modules.retain(|module| module.id != "lyrics"),
         }
         self
     }
@@ -322,31 +348,12 @@ impl Prefs {
     /// Whether module `id` shows its item `name` (whether or not the module
     /// itself is on).
     pub fn shows(&self, id: &str, name: &str) -> bool {
-        let chosen = self.modules.iter().find(|entry| entry.id == id).and_then(|entry| entry.items.get(name).copied());
-        chosen.unwrap_or_else(|| self.shows_by_default(id, name))
-    }
-
-    /// Whether module `id` shows item `name` unless it is switched: as the
-    /// module's items are by default; one of a group the machine names
-    /// ("temps:CPU", a board's sensor), as the group is.
-    fn shows_by_default(&self, id: &str, name: &str) -> bool {
-        match name.split_once(':') {
-            Some((group, _)) => self.shows(id, group),
-            None => items(id).iter().find(|item| item.name == name).is_some_and(|item| item.on),
-        }
+        shows_in(&self.modules, id, name)
     }
 
     /// Turns module `id`'s item `name` on or off.
     pub fn set_item(&mut self, id: &str, name: &str, on: bool) {
-        let default = self.shows_by_default(id, name);
-        if let Some(entry) = self.modules.iter_mut().find(|entry| entry.id == id) {
-            // Only what differs from the default is kept.
-            if on == default {
-                entry.items.remove(name);
-            } else {
-                entry.items.insert(name.to_string(), on);
-            }
-        }
+        set_item_in(&mut self.modules, id, name, on);
     }
 
     /// The switches stored before 0.1.8 made the modules' items: the
@@ -384,14 +391,18 @@ impl Prefs {
 mod tests {
     #[test]
     fn a_panel_shows_what_its_edge_holds() {
-        use crate::settings::Part::{Monitor, Music};
+        use crate::settings::Part::{Monitor, Workbench};
         let known: Vec<String> = ["cpu", "memory", "lyrics", "time"].map(String::from).to_vec();
-        let prefs = super::Prefs::resolve(&serde_json::json!({ "modules": [{ "id": "cpu", "on": true }, { "id": "memory", "on": true }, { "id": "lyrics", "on": false }] }), &known);
+        let stored = serde_json::json!({ "modules": [{ "id": "cpu", "on": true }, { "id": "lyrics", "on": true }, { "id": "time", "on": false }] });
+        let mut prefs = super::Prefs::resolve(&stored, &known);
         let on = |prefs: &super::Prefs| prefs.modules.iter().filter(|module| module.on).map(|module| module.id.clone()).collect::<Vec<_>>();
-        assert_eq!(on(&prefs.clone().holding(&[Monitor])), ["cpu", "memory"]);
-        assert_eq!(on(&prefs.clone().holding(&[Monitor, Music])), ["cpu", "memory", "lyrics"]);
-        assert_eq!(on(&prefs.clone().holding(&[Music, Monitor])), ["lyrics", "cpu", "memory"]);
-        assert_eq!(on(&prefs.clone().holding(&[Music])), ["lyrics"]);
+        // The readings without what plays; the workbench its time, on, on its own.
+        assert_eq!(on(&prefs.clone().holding(Monitor)), ["cpu", "memory"]);
+        assert_eq!(on(&prefs.clone().holding(Workbench)), ["time"]);
+        // Its items its own: the workbench's time switched, the readings' as it was.
+        super::set_item_in(&mut prefs.workbench, "time", "lyrics", true);
+        assert!(prefs.clone().holding(Workbench).shows("time", "lyrics"));
+        assert!(!prefs.shows("time", "lyrics"));
     }
 
     use super::*;

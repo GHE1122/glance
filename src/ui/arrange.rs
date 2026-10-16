@@ -147,7 +147,7 @@ pub struct Choice {
 impl Choice {
     /// As the settings keep it.
     pub fn kept(self) -> crate::settings::PanelLayout {
-        crate::settings::PanelLayout { form: self.form.key(), scale: self.scale, extra: self.extra }
+        crate::settings::PanelLayout { form: self.form.key(), scale: self.scale, extra: self.extra, workbench: false }
     }
 
     /// From the settings; none where its form is not one there is.

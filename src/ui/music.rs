@@ -93,6 +93,10 @@ const STAGE_FROM: f32 = 600.0;
 const HOLD: f32 = 12.0;
 /// The least a music widget is (DIPs).
 pub const LEAST: (f32, f32) = (240.0, 56.0);
+/// What plays as a panel slides it out (DIPs, at the panel's size 1): from a side edge as a card, from the top as a
+/// player across.
+pub const PANEL_SIDE: (f32, f32) = (380.0, 400.0);
+pub const PANEL_TOP: (f32, f32) = (640.0, 200.0);
 /// The tallest the strip and the player are at rest (DIPs; the player a row more with its controls kept): sized
 /// taller, short of where the next layout begins, they come back to it as they are let go.
 const STRIP_MOST: f32 = 96.0;

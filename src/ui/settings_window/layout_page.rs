@@ -1,6 +1,7 @@
-//! The layout page: the components, to be dragged onto the edges of the screens; the screens as Windows arranges
-//! them, every edge with what it opens (all of them small, or one screen large, its desktop and the real panel slid
-//! out from the edge last pressed); a component on an edge dragged along it, to another, or off it.
+//! The layout page: the components, to be dragged onto the edges of the screens, one to an edge; the screens as
+//! Windows arranges them, every edge with what it opens (all of them small, or one screen large, its desktop and the
+//! real panel slid out from the edge last pressed); a component on an edge dragged to another (the two change places)
+//! or off it.
 
 use std::time::Instant;
 
@@ -24,11 +25,10 @@ const EDITOR_FOOT: f32 = 56.0;
 const ZONE_SMALL: f32 = 30.0;
 const ZONE_LARGE: f32 = 112.0;
 const ZONE_TOP_LARGE: f32 = 48.0;
-/// A component on an edge: its pill's height and the room between pills, drawn small (its icon in a disc) and large
-/// (its icon and name, and a button that takes it off); how thick the edge's line is.
+/// A component on an edge: its pill's height, drawn small (its icon in a disc) and large (its icon and name, and a
+/// button that takes it off); how thick the edge's line is.
 const CHIP_SMALL: f32 = 22.0;
 const CHIP: f32 = 28.0;
-const CHIP_GAP: f32 = 6.0;
 const EDGE_LINE: f32 = 3.0;
 /// How far the pointer moves before a press on a component carries it.
 const CARRY_FROM: f32 = 4.0;
@@ -42,19 +42,17 @@ pub(super) struct Carry {
     pub moved: bool,
 }
 
-/// An edge of a screen in the editor as last drawn: where it takes a drop, whether it runs up and down, and where
-/// each component it holds is, in its order.
+/// An edge of a screen in the editor as last drawn: where it takes a drop.
 pub(super) struct Zone {
     pub screen: String,
     pub edge: Edge,
     pub rect: Rect,
-    pub upright: bool,
-    pub chips: Vec<(Part, Rect)>,
 }
 
 pub(super) fn part_name(part: Part, lang: Lang) -> &'static str {
     match part {
         Part::Monitor => pick(lang, "监控", "Monitor"),
+        Part::Workbench => pick(lang, "工作台", "Workbench"),
         Part::Music => pick(lang, "音乐", "Music"),
     }
 }
@@ -62,13 +60,15 @@ pub(super) fn part_name(part: Part, lang: Lang) -> &'static str {
 fn part_word(part: Part, lang: Lang) -> &'static str {
     match part {
         Part::Monitor => pick(lang, "处理器、显卡、内存、网络等实时数据", "Live readings: processor, graphics, memory, network"),
+        Part::Workbench => pick(lang, "时间与正在播放的内容，以及手头常用的工具", "The time, what plays, and the tools at hand"),
         Part::Music => pick(lang, "正在播放的歌曲、歌词与播放控制", "What plays, its lyrics and its controls"),
     }
 }
 
-fn part_icon(part: Part) -> Icon {
+pub(super) fn part_icon(part: Part) -> Icon {
     match part {
         Part::Monitor => Icon::Gauge,
+        Part::Workbench => Icon::Briefcase,
         Part::Music => Icon::Music,
     }
 }
@@ -77,6 +77,7 @@ fn part_icon(part: Part) -> Icon {
 fn part_colour(part: Part) -> Color {
     match part {
         Part::Monitor => Color::hex(0x2F6FE0, 1.0),
+        Part::Workbench => Color::hex(0x1F8A7A, 1.0),
         Part::Music => Color::hex(0xC2408F, 1.0),
     }
 }
@@ -94,8 +95,8 @@ impl Ui {
             pick(self.lang, "组件", "Components"),
             pick(
                 self.lang,
-                "把组件拖到右边屏幕的边上，这条边就能呼出它们。一条边可以放好几个组件，同一个组件也可以放在好几条边上。没有组件的边不呼出",
-                "Drag a component onto an edge of a screen on the right, and that edge opens it. An edge can hold several, and a component can be on several edges. An edge holding none opens nothing",
+                "把组件拖到右边屏幕的边上，这条边就能呼出它。每条边放一个组件，同一个组件可以放在好几条边上。拖到已有组件的边上会替换它，从另一条边拖来则两边互换。没有组件的边不呼出",
+                "Drag a component onto an edge of a screen on the right, and that edge opens it. An edge holds one, and a component can be on several edges. Dropped on an edge that holds one, it takes its place; brought from another edge, the two change places. An edge holding none opens nothing",
             ),
         )
     }
@@ -125,6 +126,7 @@ impl Ui {
             let sample = Rect { x: r.x + 14.0, y: r.y + r.h - 14.0 - CARD_SAMPLE, w: r.w - 28.0, h: CARD_SAMPLE };
             match part {
                 Part::Monitor => self.monitor_sample(frame, palette, sample),
+                Part::Workbench => self.workbench_sample(frame, palette, sample),
                 Part::Music => {
                     let mut shows = super::super::music::Shows::from(&self.settings.view);
                     // As a strip: one line, the cover and what plays beside it.
@@ -161,6 +163,27 @@ impl Ui {
             let shown = figure.map_or("—".to_string(), |f| format!("{f:.0}%"));
             text_centred(frame, &shown, Font::new(Family::Segoe, 20.0, 600.0), palette.text, x, r.y + 38.0, cell, Align::Start);
         }
+    }
+
+    /// What the workbench shows, small: the time and the day, and what plays.
+    fn workbench_sample(&self, frame: &Frame, palette: &Palette, r: Rect) {
+        let app = crate::app();
+        let Some(t) = app.controller.history.lock().unwrap().back().map(|sample| sample.t) else { return };
+        let now = super::super::text::Local::at(t);
+        let (figure, unit) = now.time(false, self.lang);
+        let clock = format!("{figure}{unit}");
+        let big = Font::new(Family::Segoe, 26.0, 600.0);
+        let clock_w = frame.gfx.measure(&clock, big);
+        text_centred(frame, &clock, big, palette.text, r.x, r.y + 20.0, clock_w + 4.0, Align::Start);
+        text_centred(frame, &now.date(self.lang), Font::new(Family::Segoe, 11.0, 400.0), palette.text2, r.x, r.y + 44.0, clock_w + 40.0, Align::Start);
+        let x = r.x + clock_w.max(110.0) + 24.0;
+        let playing = crate::playing::now().filter(|heard| !heard.title.is_empty());
+        let (title, about) = match &playing {
+            Some(heard) => (heard.title.clone(), heard.artist.clone()),
+            None => (pick(self.lang, "没有正在播放的内容", "Nothing is playing").to_string(), String::new()),
+        };
+        text_centred(frame, &title, Font::new(Family::Segoe, 13.0, 600.0), palette.text, x, r.y + 18.0, r.x + r.w - x, Align::Start);
+        text_centred(frame, &about, Font::new(Family::Segoe, 11.0, 400.0), palette.text2, x, r.y + 38.0, r.x + r.w - x, Align::Start);
     }
 
     /// The screen shown large in the editor, by its name: the one chosen, while it is there; every screen small, else
@@ -233,7 +256,7 @@ impl Ui {
         legend(frame, false, pick(lang, "外边缘：推进去呼出", "Outer edge: push into it"));
         legend(frame, true, pick(lang, "两块屏幕相接处：停一下呼出", "Where screens meet: rest on it"));
         let rest = if shown.is_some() {
-            pick(lang, "点一条边，可以试看它呼出的面板。底边是任务栏，不放组件", "Press an edge to try the panel it opens. The bottom is the taskbar's")
+            pick(lang, "点一条边，可以试看它呼出的面板，再点一次收起。底边是任务栏，不放组件", "Press an edge to try the panel it opens, and again to put it away. The bottom is the taskbar's")
         } else {
             pick(lang, "点一块屏幕，放大查看。底边是任务栏，不放组件", "Press a screen to see it large. The bottom is the taskbar's")
         };
@@ -241,7 +264,7 @@ impl Ui {
         // What is carried, at the pointer.
         if let (Some(carry), Some((px, py))) = (self.carry.as_ref().filter(|carry| carry.moved), self.pointer) {
             let part = carry.part;
-            self.chip(frame, part, Rect { x: px + 10.0, y: py + 6.0, w: self.chip_width(frame, part, true) - CHIP + 8.0, h: CHIP }, true, 0.92, None);
+            self.chip(frame, part, Rect { x: px + 10.0, y: py + 6.0, w: self.chip_width(frame, part) - CHIP + 8.0, h: CHIP }, true, 0.92, None);
         }
         creep
     }
@@ -286,9 +309,15 @@ impl Ui {
     /// and its edges with what they open.
     fn paint_one_screen(&mut self, frame: &Frame, palette: &Palette, places: &Places, screen: &str, canvas: Rect, hovered: &Option<Target>) -> Option<f32> {
         let index = self.screens.iter().position(|known| known.id == screen)?;
-        let held = self.shown_edge.filter(|edge| !places.parts(screen, *edge).is_empty());
-        let prefs = held.map(|edge| self.prefs.clone().holding(places.parts(screen, edge)));
-        let (creep, r) = self.panel_on_stage(frame, canvas, held, prefs.as_ref(), true);
+        let held = self.shown_edge.and_then(|edge| Some((edge, places.part(screen, edge)?)));
+        let (creep, r) = match held {
+            Some((edge, Part::Music)) => self.music_on_stage(frame, canvas, edge),
+            Some((edge, part)) => {
+                let prefs = self.prefs.clone().holding(part);
+                self.panel_on_stage(frame, canvas, Some(edge), Some(&prefs), true)
+            }
+            None => self.panel_on_stage(frame, canvas, None, None, true),
+        };
         let work = self.stage.work;
         let monitors: Vec<RECT> = self.screens.iter().map(|known| known.monitor).collect();
         let along = |px: i32, upright: bool| if upright { r.y + (px - work.top) as f32 * r.h / (work.bottom - work.top).max(1) as f32 } else { r.x + (px - work.left) as f32 * r.w / (work.right - work.left).max(1) as f32 };
@@ -296,9 +325,36 @@ impl Ui {
         creep
     }
 
+    /// The stage's whole screen in `area`, and what plays slid out from its `edge` as the panel shows it there (as
+    /// large as on the screen, the screen made smaller with it). Returns how soon to draw again, and where the screen
+    /// was drawn.
+    fn music_on_stage(&mut self, frame: &Frame, area: Rect, edge: Edge) -> (Option<f32>, Rect) {
+        let (_, r) = self.panel_on_stage(frame, area, None, None, true);
+        let k = r.w / self.stage.size.0;
+        let shows = super::super::music::Shows::from(&self.settings.view);
+        let room = if edge == Edge::Top { super::super::music::PANEL_TOP } else { super::super::music::PANEL_SIDE };
+        let zoom = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
+        let size = super::super::music::rests_at(room, &shows);
+        let (w, h) = (size.0 * zoom, size.1 * zoom);
+        let (sw, sh) = self.stage.size;
+        let inset = 8.0;
+        let (x, y) = match edge {
+            Edge::Left => (inset, (sh - h) / 2.0),
+            Edge::Right => (sw - inset - w, (sh - h) / 2.0),
+            Edge::Top => ((sw - w) / 2.0, inset),
+        };
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(r.x, r.y, r.w, r.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        frame.place(Matrix3x2::scale(zoom * k, zoom * k) * Matrix3x2::translation(r.x + x * k, r.y + y * k));
+        let painted = self.music.paint(frame, size, &shows, super::super::music::Ground::of(&shows), self.scale * zoom * k, None, Instant::now());
+        frame.origin(0.0, 0.0);
+        unsafe { frame.dc.PopAxisAlignedClip() };
+        (painted.busy.then_some(MUSIC_PREVIEW_PACE), r)
+    }
+
     /// The edges of the screen `screen` (`monitors[index]`), drawn at `r` (`along` placing a physical pixel along an
     /// edge on it): each edge's line (solid where it is pushed into, dashed where another screen lies against it; in
-    /// the accent where it opens anything), and its components in pills along it; each the zone it takes a drop in.
+    /// the accent where it opens anything), and the component it holds in a pill at its middle; each the zone it takes
+    /// a drop in.
     #[allow(clippy::too_many_arguments)]
     fn paint_zones(&mut self, frame: &Frame, palette: &Palette, places: &Places, screen: &str, monitors: &[RECT], index: usize, r: Rect, along: &dyn Fn(i32, bool) -> f32, large: bool, hovered: &Option<Target>) {
         let eased = crate::screens::eased();
@@ -313,7 +369,7 @@ impl Ui {
                 Edge::Right => Rect { x: r.x + r.w - deep, y: r.y, w: deep, h: r.h },
                 Edge::Top => Rect { x: r.x + deep, y: r.y, w: r.w - 2.0 * deep, h: deep_top },
             };
-            let parts = places.parts(screen, edge).to_vec();
+            let part = places.part(screen, edge);
             let over = carrying && self.pointer.is_some_and(|(x, y)| x >= zone.x && x < zone.x + zone.w && y >= zone.y && y < zone.y + zone.h);
             // While a component is carried, every edge shows where it takes it; the one under the pointer, more.
             if carrying {
@@ -322,7 +378,7 @@ impl Ui {
                 fill(frame, Color::hex(0xFFFFFF, 0.14), zone.x, zone.y, zone.w, zone.h, 6.0);
             }
             // The line along the edge, stretch by stretch.
-            let colour = if parts.is_empty() { pale } else { palette.selection };
+            let colour = if part.is_some() { palette.selection } else { pale };
             let (from, to) = if upright { (r.y, r.y + r.h) } else { (r.x, r.x + r.w) };
             for (a, b, seam) in crate::screens::stretches(monitors, index, edge, eased) {
                 let (a, b) = (along(a, upright).max(from + 4.0), along(b, upright).min(to - 4.0));
@@ -345,52 +401,35 @@ impl Ui {
                     bar(a, b);
                 }
             }
-            // Its components, in pills along it from its middle.
-            let sizes: Vec<(f32, f32)> = parts.iter().map(|part| if large { (self.chip_width(frame, *part, true), CHIP) } else { (CHIP_SMALL, CHIP_SMALL) }).collect();
-            let total = |pick: fn(&(f32, f32)) -> f32| sizes.iter().map(pick).sum::<f32>() + CHIP_GAP * sizes.len().saturating_sub(1) as f32;
-            let mut at = if upright { zone.y + zone.h / 2.0 - total(|s| s.1) / 2.0 } else { zone.x + zone.w / 2.0 - total(|s| s.0) / 2.0 };
-            let mut chips = Vec::new();
-            for (part, (w, h)) in parts.iter().zip(sizes) {
+            // What it holds, in a pill at its middle (going, while one carried is over it to take its place); none
+            // while its panel shows there, slid out over where it would be (pressed again, the edge puts it away).
+            let showing = large && !carrying && self.shown_edge == Some(edge);
+            if let Some(part) = part.filter(|_| !showing) {
+                let (w, h) = if large { (self.chip_width(frame, part), CHIP) } else { (CHIP_SMALL, CHIP_SMALL) };
                 let rect = match edge {
-                    Edge::Left => Rect { x: r.x + 10.0, y: at, w, h },
-                    Edge::Right => Rect { x: r.x + r.w - 10.0 - w, y: at, w, h },
-                    Edge::Top => Rect { x: at, y: r.y + 10.0, w, h },
+                    Edge::Left => Rect { x: r.x + 10.0, y: zone.y + (zone.h - h) / 2.0, w, h },
+                    Edge::Right => Rect { x: r.x + r.w - 10.0 - w, y: zone.y + (zone.h - h) / 2.0, w, h },
+                    Edge::Top => Rect { x: zone.x + (zone.w - w) / 2.0, y: r.y + 10.0, w, h },
                 };
-                at += if upright { h } else { w } + CHIP_GAP;
-                let lifted = self.carry.as_ref().is_some_and(|carry| carry.moved && carry.part == *part && carry.from.as_ref().is_some_and(|(s, e)| s == screen && *e == edge));
-                let pointed = hovered.as_ref().is_some_and(|target| matches!(target, Target::Chip(s, e, p) | Target::Unplace(s, e, p) if s == screen && *e == edge && p == part));
-                self.chip(frame, *part, rect, large, if lifted { 0.35 } else { 1.0 }, large.then_some(pointed && !carrying));
-                chips.push((*part, rect));
-            }
-            // Where a carried component would go: a mark between the pills.
-            if over {
-                let index = self.drop_index(&chips, upright);
-                let mark = match chips.get(index).map(|(_, rect)| *rect).or_else(|| chips.last().map(|(_, rect)| *rect)) {
-                    Some(rect) if index < chips.len() => if upright { (rect.x + rect.w / 2.0, rect.y - CHIP_GAP / 2.0) } else { (rect.x - CHIP_GAP / 2.0, rect.y + rect.h / 2.0) },
-                    Some(rect) => if upright { (rect.x + rect.w / 2.0, rect.y + rect.h + CHIP_GAP / 2.0) } else { (rect.x + rect.w + CHIP_GAP / 2.0, rect.y + rect.h / 2.0) },
-                    None => (zone.x + zone.w / 2.0, zone.y + zone.h / 2.0),
-                };
-                fill(frame, Color::hex(0xFFFFFF, 1.0), mark.0 - 5.0, mark.1 - 5.0, 10.0, 10.0, 5.0);
-                fill(frame, palette.selection, mark.0 - 3.0, mark.1 - 3.0, 6.0, 6.0, 3.0);
-            }
-            // What takes a press: each pill (its button first), then the zone.
-            for (part, rect) in &chips {
+                let lifted = self.carry.as_ref().is_some_and(|carry| carry.moved && carry.from.as_ref().is_some_and(|(s, e)| s == screen && *e == edge));
+                let pointed = hovered.as_ref().is_some_and(|target| matches!(target, Target::Chip(s, e, _) | Target::Unplace(s, e) if s == screen && *e == edge));
+                self.chip(frame, part, rect, large, if lifted || over { 0.35 } else { 1.0 }, large.then_some(pointed && !carrying));
+                // What takes a press: the pill's button first, then the pill.
                 if large {
-                    self.targets.push((Rect { x: rect.x + rect.w - CHIP, y: rect.y, w: CHIP, h: rect.h }, Target::Unplace(screen.to_string(), edge, *part)));
+                    self.targets.push((Rect { x: rect.x + rect.w - CHIP, y: rect.y, w: CHIP, h: rect.h }, Target::Unplace(screen.to_string(), edge)));
                 }
-                self.targets.push((*rect, Target::Chip(screen.to_string(), edge, *part)));
+                self.targets.push((rect, Target::Chip(screen.to_string(), edge, part)));
             }
             if large {
                 self.targets.push((zone, Target::Zone(screen.to_string(), edge)));
             }
-            self.zones.push(Zone { screen: screen.to_string(), edge, rect: zone, upright, chips });
+            self.zones.push(Zone { screen: screen.to_string(), edge, rect: zone });
         }
     }
 
-    /// How wide a component's pill is: its icon in a disc (small), or its icon and name, and the button that takes it
-    /// off (large).
-    fn chip_width(&self, frame: &Frame, part: Part, large: bool) -> f32 {
-        if large { 8.0 + 16.0 + 6.0 + frame.gfx.measure(part_name(part, self.lang), Font::new(Family::Segoe, 13.0, 600.0)) + 8.0 + CHIP - 6.0 } else { CHIP_SMALL }
+    /// How wide a component's pill is drawn large: its icon and name, and the button that takes it off.
+    fn chip_width(&self, frame: &Frame, part: Part) -> f32 {
+        8.0 + 16.0 + 6.0 + frame.gfx.measure(part_name(part, self.lang), Font::new(Family::Segoe, 13.0, 600.0)) + 8.0 + CHIP - 6.0
     }
 
     /// A component's pill at `r`, as opaque as `opacity`: in its colour, its icon (and, large, its name, and where
@@ -412,12 +451,6 @@ impl Ui {
         let (cx, cy) = (r.x + r.w - CHIP / 2.0, r.y + r.h / 2.0);
         fill(frame, Color::hex(0x000000, if pointed { 0.32 } else { 0.18 } * opacity), cx - 8.0, cy - 8.0, 16.0, 16.0, 8.0);
         frame.icon(Icon::Close, Point { x: cx, y: cy }, 10.0, white);
-    }
-
-    /// Where among `chips` (along an edge, up and down where `upright`) a component carried to the pointer goes.
-    fn drop_index(&self, chips: &[(Part, Rect)], upright: bool) -> usize {
-        let Some((x, y)) = self.pointer else { return chips.len() };
-        chips.iter().position(|(_, r)| if upright { y < r.y + r.h / 2.0 } else { x < r.x + r.w / 2.0 }).unwrap_or(chips.len())
     }
 
     /// A press on a component (in the library, or on an edge): carried from there once the pointer moves.
@@ -456,17 +489,14 @@ impl Ui {
             return;
         }
         let zone = self.pointer.and_then(|(x, y)| self.zones.iter().find(|zone| x >= zone.rect.x && x < zone.rect.x + zone.rect.w && y >= zone.rect.y && y < zone.rect.y + zone.rect.h));
-        let dropped = zone.map(|zone| (zone.screen.clone(), zone.edge, self.drop_index(&zone.chips, zone.upright)));
+        let dropped = zone.map(|zone| (zone.screen.clone(), zone.edge));
         let places = self.settings.places_mut();
-        match (dropped, carry.from) {
-            (Some((screen, edge, index)), from) => {
-                if let Some((was_screen, was_edge)) = from.filter(|(s, e)| *s != screen || *e != edge) {
-                    places.take(&was_screen, was_edge, carry.part);
-                }
-                places.put(&screen, edge, index, carry.part);
+        match (dropped, &carry.from) {
+            (Some((screen, edge)), from) => {
+                places.put(&screen, edge, carry.part, from.as_ref().map(|(s, e)| (s.as_str(), *e)));
                 self.shown_edge = Some(edge);
             }
-            (None, Some((screen, edge))) => places.take(&screen, edge, carry.part),
+            (None, Some((screen, edge))) => places.take(screen, *edge),
             (None, None) => return,
         }
         self.save();
@@ -492,9 +522,11 @@ impl Ui {
                 self.settings.places_mut().set_same(same, &screen);
                 self.save();
             }
+            // (Pressed again, its panel is put away.)
+            Target::Zone(_, edge) if self.shown_edge == Some(*edge) => self.shown_edge = None,
             Target::Zone(screen, edge) => self.try_edge(screen.clone(), *edge),
-            Target::Unplace(screen, edge, part) => {
-                self.settings.places_mut().take(screen, *edge, *part);
+            Target::Unplace(screen, edge) => {
+                self.settings.places_mut().take(screen, *edge);
                 self.save();
             }
             _ => return false,
@@ -515,7 +547,9 @@ impl Ui {
             let places = self.settings.places();
             for edge in EDGES {
                 stops.push(Target::Zone(screen.clone(), edge));
-                stops.extend(places.parts(&screen, edge).iter().map(|part| Target::Unplace(screen.clone(), edge, *part)));
+                if places.part(&screen, edge).is_some() {
+                    stops.push(Target::Unplace(screen.clone(), edge));
+                }
             }
         }
         stops

@@ -33,6 +33,7 @@ pub enum Icon {
     LayoutGrid,
     Gauge,
     ChevronDown,
+    Briefcase,
 }
 
 impl Icon {
@@ -40,7 +41,7 @@ impl Icon {
     /// "arrow-down-up", "gamepad-2", "pin", "x", "settings", "check",
     /// "mouse-pointer-2", "panel-right", "undo-2", "refresh-cw", "power", "layers", "clock", "image-plus", "skip-back", "play", "pause", "skip-forward",
     /// "music", "volume-2", "volume-x" (their speaker an older Lucide's, as lines), "layout-grid", "gauge",
-    /// "chevron-down";
+    /// "chevron-down", "briefcase";
     /// lucide-static 1.53.0), its
     /// rectangles and circles written as paths.
     fn data(self) -> &'static [&'static str] {
@@ -90,6 +91,7 @@ impl Icon {
             ],
             Icon::Gauge => &["m12 14 4-4", "M3.34 19a10 10 0 1 1 17.32 0"],
             Icon::ChevronDown => &["m6 9 6 6 6-6"],
+            Icon::Briefcase => &["M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16", "M4 6h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"],
             Icon::ImagePlus => &[
                 "M16 5h6",
                 "M19 2v6",

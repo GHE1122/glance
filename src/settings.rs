@@ -32,24 +32,26 @@ pub enum Edge {
 /// The edges a panel can open from, in the order they are gone through.
 pub const EDGES: [Edge; 3] = [Edge::Left, Edge::Top, Edge::Right];
 
-/// What an edge opens: a component, shown in the panel it opens with the others the edge holds, in their order.
+/// What an edge opens: a component, the panel it slides out.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Part {
-    /// The readings.
+    /// The PC's readings.
     Monitor,
-    /// What plays.
+    /// What the user has at hand: the time and what plays (the station, notes and quick launch to come).
+    Workbench,
+    /// What plays, its lyrics and its controls.
     Music,
 }
 
 /// Every component there is, in the order the settings offer them.
-pub const PARTS: [Part; 2] = [Part::Monitor, Part::Music];
+pub const PARTS: [Part; 3] = [Part::Monitor, Part::Workbench, Part::Music];
 
-/// One edge of a screen and what it opens (nothing: it opens no panel).
+/// One edge of a screen and the component it opens.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Hold {
     pub edge: Edge,
-    pub parts: Vec<Part>,
+    pub part: Part,
 }
 
 /// What the edges of one screen open: the screen by the name that stays its own (see `screens`).
@@ -60,7 +62,7 @@ pub struct ScreenHolds {
 }
 
 /// What each screen edge opens: a screen's own where it was set apart, else as every screen not set apart does
-/// (every screen alike, while `same`). An edge holding anything opens it where the pointer is pushed into it, and
+/// (every screen alike, while `same`). An edge holding a component opens it where the pointer is pushed into it, and
 /// where another screen lies against it (a seam), where the pointer rests there.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Places {
@@ -72,7 +74,7 @@ pub struct Places {
 impl Default for Places {
     /// The readings at the right edge of every screen.
     fn default() -> Self {
-        Places { same: true, every: vec![Hold { edge: Edge::Right, parts: vec![Part::Monitor] }], screens: Vec::new() }
+        Places { same: true, every: vec![Hold { edge: Edge::Right, part: Part::Monitor }], screens: Vec::new() }
     }
 }
 
@@ -85,72 +87,66 @@ impl Places {
         }
     }
 
-    /// What `edge` of the screen named `screen` opens, in its order (none: nothing).
-    pub fn parts(&self, screen: &str, edge: Edge) -> &[Part] {
-        self.holds(screen).iter().find(|hold| hold.edge == edge).map_or(&[], |hold| &hold.parts)
+    /// What `edge` of the screen named `screen` opens (none: nothing).
+    pub fn part(&self, screen: &str, edge: Edge) -> Option<Part> {
+        self.holds(screen).iter().find(|hold| hold.edge == edge).map(|hold| hold.part)
     }
 
     /// The edges of the screen named `screen` that open a panel.
     pub fn lit(&self, screen: &str) -> Lit {
-        Lit::of(&EDGES.into_iter().filter(|edge| !self.parts(screen, *edge).is_empty()).collect::<Vec<_>>())
+        Lit::of(&EDGES.into_iter().filter(|edge| self.part(screen, *edge).is_some()).collect::<Vec<_>>())
+    }
+
+    /// Every list of edges kept: every screen's, and while they are set apart, each one's.
+    fn all(&self) -> impl Iterator<Item = &Hold> {
+        let apart = if self.same { &[][..] } else { &self.screens[..] };
+        self.every.iter().chain(apart.iter().flat_map(|entry| &entry.holds))
     }
 
     /// Whether `edge` of any screen opens a panel.
     pub fn anywhere(&self, edge: Edge) -> bool {
-        let opens = |holds: &[Hold]| holds.iter().any(|hold| hold.edge == edge && !hold.parts.is_empty());
-        opens(&self.every) || (!self.same && self.screens.iter().any(|entry| opens(&entry.holds)))
+        self.all().any(|hold| hold.edge == edge)
     }
 
     /// Whether any edge of any screen opens `part`.
     pub fn shows(&self, part: Part) -> bool {
-        let shows = |holds: &[Hold]| holds.iter().any(|hold| hold.parts.contains(&part));
-        shows(&self.every) || (!self.same && self.screens.iter().any(|entry| shows(&entry.holds)))
+        self.all().any(|hold| hold.part == part)
     }
 
-    /// What `edge` of the screen named `screen` opens, to be changed: that screen's own (set apart from the rest as it
-    /// was, if it was not), or every screen's while they are alike.
-    fn parts_mut(&mut self, screen: &str, edge: Edge) -> &mut Vec<Part> {
-        let holds = if self.same {
-            &mut self.every
-        } else {
-            let at = match self.screens.iter().position(|entry| entry.screen == screen) {
-                Some(at) => at,
-                None => {
-                    self.screens.push(ScreenHolds { screen: screen.to_string(), holds: self.every.clone() });
-                    self.screens.len() - 1
-                }
-            };
-            &mut self.screens[at].holds
-        };
-        let at = match holds.iter().position(|hold| hold.edge == edge) {
+    /// What the edges of the screen named `screen` open, to be changed: that screen's own (set apart from the rest as
+    /// it was, if it was not), or every screen's while they are alike.
+    fn holds_mut(&mut self, screen: &str) -> &mut Vec<Hold> {
+        if self.same {
+            return &mut self.every;
+        }
+        let at = match self.screens.iter().position(|entry| entry.screen == screen) {
             Some(at) => at,
             None => {
-                holds.push(Hold { edge, parts: Vec::new() });
-                holds.len() - 1
+                self.screens.push(ScreenHolds { screen: screen.to_string(), holds: self.every.clone() });
+                self.screens.len() - 1
             }
         };
-        &mut holds[at].parts
+        &mut self.screens[at].holds
     }
 
-    /// `part` put on `edge` of the screen named `screen`, at `index` among what it holds (taken from where it was
-    /// there, if it was).
-    pub fn put(&mut self, screen: &str, edge: Edge, index: usize, part: Part) {
-        let parts = self.parts_mut(screen, edge);
-        let index = match parts.iter().position(|held| *held == part) {
-            Some(was) => {
-                parts.remove(was);
-                if was < index { index - 1 } else { index }
+    /// `part` put on `edge` of the screen named `screen`, in place of what it held. Moved there from another edge
+    /// (`from`, its screen and edge), that one takes what this held, if it held anything: the two change places.
+    pub fn put(&mut self, screen: &str, edge: Edge, part: Part, from: Option<(&str, Edge)>) {
+        let was = self.part(screen, edge);
+        if let Some((from_screen, from_edge)) = from {
+            self.take(from_screen, from_edge);
+            if let Some(was) = was {
+                self.holds_mut(from_screen).push(Hold { edge: from_edge, part: was });
             }
-            None => index,
-        };
-        parts.insert(index.min(parts.len()), part);
-        self.tidy();
+        }
+        let holds = self.holds_mut(screen);
+        holds.retain(|hold| hold.edge != edge);
+        holds.push(Hold { edge, part });
     }
 
-    /// `part` taken off `edge` of the screen named `screen`.
-    pub fn take(&mut self, screen: &str, edge: Edge, part: Part) {
-        self.parts_mut(screen, edge).retain(|held| *held != part);
-        self.tidy();
+    /// What `edge` of the screen named `screen` held, taken off it: it opens nothing.
+    pub fn take(&mut self, screen: &str, edge: Edge) {
+        self.holds_mut(screen).retain(|hold| hold.edge != edge);
     }
 
     /// Every screen alike (as the screen named `screen` is now), or each set apart as it is now.
@@ -163,19 +159,9 @@ impl Places {
     }
 
     /// Where a panel opened by hand (the shortcut, the tray) on a screen none of whose edges opens one opens, and
-    /// what it shows: as the first edge of every screen that does, else of any screen; the readings at the right
-    /// edge, where no edge opens anything anywhere.
-    pub fn by_hand(&self) -> (Edge, Vec<Part>) {
-        let first = self.every.iter().chain(self.screens.iter().flat_map(|entry| &entry.holds)).find(|hold| !hold.parts.is_empty());
-        first.map_or((Edge::Right, vec![Part::Monitor]), |hold| (hold.edge, hold.parts.clone()))
-    }
-
-    /// No edge kept that holds nothing.
-    fn tidy(&mut self) {
-        self.every.retain(|hold| !hold.parts.is_empty());
-        for entry in &mut self.screens {
-            entry.holds.retain(|hold| !hold.parts.is_empty());
-        }
+    /// what it shows: as the first edge kept; the readings at the right edge, where no edge opens anything anywhere.
+    pub fn by_hand(&self) -> (Edge, Part) {
+        self.all().next().map_or((Edge::Right, Part::Monitor), |hold| (hold.edge, hold.part))
     }
 }
 
@@ -235,6 +221,9 @@ pub struct PanelLayout {
     pub form: String,
     pub scale: f32,
     pub extra: (f32, f32),
+    /// Its lanes the workbench's, not the readings'.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub workbench: bool,
 }
 
 /// The form a widget showing what plays is kept as, in place of the readings' (see `PanelLayout`): an older Glance,
@@ -651,20 +640,10 @@ impl Settings {
         }
     }
 
-    /// What each screen edge opens, as settings from before 0.3.12 had the panel open: from the edges that opened
-    /// it (pushed into, or rested on where screens meet), the readings with what plays where its lane was on (before
-    /// the readings, where it was the first lane shown, else after them).
+    /// What each screen edge opens, as settings from before 0.3.12 had the panel open: the readings, at the edges that
+    /// opened it (pushed into, or rested on where screens meet).
     fn places_before(&self) -> Places {
-        // (As kept: the modules on in their order, a module not listed off.)
-        let modules = self.view["modules"].as_array().map_or(&[][..], Vec::as_slice);
-        let shown: Vec<&str> = modules.iter().filter(|module| module["on"] == true).filter_map(|module| module["id"].as_str()).collect();
-        let parts = match shown.iter().position(|id| *id == "lyrics") {
-            Some(0) if shown.len() == 1 => vec![Part::Music],
-            Some(0) => vec![Part::Music, Part::Monitor],
-            Some(_) => vec![Part::Monitor, Part::Music],
-            None => vec![Part::Monitor],
-        };
-        let holds = |edges: &[Edge]| edges.iter().map(|edge| Hold { edge: *edge, parts: parts.clone() }).collect::<Vec<_>>();
+        let holds = |edges: &[Edge]| edges.iter().map(|edge| Hold { edge: *edge, part: Part::Monitor }).collect::<Vec<_>>();
         let opened = |screen: &ScreenEdges| {
             let mut edges: Vec<Edge> = screen.edges.clone();
             edges.extend(screen.seams.iter().filter(|edge| !screen.edges.contains(edge)));
@@ -756,38 +735,37 @@ mod tests {
 
     #[test]
     fn each_edge_opens_what_it_holds() {
-        use Part::{Monitor, Music};
+        use Part::{Monitor, Music, Workbench};
         // At first, the readings at the right edge of every screen.
         let mut places = Places::default();
-        assert_eq!(places.parts("a", Edge::Right), [Monitor]);
+        assert_eq!(places.part("a", Edge::Right), Some(Monitor));
         assert_eq!(places.lit("b"), Lit::of(&[Edge::Right]));
         // Every screen alike: what one is given, all are.
-        places.put("a", Edge::Left, 0, Music);
-        assert_eq!(places.parts("b", Edge::Left), [Music]);
-        // Put before the readings on the same edge, then moved after them: in that order, once.
-        places.put("a", Edge::Right, 0, Music);
-        assert_eq!(places.parts("a", Edge::Right), [Music, Monitor]);
-        places.put("a", Edge::Right, 2, Music);
-        assert_eq!(places.parts("a", Edge::Right), [Monitor, Music]);
-        // Each set apart: one screen changed, the others as they were.
+        places.put("a", Edge::Left, Music, None);
+        assert_eq!(places.part("b", Edge::Left), Some(Music));
+        // Put on an edge that held something: in its place.
+        places.put("a", Edge::Right, Workbench, None);
+        assert_eq!(places.part("a", Edge::Right), Some(Workbench));
+        assert_eq!(places.holds("a").len(), 2);
+        // Moved from another edge onto one that held something: the two change places; onto an empty one, it leaves.
+        places.put("a", Edge::Right, Music, Some(("a", Edge::Left)));
+        assert_eq!((places.part("a", Edge::Right), places.part("a", Edge::Left)), (Some(Music), Some(Workbench)));
+        places.put("a", Edge::Top, Workbench, Some(("a", Edge::Left)));
+        assert_eq!((places.part("a", Edge::Top), places.part("a", Edge::Left)), (Some(Workbench), None));
+        // Each set apart: one screen changed, the others as they were (one not named, as every screen is).
         places.set_same(false, "a");
-        places.take("a", Edge::Left, Music);
-        assert_eq!(places.parts("a", Edge::Left), [] as [Part; 0]);
-        assert_eq!(places.parts("b", Edge::Left), [Music]);
-        assert!(!places.anywhere(Edge::Top));
-        // The last taken off an edge: it opens nothing, and is not kept; a screen not set apart opens it still.
-        places.take("b", Edge::Left, Music);
-        assert!(!places.lit("b").has(Edge::Left));
-        assert!(places.lit("c").has(Edge::Left));
-        assert!(places.screens.iter().all(|entry| entry.holds.iter().all(|hold| !hold.parts.is_empty())));
+        places.take("a", Edge::Top);
+        assert_eq!(places.part("a", Edge::Top), None);
+        assert_eq!(places.part("b", Edge::Top), Some(Workbench));
+        places.put("b", Edge::Left, Monitor, Some(("a", Edge::Right)));
+        assert_eq!((places.part("b", Edge::Left), places.part("a", Edge::Right)), (Some(Monitor), None));
+        assert!(places.anywhere(Edge::Left));
+        assert!(places.shows(Monitor) && places.shows(Music));
         // Alike again, as the screen it was made so from.
-        places.put("b", Edge::Top, 0, Music);
-        places.set_same(true, "a");
-        assert_eq!(places.parts("b", Edge::Top), [] as [Part; 0]);
-        assert_eq!(places.lit("b"), Lit::of(&[Edge::Right]));
+        places.set_same(true, "b");
+        assert_eq!(places.lit("a"), Lit::of(&[Edge::Left, Edge::Top, Edge::Right]));
         // Opened by hand where no edge opens anything: as the first edge that does.
-        assert_eq!(places.by_hand(), (Edge::Right, vec![Monitor, Music]));
-        assert_eq!(Places { same: true, every: Vec::new(), screens: Vec::new() }.by_hand(), (Edge::Right, vec![Monitor]));
+        assert_eq!(Places { same: true, every: Vec::new(), screens: Vec::new() }.by_hand(), (Edge::Right, Monitor));
         // Opened by hand: from the nearest edge.
         let both = Lit::of(&[Edge::Left, Edge::Right]);
         assert_eq!(both.nearest((0, 0, 1000, 500), (700, 20)), Some(Edge::Right));
@@ -796,39 +774,32 @@ mod tests {
     }
 
     #[test]
-    fn edges_chosen_before_hold_what_the_panel_showed() {
-        use Part::{Monitor, Music};
+    fn edges_chosen_before_open_the_readings() {
         let read = |json: &str| {
             let mut settings: Settings = serde_json::from_str(json).unwrap();
             settings.carry_over();
             settings
         };
-        // The one edge every screen had: the readings.
+        // The one edge every screen had.
         let settings = read(r#"{"edge":"left"}"#);
-        assert_eq!(settings.places(), &Places { same: true, every: vec![Hold { edge: Edge::Left, parts: vec![Monitor] }], screens: Vec::new() });
+        assert_eq!(settings.places(), &Places { same: true, every: vec![Hold { edge: Edge::Left, part: Part::Monitor }], screens: Vec::new() });
         // Pushing turned off, and screens' seams not: nothing.
         let settings = read(r#"{"edge":"top","sensitivity":"off"}"#);
         assert!(settings.places().every.is_empty());
         assert!(settings.sensitivity == Sensitivity::default());
         // Where screens meet, alone: it opens there.
         let settings = read(r#"{"edge":"top","sensitivity":"off","seam":true}"#);
-        assert_eq!(settings.places().parts("a", Edge::Top), [Monitor]);
-        // Screens chosen apart, their edges and seams together; what plays where its lane was on, before the
-        // readings where it was the first lane shown.
-        let settings = read(r#"{"screens":[{"screen":"a","edges":["left"],"seams":["right"]}],"view":{"modules":[{"id":"cpu","on":true},{"id":"lyrics","on":true}]}}"#);
+        assert_eq!(settings.places().part("a", Edge::Top), Some(Part::Monitor));
+        // Screens chosen apart, their edges and seams together.
+        let settings = read(r#"{"screens":[{"screen":"a","edges":["left"],"seams":["right"]}]}"#);
         assert!(!settings.places().same);
-        assert_eq!(settings.places().parts("a", Edge::Left), [Monitor, Music]);
-        assert_eq!(settings.places().parts("a", Edge::Right), [Monitor, Music]);
-        assert_eq!(settings.places().parts("b", Edge::Right), [Monitor, Music]);
-        let settings = read(r#"{"view":{"modules":[{"id":"cpu","on":false},{"id":"lyrics","on":true},{"id":"gpu:0","on":true}]}}"#);
-        assert_eq!(settings.places().parts("a", Edge::Right), [Music, Monitor]);
-        let settings = read(r#"{"view":{"modules":[{"id":"lyrics","on":true},{"id":"cpu","on":false}]}}"#);
-        assert_eq!(settings.places().parts("a", Edge::Right), [Music]);
+        assert_eq!(settings.places().lit("a"), Lit::of(&[Edge::Left, Edge::Right]));
+        assert_eq!(settings.places().lit("b"), Lit::of(&[Edge::Right]));
         // Written as places, the old fields not again; read back as written.
         let written = serde_json::to_string(&settings).unwrap();
         assert!(written.contains("\"places\"") && !written.contains("\"pushed\""));
         assert_eq!(read(&written).places(), settings.places());
-        assert!(Settings::default().places().shows(Monitor));
+        assert!(Settings::default().places().shows(Part::Monitor));
     }
 
     #[test]
