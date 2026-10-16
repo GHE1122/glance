@@ -171,6 +171,11 @@ pub struct WidgetAt {
     /// How large it is (DIPs), where its size is its own (what plays) rather than its form's.
     #[serde(default)]
     pub size: Option<(f32, f32)>,
+    /// Widgets merged into it: each part's form (its own first), and whether they are beside it rather than below.
+    #[serde(default)]
+    pub parts: Option<Vec<PanelLayout>>,
+    #[serde(default)]
+    pub beside: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -411,6 +411,12 @@ struct Widget {
     contact: Contact,
     /// Its surface's corner on the screen (physical px).
     at: POINT,
+    /// Shown as where a widget in hand would be merged (beside it, else below), while it would.
+    drop_target: Option<bool>,
+    /// Merged, pressed on a part after the first: that part (torn out as it is moved), and where it was taken from
+    /// its corner (DIPs); torn out, to be made a widget of its own (see `Widgets::tear_part`).
+    splitting: Option<(usize, (f32, f32))>,
+    split: Option<(usize, (f32, f32))>,
     /// While it is sized: the room its edges were dragged to (DIPs).
     room: Option<(f32, f32)>,
     /// Let go after it was sized or stuck: since when, and from what
@@ -516,6 +522,202 @@ enum Content {
     Readings(Readings),
     /// What plays (see `music`).
     Music(MusicShown),
+    /// Widgets merged into one (see `Merged`).
+    Merged(Box<Merged>),
+}
+
+/// Widgets merged into one (see `Widgets::merge`): the one dropped onto first, its look the whole one's (its ground
+/// under all of it), each other below it or beside it (`beside`); laid out by the whole one's size (see `lay_out`).
+struct Merged {
+    /// Readings or what plays, never merged ones.
+    parts: Vec<Content>,
+    beside: bool,
+    /// Its size (DIPs, as large as it is on the screen), where each part is (from its corner, as last laid out), and
+    /// the least it can be.
+    size: (f32, f32),
+    rects: Vec<(f32, f32, f32, f32)>,
+    least: (f32, f32),
+    /// Where its parts were as the journal was last told.
+    told: Vec<(f32, f32, f32, f32)>,
+}
+
+/// The readings laid out for `room` (DIPs on the screen) as the panel's are, in a work area `work` large; none where
+/// nothing could be.
+fn readings_for(scene: &Scene, theme: &Theme, work: (f32, f32), seen: &Seen, room: (f32, f32)) -> Option<arrange::Opening> {
+    let heights = view::heights(scene);
+    let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
+    let opening = arrange::Opening::new(theme, Edge::Right, &lanes, forms::count(scene), work, None, 1.0, Want::Room(room, None), seen.clone());
+    opening.choice.is_some().then_some(opening)
+}
+
+impl Merged {
+    /// Whether the one dropped onto (whose look it has) is what plays.
+    fn host_plays(&self) -> bool {
+        matches!(self.parts.first(), Some(Content::Music(_)))
+    }
+
+    /// Lays its parts out in its size: each its least along the way they go, then the room left to those that show
+    /// more with more, in turn (the readings as far as they show all they can; what plays takes all that is left);
+    /// the readings' form the one their room holds. Whether every part could be laid out.
+    fn lay_out(&mut self, scene: &Scene, theme: &Theme, work: (f32, f32), seen: &Seen) -> bool {
+        let (along, across) = if self.beside { (0, 1) } else { (1, 0) };
+        let pick = |size: (f32, f32), axis: usize| if axis == 0 { size.0 } else { size.1 };
+        let cross = pick(self.size, across);
+        let room = |length: f32| if self.beside { (length, cross) } else { (cross, length) };
+        let on_screen = |opening: &arrange::Opening| (opening.size.0 * opening.zoom, opening.size.1 * opening.zoom);
+        // Each part's least along, and across, and what it would take at most along (none: all it is given).
+        let mut wants = Vec::with_capacity(self.parts.len());
+        for part in &self.parts {
+            wants.push(match part {
+                Content::Readings(_) => {
+                    let Some(least) = readings_for(scene, theme, work, seen, room(1.0)) else { return false };
+                    let most = readings_for(scene, theme, work, seen, room(100_000.0)).map_or(f32::INFINITY, |most| pick(on_screen(&most), along));
+                    (pick(on_screen(&least), along), pick(on_screen(&least), across), most)
+                }
+                _ => (pick(music::LEAST, along), pick(music::LEAST, across), f32::INFINITY),
+            });
+        }
+        let least_along: f32 = wants.iter().map(|w| w.0).sum();
+        let least_across = wants.iter().map(|w| w.1).fold(0.0, f32::max);
+        self.least = if self.beside { (least_along, least_across) } else { (least_across, least_along) };
+        let total = pick(self.size, along).max(least_along);
+        let mut given: Vec<f32> = wants.iter().map(|w| w.0).collect();
+        let mut left = total - least_along;
+        for (share, want) in given.iter_mut().zip(&wants).filter(|(_, want)| want.2.is_finite()) {
+            let more = (want.2 - want.0).max(0.0).min(left);
+            *share += more;
+            left -= more;
+        }
+        // The readings in the room they are given: as large as the form it holds (what is left of the room, to the rest).
+        for (index, part) in self.parts.iter_mut().enumerate() {
+            if let Content::Readings(readings) = part {
+                let Some(opening) = readings_for(scene, theme, work, seen, room(given[index])) else { return false };
+                let shown = on_screen(&opening);
+                left += given[index] - pick(shown, along);
+                given[index] = pick(shown, along);
+                let choice = opening.choice.unwrap();
+                readings.choice = choice;
+                readings.last = Some(Shown { form: choice.form, zoom: opening.zoom, size: opening.size, layout: opening.layout.clone(), small: opening.small(), detail: opening.detail() });
+            }
+        }
+        let open: Vec<usize> = (0..self.parts.len()).filter(|&index| !wants[index].2.is_finite()).collect();
+        let to_each = if open.is_empty() { 0.0 } else { left / open.len() as f32 };
+        for index in &open {
+            given[*index] += to_each;
+        }
+        if open.is_empty() {
+            if let Some(last) = given.last_mut() {
+                *last += left;
+            }
+        }
+        let mut at = 0.0;
+        self.rects = given
+            .iter()
+            .map(|length| {
+                let rect = if self.beside { (at, 0.0, *length, cross) } else { (0.0, at, cross, *length) };
+                at += length;
+                rect
+            })
+            .collect();
+        self.size = if self.beside { (at, cross) } else { (cross, at) };
+        // (For the journal, as the parts' places change.)
+        let readings = self.parts.iter().find_map(|part| if let Content::Readings(readings) = part { readings.last.as_ref().map(|shown| (shown.form.key(), shown.size, shown.zoom)) } else { None });
+        if self.told != self.rects {
+            self.told = self.rects.clone();
+            note(format!("widget: merged laid out in {:.0} x {:.0}: {:?}; readings {readings:?}", self.size.0, self.size.1, self.rects));
+        }
+        true
+    }
+
+    /// Whether what plays in it is to be drawn again soon.
+    fn busy(&self) -> bool {
+        self.parts.iter().any(|part| matches!(part, Content::Music(shown) if shown.busy))
+    }
+
+    /// The part at `(x, y)` (DIPs, from its corner), and that point from the part's corner.
+    fn part_at(&self, (x, y): (f32, f32)) -> Option<(usize, (f32, f32))> {
+        self.rects.iter().position(|(rx, ry, rw, rh)| x >= *rx && x < rx + rw && y >= *ry && y < ry + rh).map(|index| (index, (x - self.rects[index].0, y - self.rects[index].1)))
+    }
+}
+
+/// Draws widgets merged (`merged`), from the frame's origin moved by `local`, `px` physical pixels a DIP: the ground
+/// of the one dropped onto under all of them (the skin's, or what plays' own), each part in its place on it. Where a
+/// press does something in each, from its corner; whether all of it was drawn.
+#[allow(clippy::too_many_arguments)]
+fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Matrix3x2, px: f32, backdrop: Option<(&ID2D1Bitmap1, Vector2, u64, f32)>, frost: f32, rough: bool, pointer: Option<(f32, f32)>, shows: &Shows, now: Instant) -> (Vec<view::HitBox>, bool) {
+    let theme = scene.theme;
+    let size = merged.size;
+    let host_plays = merged.host_plays();
+    let rects = merged.rects.clone();
+    let mut hits = Vec::new();
+    let mut whole = true;
+    // What plays' own ground, under it all.
+    if host_plays {
+        if let Some(Content::Music(host)) = merged.parts.first_mut() {
+            frame.place(local);
+            host.music.paint_ground(frame, size);
+        }
+    }
+    let mut backdrop = backdrop;
+    for (index, part) in merged.parts.iter_mut().enumerate() {
+        let Some(&(rx, ry, rw, rh)) = rects.get(index) else { continue };
+        let placed = |at: (f32, f32), list: &mut Vec<view::HitBox>, from: Vec<view::HitBox>, k: f32| {
+            list.extend(from.into_iter().map(|(hx, hy, hw, hh, hit)| (at.0 + hx * k, at.1 + hy * k, hw * k, hh * k, hit)));
+        };
+        match part {
+            Content::Readings(readings) => {
+                let Some(shown) = readings.last.clone() else { continue };
+                let z = shown.zoom;
+                let lanes = view::lanes_at(scene, |_| shown.detail);
+                // The one dropped onto: its picture the whole size, its lanes in its part, the skin's ground under the
+                // others' parts too. Else on the ground there is, in its part.
+                let (picture_size, at, others, drawn_local) = if index == 0 {
+                    let others: Vec<view::Rect> = rects.iter().enumerate().filter(|(other, _)| *other != 0).map(|(_, (x, y, w, h))| view::Rect { x: x / z, y: y / z, w: w / z, h: h / z }).collect();
+                    ((size.0 / z, size.1 / z), (rx / z, ry / z), Some(others), Matrix3x2::scale(z, z) * local)
+                } else {
+                    ((rw / z, rh / z), (0.0, 0.0), None, Matrix3x2::scale(z, z) * Matrix3x2::translation(rx, ry) * local)
+                };
+                let picture = render::Picture { scene, lanes: &lanes, layout: &shown.layout, small: shown.small.map(|small| (small, shown.size)), size: picture_size, at, edge: None, backdrop: if index == 0 { backdrop.take() } else { None }, frost, rough };
+                // (Drawn from its place, its own DIPs scaled to the screen's: its layers and its charts, drawn straight
+                // onto the frame each frame, alike.)
+                frame.place(drawn_local);
+                match readings.layers.draw_on(frame, &picture, Matrix3x2::identity(), px * z, others.as_deref()) {
+                    Ok(drawn) => {
+                        if let Some(from) = drawn.hits {
+                            placed((rx, ry), &mut hits, from, z);
+                        }
+                    }
+                    Err(error) => {
+                        note(format!("widget: its readings not drawn: {error}"));
+                        whole = false;
+                    }
+                }
+            }
+            Content::Music(shown) => {
+                let MusicShown { music, layer, frames, busy, .. } = shown;
+                *frames += 1;
+                let ground = music::Ground::Host { dark: theme.dark };
+                let here = pointer.filter(|(x, y)| *x >= rx && *x < rx + rw && *y >= ry && *y < ry + rh).map(|(x, y)| (x - rx, y - ry));
+                let mut painted = None;
+                frame.origin(0.0, 0.0);
+                let drew = layer.draw(frame, *frames, Matrix3x2::translation(rx, ry) * local, (-4.0, -4.0, rw + 8.0, rh + 8.0), px, None, |frame| {
+                    painted = Some(music.paint(frame, (rw, rh), shows, ground, px, here, now));
+                    Ok(())
+                });
+                if let Err(error) = drew {
+                    note(format!("widget: what plays not drawn: {error}"));
+                    whole = false;
+                }
+                if let Some(painted) = painted {
+                    *busy = painted.busy;
+                    placed((rx, ry), &mut hits, painted.hits, 1.0);
+                }
+            }
+            Content::Merged(_) => {}
+        }
+    }
+    frame.origin(0.0, 0.0);
+    (hits, whole)
 }
 
 /// The readings a widget shows, and what it keeps of them from frame to frame.
@@ -583,6 +785,45 @@ impl Content {
                 shown.music.release();
                 shown.layer.release();
             }
+            Content::Merged(merged) => merged.parts.iter_mut().for_each(Content::release),
+        }
+    }
+
+    /// How far its process list is turned (DIPs).
+    fn process_scroll(&self) -> f32 {
+        match self {
+            Content::Readings(readings) => readings.scroll,
+            Content::Music(_) => 0.0,
+            Content::Merged(merged) => merged.parts.iter().map(Content::process_scroll).fold(0.0, f32::max),
+        }
+    }
+
+    /// The preferences its readings are drawn by, where they are not the panel's (`prefs`): without the music lane
+    /// (what plays is a widget of its own, or a part of one merged).
+    fn prefs(&self, prefs: &crate::ui::prefs::Prefs) -> Option<crate::ui::prefs::Prefs> {
+        matches!(self, Content::Readings(_) | Content::Merged(_)).then(|| {
+            let mut prefs = prefs.clone();
+            prefs.modules.retain(|module| module.id != "lyrics");
+            prefs
+        })
+    }
+
+    /// Whether `guest` (one of its own, not merged) may be merged into it: a kind it has not got, its parts not too
+    /// many.
+    fn takes(&self, guest: &Content) -> bool {
+        let same = |part: &Content| std::mem::discriminant(part) == std::mem::discriminant(guest);
+        match self {
+            Content::Merged(merged) => merged.parts.len() < PARTS_MOST && !merged.parts.iter().any(same),
+            _ => !same(self) && !matches!(guest, Content::Merged(_)),
+        }
+    }
+
+    /// Whether it is drawn on the skin (the readings, or what was merged into them).
+    fn skinned(&self) -> bool {
+        match self {
+            Content::Readings(_) => true,
+            Content::Music(_) => false,
+            Content::Merged(merged) => !merged.host_plays(),
         }
     }
 
@@ -591,6 +832,7 @@ impl Content {
         match self {
             Content::Readings(readings) => readings.choice.form.key(),
             Content::Music(_) => MUSIC_FORM.into(),
+            Content::Merged(merged) => format!("merged ({})", merged.parts.iter().map(Content::key).collect::<Vec<_>>().join(", ")),
         }
     }
 
@@ -599,6 +841,8 @@ impl Content {
         match self {
             Content::Readings(_) => &buttons::ALL,
             Content::Music(_) => &[Button::Settings, Button::Pin, Button::Through, Button::Close],
+            // (With readings in it, as theirs.)
+            Content::Merged(merged) => merged.parts.iter().find(|part| matches!(part, Content::Readings(_))).map_or(&[Button::Settings, Button::Pin, Button::Through, Button::Close], Content::buttons),
         }
     }
 }
@@ -622,7 +866,26 @@ pub struct Widgets {
     areas: Vec<(isize, RECT)>,
     /// Live refraction, as the widgets were last drawn (see `Look::live`).
     live: bool,
+    /// A widget in hand held over another, to be merged into it as it is let go (see `look_for_a_drop`).
+    dropping: Option<Dropping>,
 }
+
+/// A widget in hand (`guest`) held over another (`target`): since when, whether it goes beside it (else below), and
+/// whether it has been held there long enough to be merged into it as it is let go.
+#[derive(Clone, Copy, PartialEq)]
+struct Dropping {
+    guest: isize,
+    target: isize,
+    beside: bool,
+    since: Instant,
+    armed: bool,
+}
+
+/// How long a widget in hand is held over another before it is merged into it as it is let go; how far into the
+/// other's width from its right edge it goes beside it (else below); how many parts a widget merges at most.
+const DROP_HOLD: Duration = Duration::from_millis(600);
+const DROP_BESIDE: f32 = 0.3;
+const PARTS_MOST: usize = 4;
 
 impl Widgets {
     /// Whether `hwnd` is one of the widgets'.
@@ -636,11 +899,19 @@ impl Widgets {
     /// capture, as a bitmap, and its tone), if it had, till it takes its own
     /// (on another thread: it is drawn at once). `from`: the edge the panel
     /// was at, if it was at one.
-    pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, lent: Option<Lent>, from: Option<Edge>) -> bool {
+    pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, size: (f32, f32), lent: Option<Lent>, from: Option<Edge>) -> bool {
         let Some(contact) = monitor_at(at) else { return false };
         let choice = Choice { form, scale, extra: (0.0, 0.0) };
         let made = Instant::now();
-        let Some(mut widget) = Widget::new(contact, at, Content::Readings(Readings::new(choice))) else { return false };
+        // With its music lane, the readings and what plays merged below them, as large as the panel was (what plays
+        // a part of its own: readings show no music lane).
+        let readings = Content::Readings(Readings::new(choice));
+        let content = if crate::ui::prefs::module_on(&crate::app().settings.lock().unwrap().view, "lyrics") {
+            Content::Merged(Box::new(Merged { parts: vec![readings, Content::Music(MusicShown::new(music::LEAST))], beside: false, size, rects: Vec::new(), least: (0.0, 0.0), told: Vec::new() }))
+        } else {
+            readings
+        };
+        let Some(mut widget) = Widget::new(contact, at, content) else { return false };
         let made = made.elapsed();
         if made > SLOW_FRAME {
             note(format!("widget: made in {:.1} ms", made.as_secs_f32() * 1000.0));
@@ -897,6 +1168,21 @@ impl Widgets {
             widget.next_frame = Instant::now();
             return;
         }
+        if let Content::Merged(merged) = &mut widget.content {
+            let mut client = screen;
+            unsafe {
+                let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
+            }
+            let margin = (widget.margin * widget.contact.scale).ceil() as i32;
+            let at = ((client.x - margin) as f32 / widget.contact.scale, (client.y - margin) as f32 / widget.contact.scale);
+            if let Some((index, _)) = merged.part_at(at) {
+                if let Content::Music(shown) = &mut merged.parts[index] {
+                    shown.music.wheel(delta);
+                    widget.next_frame = Instant::now();
+                    return;
+                }
+            }
+        }
         let mut client = screen;
         unsafe {
             let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
@@ -905,7 +1191,12 @@ impl Widgets {
         let margin = widget.margin_px();
         let (x, y) = ((client.x - margin) as f32 / px - widget.hits_from.0, (client.y - margin) as f32 / px - widget.hits_from.1);
         let most = widget.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).and_then(|hit| hit.4.max_scroll());
-        if let (Some(most), Content::Readings(readings)) = (most, &mut widget.content) {
+        let readings = match &mut widget.content {
+            Content::Readings(readings) => Some(readings),
+            Content::Merged(merged) => merged.parts.iter_mut().find_map(|part| if let Content::Readings(readings) = part { Some(readings) } else { None }),
+            Content::Music(_) => None,
+        };
+        if let (Some(most), Some(readings)) = (most, readings) {
             let rows = -(delta as f32) / 120.0 * crate::panel::WHEEL_ROWS;
             readings.scroll_target = (readings.scroll_target + rows * view::TABLE_ROW).clamp(0.0, most);
             widget.next_frame = Instant::now();
@@ -914,6 +1205,21 @@ impl Widgets {
 
     /// Let go of a press on a widget, or (`cancelled`) its capture lost: then no press is completed.
     pub fn release(&mut self, hwnd: HWND, now: Instant, cancelled: bool) {
+        if let Some(widget) = self.list.iter().find(|w| w.window.hwnd == hwnd) {
+            note(format!("widget: release ({}), {}", if cancelled { "its capture lost" } else { "let go" }, match &widget.drag { Some(Drag::Move { moved, torn, .. }) => format!("moving (moved {moved}, torn {torn})"), Some(Drag::Size { .. }) => "sizing".into(), Some(Drag::Slide { .. }) => "sliding".into(), None => "in no hand".into() }));
+        }
+        // Held over another long enough: merged into it.
+        if let Some(drop) = self.dropping.take() {
+            if drop.armed && drop.guest == hwnd.0 as isize && !cancelled {
+                self.merge(drop);
+                self.save();
+                return;
+            }
+            if let Some(target) = self.list.iter_mut().find(|w| w.window.hwnd.0 as isize == drop.target) {
+                target.drop_target = None;
+                target.next_frame = now;
+            }
+        }
         let Some(index) = self.list.iter().position(|w| w.window.hwnd == hwnd) else { return };
         let widget = &mut self.list[index];
         widget.next_frame = now;
@@ -1015,8 +1321,10 @@ impl Widgets {
             behind_changed();
         }
         self.areas = areas;
+        self.look_for_a_drop(now);
         let mut due = REST_FRAME;
         let mut gone = Vec::new();
+        let mut torn = Vec::new();
         for (index, widget) in self.list.iter_mut().enumerate() {
             // (Letting clicks through, but for the one on its button.)
             let through = widget.click_through && !widget.reached;
@@ -1038,6 +1346,9 @@ impl Widgets {
             if widget.drag.is_some() {
                 widget.follow(now);
             }
+            if let Some(split) = widget.split.take() {
+                torn.push((index, split));
+            }
             match widget.frame(now, look, history, seen, controller) {
                 Frame::Gone => gone.push(index),
                 Frame::Moving => {
@@ -1053,6 +1364,10 @@ impl Widgets {
                 }
             }
         }
+        for (index, (part, grab)) in torn {
+            self.tear_part(index, part, grab);
+            due = Duration::ZERO;
+        }
         // Where they came to rest, kept.
         let rested = self.list.iter_mut().fold(false, |any, widget| std::mem::take(&mut widget.unsaved) | any);
         if rested && gone.is_empty() {
@@ -1063,6 +1378,116 @@ impl Widgets {
             self.save();
         }
         Some(due)
+    }
+
+    /// The widget in hand held over another it may be merged into: since when, and, held there long enough, that
+    /// one shown as where it would go (beside it near its right edge, else below it).
+    fn look_for_a_drop(&mut self, now: Instant) {
+        let held = self.list.iter().position(|w| matches!(w.drag, Some(Drag::Move { moved: true, .. })));
+        let found = held.zip(cursor_position()).and_then(|(guest, cursor)| {
+            let target = self.list.iter().position(|w| {
+                let r = w.rect();
+                w.window.hwnd != self.list[guest].window.hwnd && w.shown_once && (r.left..r.right).contains(&cursor.x) && (r.top..r.bottom).contains(&cursor.y) && w.content.takes(&self.list[guest].content)
+            })?;
+            let (r, beside) = (self.list[target].rect(), match &self.list[target].content {
+                Content::Merged(merged) => merged.beside,
+                _ => false,
+            });
+            let beside = beside || (!matches!(self.list[target].content, Content::Merged(_)) && cursor.x as f32 > r.right as f32 - (r.right - r.left) as f32 * DROP_BESIDE);
+            Some((self.list[guest].window.hwnd.0 as isize, self.list[target].window.hwnd.0 as isize, beside))
+        });
+        let dropping = found.map(|(guest, target, beside)| {
+            let since = self.dropping.filter(|was| was.guest == guest && was.target == target).map_or(now, |was| was.since);
+            Dropping { guest, target, beside, since, armed: now.saturating_duration_since(since) >= DROP_HOLD }
+        });
+        for widget in &mut self.list {
+            let shown = dropping.filter(|drop| drop.armed && drop.target == widget.window.hwnd.0 as isize).map(|drop| drop.beside);
+            if widget.drop_target != shown {
+                widget.drop_target = shown;
+                widget.next_frame = now;
+            }
+        }
+        if dropping.is_some_and(|drop| drop.armed) && self.dropping.is_none_or(|was| !was.armed) {
+            note("widget: held over another, to be merged into it");
+        }
+        self.dropping = dropping;
+    }
+
+    /// The widget in hand merged into the one it was held over: that one's look and size (no less than both need),
+    /// the one in hand below it or beside it; its window gone.
+    fn merge(&mut self, drop: Dropping) {
+        let (Some(guest), Some(_)) = (self.list.iter().position(|w| w.window.hwnd.0 as isize == drop.guest), self.list.iter().position(|w| w.window.hwnd.0 as isize == drop.target)) else { return };
+        let mut guest = self.list.remove(guest);
+        let _ = unsafe { ReleaseCapture() };
+        guest.hide_hint();
+        if guest.tip.take().is_some() {
+            crate::ui::tip::hide();
+        }
+        let content = std::mem::replace(&mut guest.content, Content::Music(MusicShown::new(music::LEAST)));
+        guest.gone();
+        guest.window.destroy();
+        let Some(target) = self.list.iter_mut().find(|w| w.window.hwnd.0 as isize == drop.target) else { return };
+        let size = (target.surface_size.0 * target.zoom, target.surface_size.1 * target.zoom);
+        let host = std::mem::replace(&mut target.content, Content::Music(MusicShown::new(music::LEAST)));
+        target.content = match host {
+            Content::Merged(mut merged) => {
+                merged.parts.push(content);
+                Content::Merged(merged)
+            }
+            host => Content::Merged(Box::new(Merged { parts: vec![host, content], beside: drop.beside, size, rects: Vec::new(), least: (0.0, 0.0), told: Vec::new() })),
+        };
+        note(format!("widget: merged into another, {}", if drop.beside { "beside it" } else { "below it" }));
+        target.drop_target = None;
+        target.settle = None;
+        target.next_frame = Instant::now();
+    }
+
+    /// The part at `part` of the merged widget at `index` torn out, in hand where it was taken (`grab`, DIPs from its
+    /// corner): a widget of its own, as large as it was; the other parts as they were, the one left alone a widget
+    /// of its own kind again.
+    fn tear_part(&mut self, index: usize, part: usize, grab: (f32, f32)) {
+        let Some(widget) = self.list.get_mut(index) else { return };
+        let Content::Merged(merged) = &mut widget.content else { return };
+        if part == 0 || part >= merged.parts.len() {
+            return;
+        }
+        let (_, _, pw, ph) = merged.rects.get(part).copied().unwrap_or((0.0, 0.0, music::LEAST.0, music::LEAST.1));
+        let mut content = merged.parts.remove(part);
+        let removed = merged.rects.remove(part);
+        if let Content::Music(shown) = &mut content {
+            shown.size = (pw.max(music::LEAST.0), ph.max(music::LEAST.1));
+        }
+        // What is left: shorter by the part along the way they went; one part alone, a widget of its kind.
+        if merged.beside {
+            merged.size.0 -= removed.2;
+        } else {
+            merged.size.1 -= removed.3;
+        }
+        if merged.parts.len() == 1 {
+            let rest = merged.rects.first().copied();
+            let mut last = merged.parts.pop().unwrap();
+            if let (Content::Music(shown), Some((_, _, w, h))) = (&mut last, rest) {
+                shown.size = (w.max(music::LEAST.0), h.max(music::LEAST.1));
+            }
+            widget.content = last;
+        }
+        widget.drag = None;
+        widget.next_frame = Instant::now();
+        let _ = unsafe { ReleaseCapture() };
+        widget.window.lift(false);
+        let Some(cursor) = cursor_position() else { return };
+        let scale = widget.contact.scale;
+        let grab = POINT { x: (grab.0 * scale) as i32, y: (grab.1 * scale) as i32 };
+        let at = POINT { x: cursor.x - grab.x, y: cursor.y - grab.y };
+        let Some(contact) = monitor_at(cursor) else { return };
+        let Some(mut torn) = Widget::new(contact, at, content) else { return };
+        note(format!("widget: a part torn out of a merged one, at ({}, {}), held {:?} from its corner", at.x, at.y, (grab.x, grab.y)));
+        torn.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: true, moved: true });
+        torn.torn_from = Some((None, contact.monitor));
+        torn.window.yield_to(self.settings);
+        unsafe { SetCapture(torn.window.hwnd) };
+        self.list.push(torn);
+        self.save();
     }
 
     /// Puts the widget at `index` away: kept to be brought back, its window gone, and what one of its buttons said
@@ -1177,6 +1602,9 @@ impl Widget {
             frost_shown: None,
             tone_due: false,
             frame_took: gfx::Took::default(),
+            drop_target: None,
+            splitting: None,
+            split: None,
             hover: false,
             hit_hover: None,
             lingered: None,
@@ -1198,9 +1626,18 @@ impl Widget {
     fn restore(kept: &WidgetAt) -> Option<Self> {
         let at = POINT { x: kept.at.0, y: kept.at.1 };
         let contact = monitor_at(at)?;
-        let content = match kept.layout.form.as_str() {
-            MUSIC_FORM => Content::Music(MusicShown::new(kept.size.unwrap_or(music::LEAST))),
-            _ => Content::Readings(Readings { before: kept.before.as_ref().and_then(Choice::from_kept), ..Readings::new(Choice::from_kept(&kept.layout)?) }),
+        let one = |layout: &crate::settings::PanelLayout| -> Option<Content> {
+            Some(match layout.form.as_str() {
+                MUSIC_FORM => Content::Music(MusicShown::new(kept.size.unwrap_or(music::LEAST))),
+                _ => Content::Readings(Readings { before: kept.before.as_ref().and_then(Choice::from_kept), ..Readings::new(Choice::from_kept(layout)?) }),
+            })
+        };
+        let content = match &kept.parts {
+            Some(parts) if parts.len() > 1 => {
+                let parts = parts.iter().map(one).collect::<Option<Vec<_>>>()?;
+                Content::Merged(Box::new(Merged { parts, beside: kept.beside, size: kept.size.unwrap_or(music::LEAST), rects: Vec::new(), least: (0.0, 0.0), told: Vec::new() }))
+            }
+            _ => one(&kept.layout)?,
         };
         let mut widget = Widget::new(contact, at, content)?;
         widget.pinned = kept.pinned;
@@ -1213,9 +1650,14 @@ impl Widget {
     }
 
     fn kept(&self) -> WidgetAt {
-        let (layout, before, size) = match &self.content {
-            Content::Readings(readings) => (readings.choice.kept(), readings.before.map(Choice::kept), None),
-            Content::Music(shown) => (crate::settings::PanelLayout { form: MUSIC_FORM.into(), scale: 1.0, extra: (0.0, 0.0) }, None, Some(shown.size)),
+        let layout_of = |content: &Content| match content {
+            Content::Readings(readings) => readings.choice.kept(),
+            _ => crate::settings::PanelLayout { form: MUSIC_FORM.into(), scale: 1.0, extra: (0.0, 0.0) },
+        };
+        let (layout, before, size, parts, beside) = match &self.content {
+            Content::Readings(readings) => (readings.choice.kept(), readings.before.map(Choice::kept), None, None, false),
+            Content::Music(shown) => (layout_of(&self.content), None, Some(shown.size), None, false),
+            Content::Merged(merged) => (layout_of(&merged.parts[0]), None, Some(merged.size), Some(merged.parts.iter().map(layout_of).collect()), merged.beside),
         };
         WidgetAt {
             at: (self.at.x, self.at.y),
@@ -1227,6 +1669,8 @@ impl Widget {
             stuck: self.stuck.map(Side::kept),
             before,
             size,
+            parts,
+            beside,
         }
     }
 
@@ -1470,6 +1914,10 @@ impl Widget {
             }
         } else {
             self.drag = Some(Drag::Move { grab: POINT { x: from.x - self.at.x, y: from.y - self.at.y }, trail: Vec::new(), torn: false, moved: false });
+            self.splitting = match &self.content {
+                Content::Merged(merged) => merged.part_at((x, y)).filter(|(part, _)| *part > 0),
+                _ => None,
+            };
         }
         unsafe { SetCapture(self.window.hwnd) };
         // Above every window while it is in hand, kept on the desktop or not.
@@ -1513,6 +1961,11 @@ impl Widget {
                         return;
                     }
                     *moved = true;
+                    // Taken by a part merged into it: that part torn out (it moves; this stays).
+                    if let Some(split) = self.splitting.take() {
+                        self.split = Some(split);
+                        return;
+                    }
                 }
                 // Pulled away from the edge it was stuck to: as it was before,
                 // under the hand where it was taken.
@@ -1544,6 +1997,7 @@ impl Widget {
                     }
                 }
                 self.at = POINT { x: cursor.x - grab.x, y: cursor.y - grab.y };
+                note_sparingly("followed", || format!("widget: followed the hand to ({}, {})", cursor.x, cursor.y));
                 if let Some(contact) = monitor_at(cursor) {
                     self.moved_to(contact);
                 }
@@ -1583,10 +2037,14 @@ impl Widget {
     /// Let go: a press where it was is a click (on a button, what it does); a move, flung if fast enough. Cancelled
     /// (the capture taken away), neither: what was pressed is not done, and it stays where it was.
     fn release(&mut self, now: Instant, cancelled: bool) -> Released {
-        let _ = unsafe { ReleaseCapture() };
+        // (Its own capture: not one another has taken since, a part torn out of it.)
+        if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == self.window.hwnd {
+            let _ = unsafe { ReleaseCapture() };
+        }
         // Back where it is kept, let go.
         self.window.lift(false);
         self.hide_hint();
+        self.splitting = None;
         // (The capture's end after a release comes here too, with nothing.)
         let Some(drag) = self.drag.take() else { return Released::Nothing };
         match drag {
@@ -1641,8 +2099,14 @@ impl Widget {
                                 Some(view::Hit::Drive(place)) => crate::panel::open_drive(place),
                                 Some(view::Hit::Line(index)) => {
                                     music::play_line(index);
-                                    if let Content::Music(shown) = &mut self.content {
-                                        shown.music.back_to_now();
+                                    match &mut self.content {
+                                        Content::Music(shown) => shown.music.back_to_now(),
+                                        Content::Merged(merged) => merged.parts.iter_mut().for_each(|part| {
+                                            if let Content::Music(shown) = part {
+                                                shown.music.back_to_now();
+                                            }
+                                        }),
+                                        Content::Readings(_) => {}
                                     }
                                 }
                                 _ => {}
@@ -1805,6 +2269,11 @@ impl Widget {
         self.retake |= !fresh;
     }
 
+    /// Whether it is merged into what plays (drawn on its ground).
+    fn on_music(&self) -> bool {
+        matches!(&self.content, Content::Merged(merged) if merged.host_plays())
+    }
+
     /// Whether it is kept under every other window.
     fn low(&self) -> bool {
         self.on_desktop && !self.game_only
@@ -1826,7 +2295,12 @@ impl Widget {
         let started = Instant::now();
         let mut moving = self.drag.is_some() || self.settle.is_some();
         // Its process list turned on toward where the wheel turned it, as the panel's is.
-        if let Content::Readings(readings) = &mut self.content {
+        let readings: Vec<&mut Readings> = match &mut self.content {
+            Content::Readings(readings) => vec![readings],
+            Content::Merged(merged) => merged.parts.iter_mut().filter_map(|part| if let Content::Readings(readings) = part { Some(readings) } else { None }).collect(),
+            Content::Music(_) => Vec::new(),
+        };
+        for readings in readings {
             readings.scroll += (readings.scroll_target - readings.scroll) * (1.0 - std::f32::consts::E.powf(-dt / 1000.0 / crate::panel::SCROLL_EASE));
             moving |= (readings.scroll_target - readings.scroll).abs() > 0.05;
         }
@@ -1877,16 +2351,18 @@ impl Widget {
             }
             moving = true;
         }
-        let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| look.skin.sees_backdrop()));
+        // On what plays' own ground (merged into it), dark, as that ground is.
+        let on_music = self.on_music();
+        let dark = on_music || theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| look.skin.sees_backdrop()));
         let theme = Theme::new(look.skin, dark);
         // Room round it for its shadow (the skin's; what plays, its own), and above it for its buttons.
-        let shadow = if matches!(self.content, Content::Music(_)) { MUSIC_SHADOW } else { theme.margin };
+        let shadow = if matches!(self.content, Content::Music(_)) || on_music { MUSIC_SHADOW } else { theme.margin };
         self.margin = shadow.max(BUTTON + 2.0 * BUTTON_INSET);
-        let process_scroll = match &self.content {
-            Content::Readings(readings) => readings.scroll,
-            Content::Music(_) => 0.0,
-        };
-        let scene = view::Scene { hover: self.hit_hover, process_scroll, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
+        let process_scroll = self.content.process_scroll();
+        // Merged with what plays, the readings without the music lane (what plays shows itself).
+        let prefs = self.content.prefs(look.prefs);
+        let prefs = prefs.as_ref().unwrap_or(look.prefs);
+        let scene = view::Scene { hover: self.hit_hover, process_scroll, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -1944,6 +2420,21 @@ impl Widget {
                 self.zoom = 1.0;
                 self.shown = shown.size;
                 moving |= shown.busy;
+            }
+            // Merged: laid out in the room it is given, no less than its parts need at their least.
+            Content::Merged(merged) => {
+                if let Some(room) = sized_to {
+                    merged.size = room;
+                }
+                if !merged.lay_out(&scene, &theme, work, seen) {
+                    return Frame::Rest;
+                }
+                if sized_to.is_some() {
+                    merged.size = (merged.size.0.max(merged.least.0), merged.size.1.max(merged.least.1));
+                }
+                self.zoom = 1.0;
+                self.shown = merged.size;
+                moving |= merged.busy();
             }
         }
         // Its surface: the room the hand gives it, past what it shows only
@@ -2053,6 +2544,7 @@ impl Widget {
                                 ((there.size.0 * there.zoom * scale) as i32, (there.size.1 * there.zoom * scale) as i32)
                             }
                             Content::Music(shown) => ((shown.size.0 * scale) as i32, (shown.size.1 * scale) as i32),
+                            Content::Merged(merged) => ((merged.size.0 * scale) as i32, (merged.size.1 * scale) as i32),
                         };
                         self.hint_size = Some((side, size));
                         size
@@ -2075,7 +2567,7 @@ impl Widget {
         // (On the device that draws now, before what is behind is awaited: one waited for on a device gone never
         // comes.)
         self.follow_device();
-        let sees = look.skin.sees_backdrop() && matches!(self.content, Content::Readings(_));
+        let sees = look.skin.sees_backdrop() && self.content.skinned();
         let live = look.live && sees;
         if !sees {
             self.backdrop = None;
@@ -2184,8 +2676,9 @@ impl Widget {
         // Drawn light or dark as the desktop behind it is, now that it has
         // been taken: a first frame drawn before that would show the other.
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| sees));
+        let dark = dark || on_music;
         let theme = if dark == theme.dark { theme } else { Theme::new(look.skin, dark) };
-        let scene = view::Scene { hover: self.hit_hover, process_scroll, ..crate::panel::scene_for(controller, look.prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hit_hover, process_scroll, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, now);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
@@ -2255,15 +2748,13 @@ impl Widget {
         };
         let halo = (theme.skin == Skin::Glass).then_some(theme.legibility);
         let (opacity, pinned, through, gfx) = (self.opacity, self.pinned, self.click_through, self.gfx.clone());
+        let drop_target = self.drop_target;
         let rough = matches!(self.drag, Some(Drag::Move { moved: true, .. })) || self.fling.is_some();
         let contact_scale = self.contact.scale;
         let offered = self.offered();
-        let frost = match self.content {
-            Content::Readings(_) => self.frost(now, theme),
-            Content::Music(_) => 0.0,
-        };
+        let frost = if self.content.skinned() { self.frost(now, theme) } else { 0.0 };
         // What plays: as its switches say, the pointer where it is over it (letting clicks through, it is not).
-        let shows = matches!(self.content, Content::Music(_)).then(|| Shows::from(&crate::app().settings.lock().unwrap().view));
+        let shows = (!matches!(self.content, Content::Readings(_))).then(|| Shows::from(&crate::app().settings.lock().unwrap().view));
         let pointer = cursor_position().filter(|_| self.hover && !self.click_through).map(|c| ((c.x - self.at.x) as f32 / px, (c.y - self.at.y) as f32 / px));
         let behind = &mut self.behind;
         let content = &mut self.content;
@@ -2365,8 +2856,34 @@ impl Widget {
                         pressed = Some((painted.hits, (0.0, 0.0)));
                     }
                 }
+                Content::Merged(merged) => {
+                    let backdrop = behind.as_mut().and_then(|behind| {
+                        if behind.bitmap.is_none() {
+                            if let Ok(bitmap) = behind.capture.bitmap_into(&frame.dc, contact_scale, behind.former.take().as_ref()) {
+                                behind.bitmap = Some((bitmap, contact_scale));
+                                behind.capture.forget_pixels();
+                            }
+                        }
+                        let from = behind.capture.rect;
+                        let at = Vector2 { X: (window.left - from.left) as f32 / px + margin, Y: (window.top - from.top) as f32 / px + margin };
+                        Some((&behind.bitmap.as_ref()?.0, at, behind.capture.digest, px))
+                    });
+                    let shows = shows.unwrap_or_else(|| Shows::from(&serde_json::Value::Null));
+                    let (hits, drawn_whole) = draw_merged(frame, merged, scene, local, px, backdrop, frost, rough, pointer, &shows, now);
+                    whole &= drawn_whole;
+                    pressed = Some((hits, (0.0, 0.0)));
+                }
             }
             frame.place(Matrix3x2::translation(margin, margin));
+            if let Some(beside) = drop_target {
+                let ring = theme.text.alpha(0.85);
+                frame.stroke_rounded(Fill::Solid(ring), -4.0, -4.0, size.0 + 8.0, size.1 + 8.0, 18.0, 2.5);
+                if beside {
+                    frame.fill_rounded(ring.alpha(0.5), size.0 - 10.0, 10.0, 5.0, size.1 - 20.0, 2.5);
+                } else {
+                    frame.fill_rounded(ring.alpha(0.5), 10.0, size.1 - 10.0, size.0 - 20.0, 5.0, 2.5);
+                }
+            }
             // The pointer over it: its buttons (letting clicks through, the one that ends that).
             let front_is_game = crate::ui::view::game_shown(scene.history);
             for (centre, button) in offered {

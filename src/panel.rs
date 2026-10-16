@@ -492,7 +492,7 @@ impl Controller {
             let layout = arrange::Choice { form: Form::Lanes { detail: Detail::Full, columns: 2 }, scale: 1.0, extra: (0.0, 0.0) }.kept();
             // Its corner, as near as can be told from its middle.
             let corner = (at.screen.0 - 356, at.screen.1 - 270);
-            widgets.adopt(crate::settings::WidgetAt { at: corner, layout, pinned: at.locked, click_through: false, game_only: false, on_desktop: false, stuck: None, before: None, size: None });
+            widgets.adopt(crate::settings::WidgetAt { at: corner, layout, pinned: at.locked, click_through: false, game_only: false, on_desktop: false, stuck: None, before: None, size: None, parts: None, beside: false });
             std::thread::spawn(|| crate::app().change(|settings| settings.panel_at = None));
         }
         let mut restore = false;
@@ -730,7 +730,7 @@ impl Controller {
                 WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => panel.press(lparam_point(msg.lParam)),
                 WM_TIMER if msg.hwnd == panel.window.hwnd && panel.held() => {
                     panel.dragged(now);
-                    if let Some((form, scale, at, grab)) = panel.tear.take() {
+                    if let Some((form, scale, at, grab, size)) = panel.tear.take() {
                         // The widget takes the desktop behind it before the
                         // panel goes: without the panel in it (it is put back
                         // in captures as it goes).
@@ -743,7 +743,7 @@ impl Controller {
                         });
                         // The edge it was at, unless it had been moved away.
                         let from = panel.placement.as_ref().filter(|placement| placement.floating.is_none()).map(|_| panel.edge);
-                        if !widgets.tear(form, scale, at, grab, lent, from) {
+                        if !widgets.tear(form, scale, at, grab, size, lent, from) {
                             panel.torn = false;
                             panel.exclude();
                         }
@@ -1230,7 +1230,7 @@ struct Panel<'a> {
     bar: view::Rect,
     /// Torn off as it was dragged: the widget to make (its form, scale and
     /// corner on the screen, and where the hand holds it from that corner).
-    tear: Option<(Form, f32, POINT, POINT)>,
+    tear: Option<(Form, f32, POINT, POINT, (f32, f32))>,
     /// What plays torn off its lane as it was dragged: the music widget to make (its size, DIPs, its corner on the
     /// screen, and where the hand holds it from that corner). The panel stays.
     tear_music: Option<((f32, f32), POINT, POINT)>,
@@ -1992,7 +1992,8 @@ impl<'a> Panel<'a> {
             }
             let form = Form::Lanes { detail: Detail::Full, columns: opening.layout.columns };
             let at = POINT { x: placement.panel.left + dx, y: placement.panel.top + dy };
-            self.tear = Some((form, opening.zoom, at, POINT { x: cursor.x - at.x, y: cursor.y - at.y }));
+            let size = ((placement.panel.right - placement.panel.left) as f32 / placement.contact.scale, (placement.panel.bottom - placement.panel.top) as f32 / placement.contact.scale);
+            self.tear = Some((form, opening.zoom, at, POINT { x: cursor.x - at.x, y: cursor.y - at.y }, size));
             self.end_drag();
             self.torn = true;
             return;

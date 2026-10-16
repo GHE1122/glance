@@ -346,6 +346,21 @@ impl Music {
         self.turned_at = Instant::now();
     }
 
+    /// Its own ground alone, `size` large (its shadow, the cover blurred under a wash of its colour), under a widget
+    /// merged into it: what each part shows drawn over it (see `Ground::Host`).
+    pub fn paint_ground(&mut self, frame: &Frame, size: (f32, f32)) {
+        let heard = crate::playing::now();
+        if let Some(cover) = heard.as_ref().filter(|heard| !heard.title.is_empty()).and_then(|heard| crate::cover::of(&heard.title, &heard.artist)) {
+            self.tint = toward(self.tint, readable(cover.base, 0.72), 0.2);
+            self.accent = toward(self.accent, readable(cover.accent, 0.62), 0.2);
+            self.backdrop(frame, &cover);
+        }
+        let shown = self.fading.as_ref().map_or(1.0, |(_, since)| (since.elapsed().as_secs_f32() / 1.2).min(1.0));
+        let before = self.fading.as_ref().map(|(before, _)| before.clone());
+        let backdrop = Backdrop { size, radius: RADIUS, backdrop: self.backdrop.as_ref().map(|(_, bitmap)| bitmap.clone()), before, shown, accent: self.accent, tint: self.tint, own: true };
+        let _ = backdrop.paint(frame, |_| {});
+    }
+
     /// Back to the line sung now (a line turned to was pressed).
     pub fn back_to_now(&mut self) {
         (self.turned, self.wheeled) = (0, 0.0);
@@ -948,7 +963,11 @@ impl Drawing<'_> {
         }
         // Room for more than the line sung now and the one under it: the lines round it, as the card's.
         if let (Some(lines), true) = (self.moment.lines.clone(), player_shows_lines(self.size, self.shows)) {
-            self.rail_of_lines(&lines, left, line_top, bottom, width);
+            // (Its middle line level with the cover's middle, where there is a cover: the lines round it as much
+            // above as below it, the title above them.)
+            let middle = at.cover.map_or((line_top + bottom) / 2.0, |(_, y, side)| y + side / 2.0);
+            let half = (middle - line_top).min(bottom - middle).max(0.0);
+            self.rail_of_lines(&lines, left, middle - half, middle + half, width);
             return;
         }
         let frame = self.frame;
@@ -1955,7 +1974,7 @@ mod pictures {
         let floating = Shows { cover: false, title: false, spectrum: false, clear: true, ..all };
         // Name, size, switches, the pointer over it (the controls come), lines turned by the wheel, the track dragged,
         // the music between lines.
-        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 18] = [
+        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 19] = [
             ("strip", (420.0, 76.0), all, false, 0, false, false),
             ("strip-over", (420.0, 76.0), all, true, 0, false, false),
             ("strip-kept", (480.0, 76.0), Shows { controls: true, ..all }, false, 0, false, false),
@@ -1963,6 +1982,7 @@ mod pictures {
             ("player-over", (470.0, 178.0), all, true, 0, false, false),
             ("player-dragged", (470.0, 178.0), all, true, 0, true, false),
             ("player-kept", (470.0, 210.0), Shows { controls: true, ..all }, false, 0, false, false),
+            ("player-lines", (520.0, 236.0), all, false, 0, false, false),
             ("player-nocover", (470.0, 178.0), Shows { cover: false, ..all }, false, 0, false, false),
             ("player-turned", (470.0, 178.0), all, false, 2, false, false),
             ("player-between", (470.0, 178.0), all, false, 0, false, true),
