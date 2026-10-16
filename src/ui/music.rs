@@ -123,6 +123,8 @@ pub struct Shows {
     pub controls: bool,
     /// No ground: its words edged, on whatever is behind it.
     pub clear: bool,
+    /// How far in from its edge what it shows begins (DIPs), where not its own (merged into another widget).
+    pub inset: Option<u32>,
 }
 
 impl Shows {
@@ -137,6 +139,7 @@ impl Shows {
             spectrum: on("spectrum"),
             controls: on("controls"),
             clear: on("clear"),
+            inset: None,
         }
     }
 }
@@ -146,8 +149,11 @@ impl Shows {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Ground {
     Own,
+    /// Its own look, its ground drawn under it already (it is the one other widgets are merged into).
+    Under,
     Clear,
-    Host { dark: bool },
+    /// Its words in the host's type (`family`), as far in from its edge as the host's are (`inset`).
+    Host { dark: bool, family: Family, inset: f32 },
 }
 
 impl Ground {
@@ -172,6 +178,30 @@ const STRIP_LINE: Font = Font::new(Family::Segoe, 16.0, 700.0);
 const STRIP_LEAST: f32 = 12.5;
 const FLOAT_LINE: Font = Font::new(Family::Segoe, 36.0, 800.0);
 const FLOAT_UNDER: f32 = 0.5;
+/// Its type, each font as it is drawn (in the host's family, merged into another widget).
+#[derive(Clone, Copy)]
+struct Fonts {
+    now: Font,
+    under_font: Font,
+    title: Font,
+    about: Font,
+    line: Font,
+    under: Font,
+    time: Font,
+    strip: Font,
+    float: Font,
+}
+
+impl Fonts {
+    fn in_family(family: Option<Family>) -> Fonts {
+        let of = |font: Font| match family {
+            Some(family) => Font { family, ..font },
+            None => font,
+        };
+        Fonts { now: of(NOW_FONT), under_font: of(UNDER_FONT), title: of(TITLE), about: of(ABOUT), line: of(PLAYER_LINE), under: of(PLAYER_UNDER), time: of(TIME), strip: of(STRIP_LINE), float: of(FLOAT_LINE) }
+    }
+}
+
 /// The three that are pressed (what goes back, pauses or plays, and skips): the side of each.
 const CONTROL: f32 = 28.0;
 /// The spectrum's row of its own, under kept controls, and the room between rows (DIPs).
@@ -456,10 +486,18 @@ impl Music {
             self.turning = None;
         }
         // On a light ground, its colours deepened to be read on it, and its words dark.
-        let light = ground == Ground::Host { dark: false };
+        let light = matches!(ground, Ground::Host { dark: false, .. });
+        let family = match ground {
+            Ground::Host { family, .. } => Some(family),
+            _ => None,
+        };
+        let shows = &Shows { inset: match ground {
+            Ground::Host { inset, .. } => Some(inset.round() as u32),
+            _ => shows.inset,
+        }, ..*shows };
         let (tint, accent) = if light { (deep(self.tint), deep(self.accent)) } else { (self.tint, self.accent) };
         let ink = if light { 0x1A1A1A } else { 0xFFFFFF };
-        let mut drawing = Drawing { music: self, frame, moment: &moment, shows, ground, ink, edged: ground == Ground::Clear, light, tint, accent, scale, pointer, size, turn, hits: Vec::new() };
+        let mut drawing = Drawing { music: self, frame, moment: &moment, shows, ground, ink, edged: ground == Ground::Clear, light, tint, accent, fonts: Fonts::in_family(family), scale, pointer, size, turn, hits: Vec::new() };
         drawing.ground(layout);
         // Turning into this layout: what is not on its ground comes in as its parts move.
         if let Some((_, t)) = turn {
@@ -495,6 +533,8 @@ struct Drawing<'a> {
     light: bool,
     tint: [f32; 3],
     accent: [f32; 3],
+    /// Its type: its own, or the host's.
+    fonts: Fonts,
     scale: f32,
     pointer: Option<(f32, f32)>,
     size: (f32, f32),
@@ -544,7 +584,7 @@ fn rows_tall(shows: &Shows) -> f32 {
 }
 
 /// How much room the player's words have (DIPs) from which it shows the lines round the one sung now.
-const PLAYER_LINES_FROM: f32 = 96.0;
+const PLAYER_LINES_FROM: f32 = 110.0;
 
 /// Whether the player shows the lines round the one sung now, `size` large, showing `shows` (else the line sung now
 /// and what is under it).
@@ -552,6 +592,11 @@ fn player_shows_lines(size: (f32, f32), shows: &Shows) -> bool {
     let at = placed(Layout::Player, size, shows);
     let bottom = size.1 - pad(Layout::Player) - rows_tall(shows) - 8.0;
     shows.lines && bottom - at.below >= PLAYER_LINES_FROM
+}
+
+/// Each layout's room inside its edge as `shows` says: its own, or the host's.
+fn pad_of(layout: Layout, shows: &Shows) -> f32 {
+    shows.inset.map_or(pad(layout), |inset| inset as f32)
 }
 
 /// Each layout's room inside its edge, and the corners of its ground (DIPs).
@@ -564,6 +609,8 @@ fn pad(layout: Layout) -> f32 {
     }
 }
 const RADIUS: f32 = 14.0;
+/// The strip's cover inside another widget, at most (DIPs).
+const HOSTED_COVER: f32 = 44.0;
 /// The cover in the card's top row, beside what plays (DIPs).
 const CARD_COVER: f32 = 64.0;
 
@@ -580,11 +627,12 @@ struct Placed {
 }
 
 fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
-    let pad = pad(layout);
+    let pad = pad_of(layout, shows);
     match layout {
         Layout::Strip => {
-            let side = (h - 2.0 * pad).max(0.0);
-            let cover = shows.cover.then_some((pad, pad, side));
+            // (Inside another widget, no taller than a lane's line of words and what is under it, in its middle.)
+            let side = (h - 2.0 * pad).min(if shows.inset.is_some() { HOSTED_COVER } else { f32::MAX }).max(0.0);
+            let cover = shows.cover.then_some((pad, (h - side) / 2.0, side));
             let left = if shows.cover { pad + side + 12.0 } else { pad + 4.0 };
             Placed { cover, title: None, below: 0.0, left, width: (w - pad - left).max(0.0) }
         }
@@ -671,7 +719,10 @@ impl Drawing<'_> {
             ground.paint(frame, |frame| {
                 if let Some((x, y, side)) = at.cover {
                     let corner = if side < 50.0 { 6.0 } else { 9.0 };
-                    frame.shadow(Color::hex(0x000000, 0.35), x, y, side, side, corner, 10.0, 3.0);
+                    // (Inside another widget, flat as what it shows is.)
+                    if shows.inset.is_none() {
+                        frame.shadow(Color::hex(0x000000, 0.35), x, y, side, side, corner, 10.0, 3.0);
+                    }
                     match &cover {
                         Some(cover) => {
                             let picture = super::canvas::Picture { key: Arc::as_ptr(cover) as usize as u64, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
@@ -685,7 +736,7 @@ impl Drawing<'_> {
                     }
                 }
                 if let Some((x, y, wide, centred)) = at.title {
-                    for (text, font, alpha, down) in [(&title, TITLE, 0.95, 0.0), (&artist, ABOUT, 0.62, 21.0)] {
+                    for (text, font, alpha, down) in [(&title, self.fonts.title, 0.95, 0.0), (&artist, self.fonts.about, 0.62, 21.0)] {
                         let text = fitted(frame, text, font, wide);
                         let from = if centred { x + (wide - frame.measure(&text, font)) / 2.0 } else { x };
                         words(frame, &text, font, Color::hex(ink, alpha), from, y + down, wide + 2.0, Align::Start, edged);
@@ -753,7 +804,7 @@ impl Drawing<'_> {
         let frame = self.frame;
         let position = self.moment.dragged_to.unwrap_or(self.moment.position);
         let left_over = format!("-{}", super::text::clock((length - position).max(0.0).round() as u32));
-        let time_wide = frame.measure(&left_over, TIME) + 2.0;
+        let time_wide = frame.measure(&left_over, self.fonts.time) + 2.0;
         let track = (to - time_wide - 10.0 - from).max(0.0);
         if track < 24.0 {
             return;
@@ -768,15 +819,15 @@ impl Drawing<'_> {
         if seekable && (lit || dragged) {
             frame.fill_circle(Color::hex(self.ink, fade), Point { x: from + track * fraction, y: middle }, 6.0);
         }
-        words(frame, &left_over, TIME, Color::hex(self.ink, 0.6 * fade), to - time_wide, middle - TIME.size * 0.7, time_wide, Align::End, self.edged);
+        words(frame, &left_over, self.fonts.time, Color::hex(self.ink, 0.6 * fade), to - time_wide, middle - self.fonts.time.size * 0.7, time_wide, Align::End, self.edged);
         // Dragged: the time it is dragged to, over where it is.
         if dragged {
             let said = super::text::clock(position.max(0.0).round() as u32);
-            let wide = frame.measure(&said, TIME) + 12.0;
+            let wide = frame.measure(&said, self.fonts.time) + 12.0;
             let x = (from + track * fraction - wide / 2.0).clamp(from - 4.0, from + track - wide + 4.0);
             let y = row - 18.0;
             frame.fill_rounded(Color::hex(0x000000, 0.7), x, y, wide, 17.0, 5.0);
-            frame.text(&said, TIME, Color::hex(0xFFFFFF, 0.95), x + 6.0, y + 1.5, wide, Align::Start);
+            frame.text(&said, self.fonts.time, Color::hex(0xFFFFFF, 0.95), x + 6.0, y + 1.5, wide, Align::Start);
         }
         if seekable && self.music.controls_in >= 0.5 {
             self.hits.push((from, row, track, CONTROL, Hit::Seek));
@@ -789,7 +840,7 @@ impl Drawing<'_> {
         let frame = self.frame;
         let line = &lines[index];
         let chip = super::text::clock(line.at.max(0.0) as u32);
-        let chip_wide = frame.measure(&chip, TIME) + 26.0;
+        let chip_wide = frame.measure(&chip, self.fonts.time) + 26.0;
         let text = if line.text.trim().is_empty() { "…".to_string() } else { line.text.clone() };
         let room = (width - chip_wide - 10.0).max(0.0);
         let shown = fitted(frame, &text, font, room);
@@ -800,7 +851,7 @@ impl Drawing<'_> {
         frame.fill_rounded(Color::hex(self.ink, if on { 0.24 } else { 0.1 }), cx, cy, chip_wide, 18.0, 9.0);
         frame.stroke_rounded(Fill::Solid(Color::hex(self.ink, 0.5)), cx, cy, chip_wide, 18.0, 9.0, 1.0);
         frame.icon(Icon::Play, Point { x: cx + 10.0, y: cy + 9.0 }, 10.0, Color::hex(self.ink, 0.95));
-        frame.text(&chip, TIME, Color::hex(self.ink, 0.95), cx + 17.0, cy + 2.0, chip_wide, Align::Start);
+        frame.text(&chip, self.fonts.time, Color::hex(self.ink, 0.95), cx + 17.0, cy + 2.0, chip_wide, Align::Start);
         self.hits.push((x, y, wide, font.size * 1.35, Hit::Line(index as u16)));
         self.hits.push((cx, cy, chip_wide, 18.0, Hit::Line(index as u16)));
     }
@@ -810,7 +861,7 @@ impl Drawing<'_> {
     /// middle and what is under it below, the controls at its start as the pointer comes.
     fn strip(&mut self) {
         let (w, h) = self.size;
-        let pad = pad(Layout::Strip);
+        let pad = pad_of(Layout::Strip, self.shows);
         let at = self.placed(Layout::Strip);
         let (accent, tint) = (self.accent, self.tint);
         let keys_wide = 3.0 * CONTROL + 4.0;
@@ -853,7 +904,7 @@ impl Drawing<'_> {
         match (&lines, now) {
             (Some(lines), _) if self.music.turned != 0 => {
                 let index = (now.map_or(0, |now| now as i32) + self.music.turned).clamp(0, lines.len() as i32 - 1) as usize;
-                self.turned_to(lines, index, left, h / 2.0 - STRIP_LINE.size * 0.7, width, STRIP_LINE);
+                self.turned_to(lines, index, left, h / 2.0 - self.fonts.strip.size * 0.7, width, self.fonts.strip);
             }
             (Some(lines), Some(now)) => {
                 let line = &lines[now];
@@ -862,10 +913,10 @@ impl Drawing<'_> {
                 let eased = self.came();
                 let (dim, bright) = self.line_colours(eased);
                 if text.trim().is_empty() {
-                    let y = h / 2.0 - STRIP_LINE.size * 0.7 + (1.0 - eased) * 8.0;
-                    interlude(frame, left, y, STRIP_LINE.size, between(line, next, self.moment.position), dim, bright);
+                    let y = h / 2.0 - self.fonts.strip.size * 0.7 + (1.0 - eased) * 8.0;
+                    interlude(frame, left, y, self.fonts.strip.size, between(line, next, self.moment.position), dim, bright);
                 } else {
-                    let font = Font { size: (STRIP_LINE.size * (width / frame.measure(&text, STRIP_LINE).max(1.0))).clamp(STRIP_LEAST, STRIP_LINE.size), ..STRIP_LINE };
+                    let font = Font { size: (self.fonts.strip.size * (width / frame.measure(&text, self.fonts.strip).max(1.0))).clamp(STRIP_LEAST, self.fonts.strip.size), ..self.fonts.strip };
                     let y = h / 2.0 - font.size * 0.7 + (1.0 - eased) * 8.0;
                     // (One row: where it would wrap, cut where it wraps.)
                     let layout = frame.gfx.wrapped(&text, font, 100_000.0);
@@ -877,12 +928,12 @@ impl Drawing<'_> {
                 let first = lines.first().map_or(0.0, |line| line.at);
                 let done = if first > 0.0 { (self.moment.position / first).clamp(0.0, 1.0) as f32 } else { 0.0 };
                 let (dim, bright) = self.line_colours(1.0);
-                interlude(frame, left, h / 2.0 - STRIP_LINE.size * 0.7, STRIP_LINE.size, done, dim, bright);
+                interlude(frame, left, h / 2.0 - self.fonts.strip.size * 0.7, self.fonts.strip.size, done, dim, bright);
             }
             (None, _) => {
                 let said = [self.moment.title.as_str(), self.moment.artist.as_str()].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · ");
                 let said = if said.is_empty() { self.moment.said.clone().unwrap_or_default() } else { said };
-                words(frame, &fitted(frame, &said, ABOUT, width), ABOUT, Color::hex(self.ink, 0.8), left, h / 2.0 - ABOUT.size * 0.7, width + 2.0, Align::Start, self.edged);
+                words(frame, &fitted(frame, &said, self.fonts.about, width), self.fonts.about, Color::hex(self.ink, 0.8), left, h / 2.0 - self.fonts.about.size * 0.7, width + 2.0, Align::Start, self.edged);
             }
         }
         frame.unclip();
@@ -894,9 +945,9 @@ impl Drawing<'_> {
         let frame = self.frame;
         let room = (to - from).max(0.0);
         let under_room = |size: f32| h >= size * 1.4 + size * FLOAT_UNDER * 1.4 + 16.0;
-        let size = (h * 0.34).clamp(STRIP_LEAST, FLOAT_LINE.size);
-        let font = Font { size, ..FLOAT_LINE };
-        let under_font = Font { size: (size * FLOAT_UNDER).max(11.0), weight: 600.0, ..FLOAT_LINE };
+        let size = (h * 0.34).clamp(STRIP_LEAST, self.fonts.float.size);
+        let font = Font { size, ..self.fonts.float };
+        let under_font = Font { size: (size * FLOAT_UNDER).max(11.0), weight: 600.0, ..self.fonts.float };
         let with_under = under_room(size);
         let top = if with_under { (h - size * 1.4 - under_font.size * 1.4) / 2.0 } else { (h - size * 1.4) / 2.0 };
         let Some(lines) = self.moment.lines.clone() else {
@@ -909,7 +960,7 @@ impl Drawing<'_> {
         if self.music.turned != 0 {
             let index = (self.moment.now.map_or(0, |now| now as i32) + self.music.turned).clamp(0, lines.len() as i32 - 1) as usize;
             let text = lines[index].text.clone();
-            let wide = (frame.measure(&text, font) + frame.measure("0:00", TIME) + 36.0).min(room);
+            let wide = (frame.measure(&text, font) + frame.measure("0:00", self.fonts.time) + 36.0).min(room);
             self.turned_to(&lines, index, from + (room - wide) / 2.0, top, wide, font);
             return;
         }
@@ -951,23 +1002,24 @@ impl Drawing<'_> {
     /// it is sung, wrapped where it is too long) and what is under it, the rows along the bottom.
     fn player(&mut self) {
         let (_, h) = self.size;
-        let pad = pad(Layout::Player);
+        let pad = pad_of(Layout::Player, self.shows);
         let at = self.placed(Layout::Player);
         let (left, width) = (at.left, at.width);
         let free = self.rows(pad, h - pad, self.size.0 - 2.0 * pad);
         let line_top = at.below;
         let bottom = free - 8.0;
-        let under_tall = PLAYER_UNDER.size * 1.35;
+        let under_tall = self.fonts.under.size * 1.35;
         if bottom <= line_top {
             return;
         }
         // Room for more than the line sung now and the one under it: the lines round it, as the card's.
         if let (Some(lines), true) = (self.moment.lines.clone(), player_shows_lines(self.size, self.shows)) {
-            // (Its middle line level with the cover's middle, where there is a cover: the lines round it as much
-            // above as below it, the title above them.)
+            // (The line sung now level with the cover's middle, where there is a cover, as far as there is room for a
+            // line above it and below it: the lines all the way from under the title to the rows along the bottom.)
             let middle = at.cover.map_or((line_top + bottom) / 2.0, |(_, y, side)| y + side / 2.0);
-            let half = (middle - line_top).min(bottom - middle).max(0.0);
-            self.rail_of_lines(&lines, left, middle - half, middle + half, width);
+            let row = self.fonts.line.size * 1.6;
+            let anchor = middle.clamp(line_top + row * 1.2, (bottom - row * 1.2).max(line_top + row * 1.2));
+            self.rail_of_lines(&lines, left, line_top, bottom, width, Some(anchor));
             return;
         }
         let frame = self.frame;
@@ -976,11 +1028,11 @@ impl Drawing<'_> {
         match (&lines, now) {
             (Some(lines), _) if self.music.turned != 0 => {
                 let index = (now.map_or(0, |now| now as i32) + self.music.turned).clamp(0, lines.len() as i32 - 1) as usize;
-                self.turned_to(lines, index, left, line_top, width, PLAYER_LINE);
+                self.turned_to(lines, index, left, line_top, width, self.fonts.line);
                 let under = lines[index].translation.clone().filter(|_| self.shows.translation).unwrap_or_default();
-                let under_top = line_top + PLAYER_LINE.size * 1.4 + 2.0;
+                let under_top = line_top + self.fonts.line.size * 1.4 + 2.0;
                 if !under.is_empty() && under_top + under_tall <= bottom {
-                    words(frame, &fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(self.ink, 0.55), left, under_top, width + 2.0, Align::Start, self.edged);
+                    words(frame, &fitted(frame, &under, self.fonts.under, width), self.fonts.under, Color::hex(self.ink, 0.55), left, under_top, width + 2.0, Align::Start, self.edged);
                 }
             }
             (Some(lines), Some(now)) => {
@@ -994,13 +1046,13 @@ impl Drawing<'_> {
                 // as far as they fit. How tall it is, so.
                 let room = bottom - line_top;
                 let fit = |text: &str, with_under: bool| -> (Font, f32) {
-                    let sizes = || (0..).map(|step| PLAYER_LINE.size - step as f32).take_while(|size| *size >= PLAYER_UNDER.size).map(|size| Font { size, ..PLAYER_LINE });
+                    let sizes = || (0..).map(|step| self.fonts.line.size - step as f32).take_while(|size| *size >= self.fonts.under.size).map(|size| Font { size, ..self.fonts.line });
                     let height = |font: Font| frame.gfx.wrapped_height(text, font, width);
                     let wants_under = if with_under { 2.0 + under_tall } else { 0.0 };
                     let font = sizes()
                         .find(|font| height(*font) + wants_under <= room)
                         .or_else(|| sizes().find(|font| height(*font) <= room))
-                        .unwrap_or(Font { size: PLAYER_UNDER.size, ..PLAYER_LINE });
+                        .unwrap_or(Font { size: self.fonts.under.size, ..self.fonts.line });
                     (font, height(font))
                 };
                 // Come from under the line before (the next line, shown under it): it grows into its place as that
@@ -1015,9 +1067,9 @@ impl Drawing<'_> {
                         let (font, tall) = fit(&text, !under.is_empty());
                         let from = line_top + old_tall + 2.0;
                         let y = from + (line_top - from) * eased;
-                        let size = PLAYER_UNDER.size + (font.size - PLAYER_UNDER.size) * eased;
+                        let size = self.fonts.under.size + (font.size - self.fonts.under.size) * eased;
                         // As it was under the line before, going; as the line sung now, coming.
-                        words(frame, &text, Font { size, ..PLAYER_UNDER }, Color::hex(self.ink, 0.5 * (1.0 - eased)), left, y, width + 2.0, Align::Start, self.edged);
+                        words(frame, &text, Font { size, ..self.fonts.under }, Color::hex(self.ink, 0.5 * (1.0 - eased)), left, y, width + 2.0, Align::Start, self.edged);
                         let grown = Font { size, ..font };
                         let layout = frame.gfx.wrapped(&text, grown, width);
                         let sung = sung_to(&parts, self.moment.position);
@@ -1030,8 +1082,8 @@ impl Drawing<'_> {
                         let y = line_top + (1.0 - eased) * 10.0;
                         let (dim, bright) = self.line_colours(eased);
                         if text.trim().is_empty() {
-                            interlude(frame, left, y, PLAYER_LINE.size, between(line, next, self.moment.position), dim, bright);
-                            (y, PLAYER_LINE.size * 1.4)
+                            interlude(frame, left, y, self.fonts.line.size, between(line, next, self.moment.position), dim, bright);
+                            (y, self.fonts.line.size * 1.4)
                         } else {
                             let (font, tall) = fit(&text, !under.is_empty());
                             let layout = frame.gfx.wrapped(&text, font, width);
@@ -1044,7 +1096,7 @@ impl Drawing<'_> {
                 // Under it, where there is room, its translation or the next line (coming in with it).
                 let under_top = line_y + tall + 2.0;
                 if !under.is_empty() && line_top + tall + 2.0 + under_tall <= bottom {
-                    words(frame, &fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(self.ink, 0.5 * eased), left, under_top, width + 2.0, Align::Start, self.edged);
+                    words(frame, &fitted(frame, &under, self.fonts.under, width), self.fonts.under, Color::hex(self.ink, 0.5 * eased), left, under_top, width + 2.0, Align::Start, self.edged);
                 }
             }
             // None sung yet: the dots, lit as the music before the first line goes on.
@@ -1052,15 +1104,15 @@ impl Drawing<'_> {
                 let first = lines.first().map_or(0.0, |line| line.at);
                 let done = if first > 0.0 { (self.moment.position / first).clamp(0.0, 1.0) as f32 } else { 0.0 };
                 let (dim, bright) = self.line_colours(1.0);
-                interlude(frame, left, line_top, PLAYER_LINE.size, done, dim, bright);
+                interlude(frame, left, line_top, self.fonts.line.size, done, dim, bright);
             }
             // None to be had: why, in their place.
             (None, _) => {
                 let said = self.moment.said.clone().unwrap_or_default();
                 if self.edged {
-                    outlined(frame, &fitted(frame, &said, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(self.ink, 0.8), left, line_top + 2.0, width + 2.0);
+                    outlined(frame, &fitted(frame, &said, self.fonts.under, width), self.fonts.under, Color::hex(self.ink, 0.8), left, line_top + 2.0, width + 2.0);
                 } else {
-                    frame.text_wrapped(&said, PLAYER_UNDER, Color::hex(self.ink, 0.62), left, line_top + 2.0, width);
+                    frame.text_wrapped(&said, self.fonts.under, Color::hex(self.ink, 0.62), left, line_top + 2.0, width);
                 }
             }
         }
@@ -1071,7 +1123,7 @@ impl Drawing<'_> {
     /// round the one sung now beside it, and along the bottom the spectrum over the controls and the track.
     fn stage(&mut self) {
         let (w, h) = self.size;
-        let pad = pad(Layout::Stage);
+        let pad = pad_of(Layout::Stage, self.shows);
         let at = self.placed(Layout::Stage);
         let ((cx, cy), side) = stage_record(self.size);
         self.record(cx, cy, side);
@@ -1082,16 +1134,18 @@ impl Drawing<'_> {
             spectrum(self.frame, self.moment, (self.accent, self.tint), (pad, row - ROW_GAP, w - 2.0 * pad, STAGE_SPECTRUM), 0.85);
         }
         let floor = row - ROW_GAP - if self.shows.spectrum { STAGE_SPECTRUM + 10.0 } else { 0.0 };
-        let (top, bottom) = (at.below, floor.min(cy + side / 2.0));
+        // (Down to the rows along the bottom; the line sung now level with the record's middle, as far as the lines
+        // next to it stay whole.)
+        let (top, bottom) = (at.below, floor);
         if bottom <= top + 20.0 {
             return;
         }
         match self.moment.lines.clone() {
-            Some(lines) => self.rail_of_lines(&lines, at.left, top, bottom, at.width),
+            Some(lines) => self.rail_of_lines(&lines, at.left, top, bottom, at.width, Some(cy)),
             None => {
                 let said = self.moment.said.clone().unwrap_or_default();
-                let y = (top + bottom) / 2.0 - UNDER_FONT.size;
-                words(self.frame, &fitted(self.frame, &said, UNDER_FONT, at.width), UNDER_FONT, Color::hex(self.ink, 0.75), at.left, y, at.width + 2.0, Align::Start, self.edged);
+                let y = (top + bottom) / 2.0 - self.fonts.under_font.size;
+                words(self.frame, &fitted(self.frame, &said, self.fonts.under_font, at.width), self.fonts.under_font, Color::hex(self.ink, 0.75), at.left, y, at.width + 2.0, Align::Start, self.edged);
             }
         }
     }
@@ -1185,7 +1239,7 @@ impl Drawing<'_> {
     /// it, the rows along the bottom.
     fn card(&mut self, layout: Layout) {
         let (_, h) = self.size;
-        let pad = pad(layout);
+        let pad = pad_of(layout, self.shows);
         let at = self.placed(layout);
         let (x, width) = (at.left, at.width);
         let free = self.rows(x, h - pad, width);
@@ -1194,15 +1248,15 @@ impl Drawing<'_> {
             return;
         }
         match self.moment.lines.clone() {
-            Some(lines) => self.rail_of_lines(&lines, x, top, bottom, width),
+            Some(lines) => self.rail_of_lines(&lines, x, top, bottom, width, None),
             None => {
                 let said = self.moment.said.clone().unwrap_or_default();
-                let height = self.frame.gfx.wrapped_height(&said, UNDER_FONT, width);
+                let height = self.frame.gfx.wrapped_height(&said, self.fonts.under_font, width);
                 let y = (top + bottom - height) / 2.0;
                 if self.edged {
-                    outlined(self.frame, &fitted(self.frame, &said, UNDER_FONT, width), UNDER_FONT, Color::hex(self.ink, 0.8), x, y, width + 2.0);
+                    outlined(self.frame, &fitted(self.frame, &said, self.fonts.under_font, width), self.fonts.under_font, Color::hex(self.ink, 0.8), x, y, width + 2.0);
                 } else {
-                    self.frame.text_wrapped(&said, UNDER_FONT, Color::hex(self.ink, 0.7), x, y, width);
+                    self.frame.text_wrapped(&said, self.fonts.under_font, Color::hex(self.ink, 0.7), x, y, width);
                 }
             }
         }
@@ -1211,11 +1265,11 @@ impl Drawing<'_> {
     /// The lines before and after the one aimed at (sung now, or turned to by the wheel), smaller and fainter the
     /// farther they are from it, the rail gliding; the one sung now filled as it is sung, its translation under it;
     /// the one turned to, its time beside it.
-    fn rail_of_lines(&mut self, lines: &[Line], x: f32, top: f32, bottom: f32, width: f32) {
+    fn rail_of_lines(&mut self, lines: &[Line], x: f32, top: f32, bottom: f32, width: f32, anchor: Option<f32>) {
         let frame = self.frame;
         // (Short, the line aimed at in its middle, as much shown above as below it; tall, a little above the middle,
         // more of what is to come shown.)
-        let anchor = top + (bottom - top) * if bottom - top < 220.0 { 0.5 } else { 0.38 };
+        let anchor = anchor.unwrap_or(top + (bottom - top) * if bottom - top < 220.0 { 0.5 } else { 0.38 });
         let (fade_top, fade_bottom) = (((bottom - top) * 0.12).min(28.0), ((bottom - top) * 0.15).min(34.0));
         let current = self.moment.now;
         let turned = (self.music.turned != 0).then(|| (current.map_or(0, |now| now as i32) + self.music.turned).clamp(0, lines.len() as i32 - 1) as usize);
@@ -1234,10 +1288,10 @@ impl Drawing<'_> {
             }
         };
         let gap = 10.0;
-        let size = (width / 16.0).clamp(18.0, NOW_FONT.size);
+        let size = (width / 16.0).clamp(18.0, self.fonts.now.size);
         let height_of = |index: usize, scale: f32| {
             let line = &lines[index];
-            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, Font { size: size * scale, ..NOW_FONT }, width) + if Some(index) == current && translated && line.translation.is_some() { 20.0 } else { 0.0 }
+            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, Font { size: size * scale, ..self.fonts.now }, width) + if Some(index) == current && translated && line.translation.is_some() { 20.0 } else { 0.0 }
         };
         let rail = self.music.rail;
         let base = rail.floor().max(-1.0);
@@ -1263,6 +1317,15 @@ impl Drawing<'_> {
             let t = rail - rail.floor();
             if rail < first as f32 { below } else { above + (below - above) * t }
         };
+        // Where it is asked for, as far as the lines next to the one aimed at stay within it: one before, one after.
+        let anchor = {
+            let aimed = rail.round() as isize;
+            let near = |index: isize| middles.iter().find(|m| m.0 as isize == index);
+            // (Clear of the fades at its edges: shown whole.)
+            let least = near(aimed - 1).map_or(f32::MIN, |(_, middle, _, tall)| top + fade_top + at_rail - middle + tall / 2.0);
+            let most = near(aimed + 1).map_or(f32::MAX, |(_, middle, _, tall)| bottom + 12.0 - fade_bottom - (middle - at_rail) - tall / 2.0);
+            if least <= most { anchor.clamp(least, most) } else { (least + most) / 2.0 }
+        };
         let (tint, clear) = (self.tint, self.edged);
         frame.clip(x - 8.0, top, width + 16.0, bottom - top + 12.0);
         for (index, middle, scale, tall) in middles {
@@ -1275,7 +1338,7 @@ impl Drawing<'_> {
             let edge = ((y - top) / fade_top).clamp(0.0, 1.0).min(((bottom + 12.0 - (y + tall)) / fade_bottom).clamp(0.0, 1.0));
             let alpha = opacity_at(d) * edge;
             let line = &lines[index];
-            let font = Font { size: size * scale, ..NOW_FONT };
+            let font = Font { size: size * scale, ..self.fonts.now };
             if turned == Some(index) {
                 self.turned_to(lines, index, x, y, width, font);
             } else if Some(index) == current {
@@ -1298,7 +1361,7 @@ impl Drawing<'_> {
                 }
                 if let Some(translation) = line.translation.as_ref().filter(|_| translated) {
                     let under = frame.gfx.wrapped_height(&text, font, width);
-                    words(frame, &fitted(frame, translation, UNDER_FONT, width), UNDER_FONT, Color::hex(self.ink, 0.62 * alpha), x, y + under + 2.0, width, Align::Start, clear);
+                    words(frame, &fitted(frame, translation, self.fonts.under_font, width), self.fonts.under_font, Color::hex(self.ink, 0.62 * alpha), x, y + under + 2.0, width, Align::Start, clear);
                 }
             } else {
                 let shown = Color::hex(self.ink, if clear { 0.7 } else { 0.5 } * alpha);
@@ -1727,7 +1790,7 @@ mod tests {
 
     #[test]
     fn the_room_chooses_the_layout() {
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false };
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
         assert_eq!(Layout::for_room((420.0, 76.0), &all, None), Layout::Strip);
         assert_eq!(Layout::for_room((470.0, 178.0), &all, None), Layout::Player);
         assert_eq!(Layout::for_room((470.0, 400.0), &all, None), Layout::Card);
@@ -1746,7 +1809,7 @@ mod tests {
 
     #[test]
     fn a_size_comes_to_rest_where_its_layout_is_right() {
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false };
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
         // A strip pulled taller, short of a player: back to the strip's tallest; a player short of a card: its.
         assert_eq!(rests_at((420.0, 110.0), &all), (420.0, STRIP_MOST));
         assert_eq!(rests_at((420.0, 245.0), &all), (420.0, PLAYER_MOST));
@@ -1826,7 +1889,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false };
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
         let gfx = crate::ui::gfx::current().unwrap();
         let places = [1u32, 451, 902, 1350];
         let (w, h) = (470.0, 178.0);
@@ -1872,7 +1935,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false };
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::current().unwrap();
@@ -1935,7 +1998,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false };
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::current().unwrap();
@@ -1970,11 +2033,11 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false };
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
         let floating = Shows { cover: false, title: false, spectrum: false, clear: true, ..all };
         // Name, size, switches, the pointer over it (the controls come), lines turned by the wheel, the track dragged,
         // the music between lines.
-        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 19] = [
+        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 21] = [
             ("strip", (420.0, 76.0), all, false, 0, false, false),
             ("strip-over", (420.0, 76.0), all, true, 0, false, false),
             ("strip-kept", (480.0, 76.0), Shows { controls: true, ..all }, false, 0, false, false),
@@ -1983,6 +2046,8 @@ mod pictures {
             ("player-dragged", (470.0, 178.0), all, true, 0, true, false),
             ("player-kept", (470.0, 210.0), Shows { controls: true, ..all }, false, 0, false, false),
             ("player-lines", (520.0, 236.0), all, false, 0, false, false),
+            ("player-lines-short", (440.0, 190.0), all, false, 0, false, false),
+            ("player-lines-tall", (700.0, 320.0), all, false, 0, false, false),
             ("player-nocover", (470.0, 178.0), Shows { cover: false, ..all }, false, 0, false, false),
             ("player-turned", (470.0, 178.0), all, false, 2, false, false),
             ("player-between", (470.0, 178.0), all, false, 0, false, true),

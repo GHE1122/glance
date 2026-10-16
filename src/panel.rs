@@ -2532,6 +2532,7 @@ fn scene<'s>(
         overlay,
         buttons: true,
         newer: crate::update::available().is_some(),
+        music_apart: false,
     }
 }
 

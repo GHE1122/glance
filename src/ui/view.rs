@@ -263,6 +263,9 @@ pub struct Scene<'a> {
     /// A newer Glance is out: a dot on the settings button, for whoever
     /// did not see it said.
     pub newer: bool,
+    /// What plays is drawn apart (a music widget merged into these readings): the music lane is its head, and room
+    /// left under it for that (see `music_room`).
+    pub music_apart: bool,
 }
 
 impl Scene<'_> {
@@ -332,6 +335,8 @@ enum Block {
     /// A list in five columns: headings that sort it (the processes'), or
     /// not; scrolled through past `visible` rows, or not.
     Table { headings: Vec<(String, Option<ProcessSort>)>, sort: Option<ProcessSort>, rows: Vec<[String; 5]>, visible: usize, scrolls: bool, widths: [f32; 4] },
+    /// Room this tall left empty, for what is drawn there apart (see `Scene::music_apart`).
+    Room(f32),
 }
 
 impl Block {
@@ -352,6 +357,7 @@ impl Block {
             Block::Lyric { .. } => MEDIA_GAP + 2.0 * LINE,
             Block::Lyrics { .. } => MEDIA_GAP + LYRIC_ROWS as f32 * LYRIC_ROW,
             Block::Table { visible, .. } => *visible as f32 * TABLE_ROW,
+            Block::Room(tall) => *tall,
         }
     }
 }
@@ -363,6 +369,7 @@ impl Hash for Block {
         std::mem::discriminant(self).hash(state);
         match self {
             Block::Head { title, device, aside, aside_hot } => (title, device, aside, aside_hot).hash(state),
+            Block::Room(tall) => tall.to_bits().hash(state),
             Block::Readout { figure, unit, hot, .. } => (figure, unit, hot).hash(state),
             Block::Rates { rows, plot } => (rows, plot.as_ref().map(|plot| plot.max.to_bits())).hash(state),
             Block::Trace { label, value, hot, plot, gap } => (label, value, hot, plot.max.to_bits(), gap.to_bits()).hash(state),
@@ -399,6 +406,13 @@ pub struct Lane {
     id: String,
     blocks: Vec<Block>,
     ink: Ink,
+}
+
+impl Lane {
+    /// Its module's id.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 impl Hash for Lane {
@@ -1138,6 +1152,14 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         // Music: what plays (its cover, what it is, its track, how loud) and its lyrics as they are sung (looked for and
         // followed by `playing`). Kept by the name it had as the lyrics' alone. Compact (a widget of middle size): what
         // plays, its track, and the line sung now with the one under it; not how loud, nor the lines round it.
+        // Drawn apart: its head, and room under it (a player's, full; a strip's, compact).
+        "lyrics" if scene.music_apart => {
+            let heard = crate::playing::now();
+            vec![
+                head(lang.pick("音乐", "Music"), heard.as_ref().map_or(String::new(), |heard| heard.app.clone()), "", false),
+                Block::Room(if full { MUSIC_ROOM.0 } else { MUSIC_ROOM.1 }),
+            ]
+        }
         "lyrics" => {
             let heard = crate::playing::now();
             let mut blocks = vec![head(lang.pick("音乐", "Music"), heard.as_ref().map_or(String::new(), |heard| heard.app.clone()), "", false)];
@@ -1442,6 +1464,18 @@ fn text_on_line(frame: &dyn Canvas, text: &str, font: Font, color: Color, x: f32
     frame.text(text, font, color, x, baseline - ascent, width, Align::Start);
 }
 
+/// How tall the room left in the music lane for what plays drawn apart is (DIPs): in full, and compact.
+const MUSIC_ROOM: (f32, f32) = (176.0, 64.0);
+
+/// Where what plays is drawn apart in the readings `layout` lays out, their lanes `ids` in its order (see
+/// `Scene::music_apart`): the music lane's room under its head, as wide as what the lanes show; none without one.
+pub fn music_room(layout: &Layout, ids: &[String], theme: &Theme) -> Option<Rect> {
+    let index = ids.iter().position(|id| id == "lyrics")?;
+    let lane = layout.lanes().get(index).copied()?;
+    let top = lane.y + theme.pad_top + HEAD + HEAD_GAP;
+    Some(Rect { x: lane.x + theme.pad_x, y: top, w: lane.w - 2.0 * theme.pad_x, h: (lane.y + lane.h - theme.pad_bottom - top).max(0.0) })
+}
+
 /// Draws `lane` in `area`, its charts `grow` DIPs taller between them (each
 /// at most twice as tall as designed).
 fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: f32, pass: Pass, hits: &mut Vec<HitBox>) {
@@ -1462,6 +1496,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
     for block in &lane.blocks {
         let kind = match block {
             Block::Head { .. } => "head",
+            Block::Room(_) => "room",
             Block::Readout { .. } => "readout",
             Block::Rates { .. } => "rates",
             Block::Trace { .. } => "trace",
@@ -1482,6 +1517,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
         let charted = matches!(block, Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. });
         let height = block.height() + if charted { taller } else { 0.0 };
         match (block, pass) {
+            (Block::Room(_), _) => {}
             (Block::Readout { plot: Some(plot), .. }, Pass::Plots) => {
                 name("chart");
                 paint_plot(frame, scene, ink, plot, plot_left, y, plot_width, height);
@@ -2155,7 +2191,7 @@ mod tests {
         read.threads_ghz = vec![Some(5.0), Some(4.5), Some(5.4), Some(4.2)];
         let history = leak(vec![read]);
         let seen = Box::leak(Box::new(Seen::of(history)));
-        let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
         let cpu = lane(&scene, "cpu", Detail::Full).unwrap();
         let tags: Vec<&String> = cpu.iter().filter_map(|block| if let Block::Threads(cells) = block { Some(cells.iter().map(|(_, _, tag)| tag)) } else { None }).flatten().collect();
         assert_eq!(tags[2], "Thread 3 · 5.40 GHz · 10%");
@@ -2165,7 +2201,7 @@ mod tests {
     fn shows_each_kind_of_cores_clock() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
         // Big and little cores: each kind's clock, in place of the one clock.
         let mut hybrid = sample(None, None, None);
         hybrid.kinds_ghz = vec![Some(5.2), None];
@@ -2178,7 +2214,7 @@ mod tests {
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
@@ -2202,7 +2238,7 @@ mod tests {
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
@@ -2220,7 +2256,7 @@ mod tests {
         two.drives = vec!["NVMe".into(), "SATA".into()];
         two.drive_ids = vec![0, 1];
         let history = leak(vec![with(Vec::new(), vec![(0, 35.0)])]);
-        let scene_two = Scene { info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene_two = Scene { music_apart: false, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
         let disk = facts(&lane(&scene_two, "disk", Detail::Full).unwrap());
         assert_eq!(&disk[..2], [("NVMe".to_string(), "35 °C".to_string()), ("SATA".to_string(), UNREAD.to_string())]);
         // The first chiplet missed this time: the second's reading stays its own.
