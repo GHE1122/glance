@@ -16,6 +16,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
 use super::gfx::{rect, Frame, Layer};
+use super::icons::Icon;
 use super::view::{Hit, HitBox};
 use crate::cover::Cover;
 use crate::lyrics::Line;
@@ -171,10 +172,8 @@ const STRIP_LINE: Font = Font::new(Family::Segoe, 16.0, 700.0);
 const STRIP_LEAST: f32 = 12.5;
 const FLOAT_LINE: Font = Font::new(Family::Segoe, 36.0, 800.0);
 const FLOAT_UNDER: f32 = 0.5;
-/// The three that are pressed (what goes back, pauses or plays, and skips): the side of each, and the system icon
-/// font's glyphs.
+/// The three that are pressed (what goes back, pauses or plays, and skips): the side of each.
 const CONTROL: f32 = 28.0;
-const CONTROL_FONT: Font = Font::new(Family::Icons, 14.0, 400.0);
 /// The spectrum's row of its own, under kept controls, and the room between rows (DIPs).
 const SPECTRUM_ROW: f32 = 24.0;
 const ROW_GAP: f32 = 6.0;
@@ -666,10 +665,7 @@ impl Drawing<'_> {
                         // None (its player gives none, or it is being read): a plate with a note on it.
                         None => {
                             frame.fill_rounded(Color::hex(ink, if edged { 0.18 } else { 0.08 }), x, y, side, side, corner);
-                            let note = Font::new(Family::Icons, side * 0.38, 400.0);
-                            let (ink_top, ink_bottom) = frame.ink("\u{E8D6}", note);
-                            let wide = frame.measure("\u{E8D6}", note);
-                            frame.text("\u{E8D6}", note, Color::hex(ink, 0.5), x + (side - wide) / 2.0, y + side / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0, Align::Start);
+                            frame.icon(Icon::Music, Point { x: x + side / 2.0, y: y + side / 2.0 }, side * 0.42, Color::hex(ink, 0.5));
                         }
                     }
                 }
@@ -713,20 +709,19 @@ impl Drawing<'_> {
     /// the pointer, pressed only once they are half come); where the row ends.
     fn keys(&mut self, mut x: f32, row: f32, fade: f32) -> Option<f32> {
         let frame = self.frame;
-        for (key, glyph) in [(Key::Previous, "\u{E892}"), (Key::Toggle, if self.moment.playing { "\u{E769}" } else { "\u{E768}" }), (Key::Next, "\u{E893}")] {
+        for (key, icon) in [(Key::Previous, Icon::SkipBack), (Key::Toggle, if self.moment.playing { Icon::Pause } else { Icon::Play }), (Key::Next, Icon::SkipForward)] {
             let on = self.pointer.is_some_and(|(px, py)| px >= x && px < x + CONTROL && py >= row && py < row + CONTROL);
             if on {
                 frame.fill_rounded(Color::hex(self.ink, 0.14 * fade), x, row, CONTROL, CONTROL, CONTROL / 2.0);
             }
-            let font = if key == Key::Toggle { Font { size: 16.0, ..CONTROL_FONT } } else { CONTROL_FONT };
-            let (ink_top, ink_bottom) = frame.ink(glyph, font);
-            let wide = frame.measure(glyph, font);
+            let side = if key == Key::Toggle { 18.0 } else { 16.0 };
             let colour = Color::hex(self.ink, (if on { 1.0 } else { 0.85 }) * fade);
+            let centre = Point { x: x + CONTROL / 2.0, y: row + CONTROL / 2.0 };
+            // (With no ground, a dark edge under it, as its words have.)
             if self.edged {
-                outlined(frame, glyph, font, colour, x + (CONTROL - wide) / 2.0, row + CONTROL / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0);
-            } else {
-                frame.text(glyph, font, colour, x + (CONTROL - wide) / 2.0, row + CONTROL / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0, Align::Start);
+                frame.icon(icon, Point { x: centre.x + 0.6, y: centre.y + 1.0 }, side, Color::hex(0x000000, 0.45 * colour.a));
             }
+            frame.icon(icon, centre, side, colour);
             if self.music.controls_in >= 0.5 {
                 self.hits.push((x, row, CONTROL, CONTROL, Hit::Media(key)));
             }
@@ -778,8 +773,8 @@ impl Drawing<'_> {
     fn turned_to(&mut self, lines: &[Line], index: usize, x: f32, y: f32, width: f32, font: Font) {
         let frame = self.frame;
         let line = &lines[index];
-        let chip = format!("▶ {}", super::text::clock(line.at.max(0.0) as u32));
-        let chip_wide = frame.measure(&chip, TIME) + 14.0;
+        let chip = super::text::clock(line.at.max(0.0) as u32);
+        let chip_wide = frame.measure(&chip, TIME) + 26.0;
         let text = if line.text.trim().is_empty() { "…".to_string() } else { line.text.clone() };
         let room = (width - chip_wide - 10.0).max(0.0);
         let shown = fitted(frame, &text, font, room);
@@ -789,7 +784,8 @@ impl Drawing<'_> {
         let on = self.pointer.is_some_and(|(px, py)| px >= cx && px < cx + chip_wide && py >= cy && py < cy + 18.0);
         frame.fill_rounded(Color::hex(self.ink, if on { 0.24 } else { 0.1 }), cx, cy, chip_wide, 18.0, 9.0);
         frame.stroke_rounded(Fill::Solid(Color::hex(self.ink, 0.5)), cx, cy, chip_wide, 18.0, 9.0, 1.0);
-        frame.text(&chip, TIME, Color::hex(self.ink, 0.95), cx + 7.0, cy + 2.0, chip_wide, Align::Start);
+        frame.icon(Icon::Play, Point { x: cx + 10.0, y: cy + 9.0 }, 10.0, Color::hex(self.ink, 0.95));
+        frame.text(&chip, TIME, Color::hex(self.ink, 0.95), cx + 17.0, cy + 2.0, chip_wide, Align::Start);
         self.hits.push((x, y, wide, font.size * 1.35, Hit::Line(index as u16)));
         self.hits.push((cx, cy, chip_wide, 18.0, Hit::Line(index as u16)));
     }
@@ -898,7 +894,7 @@ impl Drawing<'_> {
         if self.music.turned != 0 {
             let index = (self.moment.now.map_or(0, |now| now as i32) + self.music.turned).clamp(0, lines.len() as i32 - 1) as usize;
             let text = lines[index].text.clone();
-            let wide = (frame.measure(&text, font) + frame.measure("▶ 0:00", TIME) + 24.0).min(room);
+            let wide = (frame.measure(&text, font) + frame.measure("0:00", TIME) + 36.0).min(room);
             self.turned_to(&lines, index, from + (room - wide) / 2.0, top, wide, font);
             return;
         }
@@ -973,32 +969,62 @@ impl Drawing<'_> {
                 let next = lines.get(now + 1).map(|line| line.at);
                 let (text, parts) = parts(line, next);
                 let eased = self.came();
-                let y = line_top + (1.0 - eased) * 10.0;
-                let (dim, bright) = self.line_colours(eased);
                 let under = self.under(lines, now);
-                let tall = if text.trim().is_empty() {
-                    interlude(frame, left, y, PLAYER_LINE.size, between(line, next, self.moment.position), dim, bright);
-                    PLAYER_LINE.size * 1.4
-                } else {
-                    // Too long for a row: wrapped, at the largest size (down to that of what is under it) at which
-                    // all its rows fit with what is under it; else all its rows alone; else at the least, its rows
-                    // as far as they fit.
-                    let room = bottom - line_top;
+                // A line's size: too long for a row, wrapped, at the largest size (down to that of what is under it) at
+                // which all its rows fit with what is under it; else all its rows alone; else at the least, its rows
+                // as far as they fit. How tall it is, so.
+                let room = bottom - line_top;
+                let fit = |text: &str, with_under: bool| -> (Font, f32) {
                     let sizes = || (0..).map(|step| PLAYER_LINE.size - step as f32).take_while(|size| *size >= PLAYER_UNDER.size).map(|size| Font { size, ..PLAYER_LINE });
-                    let height = |font: Font| frame.gfx.wrapped_height(&text, font, width);
-                    let wants_under = if under.is_empty() { 0.0 } else { 2.0 + under_tall };
+                    let height = |font: Font| frame.gfx.wrapped_height(text, font, width);
+                    let wants_under = if with_under { 2.0 + under_tall } else { 0.0 };
                     let font = sizes()
                         .find(|font| height(*font) + wants_under <= room)
                         .or_else(|| sizes().find(|font| height(*font) <= room))
                         .unwrap_or(Font { size: PLAYER_UNDER.size, ..PLAYER_LINE });
-                    let layout = frame.gfx.wrapped(&text, font, width);
-                    let sung = sung_to(&parts, self.moment.position);
-                    self.filled(&layout, &text, font, left, y, width, sung, dim, bright, 12.0);
-                    height(font)
+                    (font, height(font))
                 };
-                // Under it, where there is room, its translation or the next line (rising in with it).
-                let under_top = y + tall + 2.0;
-                if !under.is_empty() && under_top + under_tall <= bottom {
+                // Come from under the line before (the next line, shown under it): it grows into its place as that
+                // goes up and out, and the line after it comes in under it.
+                let before = now.checked_sub(1).filter(|&before| eased < 1.0 && !text.trim().is_empty() && !lines[before].text.trim().is_empty() && self.under(lines, before) == line.text);
+                // How far down what is under it goes: under the line as it is now, wherever that is.
+                let (line_y, tall) = match before {
+                    Some(before) => {
+                        let (old_font, old_tall) = fit(&lines[before].text, true);
+                        let (_, sung_colour) = self.line_colours(1.0);
+                        frame.text_wrapped(&lines[before].text, old_font, sung_colour.alpha(1.0 - eased), left, line_top - eased * old_tall * 0.7, width);
+                        let (font, tall) = fit(&text, !under.is_empty());
+                        let from = line_top + old_tall + 2.0;
+                        let y = from + (line_top - from) * eased;
+                        let size = PLAYER_UNDER.size + (font.size - PLAYER_UNDER.size) * eased;
+                        // As it was under the line before, going; as the line sung now, coming.
+                        words(frame, &text, Font { size, ..PLAYER_UNDER }, Color::hex(self.ink, 0.5 * (1.0 - eased)), left, y, width + 2.0, Align::Start, self.edged);
+                        let grown = Font { size, ..font };
+                        let layout = frame.gfx.wrapped(&text, grown, width);
+                        let sung = sung_to(&parts, self.moment.position);
+                        let (dim, bright) = self.line_colours(eased);
+                        self.filled(&layout, &text, grown, left, y, width, sung, dim, bright, 12.0);
+                        (y, frame.gfx.wrapped_height(&text, grown, width).max(tall * eased))
+                    }
+                    // Else it rises in as it comes.
+                    None => {
+                        let y = line_top + (1.0 - eased) * 10.0;
+                        let (dim, bright) = self.line_colours(eased);
+                        if text.trim().is_empty() {
+                            interlude(frame, left, y, PLAYER_LINE.size, between(line, next, self.moment.position), dim, bright);
+                            (y, PLAYER_LINE.size * 1.4)
+                        } else {
+                            let (font, tall) = fit(&text, !under.is_empty());
+                            let layout = frame.gfx.wrapped(&text, font, width);
+                            let sung = sung_to(&parts, self.moment.position);
+                            self.filled(&layout, &text, font, left, y, width, sung, dim, bright, 12.0);
+                            (y, tall)
+                        }
+                    }
+                };
+                // Under it, where there is room, its translation or the next line (coming in with it).
+                let under_top = line_y + tall + 2.0;
+                if !under.is_empty() && line_top + tall + 2.0 + under_tall <= bottom {
                     words(frame, &fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(self.ink, 0.5 * eased), left, under_top, width + 2.0, Align::Start, self.edged);
                 }
             }
@@ -1192,7 +1218,7 @@ impl Drawing<'_> {
         let size = (width / 16.0).clamp(18.0, NOW_FONT.size);
         let height_of = |index: usize, scale: f32| {
             let line = &lines[index];
-            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "♪" } else { &line.text }, Font { size: size * scale, ..NOW_FONT }, width) + if Some(index) == current && translated && line.translation.is_some() { 20.0 } else { 0.0 }
+            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, Font { size: size * scale, ..NOW_FONT }, width) + if Some(index) == current && translated && line.translation.is_some() { 20.0 } else { 0.0 }
         };
         let rail = self.music.rail;
         let base = rail.floor().max(-1.0);
@@ -1879,6 +1905,42 @@ mod pictures {
             println!("{t:.2} s  {sung:?}  edge {at:.1}");
             t += 0.05;
         }
+    }
+
+    /// The player as a line comes (from under the line before, where it was shown as the next): at its start, and 70,
+    /// 140 and 210 ms in, stacked into one PNG in the target folder: `cargo test --features studio -- --ignored
+    /// draws_a_line_coming --nocapture`.
+    #[test]
+    #[ignore]
+    fn draws_a_line_coming() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false };
+        let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(&out).unwrap();
+        let gfx = crate::ui::gfx::current().unwrap();
+        let (w, h) = (470.0, 178.0);
+        let margin = 20.0;
+        let one = (((w + 2.0 * margin) * 1.5) as u32, ((h + 2.0 * margin) * 1.5) as u32);
+        let mut sheet = Vec::new();
+        for ms in [0u64, 70, 140, 210] {
+            let mut moment = playing(false);
+            let now = Instant::now();
+            moment.since = Some(now - Duration::from_millis(ms));
+            moment.position = 14.05;
+            let mut music = Music { last_frame: now, ..Music::default() };
+            music.bands = moment.sound.bands;
+            let pixels = gfx
+                .draw_offscreen(one, 1.5, |frame| {
+                    frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
+                    frame.origin(margin, margin);
+                    music.paint_moment(frame, (w, h), &all, Ground::Own, 1.5, None, now, moment);
+                })
+                .unwrap();
+            sheet.extend(pixels);
+        }
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/coming.png")), one.0, one.1 * 4, &sheet).unwrap();
     }
 
     /// What plays in each layout, at each size, with its switches as each case says, drawn to PNGs in the target

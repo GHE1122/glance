@@ -4,6 +4,7 @@
 use std::hash::{Hash, Hasher};
 
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Picture, Point};
+use super::icons::Icon;
 use super::prefs::{Prefs, ProcessSort};
 use super::seen::Seen;
 use super::text::{self, Lang};
@@ -109,9 +110,9 @@ fn sung_now(heard: Option<&crate::playing::Now>, lang: Lang, translated: bool) -
     }
 }
 
-/// A line as it is shown: one with nothing sung, a note.
+/// A line as it is shown: one with nothing sung (the music between lines), three dots.
 fn sung_line(text: &str) -> String {
-    if text.is_empty() { "♪".to_string() } else { text.to_string() }
+    if text.is_empty() { "· · ·".to_string() } else { text.to_string() }
 }
 
 /// The rows of the lyrics module for what plays now (`heard`): two lines sung before, the line sung now (with
@@ -1599,7 +1600,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 part("level");
                 frame.text(&said, theme.small, if *muted { theme.text3 } else { theme.text2 }, mute - 6.0 - said_width, middle - LINE / 2.0, said_width, Align::End);
                 let hit = Hit::Media(crate::playing::Key::Mute);
-                pressed(frame, scene, hits, hit, if *muted { "\u{E74F}" } else { "\u{E767}" }, mute, row, *muted);
+                pressed(frame, scene, hits, hit, if *muted { Icon::Muted } else { Icon::Volume }, mute, row, *muted);
             }
             (Block::Track { cover, title, about, playing, players }, Pass::Content) => {
                 use crate::playing::Key;
@@ -1612,9 +1613,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     // None (its player gives none, or it is being read): a plate with a note on it.
                     None => {
                         frame.fill_rounded(theme.track, left, top, COVER, COVER, theme.control_radius.min(COVER / 4.0));
-                        let note = Font::new(Family::Icons, 18.0, 400.0);
-                        let (ink_top, ink_bottom) = frame.ink("\u{E8D6}", note);
-                        frame.text("\u{E8D6}", note, theme.text3, left + (COVER - frame.measure("\u{E8D6}", note)) / 2.0, top + COVER / 2.0 - (ink_top + ink_bottom) / 2.0, COVER, Align::Start);
+                        frame.icon(Icon::Music, Point { x: left + COVER / 2.0, y: top + COVER / 2.0 }, 18.0, theme.text3);
                     }
                 }
                 let text_left = left + COVER + 10.0;
@@ -1631,8 +1630,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     hits.push((text_left, words + LINE, pressed_from - 8.0 - text_left, LINE, switch));
                 }
                 let row = top + (COVER - MEDIA_ROW) / 2.0;
-                for (place, (key, glyph)) in [(Key::Previous, "\u{E892}"), (Key::Toggle, if *playing { "\u{E769}" } else { "\u{E768}" }), (Key::Next, "\u{E893}")].into_iter().enumerate() {
-                    pressed(frame, scene, hits, Hit::Media(key), glyph, pressed_from + place as f32 * (MEDIA_ROW + 2.0), row, false);
+                for (place, (key, icon)) in [(Key::Previous, Icon::SkipBack), (Key::Toggle, if *playing { Icon::Pause } else { Icon::Play }), (Key::Next, Icon::SkipForward)].into_iter().enumerate() {
+                    pressed(frame, scene, hits, Hit::Media(key), icon, pressed_from + place as f32 * (MEDIA_ROW + 2.0), row, false);
                 }
             }
             (Block::Progress { at, length, seekable }, Pass::Content) => {
@@ -1671,8 +1670,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     hits.push((left, top + LINE, pressed_from - 8.0 - left, LINE, switch));
                 }
                 let row = top + (2.0 * LINE - MEDIA_ROW) / 2.0;
-                for (place, (key, glyph)) in [(Key::Previous, "\u{E892}"), (Key::Toggle, if *playing { "\u{E769}" } else { "\u{E768}" }), (Key::Next, "\u{E893}")].into_iter().enumerate() {
-                    pressed(frame, scene, hits, Hit::Media(key), glyph, pressed_from + place as f32 * (MEDIA_ROW + 2.0), row, false);
+                for (place, (key, icon)) in [(Key::Previous, Icon::SkipBack), (Key::Toggle, if *playing { Icon::Pause } else { Icon::Play }), (Key::Next, Icon::SkipForward)].into_iter().enumerate() {
+                    pressed(frame, scene, hits, Hit::Media(key), icon, pressed_from + place as f32 * (MEDIA_ROW + 2.0), row, false);
                 }
             }
             (Block::Lyric { line, under, said, glide }, Pass::Content) => {
@@ -1971,15 +1970,13 @@ fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f
 /// Something pressed, as the bar's are: its glyph in a square from (`left`,
 /// `top`), on a plate while the pointer is over it or it is `lit`.
 #[allow(clippy::too_many_arguments)]
-fn pressed(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, hit: Hit, glyph: &str, left: f32, top: f32, lit: bool) {
+fn pressed(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, hit: Hit, icon: Icon, left: f32, top: f32, lit: bool) {
     let theme = scene.theme;
     let hovered = scene.hover == Some(hit);
     if hovered || lit {
         frame.fill_rounded(theme.hover, left, top, MEDIA_ROW, MEDIA_ROW, theme.control_radius.min(MEDIA_ROW / 2.0));
     }
-    let icon = Font::new(Family::Icons, 14.0, 400.0);
-    let (ink_top, ink_bottom) = frame.ink(glyph, icon);
-    frame.text(glyph, icon, if hovered || lit { theme.text } else { theme.text2 }, left + (MEDIA_ROW - frame.measure(glyph, icon)) / 2.0, top + MEDIA_ROW / 2.0 - (ink_top + ink_bottom) / 2.0, MEDIA_ROW, Align::Start);
+    frame.icon(icon, Point { x: left + MEDIA_ROW / 2.0, y: top + MEDIA_ROW / 2.0 }, 15.0, if hovered || lit { theme.text } else { theme.text2 });
     hits.push((left, top, MEDIA_ROW, MEDIA_ROW, hit));
 }
 
