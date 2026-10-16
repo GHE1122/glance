@@ -188,8 +188,8 @@ const TURN: Duration = Duration::from_millis(260);
 const RECORD_TURN: f32 = 24.0;
 const ARM_SWING: f32 = 0.6;
 /// The record's arm, from its pivot (degrees, clockwise from the right): its stylus on the record, and off it.
-const ARM_ON: f32 = 105.0;
-const ARM_OFF: f32 = 87.0;
+const ARM_ON: f32 = 100.0;
+const ARM_OFF: f32 = 78.0;
 /// The stage's rows along the bottom: the spectrum's (DIPs).
 const STAGE_SPECTRUM: f32 = 40.0;
 /// How long a line turned to by the wheel is held before the lines go back to the one sung now.
@@ -232,7 +232,7 @@ pub struct Music {
     /// Laid out anew (another layout, or what it shows switched): since when, and where its parts were (they move
     /// from there to where they go, what else it shows coming in, over `TURN`); what it showed last.
     turning: Option<(Instant, Placed)>,
-    shown: Option<(Layout, Shows)>,
+    shown: Option<(Layout, Shows, bool)>,
     /// Lines turned by the wheel from the one sung now, when last turned, and the turn not yet a line.
     turned: i32,
     turned_at: Instant,
@@ -426,15 +426,17 @@ impl Music {
             crate::journal::note(format!("music widget: {}", layout.key()));
             self.layout = Some(layout);
         }
-        // Laid out anew: its parts move from where they were, from where they had got to if they were moving still.
-        if let Some((was, showed)) = self.shown.filter(|shown| *shown != (layout, *shows)) {
+        // Laid out anew (the player too, from its line to its lines, or back): its parts move from where they were,
+        // from where they had got to if they were moving still.
+        let lines = layout == Layout::Player && player_shows_lines(size, shows);
+        if let Some((was, showed, _)) = self.shown.filter(|shown| *shown != (layout, *shows, lines)) {
             let from = match self.turning.and_then(|(since, from)| turned(now, since).map(|t| (from, t))) {
                 Some((from, t)) => tween(from, placed(was, size, &showed), t),
                 None => placed(was, size, &showed),
             };
             self.turning = Some((now, from));
         }
-        self.shown = Some((layout, *shows));
+        self.shown = Some((layout, *shows, lines));
         let turn = self.turning.and_then(|(since, from)| turned(now, since).map(|t| (from, t)));
         if turn.is_none() {
             self.turning = None;
@@ -530,6 +532,14 @@ fn rows_tall(shows: &Shows) -> f32 {
 /// How much room the player's words have (DIPs) from which it shows the lines round the one sung now.
 const PLAYER_LINES_FROM: f32 = 96.0;
 
+/// Whether the player shows the lines round the one sung now, `size` large, showing `shows` (else the line sung now
+/// and what is under it).
+fn player_shows_lines(size: (f32, f32), shows: &Shows) -> bool {
+    let at = placed(Layout::Player, size, shows);
+    let bottom = size.1 - pad(Layout::Player) - rows_tall(shows) - 8.0;
+    shows.lines && bottom - at.below >= PLAYER_LINES_FROM
+}
+
 /// Each layout's room inside its edge, and the corners of its ground (DIPs).
 fn pad(layout: Layout) -> f32 {
     match layout {
@@ -583,7 +593,7 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
         // The record drawn as it turns (not on the ground); what plays at the top of the column beside it.
         Layout::Stage => {
             let (_, side) = stage_record((w, h));
-            let left = pad + side + 40.0;
+            let left = pad + side + side * 0.28 + 12.0;
             let width = (w - left - pad).max(0.0);
             let title = shows.title.then_some((left, pad + 6.0, width, false));
             Placed { cover: None, title, below: pad + if shows.title { 58.0 } else { 0.0 }, left, width }
@@ -941,7 +951,7 @@ impl Drawing<'_> {
             return;
         }
         // Room for more than the line sung now and the one under it: the lines round it, as the card's.
-        if let (Some(lines), true) = (self.moment.lines.clone(), self.shows.lines && bottom - line_top >= PLAYER_LINES_FROM) {
+        if let (Some(lines), true) = (self.moment.lines.clone(), player_shows_lines(self.size, self.shows)) {
             self.rail_of_lines(&lines, left, line_top, bottom, width);
             return;
         }
@@ -1082,23 +1092,48 @@ impl Drawing<'_> {
         self.arm_of(cx, cy, r);
     }
 
-    /// The record's arm: its pivot past the record's top right, its stylus on the record while something plays and
-    /// swung off it (to its right) while nothing does, swinging between as it starts and stops.
+    /// The record's arm: its pivot past the record's top right; the arm reaching from it, bent a little as a tonearm
+    /// is, to its headshell, on the record's grooves while something plays and swung off it (to its right) while
+    /// nothing does, swinging between as it starts and stops.
     fn arm_of(&self, cx: f32, cy: f32, r: f32) {
         let frame = self.frame;
-        let pivot = Point { x: cx + r * 1.02, y: cy - r * 0.9 };
-        let reach = r * 1.5;
+        let pivot = Point { x: cx + r * 0.98, y: cy - r * 0.98 };
+        let reach = r * 1.35;
         let swung = self.music.arm * self.music.arm * (3.0 - 2.0 * self.music.arm);
         let angle = (ARM_OFF + (ARM_ON - ARM_OFF) * swung).to_radians();
         let head = Point { x: pivot.x + reach * angle.cos(), y: pivot.y + reach * angle.sin() };
-        let thick = (r * 0.03).max(2.0);
-        frame.stroke(&[pivot, head], Color::hex(0x000000, 0.35), thick + 2.0);
-        frame.stroke(&[pivot, head], Color::hex(0xD8D8DC, 1.0), thick);
-        // Its stylus, in the cover's colour; its pivot, a disc of steel.
-        frame.fill_circle(colour(self.accent, 1.0), head, (r * 0.05).max(4.0));
-        frame.fill_circle(Color::hex(0x2A2A2E, 1.0), pivot, (r * 0.11).max(7.0));
-        frame.fill_circle(Color::hex(0xC8C8CC, 1.0), pivot, (r * 0.06).max(4.0));
-        frame.stroke_rounded(Fill::Solid(colour(self.accent, 0.8)), pivot.x - (r * 0.11).max(7.0), pivot.y - (r * 0.11).max(7.0), 2.0 * (r * 0.11).max(7.0), 2.0 * (r * 0.11).max(7.0), (r * 0.11).max(7.0), 1.5);
+        // Bent outward (away from the record) at its middle: a quadratic curve through a point off the straight line.
+        let (dx, dy) = (head.x - pivot.x, head.y - pivot.y);
+        let bend = Point { x: (pivot.x + head.x) / 2.0 - dy * 0.16, y: (pivot.y + head.y) / 2.0 + dx * 0.16 };
+        let curve: Vec<Point> = (0..=24)
+            .map(|step| {
+                let t = step as f32 / 24.0;
+                let (a, b, c) = ((1.0 - t) * (1.0 - t), 2.0 * (1.0 - t) * t, t * t);
+                Point { x: a * pivot.x + b * bend.x + c * head.x, y: a * pivot.y + b * bend.y + c * head.y }
+            })
+            .collect();
+        let thick = (r * 0.028).max(2.5);
+        let shade: Vec<Point> = curve.iter().map(|p| Point { x: p.x + 1.5, y: p.y + 2.5 }).collect();
+        frame.stroke(&shade, Color::hex(0x000000, 0.28), thick + 1.0);
+        frame.stroke(&curve, Color::hex(0xF4F4F6, 1.0), thick);
+        // Its headshell, along the way the arm ends: white, a slot across it, a line of the cover's colour.
+        let along = (head.y - bend.y).atan2(head.x - bend.x).to_degrees();
+        let (long, wide) = ((r * 0.2).max(16.0), (r * 0.075).max(7.0));
+        let mut parent = windows_numerics::Matrix3x2::default();
+        unsafe { frame.dc.GetTransform(&mut parent) };
+        let turned = windows_numerics::Matrix3x2::rotation_around(along, windows_numerics::Vector2 { X: head.x, Y: head.y });
+        unsafe { frame.dc.SetTransform(&(turned * parent)) };
+        frame.shadow(Color::hex(0x000000, 0.35), head.x - long * 0.3, head.y - wide / 2.0, long, wide, wide * 0.3, 4.0, 2.0);
+        frame.fill_rounded(Color::hex(0xF4F4F6, 1.0), head.x - long * 0.3, head.y - wide / 2.0, long, wide, wide * 0.3);
+        frame.fill_rounded(Color::hex(0x2A2A2E, 0.85), head.x + long * 0.12, head.y - wide * 0.32, long * 0.08, wide * 0.64, 1.0);
+        frame.fill_rounded(colour(self.accent, 1.0), head.x + long * 0.32, head.y - wide * 0.18, long * 0.34, wide * 0.36, wide * 0.18);
+        unsafe { frame.dc.SetTransform(&parent) };
+        // Its pivot: a ring of white round a dark hub.
+        let ring = (r * 0.075).max(7.0);
+        frame.shadow(Color::hex(0x000000, 0.4), pivot.x - ring, pivot.y - ring, 2.0 * ring, 2.0 * ring, ring, 5.0, 2.0);
+        frame.fill_circle(Color::hex(0xF4F4F6, 1.0), pivot, ring);
+        frame.fill_circle(Color::hex(0x2A2A2E, 1.0), pivot, ring * 0.48);
+        frame.fill_circle(Color::hex(0xFFFFFF, 0.5), Point { x: pivot.x - ring * 0.15, y: pivot.y - ring * 0.15 }, ring * 0.14);
     }
 
     /// The card (and the card stood on end): what plays at the top, the lines round the one sung now gliding past
@@ -1858,7 +1893,7 @@ mod pictures {
         let floating = Shows { cover: false, title: false, spectrum: false, clear: true, ..all };
         // Name, size, switches, the pointer over it (the controls come), lines turned by the wheel, the track dragged,
         // the music between lines.
-        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 17] = [
+        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 18] = [
             ("strip", (420.0, 76.0), all, false, 0, false, false),
             ("strip-over", (420.0, 76.0), all, true, 0, false, false),
             ("strip-kept", (480.0, 76.0), Shows { controls: true, ..all }, false, 0, false, false),
@@ -1873,6 +1908,7 @@ mod pictures {
             ("card-turned", (470.0, 400.0), all, false, 2, false, false),
             ("tall", (290.0, 480.0), all, false, 0, false, false),
             ("stage", (900.0, 470.0), all, false, 0, false, false),
+            ("stage-off", (900.0, 470.0), all, false, 0, false, false),
             ("clear-player", (470.0, 178.0), Shows { clear: true, ..all }, false, 0, false, false),
             ("floating", (760.0, 110.0), floating, false, 0, false, false),
             ("floating-over", (760.0, 110.0), floating, true, 0, false, false),
@@ -1881,7 +1917,7 @@ mod pictures {
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::current().unwrap();
         for (name, (w, h), shows, over, turned, dragged, between) in cases {
-            let mut music = Music { controls_in: if over || shows.controls { 1.0 } else { 0.0 }, turned, turned_at: Instant::now(), arm: 1.0, turned_by: 30.0, ..Music::default() };
+            let mut music = Music { controls_in: if over || shows.controls { 1.0 } else { 0.0 }, turned, turned_at: Instant::now(), arm: if name.ends_with("off") { 0.0 } else { 1.0 }, turned_by: 30.0, ..Music::default() };
             let mut moment = playing(between);
             moment.dragged_to = dragged.then_some(150.0);
             music.bands = moment.sound.bands;

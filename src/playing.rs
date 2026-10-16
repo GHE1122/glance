@@ -156,29 +156,32 @@ pub fn position() -> Option<f64> {
 #[cfg(windows)]
 fn look() -> Option<std::time::Duration> {
     let mut playing = crate::media::playing();
-    // Dragged along, or just asked to go somewhere along it: there.
-    let seeking = match *SEEKING.lock().unwrap() {
-        Some((at, None)) => Some(at),
-        Some((at, Some(till))) if std::time::Instant::now() < till => Some(at),
-        _ => None,
+    // Dragged along: as far as it is dragged. Just asked to go somewhere along it: see `SOUGHT`, below.
+    let (dragged, settling) = match *SEEKING.lock().unwrap() {
+        Some((at, None)) => (Some(at), false),
+        Some((_, Some(till))) => (None, std::time::Instant::now() < till),
+        None => (None, false),
     };
-    if let (Some(at), Some((position, _))) = (seeking, playing.as_mut().and_then(|playing| playing.timeline.as_mut())) {
+    let seeking = dragged.is_some() || settling;
+    if let (Some(at), Some((position, _))) = (dragged, playing.as_mut().and_then(|playing| playing.timeline.as_mut())) {
         *position = at;
     }
     // Paused, where its player last said how far in it was while it still played (as NetEase's does: it says
     // nothing more as it pauses), it went on from there till it paused: where it was as the pause was first seen,
     // held till the player says again. (Taken as said, the line sung went back as much as a second.)
     let now = std::time::Instant::now();
-    // Played from elsewhere along its track: what its player said before that stands for where it was then, not where
-    // it is (Media Player says nothing more after it is moved along, and was taken back where it had been): where it
-    // was asked to go, on from then while it plays, till its player says again, or another track plays.
-    if let Some(playing) = playing.as_mut() {
+    // Played from elsewhere along its track: where it was asked to go, on from then while it plays (not held there:
+    // held, and reckoned on from each look, the line sung went back and forth till it was let go), whatever its player
+    // says while it settles there; after, till its player says again, or another track plays (what it said before
+    // stands for where it was then, not where it is: Media Player says nothing more after it is moved along, and was
+    // taken back where it had been).
+    if let (Some(playing), None) = (playing.as_mut(), dragged) {
         let mut sought = SOUGHT.lock().unwrap();
         if let (Some((at, when, title)), Some((position, _))) = (sought.as_ref(), playing.timeline.as_mut()) {
             let said_at = playing.said_ago.map(|ago| now - std::time::Duration::from_secs_f64(ago));
-            if *title != playing.title || said_at.is_some_and(|said| said > *when) {
+            if !settling && (*title != playing.title || said_at.is_some_and(|said| said > *when)) {
                 *sought = None;
-            } else if seeking.is_none() {
+            } else {
                 *position = at + if playing.playing { now.duration_since(*when).as_secs_f64() } else { 0.0 };
             }
         }
@@ -187,7 +190,7 @@ fn look() -> Option<std::time::Duration> {
         let said_at = playing.said_ago.map(|ago| now - std::time::Duration::from_secs_f64(ago));
         let mut held = HELD.lock().unwrap();
         match (playing.playing, playing.timeline.as_mut()) {
-            (false, Some((position, _))) if seeking.is_none() => {
+            (false, Some((position, _))) if !seeking => {
                 let was_playing = POSITION.lock().unwrap().is_some_and(|(_, _, playing)| playing);
                 match *held {
                     // The same saying as when the pause was seen: where it was held.
@@ -307,10 +310,10 @@ pub fn act(act: Act) {
             Act::Seek(at) => {
                 // Shown there at once, and till the player says it is.
                 *SEEKING.lock().unwrap() = Some((at, Some(std::time::Instant::now() + SETTLES)));
-                if crate::media::seek(at) {
-                    *SOUGHT.lock().unwrap() = now().map(|now| (at, std::time::Instant::now(), now.title));
-                } else {
+                *SOUGHT.lock().unwrap() = now().map(|now| (at, std::time::Instant::now(), now.title));
+                if !crate::media::seek(at) {
                     *SEEKING.lock().unwrap() = None;
+                    *SOUGHT.lock().unwrap() = None;
                 }
             }
         }
