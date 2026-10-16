@@ -30,13 +30,17 @@ pub enum Icon {
     Music,
     Volume,
     Muted,
+    LayoutGrid,
+    Gauge,
+    ChevronDown,
 }
 
 impl Icon {
     /// Lucide's path data for it ("cpu", "gpu", "memory-stick", "hard-drive",
     /// "arrow-down-up", "gamepad-2", "pin", "x", "settings", "check",
     /// "mouse-pointer-2", "panel-right", "undo-2", "refresh-cw", "power", "layers", "clock", "image-plus", "skip-back", "play", "pause", "skip-forward",
-    /// "music", "volume-2", "volume-x" (their speaker an older Lucide's, as lines);
+    /// "music", "volume-2", "volume-x" (their speaker an older Lucide's, as lines), "layout-grid", "gauge",
+    /// "chevron-down";
     /// lucide-static 1.53.0), its
     /// rectangles and circles written as paths.
     fn data(self) -> &'static [&'static str] {
@@ -78,6 +82,14 @@ impl Icon {
             Icon::Music => &["M9 18V5l12-2v13", "M9 18a3 3 0 1 1-6 0a3 3 0 1 1 6 0z", "M21 16a3 3 0 1 1-6 0a3 3 0 1 1 6 0z"],
             Icon::Volume => &["M11 5L6 9H2v6h4l5 4V5Z", "M15.5 8.5a5 5 0 0 1 0 7", "M19 5a10 10 0 0 1 0 14"],
             Icon::Muted => &["M11 5L6 9H2v6h4l5 4V5Z", "M22 9L16 15", "M16 9L22 15"],
+            Icon::LayoutGrid => &[
+                "M4 3h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z",
+                "M15 3h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z",
+                "M15 14h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z",
+                "M4 14h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z",
+            ],
+            Icon::Gauge => &["m12 14 4-4", "M3.34 19a10 10 0 1 1 17.32 0"],
+            Icon::ChevronDown => &["m6 9 6 6 6-6"],
             Icon::ImagePlus => &[
                 "M16 5h6",
                 "M19 2v6",

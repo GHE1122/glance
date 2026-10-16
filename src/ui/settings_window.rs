@@ -48,8 +48,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_numerics::{Matrix3x2, Vector2};
 
 use super::backdrop::Capture;
-use super::canvas::{Align, Color, Family, Font};
+use super::canvas::{Align, Canvas, Color, Family, Font, Point};
 use super::gfx::{self, rect, Frame, Gfx, Surface};
+use super::icons::Icon;
 use super::motion::{Easing, Transition};
 use super::overlay::{Layout, ROWS};
 use super::prefs::{self, LanguagePref, Prefs, ProcessSort, ThemePref};
@@ -79,6 +80,8 @@ const PANE: f32 = 480.0;
 /// The pages' list, left of the page.
 const NAV: f32 = 200.0;
 const NAV_ITEM: f32 = 40.0;
+/// How far in the components' own pages are set, under their heading.
+const NAV_INDENT: f32 = 20.0;
 const PAD_TOP: f32 = 28.0;
 const PAD_SIDE: f32 = 36.0;
 const PAD_BOTTOM: f32 = 48.0;
@@ -108,6 +111,8 @@ const ITEM_ROW: f32 = 48.0;
 const ITEM_INSET: f32 = 12.0 + 20.0 + 12.0;
 /// Room at the right of a module's row for its chevron, after its switch.
 const CHEVRON_ROOM: f32 = 28.0;
+/// How large a chevron is drawn.
+const CHEVRON: f32 = 14.0;
 /// The map of the screens: the most height it takes; the room around a
 /// screen's picture inside its place, where its edges are drawn; how deep
 /// into its place an edge takes a click; how thick an edge is drawn and how
@@ -128,6 +133,11 @@ const MAP_WELL: f32 = 14.0;
 const SKINS_ROW: f32 = 16.0 + 72.0 + 10.0 + 18.0 + 16.0;
 /// Desktop shown beside the panel in the preview (DIPs of screen).
 const PREVIEW_MARGIN: f32 = 160.0;
+/// The music page's preview: the widget's size, room at least as wide round it, and how often it is drawn while
+/// something plays (as a chart's speed: a quarter pixel each thirtieth of a second, see `draw`).
+const MUSIC_PREVIEW: (f32, f32) = (360.0, 320.0);
+const MUSIC_PREVIEW_ROOM: f32 = 24.0;
+const MUSIC_PREVIEW_PACE: f32 = 7.5;
 /// How far a wheel notch scrolls the choices, and how quickly they follow.
 const WHEEL: f32 = 100.0;
 const SCROLL_EASE: f32 = 0.06;
@@ -213,7 +223,10 @@ pub fn follow_settings() {
 /// the overlay's page: from the overlay's menu.
 pub fn open_at_overlay() {
     open();
-    with_ui(|ui| ui.turn_to(Page::Overlay));
+    with_ui(|ui| {
+        ui.tab = Tab::Overlay;
+        ui.turn_to(Page::Monitor);
+    });
 }
 
 /// Draws the window if a frame is due, and says when the next one is; `None`
@@ -429,45 +442,86 @@ fn module_fields(id: &str) -> &'static [Field] {
     }
 }
 
-/// The settings, a group to a page.
+/// The settings, a group to a page: what each screen edge opens and how; each component's own (the monitor's, on
+/// tabs of their own, and what plays); and Glance's as a whole.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Page {
-    Appearance,
-    Opening,
-    Shown,
-    Overlay,
-    Data,
-    /// The phone remote: on or off, and the phones paired with it.
-    Remote,
-    System,
+    Layout,
+    Monitor,
+    Music,
+    General,
 }
 
-const PAGES: [Page; 7] = [Page::Appearance, Page::Opening, Page::Shown, Page::Overlay, Page::Data, Page::Remote, Page::System];
+/// The monitor's settings, a group to a tab: how it looks, what it shows, how it reads, and its overlay.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tab {
+    Look,
+    Shown,
+    Data,
+    Overlay,
+}
 
-impl Page {
+const TABS: [Tab; 4] = [Tab::Look, Tab::Shown, Tab::Data, Tab::Overlay];
+
+impl Tab {
     fn name(self, lang: Lang) -> &'static str {
         match self {
-            Page::Appearance => pick(lang, "外观", "Appearance"),
-            Page::Opening => pick(lang, "呼出", "Opening"),
-            Page::Shown => pick(lang, "显示内容", "Shown"),
-            Page::Overlay => pick(lang, "悬浮窗", "Overlay"),
-            Page::Data => pick(lang, "数据", "Data"),
-            Page::Remote => pick(lang, "手机遥控", "Phone"),
-            Page::System => pick(lang, "系统", "System"),
+            Tab::Look => pick(lang, "外观", "Look"),
+            Tab::Shown => pick(lang, "显示内容", "Shown"),
+            Tab::Data => pick(lang, "数据", "Data"),
+            Tab::Overlay => pick(lang, "游戏悬浮窗", "Game overlay"),
+        }
+    }
+}
+
+/// The pages' list as it reads: each page, and the components' heading the monitor's and what plays come under
+/// (pressed, it shows the first of them).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NavItem {
+    Page(Page),
+    Components,
+}
+
+const NAV_ITEMS: [NavItem; 5] = [NavItem::Page(Page::Layout), NavItem::Components, NavItem::Page(Page::Monitor), NavItem::Page(Page::Music), NavItem::Page(Page::General)];
+
+impl NavItem {
+    fn name(self, lang: Lang) -> &'static str {
+        match self {
+            NavItem::Page(Page::Layout) => pick(lang, "布局", "Layout"),
+            NavItem::Components => pick(lang, "组件", "Components"),
+            NavItem::Page(Page::Monitor) => pick(lang, "监控", "Monitor"),
+            NavItem::Page(Page::Music) => pick(lang, "音乐", "Music"),
+            NavItem::Page(Page::General) => pick(lang, "通用", "General"),
         }
     }
 
-    /// Its glyph in the system's icon font.
-    fn glyph(self) -> &'static str {
+    fn icon(self) -> Icon {
         match self {
-            Page::Appearance => "\u{E790}",
-            Page::Opening => "\u{E8B0}",
-            Page::Shown => "\u{E8A9}",
-            Page::Overlay => "\u{E9D9}",
-            Page::Data => "\u{E9D2}",
-            Page::Remote => "\u{E8EA}",
-            Page::System => "\u{E770}",
+            NavItem::Page(Page::Layout) => Icon::LayoutGrid,
+            NavItem::Components => Icon::Layers,
+            NavItem::Page(Page::Monitor) => Icon::Gauge,
+            NavItem::Page(Page::Music) => Icon::Music,
+            NavItem::Page(Page::General) => Icon::Settings,
         }
+    }
+
+    /// Whether it is listed under the components' heading, set in.
+    fn under(self) -> bool {
+        matches!(self, NavItem::Page(Page::Monitor | Page::Music))
+    }
+
+    /// The page it shows.
+    fn page(self) -> Page {
+        match self {
+            NavItem::Page(page) => page,
+            NavItem::Components => Page::Monitor,
+        }
+    }
+}
+
+impl Page {
+    fn name(self, lang: Lang) -> &'static str {
+        NavItem::Page(self).name(lang)
     }
 }
 
@@ -568,8 +622,12 @@ enum Target {
     ScreenEdge(String, Edge, bool),
     /// A screen (by its name) in the map: the preview shows it.
     Screen(String),
-    /// A page, in the pages' list.
-    Page(Page),
+    /// A page (or the components' heading), in the pages' list.
+    Nav(NavItem),
+    /// One of the monitor's tabs.
+    Tab(Tab),
+    /// One of what plays shows (see `Row::Element`).
+    Element(&'static str),
     /// Opens or closes the fold of the modules few want.
     More,
     /// Asks for a newer release now.
@@ -597,6 +655,12 @@ const MORE: [&str; 2] = ["wsl", "docker"];
 enum Row {
     /// The page's name.
     Title,
+    /// The monitor's tabs, under its page's name.
+    Tabs,
+    /// One of what plays shows, on or off (an item of the lyrics module: see `music::Shows`).
+    Element(&'static str),
+    /// Words of their own, under the rows they are about.
+    Note(&'static str),
     /// The fold of the modules few want, and how many it holds.
     More(usize),
     Skins,
@@ -633,6 +697,8 @@ enum Row {
 
 /// How tall a group's name is, above its rows.
 const GROUP: f32 = 24.0;
+/// How tall the monitor's tabs are, and how far below their names their marker is.
+const TABS_ROW: f32 = 48.0;
 /// How tall the code's own square is, in its row.
 const CODE: f32 = 176.0;
 /// The room for the words beside it: what the row has left.
@@ -724,8 +790,11 @@ struct Ui {
     /// is where `settings` differs.
     base: Settings,
     prefs: Prefs,
-    /// The page shown.
+    /// The page shown, and the monitor's tab (shown on its page).
     page: Page,
+    tab: Tab,
+    /// What plays, as the music page's preview draws it.
+    music: super::music::Music,
     lang: Lang,
     dark: bool,
     palette: Palette,
@@ -851,6 +920,7 @@ impl Lives for Ui {
         for art in &mut self.map_art {
             art.bitmap = None;
         }
+        self.music.release();
     }
 }
 
@@ -926,7 +996,9 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             base: settings.clone(),
             settings,
             prefs,
-            page: Page::Appearance,
+            page: Page::Layout,
+            tab: Tab::Look,
+            music: super::music::Music::default(),
             autostart: crate::source::autostart(),
             remote_there: crate::phone::helper().is_some(),
             remote: crate::phone::on(),
@@ -1226,9 +1298,8 @@ impl Ui {
 
     fn rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::Title];
-        match self.page {
-            Page::Appearance => rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Language)]),
-            Page::Opening => rows.extend([
+        match (self.page, self.tab) {
+            (Page::Layout, _) => rows.extend([
                 Row::Screens,
                 Row::Choice(Field::Anchor),
                 Row::Choice(Field::Push),
@@ -1237,8 +1308,43 @@ impl Ui {
                 Row::Choice(Field::OverFullscreen),
                 Row::Switch(Switch::TearOff),
             ]),
-            Page::Shown => {
-                rows.push(Row::Choice(Field::Columns));
+            (Page::Monitor, tab) => {
+                rows.push(Row::Tabs);
+                self.monitor_rows(&mut rows, tab);
+            }
+            (Page::Music, _) => {
+                rows.extend(super::prefs::items("lyrics").iter().map(|item| Row::Element(item.name)));
+                rows.push(Row::Note(pick(
+                    self.lang,
+                    "查找歌词时会把歌名发给网易云音乐或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
+                    "To find lyrics the track's title is sent to NetEase Cloud Music or LRCLIB; a track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
+                )));
+            }
+            (Page::General, _) => {
+                rows.push(Row::Choice(Field::Language));
+                rows.push(Row::Group(pick(self.lang, "手机互联", "Phone")));
+                self.remote_rows(&mut rows);
+                rows.push(Row::Group(pick(self.lang, "系统", "System")));
+                // The switches together, then the buttons.
+                rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::Updates), Row::Version]);
+                if update::available().is_some() {
+                    rows.push(Row::Update);
+                }
+                rows.push(Row::Diagnostics);
+                if self.uninstaller.is_some() {
+                    rows.push(Row::Uninstall);
+                }
+                rows.push(Row::Quit);
+            }
+        }
+        rows
+    }
+
+    /// The rows of the monitor's tab `tab`, after the tabs.
+    fn monitor_rows(&self, rows: &mut Vec<Row>, tab: Tab) {
+        match tab {
+            Tab::Look => rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Columns)]),
+            Tab::Shown => {
                 let module = |rows: &mut Vec<Row>, id: &str| {
                     rows.push(Row::Module(id.to_string()));
                     // A card's rows, while it is open or still closing.
@@ -1250,18 +1356,18 @@ impl Ui {
                 let (folded, listed): (Vec<&prefs::ModuleEntry>, Vec<&prefs::ModuleEntry>) =
                     self.prefs.modules.iter().filter(|entry| prefs::offered(&entry.id)).partition(|entry| self.folded(&entry.id));
                 for entry in listed {
-                    module(&mut rows, &entry.id);
+                    module(rows, &entry.id);
                 }
                 if !folded.is_empty() {
                     rows.push(Row::More(folded.len()));
                     if self.more_open {
                         for entry in folded {
-                            module(&mut rows, &entry.id);
+                            module(rows, &entry.id);
                         }
                     }
                 }
             }
-            Page::Overlay => {
+            Tab::Overlay => {
                 rows.extend([
                     Row::Switch(Switch::Overlay),
                     Row::Switch(Switch::OverlayInGame),
@@ -1282,55 +1388,53 @@ impl Ui {
                     }
                 }
             }
-            Page::Data => rows.extend([
+            Tab::Data => rows.extend([
                 Row::Choice(Field::Interval),
                 Row::Choice(Field::Span),
                 Row::Choice(Field::LoadAlert),
                 Row::Choice(Field::TempAlert),
                 Row::Switch(Switch::HeatAlert),
             ]),
-            Page::Remote => {
-                rows.push(Row::Switch(Switch::Remote));
-                if self.remote {
-                    rows.push(Row::Switch(Switch::RemoteLights));
-                    rows.push(Row::Switch(Switch::RemoteScreens));
-                    // A code shows under the row that asked for it.
-                    let shown = self.code.as_ref().map(|(_, what)| *what);
-                    rows.push(Row::GetApp);
-                    if shown == Some(CodeFor::App) {
-                        rows.push(Row::Code);
-                    }
-                    rows.push(Row::Pair);
-                    if matches!(shown, Some(CodeFor::Pairing | CodeFor::WebPairing)) {
-                        rows.push(Row::Code);
-                    }
-                    if self.web_address.is_some() {
-                        rows.push(Row::WebPage);
-                        if shown == Some(CodeFor::WebPage) {
-                            rows.push(Row::Code);
-                        }
-                    }
-                    // The phones paired, a group of their own.
-                    if !self.phones.is_empty() {
-                        rows.push(Row::Group(pick(self.lang, "已配对的手机", "Phones paired")));
-                        rows.extend(self.phones.iter().enumerate().map(|(at, phone)| Row::Phone(at, phone.name.clone())));
-                    }
-                }
-            }
-            Page::System => {
-                // The switches together, then the buttons.
-                rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::Updates), Row::Version]);
-                if update::available().is_some() {
-                    rows.push(Row::Update);
-                }
-                rows.push(Row::Diagnostics);
-                if self.uninstaller.is_some() {
-                    rows.push(Row::Uninstall);
-                }
-                rows.push(Row::Quit);
-            }
         }
-        rows
+    }
+
+    /// The phone's rows: the remote on or off, and while it is, what it does and the phones paired with it.
+    fn remote_rows(&self, rows: &mut Vec<Row>) {
+        rows.push(Row::Switch(Switch::Remote));
+        if self.remote {
+            rows.push(Row::Switch(Switch::RemoteLights));
+            rows.push(Row::Switch(Switch::RemoteScreens));
+            // A code shows under the row that asked for it.
+            let shown = self.code.as_ref().map(|(_, what)| *what);
+            rows.push(Row::GetApp);
+            if shown == Some(CodeFor::App) {
+                rows.push(Row::Code);
+            }
+            rows.push(Row::Pair);
+            if matches!(shown, Some(CodeFor::Pairing | CodeFor::WebPairing)) {
+                rows.push(Row::Code);
+            }
+            if self.web_address.is_some() {
+                rows.push(Row::WebPage);
+                if shown == Some(CodeFor::WebPage) {
+                    rows.push(Row::Code);
+                }
+            }
+            // The phones paired, each a row.
+            rows.extend(self.phones.iter().enumerate().map(|(at, phone)| Row::Phone(at, phone.name.clone())));
+        }
+    }
+
+    /// Shows the monitor's tab `tab`, from its top.
+    fn turn_tab(&mut self, tab: Tab) {
+        if tab != self.tab {
+            self.tab = tab;
+            self.scroll = 0.0;
+            self.scroll_target = 0.0;
+            self.drag = None;
+            self.raise_more();
+        }
+        self.next_frame = Instant::now();
     }
 
     /// Shows page `page`, from its top.
@@ -1382,6 +1486,8 @@ impl Ui {
             // first row of a group sits 8 under its heading, the rest 4 apart.
             let (before, height) = match &row {
                 Row::Title => (0.0, TITLE),
+                Row::Tabs => (0.0, TABS_ROW),
+                Row::Note(words) => (12.0, self.gfx.wrapped_height(words, Font::new(Family::Segoe, 12.0, 400.0), PANE - 2.0 * PAD_SIDE - GUTTER - 8.0) + 8.0),
                 Row::Slider(_) => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
                 Row::Screens => (if after_heading { 8.0 } else { ROW_GAP }, self.map_head() + self.map().2 + 2.0 * MAP_WELL + ROW_SIDE),
@@ -1549,8 +1655,8 @@ impl Ui {
             self.screens.iter().find(|screen| screen.monitor == here).map(|screen| screen.id.clone())
         };
         let chosen = match self.page {
-            Page::Opening => self.map_screen.clone().filter(|id| self.screens.iter().any(|screen| screen.id == *id)),
-            Page::Overlay => self.settings.overlay.screen.and_then(|(x, y)| at(POINT { x, y })),
+            Page::Layout => self.map_screen.clone().filter(|id| self.screens.iter().any(|screen| screen.id == *id)),
+            Page::Monitor if self.tab == Tab::Overlay => self.settings.overlay.screen.and_then(|(x, y)| at(POINT { x, y })),
             _ => None,
         };
         chosen.or_else(|| {
@@ -1566,7 +1672,7 @@ impl Ui {
     /// set otherwise, where none does).
     fn preview_edge(&self) -> Edge {
         let lit = self.stage.screen.as_deref().map(|screen| self.edges_of(screen).any()).unwrap_or_default();
-        let chosen = self.shown_edge.filter(|edge| self.page == Page::Opening && lit.has(*edge));
+        let chosen = self.shown_edge.filter(|edge| self.page == Page::Layout && lit.has(*edge));
         chosen.or(lit.each().next()).unwrap_or(self.settings.edge)
     }
 
@@ -1617,6 +1723,10 @@ impl Ui {
                 let room = if self.stacked(&options) { width - 2.0 * ROW_SIDE } else { width - 2.0 * ROW_SIDE - self.segmented_width(&options) - 16.0 };
                 (Cow::Borrowed(word), room)
             }
+            Row::Element(name) => match self.item_label("lyrics", name).1 {
+                Some(word) => (Cow::Borrowed(word), width - 2.0 * ROW_SIDE - 40.0 - 16.0),
+                None => return 0.0,
+            },
             Row::Item(id, name) => match self.item_label(id, name).1 {
                 Some(word) => (Cow::Borrowed(word), width - ROW_SIDE - CHEVRON_ROOM - 40.0 - 12.0 - ITEM_INSET),
                 None => return 0.0,
@@ -2092,7 +2202,7 @@ impl Ui {
                 } else {
                     p("此版本的 Glance 未附带遥控程序", "This copy of Glance came without the remote")
                 };
-                return (p("手机遥控", "Phone remote"), Some(Cow::Borrowed(hint)), self.remote);
+                return (p("开启手机互联", "Use the phone"), Some(Cow::Borrowed(hint)), self.remote);
             }
             // The version this is, where the user looks for a newer one.
             Switch::Updates => {
@@ -2247,7 +2357,7 @@ impl Ui {
             // looking like a switch that does nothing.
             "board" if crate::app().controller.seen.lock().unwrap().board.is_none() => (
                 p("主板", "Motherboard"),
-                Some(p("没有读到这块主板的传感器，原因见“系统”页的诊断信息", "This board's sensors were not read; the diagnostics on the System page say why")),
+                Some(p("没有读到这块主板的传感器，原因见“通用”页的诊断信息", "This board's sensors were not read; the diagnostics on the General page say why")),
             ),
             "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
             "battery" => (p("电池", "Battery"), Some(p("笔记本电脑", "Laptops"))),
@@ -2478,7 +2588,7 @@ impl Ui {
 
     fn press(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
-        if self.page == Page::Remote && self.press_phone(x, y) {
+        if self.page == Page::General && self.press_phone(x, y) {
             return;
         }
         self.pressed = self.hovered();
@@ -2589,7 +2699,13 @@ impl Ui {
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
             Target::ClearShortcut => self.clear_shortcut(),
-            Target::Page(page) => self.turn_to(page),
+            Target::Nav(item) => self.turn_to(item.page()),
+            Target::Tab(tab) => self.turn_tab(tab),
+            Target::Element(name) => {
+                let on = self.item_on("lyrics", name);
+                self.prefs.set_item("lyrics", name, !on);
+                self.save();
+            }
             Target::CheckNow => update::check_now(update::Asker::Settings),
             Target::Module(id) => {
                 let (list, bare) = self.list(&id);
@@ -2669,7 +2785,7 @@ impl Ui {
     /// Every focus stop, in the order the list shows them (scrolled out of
     /// view or not).
     fn stops(&self) -> Vec<Target> {
-        let pages = PAGES.iter().map(|page| Target::Page(*page));
+        let pages = NAV_ITEMS.iter().filter(|item| **item != NavItem::Components).map(|item| Target::Nav(*item));
         pages.chain(self.layout().into_iter()
             .flat_map(|(row, ..)| match row {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
@@ -2710,7 +2826,9 @@ impl Ui {
                 Row::Phone(at, _) => vec![Target::Unpair(at)],
                 Row::Code | Row::Group(_) => vec![],
                 Row::More(_) => vec![Target::More],
-                Row::Title => vec![],
+                Row::Tabs => TABS.iter().map(|tab| Target::Tab(*tab)).collect(),
+                Row::Element(name) => vec![Target::Element(name)],
+                Row::Title | Row::Note(_) => vec![],
             }))
             .collect()
     }
@@ -2845,6 +2963,8 @@ impl Ui {
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
+            (Row::Element(a), Target::Element(b)) => a == b,
+            (Row::Tabs, Target::Tab(_)) => true,
             (Row::Slider(f), Target::Slider(g)) => f == g,
             (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,
             (Row::Item(m, a), Target::Item(n, b)) => m == n && a == b,
@@ -2865,7 +2985,7 @@ impl Ui {
     fn wheel(&mut self, delta: i16) {
         let Some((x, y)) = self.pointer else { return };
         // Over the phone's screen, its page is what moves.
-        if let Some((_, k)) = self.phone.at.filter(|(at, _)| self.page == Page::Remote && x >= at.x && x < at.x + at.w && y >= at.y && y < at.y + at.h) {
+        if let Some((_, k)) = self.phone.at.filter(|(at, _)| self.page == Page::General && x >= at.x && x < at.x + at.w && y >= at.y && y < at.y + at.h) {
             self.phone.scroll = (self.phone.scroll - delta as f32 / 120.0 * WHEEL / k).clamp(0.0, self.phone.most);
             self.next_frame = Instant::now();
             return;
@@ -3093,11 +3213,12 @@ impl Ui {
         let title = Font::new(Family::SegoeDisplay, 20.0, 600.0);
         text_centred(frame, pick(lang, "设置", "Settings"), title, palette.text, left + 8.0, PAD_TOP + 18.0, width, Align::Start);
         let label = Font::new(Family::Segoe, 14.0, 400.0);
-        let icon = Font::new(Family::Icons, 16.0, 400.0);
-        for (i, page) in PAGES.into_iter().enumerate() {
-            let r = Rect { x: left, y: PAD_TOP + 52.0 + i as f32 * (NAV_ITEM + 4.0), w: width, h: NAV_ITEM };
-            let target = Target::Page(page);
-            let (shown, hover) = (page == self.page, hovered.as_ref() == Some(&target));
+        for (i, item) in NAV_ITEMS.into_iter().enumerate() {
+            // The components' own pages set in under their heading.
+            let indent = if item.under() { NAV_INDENT } else { 0.0 };
+            let r = Rect { x: left + indent, y: PAD_TOP + 52.0 + i as f32 * (NAV_ITEM + 4.0), w: width - indent, h: NAV_ITEM };
+            let target = Target::Nav(item);
+            let (shown, hover) = (item == NavItem::Page(self.page), hovered.as_ref() == Some(&target));
             if shown || hover {
                 fill(frame, if shown { palette.control } else { palette.hover }, r.x, r.y, r.w, r.h, 6.0);
             }
@@ -3105,10 +3226,10 @@ impl Ui {
                 fill(frame, palette.selection, r.x, r.y + 12.0, 3.0, r.h - 24.0, 1.5);
             }
             let cy = r.y + r.h / 2.0;
-            text_centred(frame, page.glyph(), icon, palette.text, r.x + 14.0, cy, 24.0, Align::Start);
-            text_centred(frame, page.name(lang), label, palette.text, r.x + 46.0, cy, r.w - 50.0, Align::Start);
+            frame.icon(item.icon(), Point { x: r.x + 22.0, y: cy }, 16.0, palette.text);
+            text_centred(frame, item.name(lang), label, palette.text, r.x + 46.0, cy, r.w - 50.0, Align::Start);
             // A newer Glance is out: a dot on the page it is taken from.
-            if page == Page::System && update::available().is_some() {
+            if item == NavItem::Page(Page::General) && update::available().is_some() {
                 fill(frame, palette.selection, r.x + r.w - 20.0, cy - 3.0, 6.0, 6.0, 3.0);
             }
             self.targets.push((r, target));
@@ -3187,7 +3308,7 @@ impl Ui {
             self.next_frame = now + Duration::from_millis(300);
         }
         // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered appears, and its code goes.
-        if self.page == Page::Remote && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
+        if self.page == Page::General && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
             let phones = crate::phone::phones();
             if phones.len() > self.phones.len() && self.code.as_ref().is_some_and(|(_, what)| matches!(what, CodeFor::Pairing | CodeFor::WebPairing)) {
                 self.code = None;
@@ -3242,6 +3363,42 @@ impl Ui {
                     let title = Font::new(Family::SegoeDisplay, 28.0, 600.0);
                     text_centred(frame, self.page.name(lang), title, palette.text, left, y + 22.0, width, Align::Start);
                 }
+                // Each tab's name, the one shown marked under it in the accent, over a hairline the width of the list.
+                Row::Tabs => {
+                    let font = |shown: bool| Font::new(Family::Segoe, 14.0, if shown { 600.0 } else { 400.0 });
+                    let base = y + row_height - 8.0;
+                    fill(frame, palette.rule, left, base, width, 1.0, 0.0);
+                    let mut x = left;
+                    for tab in TABS {
+                        let name = tab.name(lang);
+                        let shown = tab == self.tab;
+                        let w = frame.gfx.measure(name, font(true)) + 24.0;
+                        let target = Target::Tab(tab);
+                        let hover = hovered.as_ref() == Some(&target);
+                        let r = Rect { x, y, w, h: row_height - 8.0 };
+                        if hover && !shown {
+                            fill(frame, palette.hover, r.x, r.y + 4.0, r.w, r.h - 8.0, 6.0);
+                        }
+                        text_centred(frame, name, font(shown), if shown { palette.text } else { palette.text2 }, x + 12.0, y + (row_height - 8.0) / 2.0, w - 12.0, Align::Start);
+                        if shown {
+                            fill(frame, palette.selection, x + 12.0, base - 2.0, w - 24.0, 3.0, 1.5);
+                        }
+                        self.targets.push((r, target));
+                        x += w;
+                    }
+                }
+                Row::Element(name) => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let (title, word) = self.item_label("lyrics", name);
+                    let on = self.item_on("lyrics", name);
+                    let switch_left = left + width - ROW_SIDE - 40.0;
+                    field_label(frame, palette, &title, word, label, hint, left + ROW_SIDE, y + row_height / 2.0, switch_left - 16.0 - left - ROW_SIDE);
+                    let target = Target::Element(name);
+                    let pressed = self.pressed == Some(target.clone());
+                    self.toggle(frame, palette, format!("element:{name}"), on, true, switch_left, y + row_height / 2.0, now, pressed);
+                    self.targets.push((Rect { x: left, y, w: width, h: row_height }, target));
+                }
+                Row::Note(words) => frame.text_wrapped(words, hint, palette.text2, left + 4.0, y + 4.0, width - 8.0),
                 Row::Slider(field) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, min, max, _, value) = self.slider(field);
@@ -3542,12 +3699,9 @@ impl Ui {
         card(frame, palette, left, y, width, height, palette.card);
         let cy = y + height / 2.0;
         let turn = self.animate("chevron:more".into(), if self.more_open { 180.0 } else { 0.0 }, SLIDE, now, false);
-        let chevron = Font::new(Family::Icons, 12.0, 400.0);
-        let glyph = "\u{E70D}";
-        let glyph_w = frame.gfx.measure(glyph, chevron);
         let cx = left + width - ROW_SIDE - 6.0;
         frame.place(Matrix3x2::rotation_around(turn, Vector2 { X: cx, Y: cy }));
-        text_centred(frame, glyph, chevron, palette.text2, cx - glyph_w / 2.0, cy, glyph_w + 4.0, Align::Start);
+        frame.icon(Icon::ChevronDown, Point { x: cx, y: cy }, CHEVRON, palette.text2);
         frame.origin(0.0, 0.0);
         let names: Vec<String> = self.prefs.modules.iter().filter(|entry| self.folded(&entry.id) && prefs::offered(&entry.id)).map(|entry| self.module(&entry.id).0).collect();
         let title = if self.lang == Lang::Zh { format!("更多模块（{count}）") } else { format!("More modules ({count})") };
@@ -3594,12 +3748,9 @@ impl Ui {
         let switch_left = left + width - ROW_SIDE - CHEVRON_ROOM - 40.0;
         if opens {
             let turn = self.animate(format!("chevron:{id}"), if open { 180.0 } else { 0.0 }, SLIDE, now, false);
-            let chevron = Font::new(Family::Icons, 12.0, 400.0);
-            let glyph = "\u{E70D}";
-            let glyph_w = frame.gfx.measure(glyph, chevron);
             let cx = left + width - ROW_SIDE - 6.0;
             frame.place(Matrix3x2::rotation_around(turn, Vector2 { X: cx, Y: cy }));
-            text_centred(frame, glyph, chevron, palette.text2, cx - glyph_w / 2.0, cy, glyph_w + 4.0, Align::Start);
+            frame.icon(Icon::ChevronDown, Point { x: cx, y: cy }, CHEVRON, palette.text2);
             frame.origin(0.0, 0.0);
         }
         field_label_line(frame, palette, &title, detail.as_deref(), label, hint, text_left, cy, switch_left - 12.0 - text_left);
@@ -4029,6 +4180,32 @@ impl Ui {
         unsafe { frame.dc.PopAxisAlignedClip() };
     }
 
+    /// What plays, as a music widget shows it with the elements chosen, over the desktop (the whole of it the room
+    /// holds): as large as the room allows up to a widget's size that shows every element there is. Returns how soon
+    /// it is to be drawn again (as the preview's charts' speed: see `paint`), while something plays.
+    fn paint_music_preview(&mut self, frame: &Frame, area: Rect) -> Option<f32> {
+        let (sw, sh) = self.stage.size;
+        let k = (area.w / sw).max(area.h / sh);
+        let (ox, oy) = (area.x + (area.w - sw * k) / 2.0, area.y + (area.h - sh * k) / 2.0);
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != 1.0f32.to_bits()) {
+            self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, 1.0).ok()).map(|b| (1.0f32.to_bits(), b));
+        }
+        if let Some((_, bitmap)) = &self.stage.bitmap {
+            unsafe { frame.dc.DrawBitmap(bitmap, Some(&rect(ox, oy, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+        }
+        let shows = super::music::Shows::from(&self.settings.view);
+        let size = (MUSIC_PREVIEW.0.min(area.w - 2.0 * MUSIC_PREVIEW_ROOM), MUSIC_PREVIEW.1.min(area.h - 2.0 * MUSIC_PREVIEW_ROOM));
+        let size = super::music::rests_at(size, &shows);
+        let at = (area.x + (area.w - size.0) / 2.0, area.y + (area.h - size.1) / 2.0);
+        let pointer = self.pointer.map(|(x, y)| (x - at.0, y - at.1)).filter(|(x, y)| *x >= 0.0 && *y >= 0.0 && *x < size.0 && *y < size.1);
+        frame.origin(at.0, at.1);
+        let painted = self.music.paint(frame, size, &shows, super::music::Ground::of(&shows), self.scale, pointer, Instant::now());
+        frame.origin(0.0, 0.0);
+        unsafe { frame.dc.PopAxisAlignedClip() };
+        painted.busy.then_some(MUSIC_PREVIEW_PACE)
+    }
+
     /// The preview: the panel as it will look over the desktop, running live.
     fn paint_preview(&mut self, frame: &Frame, palette: &Palette, width: f32, height: f32) -> Option<f32> {
         let lang = self.lang;
@@ -4036,7 +4213,11 @@ impl Ui {
         let head = Font::new(Family::SegoeDisplay, 20.0, 600.0);
         let title = pick(lang, "预览", "Preview");
         text_centred(frame, title, head, palette.text, x0, PAD_TOP + 18.0, 200.0, Align::Start);
-        let detail = if self.page == Page::Remote { pick(lang, "手机上的 Glance", "Glance on the phone") } else { pick(lang, "实时数据，桌面为当前壁纸", "Live readings over your wallpaper") };
+        let detail = match self.page {
+            Page::General => pick(lang, "手机上的 Glance", "Glance on the phone"),
+            Page::Music => pick(lang, "正在播放的内容，桌面为当前壁纸", "What plays now, over your wallpaper"),
+            _ => pick(lang, "实时数据，桌面为当前壁纸", "Live readings over your wallpaper"),
+        };
         let title_w = frame.gfx.measure(title, head);
         text_centred(frame, detail, Font::new(Family::Segoe, 12.0, 400.0), palette.text2, x0 + title_w + 12.0, PAD_TOP + 20.0, 400.0, Align::Start);
         let area = Rect { x: x0, y: PAD_TOP + 40.0, w: width - NAV - PANE - 2.0 * PAD_SIDE, h: height - PAD_TOP - 40.0 - PAD_TOP };
@@ -4046,12 +4227,15 @@ impl Ui {
         fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
         stroke_inside(frame, area, 8.0, palette.card_stroke);
 
-        if self.page == Page::Overlay {
+        if self.page == Page::Monitor && self.tab == Tab::Overlay {
             self.paint_overlay_preview(frame, area);
             return None;
         }
-        // The phone remote's page: the app as a phone shows it, in a phone's outline.
-        if self.page == Page::Remote {
+        if self.page == Page::Music {
+            return self.paint_music_preview(frame, area);
+        }
+        // The general page: the phone app as a phone shows it, in a phone's outline.
+        if self.page == Page::General {
             // (Its fans turn: drawn again some thirty times a second while they do.)
             return self.paint_phone(frame, area).then_some(7.5);
         }
