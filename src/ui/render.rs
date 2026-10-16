@@ -61,7 +61,7 @@ pub struct PanelLayers {
 impl PanelLayers {
     /// Draws what the skin puts behind the panel's readings (see `draw`);
     /// whether any of it was drawn afresh.
-    fn ground(&mut self, frame: &Frame, picture: &Picture, local: Matrix3x2, scale: f32) -> Result<bool> {
+    fn ground(&mut self, frame: &Frame, picture: &Picture, local: Matrix3x2, scale: f32, others: &[Rect]) -> Result<bool> {
         let theme = picture.scene.theme;
         let (width, height) = picture.size;
         let (ax, ay) = picture.at;
@@ -69,8 +69,10 @@ impl PanelLayers {
         // A small layout is one piece; lanes, a piece each and the bar.
         let (boxes, bar) = match picture.small {
             Some(_) => (vec![Rect { x: 0.0, y: 0.0, w: width, h: height }], Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
-            None => (picture.layout.lanes().into_iter().map(shifted).collect(), shifted(picture.layout.bar())),
+            None => (picture.layout.lanes().into_iter().map(shifted).collect::<Vec<_>>(), shifted(picture.layout.bar())),
         };
+        // (And the parts of what is merged with it, grounded as its lanes are.)
+        let boxes: Vec<Rect> = boxes.into_iter().chain(others.iter().copied()).collect();
         // What every part of it shows: its shape, as the theme has it.
         let mut shape = DefaultHasher::new();
         (theme.skin, theme.dark, picture.edge, width.to_bits(), height.to_bits()).hash(&mut shape);
@@ -113,18 +115,27 @@ impl PanelLayers {
     /// Draws only what the skin puts behind the readings, for readings
     /// drawn otherwise (as one layout turns into another, see `morph`).
     pub fn draw_ground(&mut self, frame: &Frame, picture: &Picture, local: Matrix3x2, scale: f32) -> Result<bool> {
-        self.ground(frame, picture, local, scale)
+        self.ground(frame, picture, local, scale, &[])
     }
 
     /// Draws the panel with its corner placed by `local` within the frame's
     /// current transform, at `scale` physical pixels per panel DIP.
     pub fn draw(&mut self, frame: &Frame, picture: &Picture, local: Matrix3x2, scale: f32) -> Result<Drawn> {
+        self.draw_on(frame, picture, local, scale, Some(&[]))
+    }
+
+    /// As `draw`, its skin's ground under its readings and under `others` too (the parts of what is merged with it,
+    /// from its corner); or (`None`) on no ground of its own (merged into what has its own).
+    pub fn draw_on(&mut self, frame: &Frame, picture: &Picture, local: Matrix3x2, scale: f32, others: Option<&[Rect]>) -> Result<Drawn> {
         let (scene, layout) = (picture.scene, picture.layout);
         let theme = scene.theme;
         let (ax, ay) = picture.at;
         // What each layer shows: when none of it changed, the one drawn for
         // an earlier frame serves again.
-        let grounded = self.ground(frame, picture, local, scale)?;
+        let grounded = match others {
+            Some(others) => self.ground(frame, picture, local, scale, others)?,
+            None => false,
+        };
         // The readings' own: not the desktop behind them, which moves under
         // a widget moved over it while the readings stay as they were.
         let mut key = DefaultHasher::new();

@@ -35,6 +35,9 @@ pub enum Layout {
     Card,
     /// The card stood on end: the cover above, what plays under it, then the lines.
     Tall,
+    /// Wide and tall: the cover on a record turning as it plays at the start, what plays and the lines beside it, and
+    /// along the bottom the spectrum over the controls, both kept showing.
+    Stage,
 }
 
 impl Layout {
@@ -48,6 +51,8 @@ impl Layout {
                 Layout::Strip
             } else if !shows.lines || h < CARD_FROM + more + slack {
                 Layout::Player
+            } else if shows.cover && w >= STAGE_FROM + slack && h >= CARD_FROM + slack {
+                Layout::Stage
             } else if w >= TALL_UNDER + slack {
                 Layout::Card
             } else {
@@ -68,6 +73,7 @@ impl Layout {
             Layout::Player => "player",
             Layout::Card => "card",
             Layout::Tall => "tall",
+            Layout::Stage => "stage",
         }
     }
 }
@@ -78,6 +84,8 @@ const PLAYER_FROM: f32 = 120.0;
 const STRIP_UNDER: f32 = 230.0;
 const CARD_FROM: f32 = 250.0;
 const TALL_UNDER: f32 = 360.0;
+/// The stage from this wide (and as tall as a card).
+const STAGE_FROM: f32 = 600.0;
 /// How far past where the next layout begins a room keeps the one it has (DIPs).
 const HOLD: f32 = 12.0;
 /// The least a music widget is (DIPs).
@@ -116,6 +124,22 @@ impl Shows {
     }
 }
 
+/// What it is drawn on: its own ground (the cover blurred), none (its words edged, to be read on whatever is behind),
+/// or the ground of the widget it is merged into (that one's look: its words in that ground's ink, dark or light).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Ground {
+    Own,
+    Clear,
+    Host { dark: bool },
+}
+
+impl Ground {
+    /// As a standalone music widget is drawn, its switches say.
+    pub fn of(shows: &Shows) -> Ground {
+        if shows.clear { Ground::Clear } else { Ground::Own }
+    }
+}
+
 /// The words: the line sung now in the card's lines, the others, the translation under it, what plays.
 const NOW_FONT: Font = Font::new(Family::Segoe, 25.0, 700.0);
 const UNDER_FONT: Font = Font::new(Family::Segoe, 14.0, 500.0);
@@ -136,12 +160,18 @@ const FLOAT_UNDER: f32 = 0.5;
 const CONTROL: f32 = 28.0;
 const CONTROL_FONT: Font = Font::new(Family::Icons, 14.0, 400.0);
 /// The spectrum's row of its own, under kept controls, and the room between rows (DIPs).
-const SPECTRUM_ROW: f32 = 18.0;
+const SPECTRUM_ROW: f32 = 24.0;
 const ROW_GAP: f32 = 6.0;
 /// How fast a band of the spectrum falls, at most (of its whole height, a second): from full, in about 0.6 s.
 const SPECTRUM_FALL: f32 = 1.7;
 /// How long the controls take to come in over the spectrum (or go), seconds.
 const CONTROLS_FADE: f32 = 0.18;
+/// How long it takes to turn from one layout into the next (as long as a widget of readings takes).
+const TURN: Duration = Duration::from_millis(260);
+/// How long the record takes to turn once (seconds).
+const RECORD_TURN: f32 = 24.0;
+/// The stage's rows along the bottom: the spectrum's (DIPs).
+const STAGE_SPECTRUM: f32 = 40.0;
 /// How long a line turned to by the wheel is held before the lines go back to the one sung now.
 const TURNED_HOLD: Duration = Duration::from_secs(3);
 /// How far the wheel turns for a line (its notch is 120).
@@ -175,6 +205,12 @@ pub struct Music {
     controls_in: f32,
     /// Its spectrum as shown: up at once with the sound, down no faster than `SPECTRUM_FALL`.
     bands: [f32; crate::sound::BANDS],
+    /// How far the record has turned (degrees).
+    turned_by: f32,
+    /// Laid out anew (another layout, or what it shows switched): since when, and where its parts were (they move
+    /// from there to where they go, what else it shows coming in, over `TURN`); what it showed last.
+    turning: Option<(Instant, Placed)>,
+    shown: Option<(Layout, Shows)>,
     /// Lines turned by the wheel from the one sung now, when last turned, and the turn not yet a line.
     turned: i32,
     turned_at: Instant,
@@ -203,6 +239,9 @@ impl Default for Music {
             ground: Layer::default(),
             controls_in: 0.0,
             bands: [0.0; crate::sound::BANDS],
+            turned_by: 0.0,
+            turning: None,
+            shown: None,
             turned: 0,
             turned_at: Instant::now(),
             wheeled: 0.0,
@@ -299,13 +338,14 @@ impl Music {
 
     /// Draws it in `size` (DIPs, from the frame's origin), showing `shows`, at `scale` physical pixels a DIP, the
     /// pointer at `pointer` (DIPs, from its corner) while it is over it.
-    pub fn paint(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, scale: f32, pointer: Option<(f32, f32)>, now: Instant) -> Painted {
-        self.paint_moment(frame, size, shows, scale, pointer, now, moment())
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant) -> Painted {
+        self.paint_moment(frame, size, shows, ground, scale, pointer, now, moment())
     }
 
     /// As `paint`, what plays as `moment` says.
     #[allow(clippy::too_many_arguments)]
-    fn paint_moment(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, scale: f32, pointer: Option<(f32, f32)>, now: Instant, mut moment: Moment) -> Painted {
+    fn paint_moment(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, mut moment: Moment) -> Painted {
         let step = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
         // The colours, toward the cover's (a little each frame).
@@ -352,20 +392,50 @@ impl Music {
         }
         moment.sound.bands = self.bands;
         let falling = !moment.playing && self.bands.iter().any(|&band| band > 0.0);
+        if moment.playing {
+            self.turned_by = (self.turned_by + step * 360.0 / RECORD_TURN) % 360.0;
+        }
         let layout = Layout::for_room(size, shows, self.layout);
         if self.layout != Some(layout) {
             crate::journal::note(format!("music widget: {}", layout.key()));
             self.layout = Some(layout);
         }
-        let mut drawing = Drawing { music: self, frame, moment: &moment, shows, scale, pointer, size, hits: Vec::new() };
+        // Laid out anew: its parts move from where they were, from where they had got to if they were moving still.
+        if let Some((was, showed)) = self.shown.filter(|shown| *shown != (layout, *shows)) {
+            let from = match self.turning.and_then(|(since, from)| turned(now, since).map(|t| (from, t))) {
+                Some((from, t)) => tween(from, placed(was, size, &showed), t),
+                None => placed(was, size, &showed),
+            };
+            self.turning = Some((now, from));
+        }
+        self.shown = Some((layout, *shows));
+        let turn = self.turning.and_then(|(since, from)| turned(now, since).map(|t| (from, t)));
+        if turn.is_none() {
+            self.turning = None;
+        }
+        // On a light ground, its colours deepened to be read on it, and its words dark.
+        let light = ground == Ground::Host { dark: false };
+        let (tint, accent) = if light { (deep(self.tint), deep(self.accent)) } else { (self.tint, self.accent) };
+        let ink = if light { 0x1A1A1A } else { 0xFFFFFF };
+        let mut drawing = Drawing { music: self, frame, moment: &moment, shows, ground, ink, edged: ground == Ground::Clear, light, tint, accent, scale, pointer, size, turn, hits: Vec::new() };
         drawing.ground(layout);
+        // Turning into this layout: what is not on its ground comes in as its parts move.
+        if let Some((_, t)) = turn {
+            let everything = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+            let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: t, ..Default::default() };
+            unsafe { frame.dc.PushLayer(&layer, None) };
+        }
         match layout {
             Layout::Strip => drawing.strip(),
             Layout::Player => drawing.player(),
             Layout::Card | Layout::Tall => drawing.card(layout),
+            Layout::Stage => drawing.stage(),
+        }
+        if turn.is_some() {
+            unsafe { frame.dc.PopLayer() };
         }
         let hits = drawing.hits;
-        Painted { hits, busy: moment.playing || settling || coming || falling || self.fading.is_some() || self.turned != 0 || moment.dragged_to.is_some() }
+        Painted { hits, busy: moment.playing || settling || coming || falling || self.fading.is_some() || self.turned != 0 || moment.dragged_to.is_some() || turn.is_some() }
     }
 }
 
@@ -375,11 +445,64 @@ struct Drawing<'a> {
     frame: &'a Frame<'a>,
     moment: &'a Moment,
     shows: &'a Shows,
+    ground: Ground,
+    /// Its words' colour (white, or dark on a light ground), whether they are edged (no ground), whether the ground
+    /// is light, and the cover's colours as they are drawn on it.
+    ink: u32,
+    edged: bool,
+    light: bool,
+    tint: [f32; 3],
+    accent: [f32; 3],
     scale: f32,
     pointer: Option<(f32, f32)>,
     size: (f32, f32),
+    /// Turning from another layout: where its parts were, and how far they have come (0 to 1, eased).
+    turn: Option<(Placed, f32)>,
     hits: Vec<HitBox>,
 }
+
+/// How far a turn begun at `since` has come by `now` (0 to 1, eased); none once it is over.
+fn turned(now: Instant, since: Instant) -> Option<f32> {
+    let t = now.saturating_duration_since(since).as_secs_f32() / TURN.as_secs_f32();
+    (t < 1.0).then(|| super::morph::ease(t))
+}
+
+/// Its parts `t` of the way from where they were (`from`) to where they go (`to`): each there is in both moved, the
+/// others where they go.
+fn tween(from: Placed, to: Placed, t: f32) -> Placed {
+    let at = |a: f32, b: f32| a + (b - a) * t;
+    Placed {
+        cover: match (from.cover, to.cover) {
+            (Some(a), Some(b)) => Some((at(a.0, b.0), at(a.1, b.1), at(a.2, b.2))),
+            (_, b) => b,
+        },
+        title: match (from.title, to.title) {
+            (Some(a), Some(b)) => Some((at(a.0, b.0), at(a.1, b.1), at(a.2, b.2), b.3)),
+            (_, b) => b,
+        },
+        below: at(from.below, to.below),
+        left: at(from.left, to.left),
+        width: at(from.width, to.width),
+    }
+}
+
+/// The stage's record: its middle and how wide it is, in a room `w` × `h` (as tall as the room above the rows along
+/// the bottom, no wider than two fifths of it).
+fn stage_record((w, h): (f32, f32)) -> ((f32, f32), f32) {
+    let pad = pad(Layout::Stage);
+    let above = h - 2.0 * pad - CONTROL - ROW_GAP - STAGE_SPECTRUM - 14.0;
+    let side = above.min(w * 0.4).max(0.0);
+    ((pad + side / 2.0, pad + side / 2.0), side)
+}
+
+/// How tall the rows along the bottom are (DIPs): the controls' (or the spectrum's, the controls coming over it), and
+/// with the controls kept, the spectrum's over them.
+fn rows_tall(shows: &Shows) -> f32 {
+    CONTROL + if shows.controls && shows.spectrum { ROW_GAP + SPECTRUM_ROW } else { 0.0 }
+}
+
+/// How much room the player's words have (DIPs) from which it shows the lines round the one sung now.
+const PLAYER_LINES_FROM: f32 = 96.0;
 
 /// Each layout's room inside its edge, and the corners of its ground (DIPs).
 fn pad(layout: Layout) -> f32 {
@@ -387,6 +510,7 @@ fn pad(layout: Layout) -> f32 {
         Layout::Strip => 10.0,
         Layout::Player => 18.0,
         Layout::Card | Layout::Tall => 22.0,
+        Layout::Stage => 30.0,
     }
 }
 const RADIUS: f32 = 14.0;
@@ -395,6 +519,7 @@ const CARD_COVER: f32 = 64.0;
 
 /// Where its parts go, as `layout` lays them out in `size` showing `shows`: the cover (its corner and side), what
 /// plays (its corner, how wide, centred or not), and where the rest begins below them.
+#[derive(Clone, Copy)]
 struct Placed {
     cover: Option<(f32, f32, f32)>,
     title: Option<(f32, f32, f32, bool)>,
@@ -413,8 +538,9 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             let left = if shows.cover { pad + side + 12.0 } else { pad + 4.0 };
             Placed { cover, title: None, below: 0.0, left, width: (w - pad - left).max(0.0) }
         }
+        // The cover as tall as the room above the rows along the bottom (which go all across), no wider than a third.
         Layout::Player => {
-            let side = (h - 2.0 * pad).min(w * 0.36).max(0.0);
+            let side = (h - 2.0 * pad - rows_tall(shows) - 10.0).min(w * 0.36).max(0.0);
             let cover = shows.cover.then_some((pad, pad, side));
             let left = if shows.cover { pad + side + 16.0 } else { pad };
             let width = (w - left - pad).max(0.0);
@@ -427,6 +553,14 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             let title = shows.title.then_some((tx, pad + if shows.cover { 12.0 } else { 0.0 }, (w - tx - pad).max(0.0), false));
             let below = pad + if shows.cover { CARD_COVER + 12.0 } else if shows.title { 44.0 } else { 0.0 };
             Placed { cover, title, below, left: pad, width: (w - 2.0 * pad).max(0.0) }
+        }
+        // The record drawn as it turns (not on the ground); what plays at the top of the column beside it.
+        Layout::Stage => {
+            let (_, side) = stage_record((w, h));
+            let left = pad + side + 40.0;
+            let width = (w - left - pad).max(0.0);
+            let title = shows.title.then_some((left, pad + 6.0, width, false));
+            Placed { cover: None, title, below: pad + if shows.title { 58.0 } else { 0.0 }, left, width }
         }
         Layout::Tall => {
             let wide = (w - 2.0 * pad).max(0.0);
@@ -443,6 +577,15 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
 }
 
 impl Drawing<'_> {
+    /// Where its parts are, `layout` laying them out: on their way there while it turns.
+    fn placed(&self, layout: Layout) -> Placed {
+        let to = placed(layout, self.size, self.shows);
+        match self.turn {
+            Some((from, t)) => tween(from, to, t),
+            None => to,
+        }
+    }
+
     /// Its ground (the cover blurred under a wash of its colour, inside its rounded corners, with a shadow; none,
     /// clear), the cover and what plays: kept, drawn again only as one of them changes.
     fn ground(&mut self, layout: Layout) {
@@ -458,20 +601,20 @@ impl Drawing<'_> {
         }
         let backdrop = self.music.backdrop.as_ref().map(|(key, bitmap)| (*key, bitmap.clone()));
         let (accent, tint) = (self.music.accent, self.music.tint);
-        let shows = *self.shows;
-        let at = placed(layout, self.size, &shows);
+        let (shows, ink, edged, own) = (*self.shows, self.ink, self.edged, self.ground == Ground::Own);
+        let at = self.placed(layout);
         let cover = self.moment.cover.clone();
         let (title, artist) = (self.moment.title.clone(), self.moment.artist.clone());
         let key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (w.to_bits(), h.to_bits(), self.scale.to_bits(), layout, shows, backdrop.as_ref().map(|(key, _)| *key), (shown * 64.0).round() as u32).hash(&mut hasher);
+            (w.to_bits(), h.to_bits(), self.scale.to_bits(), layout, shows, ink, own, self.turn.map(|(_, t)| t.to_bits()), backdrop.as_ref().map(|(key, _)| *key), (shown * 64.0).round() as u32).hash(&mut hasher);
             accent.iter().chain(&tint).map(|v| (v * 255.0).round() as u8).collect::<Vec<_>>().hash(&mut hasher);
             (&title, &artist, cover.as_ref().map(|cover| Arc::as_ptr(cover) as usize)).hash(&mut hasher);
             hasher.finish()
         };
         let radius = RADIUS.min(h / 2.0);
-        let ground = Ground { size: (w, h), radius, backdrop: backdrop.map(|(_, bitmap)| bitmap), before, shown, accent, tint, clear: shows.clear };
+        let ground = Backdrop { size: (w, h), radius, backdrop: backdrop.map(|(_, bitmap)| bitmap), before, shown, accent, tint, own };
         // (Round it, room for its shadow.)
         let room = 24.0;
         let _ = self.music.ground.draw(frame, key, windows_numerics::Matrix3x2::identity(), (-room, -room, w + 2.0 * room, h + 2.0 * room), self.scale, None, |frame| {
@@ -486,11 +629,11 @@ impl Drawing<'_> {
                         }
                         // None (its player gives none, or it is being read): a plate with a note on it.
                         None => {
-                            frame.fill_rounded(Color::hex(0xFFFFFF, if shows.clear { 0.18 } else { 0.08 }), x, y, side, side, corner);
+                            frame.fill_rounded(Color::hex(ink, if edged { 0.18 } else { 0.08 }), x, y, side, side, corner);
                             let note = Font::new(Family::Icons, side * 0.38, 400.0);
                             let (ink_top, ink_bottom) = frame.ink("\u{E8D6}", note);
                             let wide = frame.measure("\u{E8D6}", note);
-                            frame.text("\u{E8D6}", note, Color::hex(0xFFFFFF, 0.5), x + (side - wide) / 2.0, y + side / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0, Align::Start);
+                            frame.text("\u{E8D6}", note, Color::hex(ink, 0.5), x + (side - wide) / 2.0, y + side / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0, Align::Start);
                         }
                     }
                 }
@@ -498,7 +641,7 @@ impl Drawing<'_> {
                     for (text, font, alpha, down) in [(&title, TITLE, 0.95, 0.0), (&artist, ABOUT, 0.62, 21.0)] {
                         let text = fitted(frame, text, font, wide);
                         let from = if centred { x + (wide - frame.measure(&text, font)) / 2.0 } else { x };
-                        words(frame, &text, font, Color::hex(0xFFFFFF, alpha), from, y + down, wide + 2.0, Align::Start, shows.clear);
+                        words(frame, &text, font, Color::hex(ink, alpha), from, y + down, wide + 2.0, Align::Start, edged);
                     }
                 }
             })
@@ -508,21 +651,21 @@ impl Drawing<'_> {
     /// The rows along the bottom, from `x`, `wide`, up from `edge`: the controls kept showing in a row of their own
     /// with the spectrum's row above them; else the spectrum, the controls coming over it as the pointer does. Where
     /// they leave room down to.
-    fn rows(&mut self, x: f32, edge: f32, wide: f32, bars: usize) -> f32 {
+    fn rows(&mut self, x: f32, edge: f32, wide: f32) -> f32 {
         let row = edge - CONTROL;
-        let (accent, tint) = (self.music.accent, self.music.tint);
+        let (accent, tint) = (self.accent, self.tint);
         if self.shows.controls {
             self.keys(x - (CONTROL - 16.0) / 2.0, row, 1.0).map(|end| self.progress(end + 10.0, x + wide, row, 1.0));
             if !self.shows.spectrum {
                 return row;
             }
             let top = row - ROW_GAP - SPECTRUM_ROW;
-            spectrum(self.frame, self.moment, (accent, tint), (x, row - ROW_GAP, wide, SPECTRUM_ROW), bars, 0.85);
+            spectrum(self.frame, self.moment, (accent, tint), (x, row - ROW_GAP, wide, SPECTRUM_ROW), 0.85);
             return top;
         }
         let shown_in = self.music.controls_shown();
         if shown_in < 1.0 && self.shows.spectrum {
-            spectrum(self.frame, self.moment, (accent, tint), (x, edge - 2.0, wide, CONTROL - 4.0), bars, 1.0 - shown_in);
+            spectrum(self.frame, self.moment, (accent, tint), (x, edge - 2.0, wide, CONTROL - 4.0), 1.0 - shown_in);
         }
         if shown_in > 0.0 {
             self.keys(x - (CONTROL - 16.0) / 2.0, row, shown_in).map(|end| self.progress(end + 10.0, x + wide, row, shown_in));
@@ -537,13 +680,13 @@ impl Drawing<'_> {
         for (key, glyph) in [(Key::Previous, "\u{E892}"), (Key::Toggle, if self.moment.playing { "\u{E769}" } else { "\u{E768}" }), (Key::Next, "\u{E893}")] {
             let on = self.pointer.is_some_and(|(px, py)| px >= x && px < x + CONTROL && py >= row && py < row + CONTROL);
             if on {
-                frame.fill_rounded(Color::hex(0xFFFFFF, 0.14 * fade), x, row, CONTROL, CONTROL, CONTROL / 2.0);
+                frame.fill_rounded(Color::hex(self.ink, 0.14 * fade), x, row, CONTROL, CONTROL, CONTROL / 2.0);
             }
             let font = if key == Key::Toggle { Font { size: 16.0, ..CONTROL_FONT } } else { CONTROL_FONT };
             let (ink_top, ink_bottom) = frame.ink(glyph, font);
             let wide = frame.measure(glyph, font);
-            let colour = Color::hex(0xFFFFFF, (if on { 1.0 } else { 0.85 }) * fade);
-            if self.shows.clear {
+            let colour = Color::hex(self.ink, (if on { 1.0 } else { 0.85 }) * fade);
+            if self.edged {
                 outlined(frame, glyph, font, colour, x + (CONTROL - wide) / 2.0, row + CONTROL / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0);
             } else {
                 frame.text(glyph, font, colour, x + (CONTROL - wide) / 2.0, row + CONTROL / 2.0 - (ink_top + ink_bottom) / 2.0, wide + 2.0, Align::Start);
@@ -574,12 +717,12 @@ impl Drawing<'_> {
         let middle = row + CONTROL / 2.0;
         let fraction = (position / length).clamp(0.0, 1.0) as f32;
         let thick = if seekable && (lit || dragged) { 5.0 } else { 3.0 };
-        frame.fill_rounded(Color::hex(0xFFFFFF, 0.2 * fade), from, middle - thick / 2.0, track, thick, thick / 2.0);
-        frame.fill_rounded(colour(self.music.accent, 0.95 * fade), from, middle - thick / 2.0, track * fraction, thick, thick / 2.0);
+        frame.fill_rounded(Color::hex(self.ink, 0.2 * fade), from, middle - thick / 2.0, track, thick, thick / 2.0);
+        frame.fill_rounded(colour(self.accent, 0.95 * fade), from, middle - thick / 2.0, track * fraction, thick, thick / 2.0);
         if seekable && (lit || dragged) {
-            frame.fill_circle(Color::hex(0xFFFFFF, fade), Point { x: from + track * fraction, y: middle }, 6.0);
+            frame.fill_circle(Color::hex(self.ink, fade), Point { x: from + track * fraction, y: middle }, 6.0);
         }
-        words(frame, &left_over, TIME, Color::hex(0xFFFFFF, 0.6 * fade), to - time_wide, middle - TIME.size * 0.7, time_wide, Align::End, self.shows.clear);
+        words(frame, &left_over, TIME, Color::hex(self.ink, 0.6 * fade), to - time_wide, middle - TIME.size * 0.7, time_wide, Align::End, self.edged);
         // Dragged: the time it is dragged to, over where it is.
         if dragged {
             let said = super::text::clock(position.max(0.0).round() as u32);
@@ -605,12 +748,12 @@ impl Drawing<'_> {
         let room = (width - chip_wide - 10.0).max(0.0);
         let shown = fitted(frame, &text, font, room);
         let wide = frame.measure(&shown, font);
-        words(frame, &shown, font, Color::hex(0xFFFFFF, 0.92), x, y, room + 2.0, Align::Start, self.shows.clear);
+        words(frame, &shown, font, Color::hex(self.ink, 0.92), x, y, room + 2.0, Align::Start, self.edged);
         let (cx, cy) = (x + wide + 10.0, y + font.size * 0.66 - 9.0);
         let on = self.pointer.is_some_and(|(px, py)| px >= cx && px < cx + chip_wide && py >= cy && py < cy + 18.0);
-        frame.fill_rounded(Color::hex(if on { 0xFFFFFF } else { 0x000000 }, if on { 0.22 } else { 0.28 }), cx, cy, chip_wide, 18.0, 9.0);
-        frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, 0.5)), cx, cy, chip_wide, 18.0, 9.0, 1.0);
-        frame.text(&chip, TIME, Color::hex(0xFFFFFF, 0.95), cx + 7.0, cy + 2.0, chip_wide, Align::Start);
+        frame.fill_rounded(Color::hex(self.ink, if on { 0.24 } else { 0.1 }), cx, cy, chip_wide, 18.0, 9.0);
+        frame.stroke_rounded(Fill::Solid(Color::hex(self.ink, 0.5)), cx, cy, chip_wide, 18.0, 9.0, 1.0);
+        frame.text(&chip, TIME, Color::hex(self.ink, 0.95), cx + 7.0, cy + 2.0, chip_wide, Align::Start);
         self.hits.push((x, y, wide, font.size * 1.35, Hit::Line(index as u16)));
         self.hits.push((cx, cy, chip_wide, 18.0, Hit::Line(index as u16)));
     }
@@ -621,18 +764,18 @@ impl Drawing<'_> {
     fn strip(&mut self) {
         let (w, h) = self.size;
         let pad = pad(Layout::Strip);
-        let at = placed(Layout::Strip, self.size, self.shows);
-        let (accent, tint) = (self.music.accent, self.music.tint);
+        let at = self.placed(Layout::Strip);
+        let (accent, tint) = (self.accent, self.tint);
         let keys_wide = 3.0 * CONTROL + 4.0;
         let row = (h - CONTROL) / 2.0;
-        let centred = self.shows.clear && !self.shows.cover;
+        let centred = self.edged && !self.shows.cover;
         let shown_in = self.music.controls_shown();
         let mut end = w - pad;
         if self.shows.controls {
             self.keys(end - keys_wide, row, 1.0);
             end -= keys_wide + 10.0;
             if self.shows.spectrum && !centred {
-                spectrum(self.frame, self.moment, (accent, tint), (end - 70.0, h / 2.0 + 10.0, 70.0, 20.0), 12, 0.85);
+                spectrum(self.frame, self.moment, (accent, tint), (end - 70.0, h / 2.0 + 10.0, 70.0, 20.0), 0.85);
                 end -= 80.0;
             }
         } else if centred {
@@ -642,7 +785,7 @@ impl Drawing<'_> {
         } else {
             let wide = keys_wide.max(84.0);
             if shown_in < 1.0 && self.shows.spectrum {
-                spectrum(self.frame, self.moment, (accent, tint), (end - wide, h / 2.0 + 10.0, wide, 20.0), 14, 1.0 - shown_in);
+                spectrum(self.frame, self.moment, (accent, tint), (end - wide, h / 2.0 + 10.0, wide, 20.0), 1.0 - shown_in);
             }
             if shown_in > 0.0 {
                 self.keys(end - keys_wide, row, shown_in);
@@ -692,7 +835,7 @@ impl Drawing<'_> {
             (None, _) => {
                 let said = [self.moment.title.as_str(), self.moment.artist.as_str()].into_iter().filter(|one| !one.is_empty()).collect::<Vec<_>>().join(" · ");
                 let said = if said.is_empty() { self.moment.said.clone().unwrap_or_default() } else { said };
-                words(frame, &fitted(frame, &said, ABOUT, width), ABOUT, Color::hex(0xFFFFFF, 0.8), left, h / 2.0 - ABOUT.size * 0.7, width + 2.0, Align::Start, self.shows.clear);
+                words(frame, &fitted(frame, &said, ABOUT, width), ABOUT, Color::hex(self.ink, 0.8), left, h / 2.0 - ABOUT.size * 0.7, width + 2.0, Align::Start, self.edged);
             }
         }
         frame.unclip();
@@ -729,7 +872,7 @@ impl Drawing<'_> {
         let (text, parts) = parts(line, next);
         let eased = self.came();
         let y = top + (1.0 - eased) * 14.0;
-        let (accent, tint) = (self.music.accent, self.music.tint);
+        let (accent, tint) = (self.accent, self.tint);
         let (dim, bright) = (Color::hex(0xFFFFFF, 0.6 * eased), colour(tint, eased));
         if text.trim().is_empty() {
             let x = from + (room - font.size * INTERLUDE_WIDE) / 2.0;
@@ -762,13 +905,18 @@ impl Drawing<'_> {
     fn player(&mut self) {
         let (_, h) = self.size;
         let pad = pad(Layout::Player);
-        let at = placed(Layout::Player, self.size, self.shows);
+        let at = self.placed(Layout::Player);
         let (left, width) = (at.left, at.width);
-        let free = self.rows(left, h - pad, width, 28);
+        let free = self.rows(pad, h - pad, self.size.0 - 2.0 * pad);
         let line_top = at.below;
         let bottom = free - 8.0;
         let under_tall = PLAYER_UNDER.size * 1.35;
         if bottom <= line_top {
+            return;
+        }
+        // Room for more than the line sung now and the one under it: the lines round it, as the card's.
+        if let (Some(lines), true) = (self.moment.lines.clone(), self.shows.lines && bottom - line_top >= PLAYER_LINES_FROM) {
+            self.rail_of_lines(&lines, left, line_top, bottom, width);
             return;
         }
         let frame = self.frame;
@@ -781,7 +929,7 @@ impl Drawing<'_> {
                 let under = lines[index].translation.clone().filter(|_| self.shows.translation).unwrap_or_default();
                 let under_top = line_top + PLAYER_LINE.size * 1.4 + 2.0;
                 if !under.is_empty() && under_top + under_tall <= bottom {
-                    words(frame, &fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(0xFFFFFF, 0.55), left, under_top, width + 2.0, Align::Start, self.shows.clear);
+                    words(frame, &fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(self.ink, 0.55), left, under_top, width + 2.0, Align::Start, self.edged);
                 }
             }
             (Some(lines), Some(now)) => {
@@ -812,10 +960,10 @@ impl Drawing<'_> {
                     self.filled(&layout, &text, font, left, y, width, sung, dim, bright, 12.0);
                     height(font)
                 };
-                // Under it, where there is room, its translation or the next line.
-                let under_top = line_top + tall + 2.0;
+                // Under it, where there is room, its translation or the next line (rising in with it).
+                let under_top = y + tall + 2.0;
                 if !under.is_empty() && under_top + under_tall <= bottom {
-                    words(frame, &fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(0xFFFFFF, 0.5 * eased), left, under_top, width + 2.0, Align::Start, self.shows.clear);
+                    words(frame, &fitted(frame, &under, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(self.ink, 0.5 * eased), left, under_top, width + 2.0, Align::Start, self.edged);
                 }
             }
             // None sung yet: the dots, lit as the music before the first line goes on.
@@ -828,14 +976,76 @@ impl Drawing<'_> {
             // None to be had: why, in their place.
             (None, _) => {
                 let said = self.moment.said.clone().unwrap_or_default();
-                if self.shows.clear {
-                    outlined(frame, &fitted(frame, &said, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(0xFFFFFF, 0.8), left, line_top + 2.0, width + 2.0);
+                if self.edged {
+                    outlined(frame, &fitted(frame, &said, PLAYER_UNDER, width), PLAYER_UNDER, Color::hex(self.ink, 0.8), left, line_top + 2.0, width + 2.0);
                 } else {
-                    frame.text_wrapped(&said, PLAYER_UNDER, Color::hex(0xFFFFFF, 0.62), left, line_top + 2.0, width);
+                    frame.text_wrapped(&said, PLAYER_UNDER, Color::hex(self.ink, 0.62), left, line_top + 2.0, width);
                 }
             }
         }
         frame.unclip();
+    }
+
+    /// The stage: the record at the start (the cover in its middle, turning as it plays), what plays and the lines
+    /// round the one sung now beside it, and along the bottom the spectrum over the controls and the track.
+    fn stage(&mut self) {
+        let (w, h) = self.size;
+        let pad = pad(Layout::Stage);
+        let at = self.placed(Layout::Stage);
+        let ((cx, cy), side) = stage_record(self.size);
+        self.record(cx, cy, side);
+        // Along the bottom, all across: the controls and the track, and the spectrum over them.
+        let row = h - pad - CONTROL;
+        self.keys(pad - (CONTROL - 16.0) / 2.0, row, 1.0).map(|end| self.progress(end + 12.0, w - pad, row, 1.0));
+        if self.shows.spectrum {
+            spectrum(self.frame, self.moment, (self.accent, self.tint), (pad, row - ROW_GAP, w - 2.0 * pad, STAGE_SPECTRUM), 0.85);
+        }
+        let floor = row - ROW_GAP - if self.shows.spectrum { STAGE_SPECTRUM + 10.0 } else { 0.0 };
+        let (top, bottom) = (at.below, floor.min(cy + side / 2.0));
+        if bottom <= top + 20.0 {
+            return;
+        }
+        match self.moment.lines.clone() {
+            Some(lines) => self.rail_of_lines(&lines, at.left, top, bottom, at.width),
+            None => {
+                let said = self.moment.said.clone().unwrap_or_default();
+                let y = (top + bottom) / 2.0 - UNDER_FONT.size;
+                words(self.frame, &fitted(self.frame, &said, UNDER_FONT, at.width), UNDER_FONT, Color::hex(self.ink, 0.75), at.left, y, at.width + 2.0, Align::Start, self.edged);
+            }
+        }
+    }
+
+    /// The record, `side` across round `(cx, cy)`: black, its grooves catching the light, the cover in its middle,
+    /// turned as far as it has turned.
+    fn record(&self, cx: f32, cy: f32, side: f32) {
+        let frame = self.frame;
+        let r = side / 2.0;
+        frame.shadow(Color::hex(0x000000, 0.45), cx - r, cy - r, side, side, r, 14.0, 5.0);
+        frame.fill_circle(Color::hex(0x0E0E10, 1.0), Point { x: cx, y: cy }, r);
+        // Its grooves: fine rings, lighter toward its edge.
+        let label = r * 0.62;
+        let mut ring = label + 3.0;
+        while ring < r - 3.0 {
+            let shade = 0.035 + 0.05 * (ring - label) / (r - label);
+            frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, shade)), cx - ring, cy - ring, 2.0 * ring, 2.0 * ring, ring, 0.8);
+            ring += 4.0;
+        }
+        frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, 0.12)), cx - r + 0.5, cy - r + 0.5, side - 1.0, side - 1.0, r, 1.0);
+        // The cover in its middle, turned with it.
+        let mut parent = windows_numerics::Matrix3x2::default();
+        unsafe { frame.dc.GetTransform(&mut parent) };
+        let turned = windows_numerics::Matrix3x2::rotation_around(self.music.turned_by, windows_numerics::Vector2 { X: cx, Y: cy });
+        unsafe { frame.dc.SetTransform(&(turned * parent)) };
+        match &self.moment.cover {
+            Some(cover) => {
+                let picture = super::canvas::Picture { key: Arc::as_ptr(cover) as usize as u64, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
+                frame.picture(&picture, cx - label, cy - label, 2.0 * label, label, 1.0);
+            }
+            None => frame.fill_circle(Color::hex(0x2A2A30, 1.0), Point { x: cx, y: cy }, label),
+        }
+        unsafe { frame.dc.SetTransform(&parent) };
+        // Its hole.
+        frame.fill_circle(Color::hex(0x0E0E10, 1.0), Point { x: cx, y: cy }, (r * 0.04).max(3.0));
     }
 
     /// The card (and the card stood on end): what plays at the top, the lines round the one sung now gliding past
@@ -843,9 +1053,9 @@ impl Drawing<'_> {
     fn card(&mut self, layout: Layout) {
         let (_, h) = self.size;
         let pad = pad(layout);
-        let at = placed(layout, self.size, self.shows);
+        let at = self.placed(layout);
         let (x, width) = (at.left, at.width);
-        let free = self.rows(x, h - pad, width, 40);
+        let free = self.rows(x, h - pad, width);
         let (top, bottom) = (at.below, free - 10.0);
         if bottom <= top + 20.0 {
             return;
@@ -856,10 +1066,10 @@ impl Drawing<'_> {
                 let said = self.moment.said.clone().unwrap_or_default();
                 let height = self.frame.gfx.wrapped_height(&said, UNDER_FONT, width);
                 let y = (top + bottom - height) / 2.0;
-                if self.shows.clear {
-                    outlined(self.frame, &fitted(self.frame, &said, UNDER_FONT, width), UNDER_FONT, Color::hex(0xFFFFFF, 0.8), x, y, width + 2.0);
+                if self.edged {
+                    outlined(self.frame, &fitted(self.frame, &said, UNDER_FONT, width), UNDER_FONT, Color::hex(self.ink, 0.8), x, y, width + 2.0);
                 } else {
-                    self.frame.text_wrapped(&said, UNDER_FONT, Color::hex(0xFFFFFF, 0.7), x, y, width);
+                    self.frame.text_wrapped(&said, UNDER_FONT, Color::hex(self.ink, 0.7), x, y, width);
                 }
             }
         }
@@ -917,7 +1127,7 @@ impl Drawing<'_> {
             let t = rail - rail.floor();
             if rail < first as f32 { below } else { above + (below - above) * t }
         };
-        let (tint, clear) = (self.music.tint, self.shows.clear);
+        let (tint, clear) = (self.tint, self.edged);
         frame.clip(x - 8.0, top, width + 16.0, bottom - top + 12.0);
         for (index, middle, scale, tall) in middles {
             let d = index as f32 - rail;
@@ -935,8 +1145,8 @@ impl Drawing<'_> {
             } else if Some(index) == current {
                 let next = lines.get(index + 1).map(|line| line.at);
                 let (text, parts) = parts(line, next);
-                let bright = colour(toward([1.0, 1.0, 1.0], tint, 0.35), alpha);
-                let dim = Color::hex(0xFFFFFF, if clear { 0.55 } else { 0.34 } * alpha);
+                let bright = colour(if self.light { toward([0.0; 3], tint, 0.75) } else { toward([1.0; 3], tint, 0.35) }, alpha);
+                let dim = Color::hex(self.ink, if clear { 0.55 } else { 0.34 } * alpha);
                 if text.trim().is_empty() {
                     let done = between(line, next, self.moment.position);
                     // What has gone glows in the cover's colour.
@@ -952,10 +1162,10 @@ impl Drawing<'_> {
                 }
                 if let Some(translation) = line.translation.as_ref().filter(|_| translated) {
                     let under = frame.gfx.wrapped_height(&text, font, width);
-                    words(frame, &fitted(frame, translation, UNDER_FONT, width), UNDER_FONT, Color::hex(0xFFFFFF, 0.62 * alpha), x, y + under + 2.0, width, Align::Start, clear);
+                    words(frame, &fitted(frame, translation, UNDER_FONT, width), UNDER_FONT, Color::hex(self.ink, 0.62 * alpha), x, y + under + 2.0, width, Align::Start, clear);
                 }
             } else {
-                let shown = Color::hex(0xFFFFFF, if clear { 0.7 } else { 0.5 } * alpha);
+                let shown = Color::hex(self.ink, if clear { 0.7 } else { 0.5 } * alpha);
                 if line.text.trim().is_empty() {
                     interlude(frame, x, y, font.size, 0.0, shown, shown);
                 } else if clear {
@@ -980,8 +1190,9 @@ impl Drawing<'_> {
 
     /// The line sung now's colours: what is not sung yet, and what is (near white, the cover's colour in it).
     fn line_colours(&self, eased: f32) -> (Color, Color) {
-        let dim = if self.shows.clear { 0.6 } else { 0.36 };
-        (Color::hex(0xFFFFFF, dim * eased), colour(toward(self.music.tint, [1.0; 3], 0.65), eased))
+        let dim = if self.edged { 0.6 } else { 0.36 };
+        let toward_ink = if self.light { [0.0; 3] } else { [1.0; 3] };
+        (Color::hex(self.ink, dim * eased), colour(toward(self.tint, toward_ink, if self.light { 0.25 } else { 0.65 }), eased))
     }
 
     /// What is under the line sung now: its translation (where there is one and they are on), else the next line
@@ -995,7 +1206,7 @@ impl Drawing<'_> {
     /// A line drawn in `dim`, and over it in `bright` as far as it is sung; edged, with no ground.
     #[allow(clippy::too_many_arguments)]
     fn filled(&self, layout: &IDWriteTextLayout, text: &str, font: Font, x: f32, y: f32, width: f32, sung: f32, dim: Color, bright: Color, soft: f32) {
-        if self.shows.clear {
+        if self.edged {
             for (dx, dy) in [(0.0, 1.2), (0.8, 0.8), (-0.8, 0.8)] {
                 self.frame.text_wrapped(text, font, Color::hex(0x000000, 0.45 * bright.a), x + dx, y + dy, width);
             }
@@ -1074,6 +1285,12 @@ fn parts(line: &Line, next: Option<f64>) -> (String, Vec<(usize, usize, f64, f64
         at += units;
     }
     close(&mut pieces, &mut run, at);
+    // Each piece on to where the next begins (the spaces between them filled as the piece before them is sung, not
+    // jumped over as the next one begins).
+    let ends: Vec<usize> = pieces.iter().skip(1).map(|piece| piece.0).chain([at]).collect();
+    for (piece, end) in pieces.iter_mut().zip(ends) {
+        piece.1 = end;
+    }
     let weight: f64 = pieces.iter().map(|p| p.2).sum::<f64>().max(1e-6);
     let mut t = line.at;
     let parts = pieces
@@ -1175,9 +1392,13 @@ fn sung_part(frame: &Frame, layout: &IDWriteTextLayout, text: &str, font: Font, 
     }
 }
 
-/// The spectrum moving with the music: `bars` of them across `width` from `x`, standing on `floor`, `tall` at most,
+/// How far apart the spectrum's bars are (DIPs): dense, each thin.
+const SPECTRUM_PITCH: f32 = 7.0;
+
+/// The spectrum moving with the music: as many bars as fit `SPECTRUM_PITCH` apart across `width` from `x`, standing on `floor`, `tall` at most,
 /// shaded from the accent to the tint, `alpha` of it shown.
-fn spectrum(frame: &Frame, moment: &Moment, (accent, tint): ([f32; 3], [f32; 3]), (x, floor, width, tall): (f32, f32, f32, f32), bars: usize, alpha: f32) {
+fn spectrum(frame: &Frame, moment: &Moment, (accent, tint): ([f32; 3], [f32; 3]), (x, floor, width, tall): (f32, f32, f32, f32), alpha: f32) {
+    let bars = ((width / SPECTRUM_PITCH).round() as usize).max(8);
     let bar = width / bars as f32;
     for index in 0..bars {
         let at = index as f32 / (bars - 1) as f32 * (crate::sound::BANDS - 1) as f32;
@@ -1189,10 +1410,10 @@ fn spectrum(frame: &Frame, moment: &Moment, (accent, tint): ([f32; 3], [f32; 3])
     }
 }
 
-/// The ground: its shadow, the cover blurred behind (the one before fading out) and darkened, the cover's colour
-/// washed from a corner; all inside its rounded corners, with what `on` draws. With no ground (`clear`), only what
-/// `on` draws.
-struct Ground {
+/// Its own ground: its shadow, the cover blurred behind (the one before fading out) and darkened, the cover's colour
+/// washed from a corner; all inside its rounded corners, with what `on` draws. With none of its own, only what `on`
+/// draws.
+struct Backdrop {
     size: (f32, f32),
     radius: f32,
     backdrop: Option<ID2D1Bitmap1>,
@@ -1200,12 +1421,13 @@ struct Ground {
     shown: f32,
     accent: [f32; 3],
     tint: [f32; 3],
-    clear: bool,
+    /// Its own (else none: no ground, or another widget's).
+    own: bool,
 }
 
-impl Ground {
+impl Backdrop {
     fn paint(&self, frame: &Frame, on: impl FnOnce(&Frame)) -> windows::core::Result<()> {
-        if self.clear {
+        if !self.own {
             on(frame);
             return Ok(());
         }
@@ -1249,6 +1471,12 @@ fn colour([r, g, b]: [f32; 3], alpha: f32) -> Color {
 /// `a` eased toward `b` by `t`.
 fn toward(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+
+/// A colour deep enough to read on the light (its hue kept; its lightness lowered to at most 0.4).
+fn deep(rgb: [f32; 3]) -> [f32; 3] {
+    let (h, s, l) = crate::cover::hsl(rgb);
+    crate::cover::rgb(h, s.min(0.85), l.min(0.4))
 }
 
 /// A colour light enough to read on the dark (its hue kept; its lightness raised to at least `least`).
@@ -1337,7 +1565,12 @@ mod tests {
         assert_eq!(sung_to(&worded, 9.0), 0.0);
         // By line: each Chinese character a part, the time shared.
         let (_, shared) = parts(&line("你好 hi", Vec::new()), Some(14.0));
-        assert_eq!(shared.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), [(0, 1), (1, 2), (3, 5)]);
+        assert_eq!(shared.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), [(0, 1), (1, 3), (3, 5)]);
+        // The spaces between characters filled with the one before them: no jump over them.
+        let (_, spaced) = parts(&line("微 微 微 微", Vec::new()), Some(14.0));
+        assert_eq!(spaced.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), [(0, 2), (2, 4), (4, 6), (6, 7)]);
+        let between = |t: f64| sung_to(&spaced, t);
+        assert!((between(10.0 + 0.9 * 0.75) - 1.5).abs() < 1e-6, "three quarters through the first part, the fill is half across its space");
         assert!((shared.last().unwrap().3 - (10.0 + 4.0 * 0.9)).abs() < 1e-9);
     }
 
@@ -1348,6 +1581,8 @@ mod tests {
         assert_eq!(Layout::for_room((470.0, 178.0), &all, None), Layout::Player);
         assert_eq!(Layout::for_room((470.0, 400.0), &all, None), Layout::Card);
         assert_eq!(Layout::for_room((290.0, 470.0), &all, None), Layout::Tall);
+        assert_eq!(Layout::for_room((900.0, 470.0), &all, None), Layout::Stage);
+        assert_eq!(Layout::for_room((900.0, 470.0), &Shows { cover: false, ..all }, None), Layout::Card);
         // Without the lines, a player however tall.
         assert_eq!(Layout::for_room((470.0, 400.0), &Shows { lines: false, ..all }, None), Layout::Player);
         // Controls kept over the spectrum: a row more before the player.
@@ -1450,7 +1685,7 @@ mod pictures {
                     let area = (-24.0, -24.0, w + 48.0, h + 48.0);
                     layer
                         .draw(frame, 1, local, area, 1.5, None, |frame| {
-                            music.paint_moment(frame, (w, h), &all, 1.5, None, now, moment);
+                            music.paint_moment(frame, (w, h), &all, Ground::Own, 1.5, None, now, moment);
                             Ok(())
                         })
                         .unwrap();
@@ -1466,6 +1701,41 @@ mod pictures {
         }
     }
 
+    /// A player sized into a card, drawn as it turns (at its start, a third, two thirds and the end of the turn), to
+    /// PNGs in the target folder: `cargo test --features studio -- --ignored draws_a_turn --nocapture`.
+    #[test]
+    #[ignore]
+    fn draws_a_turn() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false };
+        let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(&out).unwrap();
+        let gfx = crate::ui::gfx::current().unwrap();
+        let start = Instant::now();
+        let mut music = Music { last_frame: start, ..Music::default() };
+        let (w, h) = (470.0, 400.0);
+        let margin = 30.0;
+        let size = (((w + 2.0 * margin) * 1.5) as u32, ((h + 2.0 * margin) * 1.5) as u32);
+        // (Drawn once as a player, then as a card at each step of the turn.)
+        for (name, room, at) in [("turn-before", (470.0, 178.0), 0u64), ("turn-0", (w, h), 1), ("turn-1", (w, h), 87), ("turn-2", (w, h), 174), ("turn-3", (w, h), 300)] {
+            let moment = playing(false);
+            music.bands = moment.sound.bands;
+            music.rail = 1.0;
+            music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+            let now = start + Duration::from_millis(at);
+            let pixels = gfx
+                .draw_offscreen(size, 1.5, |frame| {
+                    frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
+                    frame.origin(margin, margin);
+                    music.paint_moment(frame, room, &all, Ground::Own, 1.5, None, now, moment);
+                })
+                .unwrap();
+            crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/{name}.png")), size.0, size.1, &pixels).unwrap();
+        }
+    }
+
     /// What plays in each layout, at each size, with its switches as each case says, drawn to PNGs in the target
     /// folder: `cargo test --features studio -- --ignored draws_what_plays --nocapture`.
     #[test]
@@ -1478,7 +1748,7 @@ mod pictures {
         let floating = Shows { cover: false, title: false, spectrum: false, clear: true, ..all };
         // Name, size, switches, the pointer over it (the controls come), lines turned by the wheel, the track dragged,
         // the music between lines.
-        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 16] = [
+        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 17] = [
             ("strip", (420.0, 76.0), all, false, 0, false, false),
             ("strip-over", (420.0, 76.0), all, true, 0, false, false),
             ("strip-kept", (480.0, 76.0), Shows { controls: true, ..all }, false, 0, false, false),
@@ -1492,6 +1762,7 @@ mod pictures {
             ("card", (470.0, 400.0), all, false, 0, false, false),
             ("card-turned", (470.0, 400.0), all, false, 2, false, false),
             ("tall", (290.0, 480.0), all, false, 0, false, false),
+            ("stage", (900.0, 470.0), all, false, 0, false, false),
             ("clear-player", (470.0, 178.0), Shows { clear: true, ..all }, false, 0, false, false),
             ("floating", (760.0, 110.0), floating, false, 0, false, false),
             ("floating-over", (760.0, 110.0), floating, true, 0, false, false),
@@ -1515,7 +1786,7 @@ mod pictures {
                     // (On a desktop of a mid grey.)
                     frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
                     frame.origin(margin, margin);
-                    music.paint_moment(frame, (w, h), &shows, 1.5, pointer, Instant::now(), moment);
+                    music.paint_moment(frame, (w, h), &shows, Ground::of(&shows), 1.5, pointer, Instant::now(), moment);
                 })
                 .unwrap();
             let path = std::path::PathBuf::from(format!("{out}/{name}.png"));

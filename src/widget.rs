@@ -2352,7 +2352,7 @@ impl Widget {
                     let area = (-MUSIC_SHADOW, -MUSIC_SHADOW, size.0 + 2.0 * MUSIC_SHADOW, size.1 + 2.0 * MUSIC_SHADOW);
                     let mut painted = None;
                     let drew = layer.draw(frame, *frames, local, area, px, None, |frame| {
-                        painted = Some(music.paint(frame, size, &shows, px, pointer, now));
+                        painted = Some(music.paint(frame, size, &shows, music::Ground::of(&shows), px, pointer, now));
                         Ok(())
                     });
                     if let Err(error) = drew {
