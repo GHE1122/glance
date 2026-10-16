@@ -256,6 +256,15 @@ pub struct Music {
     controls_in: f32,
     /// Its spectrum as shown: up at once with the sound, down no faster than `SPECTRUM_FALL`.
     bands: [f32; crate::sound::BANDS],
+    /// Where in the rail of lines the line aimed at is drawn (DIPs, from its top), easing toward where it is to be (it
+    /// moves as the lines next to the one aimed at change, and is never seen to jump); how long the last frame was
+    /// after the one before (seconds), and whether it is still on its way.
+    anchor: Option<Anchor>,
+    step: f32,
+    anchoring: bool,
+    /// (For the tests: where each line of the rail was drawn in the last frame, by its index.)
+    #[cfg(test)]
+    drawn_lines: Vec<(usize, f32)>,
     /// How far the record has turned (degrees), and how far its arm has swung onto it (0 off it, 1 on it: on as
     /// something plays).
     turned_by: f32,
@@ -268,6 +277,18 @@ pub struct Music {
     turned: i32,
     turned_at: Instant,
     wheeled: f32,
+}
+
+/// Where the line aimed at in the rail of lines is drawn (from its top, DIPs): moving from where it was (`from`, the
+/// rail then at `from_rail`) to where it is to be (`to`) as the rail glides to the line aimed at (`aimed`), as far
+/// along as the rail is: the two arrive together, the lines moving one way.
+#[derive(Clone, Copy)]
+struct Anchor {
+    from: f32,
+    from_rail: f32,
+    aimed: isize,
+    to: f32,
+    shown: f32,
 }
 
 /// What a frame drew: where a press does something (from its corner, DIPs), and whether it is to be drawn again soon
@@ -292,6 +313,11 @@ impl Default for Music {
             ground: Layer::default(),
             controls_in: 0.0,
             bands: [0.0; crate::sound::BANDS],
+            anchor: None,
+            step: 0.0,
+            anchoring: false,
+            #[cfg(test)]
+            drawn_lines: Vec::new(),
             turned_by: 0.0,
             arm: 0.0,
             turning: None,
@@ -304,6 +330,7 @@ impl Default for Music {
 }
 
 /// What plays at one moment, as it is drawn.
+#[derive(Clone)]
 struct Moment {
     lines: Option<Arc<Vec<Line>>>,
     now: Option<usize>,
@@ -417,6 +444,7 @@ impl Music {
     fn paint_moment(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, mut moment: Moment) -> Painted {
         let step = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
+        self.step = step;
         // The colours, toward the cover's (a little each frame).
         if let Some(cover) = &moment.cover {
             let ease = (step * 3.0).min(1.0);
@@ -517,7 +545,7 @@ impl Music {
             unsafe { frame.dc.PopLayer() };
         }
         let hits = drawing.hits;
-        Painted { hits, busy: moment.playing || settling || coming || falling || swinging || self.fading.is_some() || self.turned != 0 || moment.dragged_to.is_some() || turn.is_some() }
+        Painted { hits, busy: self.anchoring || moment.playing || settling || coming || falling || swinging || self.fading.is_some() || self.turned != 0 || moment.dragged_to.is_some() || turn.is_some() }
     }
 }
 
@@ -1340,7 +1368,7 @@ impl Drawing<'_> {
         let size = (width / 16.0).clamp(18.0, self.fonts.now.size);
         let height_of = |index: usize, scale: f32| {
             let line = &lines[index];
-            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, Font { size: size * scale, ..self.fonts.now }, width) + if translated && line.translation.is_some() { TRANSLATION_ROW * scale } else { 0.0 }
+            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, Font { size: size * scale, ..self.fonts.now }, width * scale) + if translated && line.translation.is_some() { TRANSLATION_ROW * scale } else { 0.0 }
         };
         let rail = self.music.rail;
         let base = rail.floor().max(-1.0);
@@ -1368,18 +1396,40 @@ impl Drawing<'_> {
         };
         // Where it is asked for, as far as the lines next to the one aimed at stay within it: one before, one after.
         let anchor = {
-            let aimed = rail.round() as isize;
-            let near = |index: isize| middles.iter().find(|m| m.0 as isize == index);
+            // (The line it glides to: not the one it is nearest on its way, which would change half way there.)
+            let aimed = turned.or(current).map_or(rail.round() as isize, |index| index as isize);
             // (Clear of the fades at its edges: shown whole.)
-            let least = near(aimed - 1).map_or(f32::MIN, |(_, middle, _, tall)| top + fade_top + at_rail - middle + tall / 2.0);
-            let most = near(aimed + 1).map_or(f32::MAX, |(_, middle, _, tall)| bottom + 12.0 - fade_bottom - (middle - at_rail) - tall / 2.0);
+            // (As they will be once glided there, at their sizes then, the one aimed at at the anchor: not as they are on
+            // the way, which would move it as they glide.)
+            let tall_at = |index: isize, d: f32| (index >= 0 && (index as usize) < lines.len()).then(|| height_of(index as usize, scale_at(d)));
+            let aimed_half = tall_at(aimed, 0.0).unwrap_or(0.0) / 2.0;
+            let least = tall_at(aimed - 1, -1.0).map_or(f32::MIN, |tall| top + fade_top + aimed_half + gap + tall);
+            let most = tall_at(aimed + 1, 1.0).map_or(f32::MAX, |tall| bottom + 12.0 - fade_bottom - aimed_half - gap - tall);
             if least <= most { anchor.clamp(least, most) } else { (least + most) / 2.0 }
         };
+        // Moving there as the rail glides (from where it was; a rail come anew, there at once).
+        let to = anchor - top;
+        let aimed = turned.or(current).map_or(-1, |index| index as isize);
+        let mut state = match self.music.anchor.filter(|was| (was.shown - to).abs() < bottom - top) {
+            Some(was) if was.aimed == aimed && (was.to - to).abs() <= 0.5 => was,
+            Some(was) => Anchor { from: was.shown, from_rail: rail, aimed, to, shown: was.shown },
+            None => Anchor { from: to, from_rail: rail, aimed, to, shown: to },
+        };
+        let span = aimed as f32 - state.from_rail;
+        let along = if span.abs() > 1e-3 { ((rail - state.from_rail) / span).clamp(0.0, 1.0) } else { 1.0 };
+        state.shown = state.from + (state.to - state.from) * along;
+        self.music.anchoring = along < 1.0 && (state.shown - to).abs() > 0.3;
+        self.music.anchor = Some(state);
+        let anchor = top + state.shown;
         let (tint, clear) = (self.tint, self.edged);
         frame.clip(x - 8.0, top, width + 16.0, bottom - top + 12.0);
+        #[cfg(test)]
+        self.music.drawn_lines.clear();
         for (index, middle, scale, tall) in middles {
             let d = index as f32 - rail;
             let y = anchor + middle - at_rail - tall / 2.0;
+            #[cfg(test)]
+            self.music.drawn_lines.push((index, y));
             if y + tall < top - 4.0 || y > bottom + 12.0 {
                 continue;
             }
@@ -1401,29 +1451,32 @@ impl Drawing<'_> {
                     frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| interlude(frame, x, y, font.size, done, Color::hex(0, 0.0), bright));
                     interlude(frame, x, y, font.size, done, dim, bright);
                 } else {
-                    let layout = frame.gfx.wrapped(&text, font, width);
+                    // (Broken into rows as at its full size, smaller as a whole: as many rows whatever its size.)
+                    let wrap = width * scale;
+                    let layout = frame.gfx.wrapped(&text, font, wrap);
                     let sung = sung_to(&parts, self.moment.position);
                     let soft = (font.size * 0.45).clamp(6.0, 16.0);
                     // What is sung glows in the cover's colour.
-                    frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, font, x, y, width, sung, bright, soft));
-                    self.filled(&layout, &text, font, x, y, width, sung, dim, bright, soft);
+                    frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, font, x, y, wrap, sung, bright, soft));
+                    self.filled(&layout, &text, font, x, y, wrap, sung, dim, bright, soft);
                 }
                 if let Some(translation) = line.translation.as_ref().filter(|_| translated) {
-                    let under = frame.gfx.wrapped_height(&text, font, width);
-                    words(frame, &fitted(frame, translation, self.fonts.under_font, width), self.fonts.under_font, Color::hex(self.ink, 0.62 * alpha), x, y + under + 2.0, width, Align::Start, clear);
+                    let under = if text.trim().is_empty() { font.size * 1.4 } else { frame.gfx.wrapped_height(&text, font, width * scale) };
+                    let small = Font { size: self.fonts.under_font.size * scale, ..self.fonts.under_font };
+                    words(frame, &fitted(frame, translation, small, width), small, Color::hex(self.ink, 0.62 * alpha), x, y + under + 2.0 * scale, width, Align::Start, clear);
                 }
             } else {
                 let shown = Color::hex(self.ink, if clear { 0.7 } else { 0.5 } * alpha);
                 if line.text.trim().is_empty() {
                     interlude(frame, x, y, font.size, 0.0, shown, shown);
                 } else if clear {
-                    outlined(frame, &line.text, font, shown, x, y, width);
+                    outlined(frame, &line.text, font, shown, x, y, width * scale);
                 } else {
-                    frame.text_wrapped(&line.text, font, shown, x, y, width);
+                    frame.text_wrapped(&line.text, font, shown, x, y, width * scale);
                 }
                 // Its translation under it, as the line sung now's is (smaller with it).
                 if let Some(translation) = line.translation.as_ref().filter(|_| translated && !line.text.trim().is_empty()) {
-                    let under = frame.gfx.wrapped_height(&line.text, font, width);
+                    let under = frame.gfx.wrapped_height(&line.text, font, width * scale);
                     let small = Font { size: self.fonts.under_font.size * scale, ..self.fonts.under_font };
                     words(frame, &fitted(frame, translation, small, width), small, Color::hex(self.ink, 0.42 * alpha), x, y + under + 2.0 * scale, width, Align::Start, clear);
                 }
@@ -2106,6 +2159,56 @@ mod pictures {
             })
             .unwrap();
         crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/music/hosted.png", env!("CARGO_MANIFEST_DIR"))), size.0, size.1, &pixels).unwrap();
+    }
+
+    /// The lines glide on from one line sung to the next without a jump: frame by frame (16 ms apart) after the line
+    /// sung changes, each line's place moves on by no more than it did the frame before by much (no step in its
+    /// speed), in the card and in a player short enough that its rail is bounded by the lines next to the one sung.
+    #[test]
+    #[ignore]
+    fn the_lines_glide_without_a_jump() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
+        let gfx = crate::ui::gfx::current().unwrap();
+        for size in [(470.0, 400.0), (520.0, 236.0)] {
+            let start = Instant::now();
+            let mut music = Music { last_frame: start, ..Music::default() };
+            let mut tracks: Vec<Vec<f32>> = Vec::new();
+            // (The same lyrics throughout: other lyrics are another track's, and the rail starts afresh on them.)
+            let base = playing(false);
+            for frame_index in 0..40u64 {
+                let now = start + Duration::from_millis(16 * frame_index);
+                // The line before sung for the first frames, then the next.
+                let mut moment = base.clone();
+                if frame_index < 4 {
+                    moment.now = Some(0);
+                    moment.position = 11.0;
+                }
+                moment.since = Some(now - Duration::from_secs(2));
+                gfx.draw_offscreen(((size.0 * 1.5) as u32, (size.1 * 1.5) as u32), 1.5, |frame| {
+                    music.paint_moment(frame, size, &all, Ground::Own, 1.5, None, now, moment);
+                })
+                .unwrap();
+                let at = |index: usize| music.drawn_lines.iter().find(|(i, _)| *i == index).map(|(_, y)| *y);
+                tracks.push((0..4).map(|index| at(index).unwrap_or(f32::NAN)).collect());
+            }
+            println!("{size:?}:");
+            for (frame_index, ys) in tracks.iter().enumerate() {
+                println!("  {frame_index:2}  {}", ys.iter().map(|y| format!("{y:7.1}")).collect::<Vec<_>>().join(" "));
+            }
+            // From the change on: each line's move a frame no more than 3 DIPs off its move the frame before.
+            for line in 0..4 {
+                let ys: Vec<f32> = tracks[4..].iter().map(|ys| ys[line]).filter(|y| y.is_finite()).collect();
+                for window in ys.windows(3) {
+                    let (a, b) = (window[1] - window[0], window[2] - window[1]);
+                    assert!((b - a).abs() <= 3.0, "{size:?}: line {line} jumped: moved {a:.1}, then {b:.1}");
+                    // One way all along: never back the way it came.
+                    assert!(!(a.abs() > 0.3 && b.abs() > 0.3 && a.signum() != b.signum()), "{size:?}: line {line} turned back: moved {a:.1}, then {b:.1}");
+                }
+            }
+        }
     }
 
     /// What plays in each layout, at each size, with its switches as each case says, drawn to PNGs in the target
