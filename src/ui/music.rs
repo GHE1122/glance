@@ -920,12 +920,27 @@ impl Drawing<'_> {
                     let y = h / 2.0 - self.fonts.strip.size * 0.7 + (1.0 - eased) * 8.0;
                     interlude(frame, left, y, self.fonts.strip.size, between(line, next, self.moment.position), dim, bright);
                 } else {
+                    // In one row, as large as it fits (down to the least); too long for that, in two rows where the strip
+                    // is tall enough, as large as they fit; else one row cut short with an ellipsis. Never cut through.
+                    let room = h - 2.0 * pad_of(Layout::Strip, self.shows);
                     let font = Font { size: (self.fonts.strip.size * (width / frame.measure(&text, self.fonts.strip).max(1.0))).clamp(STRIP_LEAST, self.fonts.strip.size), ..self.fonts.strip };
-                    let y = h / 2.0 - font.size * 0.7 + (1.0 - eased) * 8.0;
-                    // (One row: where it would wrap, cut where it wraps.)
-                    let layout = frame.gfx.wrapped(&text, font, 100_000.0);
+                    let one_row = frame.measure(&text, font) <= width;
+                    let two_rows = (!one_row)
+                        .then(|| (0..).map(|step| self.fonts.strip.size - step as f32).take_while(|size| *size >= STRIP_LEAST).map(|size| Font { size, ..self.fonts.strip }).find(|font| {
+                            let tall = frame.gfx.wrapped_height(&text, *font, width);
+                            tall <= room && tall <= 2.0 * frame.gfx.wrapped_height("M", *font, width) + 0.5
+                        }))
+                        .flatten();
+                    let (font, text, wrap) = match two_rows {
+                        Some(font) => (font, text.clone(), width),
+                        None if one_row => (font, text.clone(), 100_000.0),
+                        None => (font, fitted(frame, &text, font, width), 100_000.0),
+                    };
+                    let tall = frame.gfx.wrapped_height(&text, font, wrap);
+                    let y = (h - tall) / 2.0 + (1.0 - eased) * 8.0;
+                    let layout = frame.gfx.wrapped(&text, font, wrap);
                     let sung = sung_to(&parts, self.moment.position);
-                    self.filled(&layout, &text, font, left, y, 100_000.0, sung, dim, bright, 12.0);
+                    self.filled(&layout, &text, font, left, y, wrap, sung, dim, bright, 12.0);
                 }
             }
             (Some(lines), None) => {
@@ -1883,6 +1898,8 @@ mod pictures {
             worded(28.0, "And the morning finds us singing "),
         ];
         lines[1].translation = Some("We run through the night".into());
+        lines[1].words.push(Word { at: 15.6, end: 15.9, text: "在 黎明 到来 之前".into() });
+        lines[1].text.push_str("在 黎明 到来 之前");
         lines[0].translation = Some("远在城市灯火之外".into());
         lines[3].translation = Some("每一次心跳都像雷声".into());
         lines[4].translation = Some("Till the dawn lights the way home".into());
@@ -2103,9 +2120,11 @@ mod pictures {
         let floating = Shows { cover: false, title: false, spectrum: false, clear: true, ..all };
         // Name, size, switches, the pointer over it (the controls come), lines turned by the wheel, the track dragged,
         // the music between lines.
-        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 21] = [
+        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 23] = [
             ("strip", (420.0, 76.0), all, false, 0, false, false),
             ("strip-over", (420.0, 76.0), all, true, 0, false, false),
+            ("strip-narrow-tall", (360.0, 96.0), all, false, 0, false, false),
+            ("strip-narrow", (250.0, 56.0), all, false, 0, false, false),
             ("strip-kept", (480.0, 76.0), Shows { controls: true, ..all }, false, 0, false, false),
             ("player", (470.0, 178.0), all, false, 0, false, false),
             ("player-over", (470.0, 178.0), all, true, 0, false, false),
