@@ -50,7 +50,7 @@ impl Layout {
         let pick = |slack: f32| {
             if h < PLAYER_FROM + more + slack || w < STRIP_UNDER + slack {
                 Layout::Strip
-            } else if !shows.lines || h < CARD_FROM + more + slack {
+            } else if h < CARD_FROM + more + slack {
                 Layout::Player
             } else if shows.cover && w >= STAGE_FROM + slack && h >= CARD_FROM + slack {
                 Layout::Stage
@@ -120,10 +120,8 @@ pub struct Shows {
     pub cover: bool,
     pub title: bool,
     /// Under the line sung now: its translation where it has one (and translations are on), else the next line.
+    /// (How many lines show is the room's: one in a strip and a player, those round it in a card and taller.)
     pub translation: bool,
-    pub next: bool,
-    /// The lines round the one sung now (the card); off, it is laid out as a player however tall it is.
-    pub lines: bool,
     pub spectrum: bool,
     /// The controls kept showing, in a row of their own; off, they come over the spectrum as the pointer does.
     pub controls: bool,
@@ -140,8 +138,6 @@ impl Shows {
             cover: on("cover"),
             title: on("title"),
             translation: on("translation"),
-            next: on("next"),
-            lines: on("lines"),
             spectrum: on("spectrum"),
             controls: on("controls"),
             clear: on("clear"),
@@ -355,16 +351,16 @@ struct Moment {
 }
 
 fn moment() -> Moment {
-    let heard = crate::playing::now();
+    let heard = crate::playing::music();
     let lang = crate::update::language();
     let (title, artist, playing) = heard.as_ref().map_or_else(Default::default, |heard| (heard.title.clone(), heard.artist.clone(), heard.playing));
     let mut moment = Moment {
         lines: None,
         now: None,
         since: None,
-        position: crate::playing::position().unwrap_or(0.0),
+        position: crate::playing::position(crate::playing::Follow::Music).unwrap_or(0.0),
         length: heard.as_ref().and_then(|heard| heard.timeline).map(|timeline| (timeline.length, timeline.seekable)),
-        dragged_to: crate::playing::dragged_to(),
+        dragged_to: crate::playing::dragged_to(crate::playing::Follow::Music),
         cover: (!title.is_empty()).then(|| crate::cover::of(&title, &artist)).flatten(),
         sound: if playing { crate::sound::heard() } else { crate::sound::Heard::default() },
         title,
@@ -387,11 +383,99 @@ fn moment() -> Moment {
     moment
 }
 
+/// The example the settings show while no music plays: its lines (each with its translation), a line every
+/// `EXAMPLE_LINE` seconds, sung word by word, over and over.
+const EXAMPLE: [(&str, &str); 8] = [
+    ("晨光落在窗台", "Morning light falls on the sill"),
+    ("城市还没醒来", "The city has not woken yet"),
+    ("我把昨天折好", "I fold yesterday away"),
+    ("放进口袋", "And keep it in my pocket"),
+    ("风从街角吹过", "A wind comes round the corner"),
+    ("带走一点寂寞", "And takes a little loneliness"),
+    ("路灯一盏盏熄灭", "The street lamps go out one by one"),
+    ("像在说再见", "As if they said goodbye"),
+];
+const EXAMPLE_LINE: f64 = 4.0;
+
+/// The example's lines, made once.
+fn example_lines() -> Arc<Vec<Line>> {
+    static LINES: std::sync::OnceLock<Arc<Vec<Line>>> = std::sync::OnceLock::new();
+    LINES
+        .get_or_init(|| {
+            let lines = EXAMPLE.iter().enumerate().map(|(index, (text, translation))| {
+                let at = index as f64 * EXAMPLE_LINE;
+                let count = text.chars().count() as f64;
+                let step = (EXAMPLE_LINE * 0.8) / count;
+                let words = text.chars().enumerate().map(|(i, c)| crate::lyrics::Word { at: at + i as f64 * step, end: at + (i + 1) as f64 * step, text: c.to_string() }).collect();
+                Line { at, end: Some(at + EXAMPLE_LINE * 0.8), text: text.to_string(), words, backing: None, translation: Some(translation.to_string()) }
+            });
+            Arc::new(lines.collect())
+        })
+        .clone()
+}
+
+/// The example's cover: a warm sky over a dark sea, the sun low in it; made once.
+fn example_cover() -> Arc<Cover> {
+    static COVER: std::sync::OnceLock<Arc<Cover>> = std::sync::OnceLock::new();
+    COVER
+        .get_or_init(|| {
+            let side = crate::cover::SIDE as usize;
+            let mut pixels = vec![0u8; side * side * 4];
+            for y in 0..side {
+                for x in 0..side {
+                    let (fx, fy) = (x as f32 / side as f32, y as f32 / side as f32);
+                    let sun = (((fx - 0.62).powi(2) + (fy - 0.42).powi(2)).sqrt() < 0.11) as u8 as f32;
+                    let [r, g, b] = if fy < 0.6 { [0.98 - 0.25 * fy, 0.55 + 0.15 * fy, 0.42 + 0.12 * fx] } else { [0.12, 0.2 + 0.1 * fx, 0.36] };
+                    let at = (y * side + x) * 4;
+                    pixels[at] = ((b * (1.0 - sun) + 0.85 * sun) * 255.0) as u8;
+                    pixels[at + 1] = ((g * (1.0 - sun) + 0.95 * sun) * 255.0) as u8;
+                    pixels[at + 2] = ((r * (1.0 - sun) + sun) * 255.0) as u8;
+                    pixels[at + 3] = 255;
+                }
+            }
+            Arc::new(Cover { pixels: Arc::new(pixels), base: [0.85, 0.52, 0.42], accent: [0.98, 0.62, 0.38] })
+        })
+        .clone()
+}
+
+/// The example as it is `t` seconds in: its line sung now, from when, and its spectrum moving with it.
+fn example(t: f64) -> Moment {
+    let lines = example_lines();
+    let length = EXAMPLE.len() as f64 * EXAMPLE_LINE;
+    let position = t.rem_euclid(length);
+    let now = crate::lyrics::sung_at(&lines, position);
+    let since = now.map(|now| Instant::now() - Duration::from_secs_f64((position - lines[now].at).max(0.0)));
+    let mut bands = [0.0; crate::sound::BANDS];
+    for (i, band) in bands.iter_mut().enumerate() {
+        let x = i as f64;
+        *band = (0.55 + 0.3 * (t * 2.3 + x * 0.45).sin() * (t * 0.7 + x * 0.21).cos() - x * 0.012).clamp(0.05, 1.0) as f32;
+    }
+    Moment {
+        lines: Some(lines),
+        now,
+        since,
+        position,
+        length: Some((length, false)),
+        dragged_to: None,
+        title: "晨光序曲".into(),
+        artist: "Glance".into(),
+        said: None,
+        playing: true,
+        cover: Some(example_cover()),
+        sound: crate::sound::Heard { level: 0.7, bands, beat: (0.5 + 0.5 * (t * 4.0).sin()).max(0.0) as f32 },
+    }
+}
+
+/// Whether any music is followed now (else the settings show the example: see `Music::paint_example`).
+pub fn heard() -> bool {
+    crate::playing::music().is_some_and(|music| !music.title.is_empty())
+}
+
 /// The line at `index` of what plays now played from its start (pressed where the wheel turned to it).
 pub fn play_line(index: u16) {
-    let Some(Sung::Lines { lines, .. }) = crate::playing::now().and_then(|now| now.sung) else { return };
+    let Some(Sung::Lines { lines, .. }) = crate::playing::music().and_then(|now| now.sung) else { return };
     if let Some(line) = lines.get(index as usize) {
-        crate::playing::act(crate::playing::Act::Seek(line.at));
+        crate::playing::act_on(crate::playing::Follow::Music, crate::playing::Act::Seek(line.at));
     }
 }
 
@@ -412,7 +496,7 @@ impl Music {
     /// Its own ground alone, `size` large (its shadow, the cover blurred under a wash of its colour), under a widget
     /// merged into it: what each part shows drawn over it (see `Ground::Host`).
     pub fn paint_ground(&mut self, frame: &Frame, size: (f32, f32)) {
-        let heard = crate::playing::now();
+        let heard = crate::playing::music();
         if let Some(cover) = heard.as_ref().filter(|heard| !heard.title.is_empty()).and_then(|heard| crate::cover::of(&heard.title, &heard.artist)) {
             self.tint = toward(self.tint, readable(cover.base, 0.72), 0.2);
             self.accent = toward(self.accent, readable(cover.accent, 0.62), 0.2);
@@ -441,6 +525,12 @@ impl Music {
     #[allow(clippy::too_many_arguments)]
     pub fn paint(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant) -> Painted {
         self.paint_moment(frame, size, shows, ground, scale, pointer, now, moment())
+    }
+
+    /// As `paint`, the example the settings show while no music plays, `t` seconds into it (see `EXAMPLE`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_example(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, t: f64) -> Painted {
+        self.paint_moment(frame, size, shows, ground, scale, pointer, now, example(t))
     }
 
     /// As `paint`, what plays as `moment` says.
@@ -625,7 +715,7 @@ const PLAYER_LINES_FROM: f32 = 110.0;
 fn player_shows_lines(size: (f32, f32), shows: &Shows) -> bool {
     let at = placed(Layout::Player, size, shows);
     let bottom = size.1 - pad(Layout::Player) - rows_tall(shows) - 8.0;
-    shows.lines && bottom - at.below >= PLAYER_LINES_FROM
+    bottom - at.below >= PLAYER_LINES_FROM
 }
 
 /// Each layout's room inside its edge as `shows` says: its own, or the host's.
@@ -825,7 +915,7 @@ impl Drawing<'_> {
             }
             frame.icon(icon, centre, side, colour);
             if self.music.controls_in >= 0.5 {
-                self.hits.push((x, row, CONTROL, CONTROL, Hit::Media(key)));
+                self.hits.push((x, row, CONTROL, CONTROL, Hit::Media(key, crate::playing::Follow::Music)));
             }
             x += CONTROL + 2.0;
         }
@@ -866,7 +956,7 @@ impl Drawing<'_> {
             frame.text(&said, self.fonts.time, Color::hex(0xFFFFFF, 0.95), x + 6.0, y + 1.5, wide, Align::Start);
         }
         if seekable && self.music.controls_in >= 0.5 {
-            self.hits.push((from, row, track, CONTROL, Hit::Seek));
+            self.hits.push((from, row, track, CONTROL, Hit::Seek(crate::playing::Follow::Music)));
         }
     }
 
@@ -1506,11 +1596,10 @@ impl Drawing<'_> {
         (Color::hex(self.ink, dim * eased), colour(toward(self.tint, toward_ink, if self.light { 0.25 } else { 0.65 }), eased))
     }
 
-    /// What is under the line sung now: its translation (where there is one and they are on), else the next line
-    /// (where that is on).
+    /// What is under the line sung now: its translation (where there is one and they are on), else the next line.
     fn under(&self, lines: &[Line], now: usize) -> String {
         let translation = lines[now].translation.clone().filter(|_| self.shows.translation);
-        let next = lines.get(now + 1).filter(|_| self.shows.next).map(|line| line.text.clone());
+        let next = lines.get(now + 1).map(|line| line.text.clone());
         translation.or(next).unwrap_or_default()
     }
 
@@ -1902,7 +1991,7 @@ mod tests {
 
     #[test]
     fn the_room_chooses_the_layout() {
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         assert_eq!(Layout::for_room((420.0, 76.0), &all, None), Layout::Strip);
         assert_eq!(Layout::for_room((470.0, 178.0), &all, None), Layout::Player);
         assert_eq!(Layout::for_room((470.0, 400.0), &all, None), Layout::Card);
@@ -1910,8 +1999,7 @@ mod tests {
         assert_eq!(Layout::for_room((900.0, 470.0), &all, None), Layout::Stage);
         assert_eq!(Layout::for_room((900.0, 470.0), &Shows { cover: false, ..all }, None), Layout::Card);
         // Without the lines, a player however tall.
-        assert_eq!(Layout::for_room((470.0, 400.0), &Shows { lines: false, ..all }, None), Layout::Player);
-        // Controls kept over the spectrum: a row more before the player.
+                // Controls kept over the spectrum: a row more before the player.
         assert_eq!(Layout::for_room((470.0, 130.0), &Shows { controls: true, ..all }, None), Layout::Strip);
         // About a threshold, the layout it has is kept.
         assert_eq!(Layout::for_room((470.0, 245.0), &all, Some(Layout::Card)), Layout::Card);
@@ -1921,7 +2009,7 @@ mod tests {
 
     #[test]
     fn a_size_comes_to_rest_where_its_layout_is_right() {
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         // A strip pulled taller, short of a player: back to the strip's tallest; a player short of a card: its.
         assert_eq!(rests_at((420.0, 110.0), &all), (420.0, STRIP_MOST));
         assert_eq!(rests_at((420.0, 245.0), &all), (420.0, PLAYER_MOST));
@@ -2006,7 +2094,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         let gfx = crate::ui::gfx::current().unwrap();
         let places = [1u32, 451, 902, 1350];
         let (w, h) = (470.0, 178.0);
@@ -2052,7 +2140,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::current().unwrap();
@@ -2115,7 +2203,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::current().unwrap();
@@ -2149,7 +2237,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         let gfx = crate::ui::gfx::current().unwrap();
         let (w, h) = (780.0, 64.0);
         let size = ((w * 1.5) as u32, (h * 1.5) as u32);
@@ -2174,7 +2262,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         let gfx = crate::ui::gfx::current().unwrap();
         for size in [(470.0, 400.0), (520.0, 236.0)] {
             let start = Instant::now();
@@ -2223,7 +2311,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, next: true, lines: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         let floating = Shows { cover: false, title: false, spectrum: false, clear: true, ..all };
         // Name, size, switches, the pointer over it (the controls come), lines turned by the wheel, the track dragged,
         // the music between lines.

@@ -6,9 +6,22 @@
 //! not; looked at every second while the module is on, and at once after
 //! anything is asked. With them, while lyrics are shown, the line sung now
 //! (looked at again as the next is due).
+//!
+//! Two are followed: whatever plays (the time and media show it, and let it be paused, whatever it is), and music
+//! alone (the music component shows it, with its lyrics: not a video playing meanwhile). See `media::Follow`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+#[cfg(windows)]
+pub use crate::media::Follow;
+/// What is followed (see the media module's).
+#[cfg(not(windows))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Follow {
+    Any,
+    Music,
+}
 
 /// How it is now.
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -58,7 +71,7 @@ pub const GLIDE: std::time::Duration = std::time::Duration::from_millis(420);
 
 /// Whether the lyrics are gliding to the line sung now: what shows them is drawn every frame meanwhile.
 pub fn gliding() -> bool {
-    NOW.lock().unwrap().as_ref().and_then(|now| now.sung.as_ref()).is_some_and(|sung| matches!(sung, Sung::Lines { since, .. } if since.elapsed() < GLIDE))
+    NOW[Follow::Music as usize].lock().unwrap().as_ref().and_then(|now| now.sung.as_ref()).is_some_and(|sung| matches!(sung, Sung::Lines { since, .. } if since.elapsed() < GLIDE))
 }
 
 /// What is told that the line sung has changed (the windows that show it are drawn at once then).
@@ -91,13 +104,40 @@ pub enum Act {
     Seek(f64),
 }
 
-static NOW: Mutex<Option<Now>> = Mutex::new(None);
+/// How it is, for each followed (see `Follow`).
+static NOW: [Mutex<Option<Now>>; 2] = [Mutex::new(None), Mutex::new(None)];
 /// Counted up each time what `NOW` holds changes: what is drawn of it is drawn again then.
 static STAMP: AtomicU64 = AtomicU64::new(0);
 
-/// How it is, as last looked at; none while the module is off (or before the first look).
+/// Music shown by the settings (their music page, and the layout's): it is looked at meanwhile, shown anywhere else
+/// or not.
+static SHOWN_IN_SETTINGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the settings show music now (see `SHOWN_IN_SETTINGS`), and the settings saying so.
+pub fn shown_in_settings() -> bool {
+    SHOWN_IN_SETTINGS.load(Ordering::Relaxed)
+}
+
+pub fn show_in_settings(shown: bool) {
+    SHOWN_IN_SETTINGS.store(shown, Ordering::Relaxed);
+}
+
+/// The players telling Windows they play music, as last looked at (each as Windows identifies it, and its name).
+static MUSIC_PLAYERS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// The players telling Windows they play music, as last looked at while music is shown.
+pub fn music_players() -> Vec<(String, String)> {
+    MUSIC_PLAYERS.lock().unwrap().clone()
+}
+
+/// How whatever plays is, as last looked at; none while nothing shows it (or before the first look).
 pub fn now() -> Option<Now> {
-    NOW.lock().unwrap().clone()
+    NOW[Follow::Any as usize].lock().unwrap().clone()
+}
+
+/// How the music is, as last looked at (with its lyrics, while they are shown); none while nothing shows it.
+pub fn music() -> Option<Now> {
+    NOW[Follow::Music as usize].lock().unwrap().clone()
 }
 
 /// A number that changes whenever `now` does.
@@ -105,8 +145,8 @@ pub fn stamp() -> u64 {
     STAMP.load(Ordering::Relaxed)
 }
 
-fn keep(now: Option<Now>) {
-    let mut kept = NOW.lock().unwrap();
+fn keep(follow: Follow, now: Option<Now>) {
+    let mut kept = NOW[follow as usize].lock().unwrap();
     if *kept != now {
         *kept = now;
         STAMP.fetch_add(1, Ordering::Relaxed);
@@ -118,7 +158,7 @@ fn keep(now: Option<Now>) {
 /// to, and some say the other thing once in between: what was asked for
 /// shows meanwhile, and what the program says after.)
 #[cfg(windows)]
-static ASKED: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
+static ASKED: [Mutex<Option<(std::time::Instant, bool)>>; 2] = [Mutex::new(None), Mutex::new(None)];
 /// How long what was asked for stands for what is said.
 #[cfg(windows)]
 const SETTLES: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -126,7 +166,7 @@ const SETTLES: std::time::Duration = std::time::Duration::from_millis(1500);
 /// Where along its track what plays is being dragged to, while it is (shown so, whatever its player says); then,
 /// asked to go there, till when what was asked for stands for what is said.
 #[cfg(windows)]
-static SEEKING: Mutex<Option<(f64, Option<std::time::Instant>)>> = Mutex::new(None);
+static SEEKING: [Mutex<Option<(f64, Option<std::time::Instant>)>>; 2] = [Mutex::new(None), Mutex::new(None)];
 
 /// Whether lyrics are shown (and so asked for), as `watch` was last told.
 #[cfg(windows)]
@@ -134,30 +174,35 @@ static LYRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 
 /// How far into the track it was as last looked at (seconds), when that was, and whether it was playing.
 #[cfg(windows)]
-static POSITION: Mutex<Option<(f64, std::time::Instant, bool)>> = Mutex::new(None);
+static POSITION: [Mutex<Option<(f64, std::time::Instant, bool)>>; 2] = [Mutex::new(None), Mutex::new(None)];
 
 /// Played from elsewhere along its track: where (seconds), when, and the track (its title).
 #[cfg(windows)]
-static SOUGHT: Mutex<Option<(f64, std::time::Instant, String)>> = Mutex::new(None);
+static SOUGHT: [Mutex<Option<(f64, std::time::Instant, String)>>; 2] = [Mutex::new(None), Mutex::new(None)];
 
 /// Paused: where it was held (seconds), and when its player had last said how far in it was as that was taken (see
 /// `look`).
 #[cfg(windows)]
-static HELD: Mutex<Option<(f64, std::time::Instant)>> = Mutex::new(None);
+static HELD: [Mutex<Option<(f64, std::time::Instant)>>; 2] = [Mutex::new(None), Mutex::new(None)];
 
-/// How far into the track it is now (seconds), from the last look on by the time since while it plays; none where
-/// its player does not say.
+/// How far into the track of what is followed for `follow` it is now (seconds), from the last look on by the time
+/// since while it plays; none where its player does not say.
 #[cfg(windows)]
-pub fn position() -> Option<f64> {
-    POSITION.lock().unwrap().map(|(at, when, playing)| if playing { at + when.elapsed().as_secs_f64() } else { at })
+pub fn position(follow: Follow) -> Option<f64> {
+    POSITION[follow as usize].lock().unwrap().map(|(at, when, playing)| if playing { at + when.elapsed().as_secs_f64() } else { at })
 }
 
-/// Looks at how it is; how long till the next line of the lyrics is due, where one is.
+/// Looks at how what is followed for `follow` is; how long till the next line of the lyrics is due, where one is
+/// (music's, while lyrics are shown).
 #[cfg(windows)]
-fn look() -> Option<std::time::Duration> {
-    let mut playing = crate::media::playing();
+fn look(follow: Follow) -> Option<std::time::Duration> {
+    let f = follow as usize;
+    let mut playing = crate::media::playing_of(follow);
+    if follow == Follow::Music {
+        *MUSIC_PLAYERS.lock().unwrap() = crate::media::music_players();
+    }
     // Dragged along: as far as it is dragged. Just asked to go somewhere along it: see `SOUGHT`, below.
-    let (dragged, settling) = match *SEEKING.lock().unwrap() {
+    let (dragged, settling) = match *SEEKING[f].lock().unwrap() {
         Some((at, None)) => (Some(at), false),
         Some((_, Some(till))) => (None, std::time::Instant::now() < till),
         None => (None, false),
@@ -176,7 +221,7 @@ fn look() -> Option<std::time::Duration> {
     // stands for where it was then, not where it is: Media Player says nothing more after it is moved along, and was
     // taken back where it had been).
     if let (Some(playing), None) = (playing.as_mut(), dragged) {
-        let mut sought = SOUGHT.lock().unwrap();
+        let mut sought = SOUGHT[f].lock().unwrap();
         if let (Some((at, when, title)), Some((position, _))) = (sought.as_ref(), playing.timeline.as_mut()) {
             let said_at = playing.said_ago.map(|ago| now - std::time::Duration::from_secs_f64(ago));
             if !settling && (*title != playing.title || said_at.is_some_and(|said| said > *when)) {
@@ -188,10 +233,10 @@ fn look() -> Option<std::time::Duration> {
     }
     if let (Some(playing), seeking) = (playing.as_mut(), seeking) {
         let said_at = playing.said_ago.map(|ago| now - std::time::Duration::from_secs_f64(ago));
-        let mut held = HELD.lock().unwrap();
+        let mut held = HELD[f].lock().unwrap();
         match (playing.playing, playing.timeline.as_mut()) {
             (false, Some((position, _))) if !seeking => {
-                let was_playing = POSITION.lock().unwrap().is_some_and(|(_, _, playing)| playing);
+                let was_playing = POSITION[f].lock().unwrap().is_some_and(|(_, _, playing)| playing);
                 match *held {
                     // The same saying as when the pause was seen: where it was held.
                     Some((at, by)) if said_at.is_some_and(|said| said <= by + std::time::Duration::from_millis(50)) => *position = at,
@@ -208,20 +253,20 @@ fn look() -> Option<std::time::Duration> {
             _ => *held = None,
         }
     }
-    *POSITION.lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, now, playing.playing)));
+    *POSITION[f].lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, now, playing.playing)));
     let timeline = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, length)| Timeline { at: at.floor(), length, seekable: playing.seekable }));
     let sound = crate::actions::volume();
-    let (sung, next) = match playing.as_ref().filter(|playing| LYRICS.load(Ordering::Relaxed) && !playing.title.is_empty()) {
+    let (sung, next) = match playing.as_ref().filter(|playing| follow == Follow::Music && LYRICS.load(Ordering::Relaxed) && !playing.title.is_empty()) {
         Some(playing) => sung(playing),
         None => (None, None),
     };
     let (title, artist, app, is_playing) = playing.map_or_else(Default::default, |playing| (playing.title, playing.artist, playing.app, playing.playing));
-    let is_playing = match *ASKED.lock().unwrap() {
+    let is_playing = match *ASKED[f].lock().unwrap() {
         Some((till, asked)) if std::time::Instant::now() < till => asked,
         _ => is_playing,
     };
     let players = crate::media::players().len().min(u8::MAX as usize) as u8;
-    keep(Some(Now { title, artist, app, playing: is_playing, volume: sound.map(|(level, _)| level), muted: sound.is_some_and(|(_, muted)| muted), timeline, players, sung }));
+    keep(follow, Some(Now { title, artist, app, playing: is_playing, volume: sound.map(|(level, _)| level), muted: sound.is_some_and(|(_, muted)| muted), timeline, players, sung }));
     next
 }
 
@@ -245,7 +290,7 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
             let due = lines.get(next).filter(|_| playing.playing).map(|line| std::time::Duration::from_secs_f64((line.at - crate::lyrics::EARLY - position).max(0.0)));
             // The same line as before keeps its time; another is the one from when it became due (from now, if
             // that was longer ago than a glide: come to by a jump in the track, it glides all the same).
-            let before = NOW.lock().unwrap().as_ref().and_then(|kept| match &kept.sung {
+            let before = NOW[Follow::Music as usize].lock().unwrap().as_ref().and_then(|kept| match &kept.sung {
                 Some(Sung::Lines { lines: had, now: was, since }) if std::sync::Arc::ptr_eq(had, &lines) && *was == now => Some(*since),
                 _ => None,
             });
@@ -263,41 +308,52 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
     }
 }
 
-/// Looks every second while `wanted` says the module is on (and whether lyrics are shown), and as each line
-/// of the lyrics is due; forgets what it saw while it is off.
+/// Looks every second at what `wanted` says is shown (whatever plays, and music with its lyrics), and as each line of
+/// the lyrics is due; forgets what it saw of one while it is not shown.
 #[cfg(windows)]
 pub fn watch(wanted: impl Fn() -> (bool, bool) + Send + 'static, changed: impl Fn() + Send + Sync + 'static) {
     let _ = TOLD.set(Box::new(changed));
     std::thread::Builder::new().name("glance: what plays".into()).spawn(move || loop {
-        let (on, lyrics) = wanted();
-        LYRICS.store(lyrics, Ordering::Relaxed);
-        let next = if on { look() } else { keep(None); None };
+        let (any, music) = wanted();
+        LYRICS.store(music, Ordering::Relaxed);
+        if any {
+            look(Follow::Any);
+        } else {
+            keep(Follow::Any, None);
+        }
+        let next = if music { look(Follow::Music) } else { keep(Follow::Music, None); None };
         // (Not sooner than a twentieth of a second: a line due already is looked at as the next comes.)
         let wait = next.map_or(std::time::Duration::from_secs(1), |next| next.clamp(std::time::Duration::from_millis(50), std::time::Duration::from_secs(1)));
         std::thread::sleep(wait);
     }).expect("a thread started");
 }
 
-/// Does `act`, on a thread of its own, and looks at how it is then: at
-/// once, and again a moment later (a program says that it has paused a
-/// little after it was asked to).
+/// Does `act` on whatever plays (see `act_on`).
 #[cfg(windows)]
 pub fn act(act: Act) {
+    act_on(Follow::Any, act);
+}
+
+/// Does `act` on what is followed for `follow`, on a thread of its own, and looks at how it is then: at once, and
+/// again a moment later (a program says that it has paused a little after it was asked to).
+#[cfg(windows)]
+pub fn act_on(follow: Follow, act: Act) {
+    let f = follow as usize;
     std::thread::spawn(move || {
         match act {
             Act::Key(Key::Previous) => {
-                let _ = crate::media::ask("previous");
+                let _ = crate::media::ask_of(follow, "previous");
             }
             Act::Key(Key::Toggle) => {
                 // Shown as asked for at once.
-                if let Some(now) = now() {
-                    *ASKED.lock().unwrap() = Some((std::time::Instant::now() + SETTLES, !now.playing));
-                    keep(Some(Now { playing: !now.playing, ..now }));
+                if let Some(now) = NOW[f].lock().unwrap().clone() {
+                    *ASKED[f].lock().unwrap() = Some((std::time::Instant::now() + SETTLES, !now.playing));
+                    keep(follow, Some(Now { playing: !now.playing, ..now }));
                 }
-                let _ = crate::media::ask("toggle");
+                let _ = crate::media::ask_of(follow, "toggle");
             }
             Act::Key(Key::Next) => {
-                let _ = crate::media::ask("next");
+                let _ = crate::media::ask_of(follow, "next");
             }
             Act::Key(Key::Player) => {
                 crate::media::follow_next();
@@ -309,18 +365,18 @@ pub fn act(act: Act) {
             Act::Volume(level) => drop(crate::actions::set_volume(Some(level), None)),
             Act::Seek(at) => {
                 // Shown there at once, and till the player says it is.
-                *SEEKING.lock().unwrap() = Some((at, Some(std::time::Instant::now() + SETTLES)));
-                *SOUGHT.lock().unwrap() = now().map(|now| (at, std::time::Instant::now(), now.title));
-                if !crate::media::seek(at) {
-                    *SEEKING.lock().unwrap() = None;
-                    *SOUGHT.lock().unwrap() = None;
+                *SEEKING[f].lock().unwrap() = Some((at, Some(std::time::Instant::now() + SETTLES)));
+                *SOUGHT[f].lock().unwrap() = NOW[f].lock().unwrap().clone().map(|now| (at, std::time::Instant::now(), now.title));
+                if !crate::media::seek_of(follow, at) {
+                    *SEEKING[f].lock().unwrap() = None;
+                    *SOUGHT[f].lock().unwrap() = None;
                 }
             }
         }
         // (The last, once what was asked for no longer stands for what is said.)
         for wait in [0, 150, 500, 900] {
             std::thread::sleep(std::time::Duration::from_millis(wait));
-            let _ = look();
+            let _ = look(follow);
         }
     });
 }
@@ -334,15 +390,15 @@ pub fn slide(level: u8) {
     if shown.is_none() || shown == now() {
         return;
     }
-    keep(shown);
+    keep(Follow::Any, shown);
     std::thread::spawn(move || drop(crate::actions::set_volume(Some(level), None)));
 }
 
-/// A track dragged along: the sound's, or that of what plays.
+/// A track dragged along: the sound's, or that of what is followed for its `Follow` (see `Follow`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Slider {
     Volume,
-    Seek,
+    Seek(Follow),
 }
 
 /// `slider` dragged to `fraction` of the way along it: the sound as loud, set at once; what plays shown as that far
@@ -352,22 +408,22 @@ pub fn slide_along(slider: Slider, fraction: f32) {
     let fraction = fraction.clamp(0.0, 1.0);
     match slider {
         Slider::Volume => slide((fraction * 100.0).round() as u8),
-        Slider::Seek => {
-            let Some(length) = now().and_then(|now| now.timeline).map(|timeline| timeline.length) else { return };
-            *SEEKING.lock().unwrap() = Some((fraction as f64 * length, None));
-            let _ = look();
+        Slider::Seek(follow) => {
+            let Some(length) = NOW[follow as usize].lock().unwrap().as_ref().and_then(|now| now.timeline).map(|timeline| timeline.length) else { return };
+            *SEEKING[follow as usize].lock().unwrap() = Some((fraction as f64 * length, None));
+            let _ = look(follow);
         }
     }
 }
 
-/// Where what plays's track is being dragged to (seconds), while it is (see `slide_along`).
+/// Where the track of what is followed for `follow` is being dragged to (seconds), while it is (see `slide_along`).
 #[cfg(windows)]
-pub fn dragged_to() -> Option<f64> {
-    SEEKING.lock().unwrap().and_then(|(at, settling)| settling.is_none().then_some(at))
+pub fn dragged_to(follow: Follow) -> Option<f64> {
+    SEEKING[follow as usize].lock().unwrap().and_then(|(at, settling)| settling.is_none().then_some(at))
 }
 
 #[cfg(not(windows))]
-pub fn dragged_to() -> Option<f64> {
+pub fn dragged_to(_: Follow) -> Option<f64> {
     None
 }
 
@@ -380,13 +436,13 @@ pub fn slid(slider: Slider, kept: bool) {
                 act(Act::Volume(level));
             }
         }
-        Slider::Seek => {
-            let left_at = SEEKING.lock().unwrap().and_then(|(at, settling)| settling.is_none().then_some(at));
+        Slider::Seek(follow) => {
+            let left_at = SEEKING[follow as usize].lock().unwrap().and_then(|(at, settling)| settling.is_none().then_some(at));
             match left_at.filter(|_| kept) {
-                Some(at) => act(Act::Seek(at)),
+                Some(at) => act_on(follow, Act::Seek(at)),
                 None => {
-                    *SEEKING.lock().unwrap() = None;
-                    let _ = look();
+                    *SEEKING[follow as usize].lock().unwrap() = None;
+                    let _ = look(follow);
                 }
             }
         }
@@ -396,10 +452,14 @@ pub fn slid(slider: Slider, kept: bool) {
 #[cfg(not(windows))]
 pub fn act(_: Act) {}
 
-/// For the studio's pictures: as if this played.
+#[cfg(not(windows))]
+pub fn act_on(_: Follow, _: Act) {}
+
+/// For the studio's pictures: as if this played (and were music).
 #[cfg(feature = "studio")]
 pub fn pretend(now: Now) {
-    keep(Some(now));
+    keep(Follow::Music, Some(now.clone()));
+    keep(Follow::Any, Some(now));
 }
 
 #[cfg(all(test, windows))]
@@ -427,10 +487,10 @@ mod tests {
     #[test]
     #[ignore]
     fn times_a_look() {
-        super::look();
+        super::look(super::Follow::Any);
         let from = std::time::Instant::now();
         for _ in 0..20 {
-            super::look();
+            super::look(super::Follow::Any);
         }
         println!("a look takes {:.2} ms; it sees {:?}", from.elapsed().as_secs_f64() * 1000.0 / 20.0, super::now());
     }

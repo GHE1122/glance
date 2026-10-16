@@ -204,6 +204,7 @@ pub struct Controller {
 
 impl Controller {
     pub fn new(info: StaticInfo, settings: &Settings) -> Self {
+        crate::media::choose_music(settings.music_source.as_ref().map(|source| source.id.clone()));
         Controller {
             info,
             config: Mutex::new(config_from(settings)),
@@ -219,6 +220,7 @@ impl Controller {
     }
 
     pub fn apply(&self, settings: &Settings) {
+        crate::media::choose_music(settings.music_source.as_ref().map(|source| source.id.clone()));
         *self.config.lock().unwrap() = config_from(settings);
         self.post(RESTYLE);
     }
@@ -2566,7 +2568,7 @@ impl<'a> Panel<'a> {
                 // As it is on screen now: shown, it closes; not, it opens.
                 self.controller.set_overlay(!self.controller.overlay_wanted());
             }
-            Some(Hit::Media(key)) => crate::playing::act(crate::playing::Act::Key(key)),
+            Some(Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
             Some(Hit::Line(index)) => {
                 crate::ui::music::play_line(index);
                 self.music.back_to_now();
@@ -2854,7 +2856,7 @@ pub(crate) fn opens_drive(name: &str, lang: Lang) -> String {
 pub(crate) fn says(hit: Hit, lang: Lang) -> Option<String> {
     match hit {
         Hit::Drive(place) => crate::app().controller.seen.lock().unwrap().volumes.get(place as usize).map(|name| opens_drive(name, lang)),
-        Hit::Media(crate::playing::Key::Player) => {
+        Hit::Media(crate::playing::Key::Player, _) => {
             let players = crate::playing::now().map_or(0, |now| now.players);
             Some(match lang {
                 Lang::Zh => format!("切换到下一个播放器（共 {players} 个）"),

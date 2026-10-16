@@ -132,7 +132,12 @@ impl Ui {
                     // As a strip: one line, the cover and what plays beside it.
                     shows.clear = false;
                     frame.origin(sample.x, sample.y);
-                    let _ = self.library_music.paint(frame, (sample.w, sample.h), &shows, super::super::music::Ground::Own, self.scale, None, Instant::now());
+                    let (size, ground, now) = ((sample.w, sample.h), super::super::music::Ground::Own, Instant::now());
+                    let _ = if super::super::music::heard() {
+                        self.library_music.paint(frame, size, &shows, ground, self.scale, None, now)
+                    } else {
+                        self.library_music.paint_example(frame, size, &shows, ground, self.scale, None, now, self.example_from.elapsed().as_secs_f64())
+                    };
                     frame.origin(0.0, 0.0);
                 }
             }
@@ -345,10 +350,15 @@ impl Ui {
         };
         unsafe { frame.dc.PushAxisAlignedClip(&rect(r.x, r.y, r.w, r.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         frame.place(Matrix3x2::scale(zoom * k, zoom * k) * Matrix3x2::translation(r.x + x * k, r.y + y * k));
-        let painted = self.music.paint(frame, size, &shows, super::super::music::Ground::of(&shows), self.scale * zoom * k, None, Instant::now());
+        let (ground, scale, now) = (super::super::music::Ground::of(&shows), self.scale * zoom * k, Instant::now());
+        let painted = if super::super::music::heard() {
+            self.music.paint(frame, size, &shows, ground, scale, None, now)
+        } else {
+            self.music.paint_example(frame, size, &shows, ground, scale, None, now, self.example_from.elapsed().as_secs_f64())
+        };
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };
-        (painted.busy.then_some(MUSIC_PREVIEW_PACE), r)
+        ((painted.busy || !super::super::music::heard()).then_some(MUSIC_PREVIEW_PACE), r)
     }
 
     /// The edges of the screen `screen` (`monitors[index]`), drawn at `r` (`along` placing a physical pixel along an

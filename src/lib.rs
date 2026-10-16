@@ -455,10 +455,14 @@ pub fn run() {
         playing::watch(|| {
             let settings = app().settings.lock().unwrap();
             let view = &settings.view;
-            // What plays, shown by an edge or a widget.
-            let music = settings.places().shows(settings::Part::Music) || settings.widgets.iter().any(settings::WidgetAt::shows_music);
-            let lyrics = music || (ui::prefs::module_on(view, "time") && ui::prefs::item_on(view, "time", "lyrics"));
-            (ui::prefs::module_on(view, "time") || lyrics, lyrics)
+            // Whatever plays, while a time and media lane shows it (the readings', or the workbench's); music, while an
+            // edge or a widget shows it, or a time and media lane its lyrics.
+            let time = |lyrics: bool| {
+                let shown = |list: &str| ui::prefs::module_on_in(view, list, "time") && (!lyrics || ui::prefs::item_on_in(view, list, "time", "lyrics"));
+                shown("modules") || shown("workbench")
+            };
+            let music = settings.places().shows(settings::Part::Music) || settings.widgets.iter().any(settings::WidgetAt::shows_music) || time(true) || playing::shown_in_settings();
+            (time(false), music)
         }, || app().controller.lyric_changed());
         let mut watch = watch::Watch::default();
         // What the remote-control helper is told of each sample.

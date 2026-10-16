@@ -226,6 +226,14 @@ pub struct PanelLayout {
     pub workbench: bool,
 }
 
+/// A player music is followed from: as Windows identifies it, and by the name it is shown by (said in the settings
+/// while it is not running).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct MusicSource {
+    pub id: String,
+    pub name: String,
+}
+
 /// The form a widget showing what plays is kept as, in place of the readings' (see `PanelLayout`): an older Glance,
 /// which has no such form, leaves it out rather than show something else.
 pub const MUSIC_FORM: &str = "music";
@@ -512,6 +520,8 @@ pub struct Settings {
     pub panel_pinned: Option<(i32, i32)>,
     /// The desktop widgets torn off the panel.
     pub widgets: Vec<WidgetAt>,
+    /// The player music is followed from, while it plays (see `media::choose_music`); none: as Glance picks.
+    pub music_source: Option<MusicSource>,
     pub view: serde_json::Value,
 }
 
@@ -544,6 +554,7 @@ impl Default for Settings {
             panel_at: None,
             panel_pinned: None,
             widgets: Vec::new(),
+            music_source: None,
             view: serde_json::Value::Null,
         }
     }

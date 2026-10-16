@@ -82,12 +82,10 @@ const TIME: [Item; 4] = [item("twelve", false), item("sound", true), item("media
 /// What plays, as the music widgets show it (see `music::Shows`): the translation under the line sung now, else the
 /// next line; the cover, what plays, the lines round the one sung now, the spectrum, the controls kept showing, no
 /// ground.
-const LYRICS: [Item; 8] = [
+const LYRICS: [Item; 6] = [
     item("translation", true),
-    item("next", true),
     item("cover", true),
     item("title", true),
-    item("lines", true),
     item("spectrum", true),
     item("controls", false),
     item("clear", false),
@@ -285,13 +283,28 @@ const DEFAULT_OFF: [&str; 5] = ["system", "time", "lyrics", "wsl", "docker"];
 /// Whether module `id` is on in the stored preferences `stored` (as kept,
 /// before they are resolved: off unless listed on).
 pub fn module_on(stored: &serde_json::Value, id: &str) -> bool {
-    stored["modules"].as_array().is_some_and(|modules| modules.iter().any(|entry| entry["id"] == id && entry["on"] == true))
+    module_on_in(stored, "modules", id)
+}
+
+/// As `module_on`, in the stored list `list` ("modules", the readings'; "workbench", the workbench's, each of its
+/// modules on unless listed off).
+pub fn module_on_in(stored: &serde_json::Value, list: &str, id: &str) -> bool {
+    let entry = stored[list].as_array().and_then(|modules| modules.iter().find(|entry| entry["id"] == id));
+    match entry {
+        Some(entry) => entry["on"] == true,
+        None => list == "workbench" && WORKBENCH.contains(&id),
+    }
 }
 
 /// Whether module `id` shows item `name` in the stored preferences `stored`: as switched there, else as it is
 /// by default.
 pub fn item_on(stored: &serde_json::Value, id: &str, name: &str) -> bool {
-    let switched = stored["modules"].as_array().and_then(|modules| modules.iter().find(|entry| entry["id"] == id)).and_then(|entry| entry["items"][name].as_bool());
+    item_on_in(stored, "modules", id, name)
+}
+
+/// As `item_on`, in the stored list `list` (see `module_on_in`).
+pub fn item_on_in(stored: &serde_json::Value, list: &str, id: &str, name: &str) -> bool {
+    let switched = stored[list].as_array().and_then(|modules| modules.iter().find(|entry| entry["id"] == id)).and_then(|entry| entry["items"][name].as_bool());
     switched.unwrap_or_else(|| items(id).iter().find(|item| item.name == name).is_some_and(|item| item.on))
 }
 

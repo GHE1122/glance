@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use windows::core::{Interface, Result};
 use windows::Media::Control::{GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager, GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status};
+use windows::Media::MediaPlaybackType;
 use windows::Win32::Media::Audio::{eConsole, eRender, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
 use windows::core::PCWSTR;
@@ -69,22 +70,111 @@ fn manager() -> Result<Manager> {
     })
 }
 
-/// The program chosen to be followed (see `choose`), as Windows identifies it; none: whichever Windows would act on.
-static CHOSEN: Mutex<Option<String>> = Mutex::new(None);
+/// What is followed: whatever plays (what Windows would act on were a media key pressed), or music alone (a music
+/// player's, or what its program says is music: not a video, nor a call).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Follow {
+    Any,
+    Music,
+}
 
-/// The session followed: the chosen program's, while it has one; else what Windows would act on were a media key
-/// pressed now.
-fn session() -> Result<Session> {
+/// The program chosen to be followed for each (see `follow_next` and `choose_music`), as Windows identifies it;
+/// none: as `session` picks.
+static CHOSEN: [Mutex<Option<String>>; 2] = [Mutex::new(None), Mutex::new(None)];
+/// The music player last followed: all music paused, it is still the one to play again.
+static LAST_MUSIC: Mutex<Option<String>> = Mutex::new(None);
+
+/// The programs known to play music (by what Windows identifies them by, or their file's name), lower case: one of
+/// them is music whatever it says of what it plays.
+const MUSIC_PLAYERS: [&str; 18] = [
+    "cloudmusic", "qqmusic", "kugou", "kwmusic", "spotify", "zunemusic", "applemusic", "itunes", "foobar2000", "musicbee", "aimp", "tidal",
+    "deezer", "amazonmusic", "yesplaymusic", "lx-music", "listen1", "musicfree",
+];
+
+/// The browsers (by what Windows identifies them by, lower case), which say what they play is music whatever it is (a
+/// video too): what one plays is music only where it is chosen to be followed for music.
+const BROWSERS: [&str; 8] = ["msedge", "chrome", "brave", "opera", "vivaldi", "firefox", "308046b0af4a39cb", "yandex"];
+
+/// Whether a program by `id` (as Windows identifies it, or by its file's name) is a music player.
+fn music_player(id: &str) -> bool {
+    let id = id.to_lowercase();
+    MUSIC_PLAYERS.iter().any(|player| id.contains(player))
+}
+
+/// Whether `session` plays music: as its program says what it plays (music, not a video nor a picture), where it says
+/// and is to be taken at its word (a browser is not: see `BROWSERS`); else as its program is a music player.
+fn is_music(session: &Session) -> bool {
+    let id = session.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default();
+    let lower = id.to_lowercase();
+    if BROWSERS.iter().any(|browser| lower.contains(browser)) {
+        return false;
+    }
+    let said = session.GetPlaybackInfo().and_then(|info| info.PlaybackType()).and_then(|kind| kind.Value()).ok();
+    match said {
+        Some(kind) if kind == MediaPlaybackType::Music => true,
+        Some(kind) if kind == MediaPlaybackType::Video || kind == MediaPlaybackType::Image => false,
+        _ => music_player(&id),
+    }
+}
+
+/// The session followed for `follow`: the chosen program's, while it has one. Else, for whatever plays, what Windows
+/// would act on were a media key pressed now; for music, of the sessions playing music the one playing (the one
+/// followed last first), else the one followed last, else the first.
+fn session_of(follow: Follow) -> Result<Session> {
     let manager = manager()?;
-    if let Some(chosen) = CHOSEN.lock().unwrap().clone() {
-        let sessions = manager.GetSessions()?;
-        for session in &sessions {
-            if session.SourceAppUserModelId().is_ok_and(|id| id.to_string() == chosen) {
-                return Ok(session);
-            }
+    let sessions: Vec<Session> = manager.GetSessions()?.into_iter().collect();
+    let id = |session: &Session| session.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default();
+    if let Some(chosen) = CHOSEN[follow as usize].lock().unwrap().clone() {
+        if let Some(session) = sessions.iter().find(|session| id(session) == chosen) {
+            return Ok(session.clone());
         }
     }
-    manager.GetCurrentSession()
+    match follow {
+        Follow::Any => manager.GetCurrentSession(),
+        Follow::Music => {
+            let music: Vec<Session> = sessions.into_iter().filter(is_music).collect();
+            let last = LAST_MUSIC.lock().unwrap().clone();
+            let playing = |session: &Session| session.GetPlaybackInfo().and_then(|info| info.PlaybackStatus()).is_ok_and(|status| status == Status::Playing);
+            let found = music
+                .iter()
+                .find(|session| playing(session) && last.as_deref() == Some(id(session).as_str()))
+                .or_else(|| music.iter().find(|session| playing(session)))
+                .or_else(|| music.iter().find(|session| last.as_deref() == Some(id(session).as_str())))
+                .or_else(|| music.first())
+                .cloned()
+                .ok_or_else(windows::core::Error::empty)?;
+            *LAST_MUSIC.lock().unwrap() = Some(id(&found));
+            Ok(found)
+        }
+    }
+}
+
+/// The session followed for whatever plays.
+fn session() -> Result<Session> {
+    session_of(Follow::Any)
+}
+
+/// Music followed from the program `id` (as Windows identifies it) while it has a session; none: as `session_of`
+/// picks.
+pub fn choose_music(id: Option<String>) {
+    *CHOSEN[Follow::Music as usize].lock().unwrap() = id;
+}
+
+/// The programs music can be followed from now: those telling Windows what they play (music or not: a browser playing
+/// music is chosen by hand), each as Windows identifies it and by the name it is shown by, the music players first.
+pub fn music_players() -> Vec<(String, String)> {
+    let Ok(sessions) = manager().and_then(|manager| manager.GetSessions()) else { return Vec::new() };
+    let mut sessions: Vec<Session> = sessions.into_iter().collect();
+    sessions.sort_by_key(|session| !is_music(session));
+    sessions
+        .into_iter()
+        .filter_map(|session| session.SourceAppUserModelId().ok().map(|id| id.to_string()))
+        .filter(|id| !id.is_empty())
+        .map(|id| {
+            let name = shown(&id).unwrap_or_else(|| id.trim_end_matches(".exe").to_string());
+            (id, name)
+        })
+        .collect()
 }
 
 /// The programs that tell Windows what they play, as Windows identifies each, in its order.
@@ -102,7 +192,7 @@ pub fn follow_next() -> bool {
     }
     let now = session().and_then(|session| session.SourceAppUserModelId()).map(|id| id.to_string()).unwrap_or_default();
     let next = players.iter().position(|id| *id == now).map_or(0, |at| (at + 1) % players.len());
-    *CHOSEN.lock().unwrap() = Some(players[next].clone());
+    *CHOSEN[Follow::Any as usize].lock().unwrap() = Some(players[next].clone());
     true
 }
 
@@ -135,9 +225,9 @@ fn shown_as(id: &str) -> Option<String> {
     }
 }
 
-/// What a program has told Windows it plays.
-fn told() -> Option<Playing> {
-    let session = session().ok()?;
+/// What a program has told Windows it plays, of those followed for `follow`.
+fn told(follow: Follow) -> Option<Playing> {
+    let session = session_of(follow).ok()?;
     let about = session.TryGetMediaPropertiesAsync().ok()?.join().ok()?;
     let title = about.Title().ok()?.to_string();
     if title.is_empty() {
@@ -166,7 +256,12 @@ fn told() -> Option<Playing> {
 
 /// Moves what plays to `seconds` into its track, where its program lets it; whether it took it.
 pub fn seek(seconds: f64) -> bool {
-    let Ok(session) = session() else { return false };
+    seek_of(Follow::Any, seconds)
+}
+
+/// As `seek`, what is followed for `follow`.
+pub fn seek_of(follow: Follow, seconds: f64) -> bool {
+    let Ok(session) = session_of(follow) else { return false };
     session.TryChangePlaybackPositionAsync((seconds.max(0.0) * 1e7) as i64).and_then(|asking| asking.join()).unwrap_or(false)
 }
 
@@ -258,15 +353,16 @@ fn shown(id: &str) -> Option<String> {
 }
 
 /// The program last heard sounding, of those that do not tell Windows what
-/// they play: paused, it is still the one to play again.
-static HEARD: Mutex<Option<String>> = Mutex::new(None);
+/// they play (for each that is followed: see `Follow`): paused, it is still
+/// the one to play again.
+static HEARD: [Mutex<Option<String>>; 2] = [Mutex::new(None), Mutex::new(None)];
 
 /// The program that is sounding (the one heard before, if it still is);
 /// or, none sounding, the one heard before, paused, for as long as it has
-/// its sound open.
-fn heard() -> Option<Playing> {
-    let programs = sounds().ok()?;
-    let mut heard = HEARD.lock().unwrap();
+/// its sound open. For music, of the music players alone.
+fn heard(follow: Follow) -> Option<Playing> {
+    let programs: Vec<(String, String, bool)> = sounds().ok()?.into_iter().filter(|(name, _, _)| follow == Follow::Any || music_player(name)).collect();
+    let mut heard = HEARD[follow as usize].lock().unwrap();
     let is = |name: &String, sounding: bool| programs.iter().any(|(program, _, active)| program == name && *active == sounding);
     let now = heard.clone().filter(|name| is(name, true)).or_else(|| programs.iter().find(|(_, _, active)| *active).map(|(name, _, _)| name.clone()));
     let (name, playing) = match now {
@@ -281,7 +377,12 @@ fn heard() -> Option<Playing> {
 
 /// What is playing (or paused); none, when nothing is.
 pub fn playing() -> Option<Playing> {
-    told().or_else(heard)
+    playing_of(Follow::Any)
+}
+
+/// What is playing (or paused) of what is followed for `follow`; none, when nothing is.
+pub fn playing_of(follow: Follow) -> Option<Playing> {
+    told(follow).or_else(|| heard(follow))
 }
 
 /// Presses and lets go one of the keyboard's media keys.
@@ -305,13 +406,18 @@ pub enum Asked {
 /// Pauses or plays what is playing ("toggle"), or skips on or back
 /// ("next", "previous").
 pub fn ask(what: &str) -> Asked {
+    ask_of(Follow::Any, what)
+}
+
+/// As `ask`, what is followed for `follow`.
+pub fn ask_of(follow: Follow, what: &str) -> Asked {
     let key = match what {
         "toggle" => VK_MEDIA_PLAY_PAUSE,
         "next" => VK_MEDIA_NEXT_TRACK,
         "previous" => VK_MEDIA_PREV_TRACK,
         _ => return Asked::Not,
     };
-    if let Ok(session) = session() {
+    if let Ok(session) = session_of(follow) {
         let asked = match what {
             "toggle" => session.TryTogglePlayPauseAsync(),
             "next" => session.TrySkipNextAsync(),

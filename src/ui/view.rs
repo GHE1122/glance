@@ -146,12 +146,12 @@ pub enum Hit {
     /// A thread's cell in the CPU's grid: its clock and load shown while the
     /// pointer is on it.
     Thread(u16),
-    /// What plays, paused, played or skipped, or the sound muted; and the
-    /// sound's track, pressed where along it the sound is to be.
-    Media(crate::playing::Key),
+    /// What is followed (see `playing::Follow`) paused, played or skipped, or the sound muted; and the sound's
+    /// track, pressed where along it the sound is to be.
+    Media(crate::playing::Key, crate::playing::Follow),
     Volume,
-    /// The track of what plays, pressed (and dragged along) where in it it is to play from.
-    Seek,
+    /// The track of what is followed, pressed (and dragged along) where in it it is to play from.
+    Seek(crate::playing::Follow),
     /// A drive's row in the storage lane: the drive opened (by its place among the drives seen).
     Drive(u16),
     /// A line of the lyrics turned to by the wheel (by its place among them): played from its start.
@@ -169,7 +169,7 @@ impl Hit {
     pub fn slider(self) -> Option<crate::playing::Slider> {
         match self {
             Hit::Volume => Some(crate::playing::Slider::Volume),
-            Hit::Seek => Some(crate::playing::Slider::Seek),
+            Hit::Seek(follow) => Some(crate::playing::Slider::Seek(follow)),
             _ => None,
         }
     }
@@ -1080,9 +1080,9 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     }
                 }
             }
-            // (None where none were found: what plays may be no song at all, a video say.)
-            let heard = crate::playing::now();
-            if let Some((line, under, said)) = sung_now(heard.as_ref(), lang, prefs.shows("lyrics", "translation")).filter(|_| on("lyrics")) {
+            // The music's line, while what plays is it (a video playing meanwhile has none); none where none were found.
+            let heard = crate::playing::music().filter(|music| crate::playing::now().is_some_and(|now| now.title == music.title && now.app == music.app));
+            if let Some((line, under, said)) = sung_now(heard.as_ref(), lang, prefs.shows("lyrics", "translation")).filter(|_| on("lyrics") && heard.is_some()) {
                 blocks.push(Block::Lyric { line, under, said, glide: glide_of(heard.as_ref()) });
             }
             blocks
@@ -1090,7 +1090,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         // What plays, in a widget merged with readings: drawn apart (see `Scene::music_apart`), its lane its head and
         // room under it (a player's, full; a strip's, compact).
         "lyrics" if scene.music_apart => {
-            let heard = crate::playing::now();
+            let heard = crate::playing::music();
             vec![
                 head(lang.pick("音乐", "Music"), heard.as_ref().map_or(String::new(), |heard| heard.app.clone()), "", false),
                 Block::Room(if full { MUSIC_ROOM.0 } else { MUSIC_ROOM.1 }),
@@ -1541,7 +1541,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 hits.push((plot_left, row, track, MEDIA_ROW, Hit::Volume));
                 part("level");
                 frame.text(&said, theme.small, if *muted { theme.text3 } else { theme.text2 }, mute - 6.0 - said_width, middle - LINE / 2.0, said_width, Align::End);
-                let hit = Hit::Media(crate::playing::Key::Mute);
+                let hit = Hit::Media(crate::playing::Key::Mute, crate::playing::Follow::Any);
                 pressed(frame, scene, hits, hit, if *muted { Icon::Muted } else { Icon::Volume }, mute, row, *muted);
             }
             (Block::Progress { at, length, seekable }, Pass::Content) => {
@@ -1557,7 +1557,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let fraction = if *length > 0 { *at as f32 / *length as f32 } else { 0.0 };
                 slider(frame, theme, ink.trace, plot_left, middle, track, fraction, *seekable);
                 if *seekable {
-                    hits.push((plot_left, y, track, MEDIA_ROW, Hit::Seek));
+                    hits.push((plot_left, y, track, MEDIA_ROW, Hit::Seek(crate::playing::Follow::Any)));
                 }
                 part("length");
                 frame.text(&long, theme.small, theme.text3, left + width - long_width, middle - LINE / 2.0, long_width, Align::End);
@@ -1573,7 +1573,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 // Where several players tell what they play: the line is pressed to follow the next (lit under the
                 // pointer; what a press does said under it).
                 let switches = *players > 1;
-                let switch = Hit::Media(crate::playing::Key::Player);
+                let switch = Hit::Media(crate::playing::Key::Player, crate::playing::Follow::Any);
                 let lit = switches && scene.hover == Some(switch);
                 frame.text(about, theme.small, if lit { theme.text } else { theme.text3 }, left, top + LINE, pressed_from - 8.0 - left, Align::Start);
                 if switches {
@@ -1581,7 +1581,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 }
                 let row = top + (2.0 * LINE - MEDIA_ROW) / 2.0;
                 for (place, (key, icon)) in [(Key::Previous, Icon::SkipBack), (Key::Toggle, if *playing { Icon::Pause } else { Icon::Play }), (Key::Next, Icon::SkipForward)].into_iter().enumerate() {
-                    pressed(frame, scene, hits, Hit::Media(key), icon, pressed_from + place as f32 * (MEDIA_ROW + 2.0), row, false);
+                    pressed(frame, scene, hits, Hit::Media(key, crate::playing::Follow::Any), icon, pressed_from + place as f32 * (MEDIA_ROW + 2.0), row, false);
                 }
             }
             (Block::Lyric { line, under, said, glide }, Pass::Content) => {
