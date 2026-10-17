@@ -1969,7 +1969,11 @@ impl Widget {
         let due = self.behind.is_none() || self.replace.is_some() || elsewhere || retake || moved_behind;
         // None could be taken last time (the lock screen): not again at once.
         let rested = self.failed.is_none_or(|at| now.saturating_duration_since(at) >= RETAKE_EVERY);
-        if sees && due && rested && self.pending.is_none() && !self.window.yielding() {
+        // Giving way to the settings, the screen copied as it is would take them in (they are in front of it); what is
+        // behind put together from the windows under it never has them (see `scene`), and is taken all the same: after
+        // the device was lost, the widget has nothing behind it till it is.
+        let in_front_kept_out = crate::ui::scene::supported() || !self.window.yielding();
+        if sees && due && rested && self.pending.is_none() && in_front_kept_out {
             // Why, for the journal (not each live refresh).
             let why = [(self.behind.is_none(), "first"), (self.replace.is_some(), "replacing what it had"), (elsewhere, "moved past what was taken"), (retake, "let go"), (moved_behind, "windows behind changed")]
                 .iter()
