@@ -1707,7 +1707,8 @@ impl<'a> Panel<'a> {
             return;
         }
         self.end_drag();
-        if matches!(self.hover.take(), Some(Hit::Drive(_))) {
+        // (What it said under what the pointer was on goes with it: a drive's row, the line that switches players.)
+        if self.hover.take().is_some_and(|hit| says(hit, self.lang).is_some()) {
             crate::ui::tip::hide();
         }
         self.recapture = false;
@@ -1744,8 +1745,8 @@ impl<'a> Panel<'a> {
         let held = buttons_down() || std::mem::replace(&mut self.presses_seen, presses) != presses;
         if !on_panel {
             if let Some(was) = self.hover.take() {
-                // (What a drive's row said under it goes with it.)
-                if matches!(was, Hit::Drive(_)) {
+                // (What it said under it goes with it: a drive's row, the line that switches players.)
+                if says(was, self.lang).is_some() {
                     crate::ui::tip::hide();
                 }
                 self.next_frame = now;

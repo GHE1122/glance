@@ -1747,7 +1747,7 @@ impl Widgets {
     /// under the pointer gone with it (the pointer, no longer over it, would never take it away).
     fn put_away_at(&mut self, index: usize) {
         let widget = self.list.remove(index);
-        if widget.tip.is_some() || matches!(widget.hit_hover, Some(view::Hit::Drive(_))) {
+        if widget.tip.is_some() || matches!(widget.hit_hover, Some(view::Hit::Drive(_) | view::Hit::Media(crate::playing::Key::Player, _))) {
             crate::ui::tip::hide();
         }
         self.put_away.push(widget.kept());
@@ -2764,8 +2764,8 @@ impl Widget {
         }
         if !hovered {
             if let Some(was) = self.hit_hover.take() {
-                // (What a drive's row said under it goes with it.)
-                if matches!(was, view::Hit::Drive(_)) {
+                // (What it said under it goes with it: a drive's row, the line that switches players.)
+                if matches!(was, view::Hit::Drive(_) | view::Hit::Media(crate::playing::Key::Player, _)) {
                     crate::ui::tip::hide();
                 }
                 self.next_frame = now;
