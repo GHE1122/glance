@@ -547,6 +547,15 @@ impl Controller {
                     self.widget_put_away.store(widgets.any_put_away(), Ordering::Relaxed);
                     self.widget_processes.store(widgets.any_showing_processes(), Ordering::Relaxed);
                 }
+                // A pinned panel that gave way to another edge's: back where it was once that one is gone.
+                if !panel.is_shown() && pinned_at.is_none() {
+                    if let Some(point) = panel.yielded.take() {
+                        if let Some(contact) = monitor_at(point) {
+                            panel.open(point, contact, panel.edge_for(point, contact), None, now);
+                            panel.pinned = panel.is_open();
+                        }
+                    }
+                }
                 if let Some(point) = pinned_at.filter(|_| !self.history.lock().unwrap().is_empty()) {
                     pinned_at = None;
                     let point = POINT { x: point.0, y: point.1 };
@@ -1243,6 +1252,8 @@ struct Panel<'a> {
     pinned: bool,
     /// Its music asked to be shown over the whole of its screen (see `Widgets::open_full`): on which screen.
     full_asked: Option<Contact>,
+    /// Pinned at its edge, it gave way to another's (see `open`): where it was, to come back once that one goes.
+    yielded: Option<POINT>,
     /// A game holding the screen in exclusive fullscreen when the panel
     /// opened over it, which sent it to the background: brought back when
     /// the panel has closed, unless a press elsewhere closed it.
@@ -1356,6 +1367,7 @@ impl<'a> Panel<'a> {
             hover: None,
             pinned: false,
             full_asked: None,
+            yielded: None,
             game: None,
             opening: None,
             game_at: (false, false),
@@ -1488,8 +1500,19 @@ impl<'a> Panel<'a> {
     /// Opens the panel on `contact`'s screen: along its `edge` at `cursor`,
     /// or `floating` where it was moved to (see `Placement::floating`).
     fn open(&mut self, cursor: POINT, contact: Contact, edge: Edge, floating: Option<(f32, f32)>, now: Instant) {
-        if self.is_open() || self.controller.history.lock().unwrap().is_empty() {
+        if self.controller.history.lock().unwrap().is_empty() {
             return;
+        }
+        if self.is_open() {
+            // Pinned at its edge where another is pushed (another edge, or the same on another screen): it gives way
+            // to that edge's, and comes back where it was once that one goes (see `yielded`). (Each edge holds its
+            // own; pinned, one stood in the way of every other.)
+            let elsewhere = self.edge != edge || self.placement.as_ref().is_some_and(|placement| placement.contact.monitor != contact.monitor);
+            if !(self.pinned && elsewhere && !self.floating()) {
+                return;
+            }
+            self.yielded = self.placement.as_ref().map(|placement| placement.anchor);
+            self.dismiss();
         }
         let began = Instant::now();
         let mut taking = Duration::ZERO;

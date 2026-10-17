@@ -79,8 +79,10 @@ pub struct FullMusic {
     pointer: Option<(f32, f32)>,
     moved: Option<Instant>,
     controls: f32,
-    /// Whether the volume's bar is open (the pointer over its icon, or over the bar since).
+    /// Whether the volume's bar is open (the pointer over its icon, or over the bar since), and when the sound was
+    /// last turned by the wheel or a key (the bar then open a moment, saying how loud).
     volume_open: bool,
+    volume_turned: Option<Instant>,
     /// Whether the pointer over it is hidden, as last told.
     pointer_hidden: Option<bool>,
     /// What a press is on, as last drawn; the last press (for a double click); what is dragged.
@@ -123,6 +125,7 @@ impl FullMusic {
             controls: 1.0,
             pointer_hidden: None,
             volume_open: false,
+            volume_turned: None,
             hits: Vec::new(),
             pressed: None,
             dragging: None,
@@ -217,6 +220,7 @@ impl FullMusic {
         let (smoke, lines, now_index, leaving) = (&self.smoke, self.lines.clone(), self.now, self.leaving);
         let (pointer, controls, dragging) = (self.pointer, self.controls, self.dragging);
         let mut volume_open = self.volume_open;
+        let flash = self.volume_turned.is_some_and(|turned| now.duration_since(turned) < AWAKE);
         let mut hits = Vec::new();
         let gfx = self.gfx.clone();
         let _ = self.surface.draw(&gfx, pixels, self.scale, |frame| {
@@ -232,7 +236,10 @@ impl FullMusic {
                 draw_said(frame, (w, h), title, artist, why);
             }
             if controls > 0.0 {
-                draw_controls(frame, (w, h), controls, pointer, dragging, &mut volume_open, playing, position, length, &mut hits);
+                // (Coming up a little as they come in.)
+                frame.origin(0.0, (1.0 - controls) * 6.0);
+                draw_controls(frame, (w, h), controls, pointer, dragging, &mut volume_open, flash, playing, position, length, &mut hits);
+                frame.origin(0.0, 0.0);
             }
         });
         self.hits = hits;
@@ -292,36 +299,51 @@ impl FullMusic {
 
     /// What is dragged, to `at`: the track (shown that far in, played from there once let go) or the volume.
     fn drag(&mut self, dragged: Hit, at: (f32, f32)) {
-        let Some(((x, _, w, _), _)) = self.hits.iter().find(|(_, hit)| *hit == dragged) else { return };
-        let fraction = ((at.0 - x) / w.max(1.0)).clamp(0.0, 1.0);
+        let Some((area, _)) = self.hits.iter().find(|(_, hit)| *hit == dragged).copied() else { return };
         match dragged {
-            Hit::Track => crate::playing::slide_along(crate::playing::Slider::Seek(Follow::Music), fraction),
+            Hit::Track => crate::playing::slide_along(crate::playing::Slider::Seek(Follow::Music), ((at.0 - area.0) / area.2.max(1.0)).clamp(0.0, 1.0)),
+            // (Upright: from its bottom up.)
             Hit::Volume => {
+                let (top, bottom) = volume_bar(area);
+                let fraction = ((bottom - at.1) / (bottom - top).max(1.0)).clamp(0.0, 1.0);
                 let _ = crate::actions::set_volume(Some((fraction * 100.0).round() as u8), Some(false));
             }
             _ => {}
         }
     }
 
-    /// The wheel turned by `delta` (120 a notch): the sound louder or softer.
-    pub fn wheel(&mut self, delta: i16) {
-        self.moved = Some(Instant::now());
+    /// The sound louder or softer by `step` (of 100), the volume's bar shown a moment saying how loud.
+    fn turn_sound(&mut self, step: i32) {
         if let Some((level, _)) = crate::actions::volume() {
-            let level = (level as i32 + delta as i32 / 120 * 5).clamp(0, 100) as u8;
+            let level = (level as i32 + step).clamp(0, 100) as u8;
             let _ = crate::actions::set_volume(Some(level), Some(false));
         }
+        self.volume_turned = Some(Instant::now());
+        self.moved = Some(Instant::now());
     }
 
-    /// A key pressed: Esc leaves it, the space bar pauses or plays.
+    /// The wheel turned by `delta` (120 a notch): the sound louder or softer.
+    pub fn wheel(&mut self, delta: i16) {
+        self.turn_sound(delta as i32 / 120 * 5);
+    }
+
+    /// A key pressed: Esc leaves it, the space bar pauses or plays, left and right go back and on five seconds, up
+    /// and down turn the sound.
     pub fn key(&mut self, key: u16) -> Asked {
         match key {
-            0x1B => Asked::Leave,
-            0x20 => {
-                crate::playing::act_on(Follow::Music, crate::playing::Act::Key(crate::playing::Key::Toggle));
-                Asked::Stay
+            0x1B => return Asked::Leave,
+            0x20 => crate::playing::act_on(Follow::Music, crate::playing::Act::Key(crate::playing::Key::Toggle)),
+            0x25 | 0x27 => {
+                let position = crate::playing::position(Follow::Music).unwrap_or(0.0);
+                let to = position + if key == 0x27 { 5.0 } else { -5.0 };
+                crate::playing::act_on(Follow::Music, crate::playing::Act::Seek(to.max(0.0)));
+                self.moved = Some(Instant::now());
             }
-            _ => Asked::Stay,
+            0x26 => self.turn_sound(5),
+            0x28 => self.turn_sound(-5),
+            _ => {}
         }
+        Asked::Stay
     }
 }
 
@@ -508,7 +530,7 @@ fn draw_said(frame: &Frame, (w, h): (f32, f32), title: &str, artist: &str, why: 
 /// ends, the keys under it, the volume and the way out at the right; each lit under the pointer. What they are is
 /// put in `hits`.
 #[allow(clippy::too_many_arguments)]
-fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<(f32, f32)>, dragging: Option<Hit>, volume_open: &mut bool, playing: bool, position: f64, length: Option<f64>, hits: &mut Vec<((f32, f32, f32, f32), Hit)>) {
+fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<(f32, f32)>, dragging: Option<Hit>, volume_open: &mut bool, flash: bool, playing: bool, position: f64, length: Option<f64>, hits: &mut Vec<((f32, f32, f32, f32), Hit)>) {
     let under = |x: f32, y: f32, wide: f32, tall: f32| pointer.is_some_and(|(px, py)| px >= x && px < x + wide && py >= y && py < y + tall);
     // A darkening along the bottom for them to be read on.
     frame.fill_shape(
@@ -548,8 +570,9 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
         }
         hits.push(((from - 8.0, y - 10.0, wide + 16.0, 20.0), Hit::Track));
     }
-    // At the right, the way out, and the sound's icon beside it; its bar opening to the left of the icon while the
-    // pointer is over the icon or the bar (nothing moves as it opens).
+    // At the right, the way out, and the sound's icon beside it; over the icon, while the pointer is over it or the
+    // bar (or the sound was just turned by the wheel or a key: `flash`), a bar standing up, filled as loud as the sound
+    // is, its level said at its top. (Upright, it takes no room along the bottom.)
     let (level, muted) = crate::actions::volume().unwrap_or((0, false));
     let leave_x = w - 30.0 - cell;
     let middle = row + cell / 2.0;
@@ -557,29 +580,44 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
     frame.icon(Icon::Minimize, Point { x: leave_x + cell / 2.0, y: middle }, 20.0, ink(lit));
     hits.push(((leave_x, row, cell, cell), Hit::Leave));
     let mute_x = leave_x - 8.0 - cell;
-    let bar = 96.0;
-    let bar_x = mute_x - 6.0 - bar;
     let on_icon = under(mute_x, row, cell, cell);
-    *volume_open = on_icon || dragging == Some(Hit::Volume) || (*volume_open && under(bar_x - 12.0, row, mute_x + cell - bar_x + 12.0, cell));
+    let (pop_w, pop_h) = (VOLUME_POP.0, VOLUME_POP.1);
+    let (pop_x, pop_y) = (mute_x + (cell - pop_w) / 2.0, row - 6.0 - pop_h);
+    *volume_open = on_icon || flash || dragging == Some(Hit::Volume) || (*volume_open && under(pop_x - 6.0, pop_y - 6.0, pop_w + 12.0, row + cell - pop_y + 6.0));
     frame.icon(if muted || level == 0 { Icon::Muted } else { Icon::Volume }, Point { x: mute_x + cell / 2.0, y: middle }, 20.0, ink(on_icon));
     hits.push(((mute_x, row, cell, cell), Hit::Mute));
     if *volume_open {
         let fraction = if muted { 0.0 } else { level as f32 / 100.0 };
-        let lit = under(bar_x - 8.0, row, bar + 16.0, cell) || dragging == Some(Hit::Volume);
-        slider(frame, (bar_x, middle, bar), fraction, lit, shown);
-        hits.push(((bar_x - 8.0, row, bar + 16.0, cell), Hit::Volume));
+        frame.fill_rounded(Color::hex(0x000000, 0.45 * shown), pop_x, pop_y, pop_w, pop_h, pop_w / 2.0);
+        let said = format!("{}%", if muted { 0 } else { level });
+        let small = Font::new(Family::Segoe, 12.0, 600.0);
+        let wide = frame.measure(&said, small);
+        frame.text(&said, small, Color::hex(0xFFFFFF, 0.9 * shown), pop_x + (pop_w - wide) / 2.0, pop_y + 10.0, pop_w, Align::Start);
+        let (top, bottom) = volume_bar((pop_x, pop_y, pop_w, pop_h));
+        let lit = under(pop_x, pop_y, pop_w, pop_h) || dragging == Some(Hit::Volume);
+        let thick = if lit { 5.0 } else { 3.0 };
+        let x = pop_x + pop_w / 2.0 - thick / 2.0;
+        frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 0.3 } else { 0.22 } * shown), x, top, thick, bottom - top, thick / 2.0);
+        let filled = (bottom - top) * fraction;
+        frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 1.0 } else { 0.85 } * shown), x, bottom - filled, thick, filled, thick / 2.0);
+        hits.push(((pop_x, pop_y, pop_w, pop_h), Hit::Volume));
     }
 }
 
+/// The volume's bar standing up over its icon: how wide and tall it is, round its line.
+const VOLUME_POP: (f32, f32) = (40.0, 156.0);
+
+/// Where the volume's line runs in its bar `(x, y, w, h)`: from its top (under its level said) to its bottom.
+fn volume_bar((_, y, _, h): (f32, f32, f32, f32)) -> (f32, f32) {
+    (y + 34.0, y + h - 16.0)
+}
+
 /// A slider along `(x, y, wide)` (its middle line), `fraction` of it filled, `shown` of it drawn: a thin line,
-/// thicker with its knob on it where it is `lit` (the pointer over it, or dragged). The track and the volume alike.
+/// thicker and brighter where it is `lit` (the pointer over it, or dragged); no knob (the screen kept spare).
 fn slider(frame: &Frame, (x, y, wide): (f32, f32, f32), fraction: f32, lit: bool, shown: f32) {
     let thick = if lit { 5.0 } else { 3.0 };
-    frame.fill_rounded(Color::hex(0xFFFFFF, 0.22 * shown), x, y - thick / 2.0, wide, thick, thick / 2.0);
-    frame.fill_rounded(Color::hex(0xFFFFFF, shown), x, y - thick / 2.0, wide * fraction, thick, thick / 2.0);
-    if lit {
-        frame.fill_circle(Color::hex(0xFFFFFF, shown), Point { x: x + wide * fraction, y }, 6.5);
-    }
+    frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 0.3 } else { 0.22 } * shown), x, y - thick / 2.0, wide, thick, thick / 2.0);
+    frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 1.0 } else { 0.85 } * shown), x, y - thick / 2.0, wide * fraction, thick, thick / 2.0);
 }
 
 #[cfg(all(test, feature = "studio"))]
@@ -607,7 +645,7 @@ mod pictures {
                 smoke.paint(frame, rect(0.0, 0.0, w, h));
                 draw_lines(frame, (w, h), &lines, Some(0), None, 12.6, 3.0, &music);
                 let mut hits = Vec::new();
-                draw_controls(frame, (w, h), 1.0, Some((w / 2.0, h - 88.0)), None, &mut true, true, 80.0, Some(226.0), &mut hits);
+                draw_controls(frame, (w, h), 1.0, Some((w / 2.0, h - 88.0)), None, &mut true, true, true, 80.0, Some(226.0), &mut hits);
             })
             .unwrap();
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
