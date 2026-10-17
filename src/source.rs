@@ -18,6 +18,8 @@ use crate::reading::{Sample, StaticInfo};
 /// How long the sensors are waited for as they are started (an elevated start Windows asks the user about may
 /// take a while to be answered).
 const STARTED_WITHIN: Duration = Duration::from_secs(60);
+/// How long the sensors of another version are waited for to go, as they hear this one (they go at once).
+const GONE_WITHIN: Duration = Duration::from_secs(10);
 /// How long they are waited for as they are started again through their task, the link lost (no one is asked).
 const STARTED_AGAIN_WITHIN: Duration = Duration::from_secs(15);
 /// How long a link must have lasted for its sensors, gone, to be started again: those that fail again and again
@@ -98,15 +100,21 @@ pub fn open() -> (StaticInfo, Source) {
     if !crate::elevation::is_elevated() {
         // The sensors running, and of this version; else (none running, or another version's, which goes as it
         // hears this one) this version's started.
-        let running = Link::connect(Duration::from_millis(300));
-        let turned_away = running.is_some();
-        let mut linked = greeted(running);
+        let mut linked = match Link::connect(Duration::from_millis(300)) {
+            Some(running) => match greeted(&running) {
+                Some(info) => Some((running, info)),
+                // Another version's, going as it hears this one: its pipes free once it has gone.
+                None => {
+                    if !running.gone_within(GONE_WITHIN) {
+                        crate::journal::note("readings: the sensors of another version had not gone in time");
+                    }
+                    None
+                }
+            },
+            None => None,
+        };
         if linked.is_none() {
-            if turned_away {
-                // (Its pipes free once it has gone.)
-                std::thread::sleep(Duration::from_secs(2));
-            }
-            linked = crate::elevation::start_sensors().then(|| greeted(Link::connect(STARTED_WITHIN))).flatten();
+            linked = crate::elevation::start_sensors().then(|| Link::connect(STARTED_WITHIN)).flatten().and_then(|link| greeted(&link).map(|info| (link, info)));
         }
         if let Some((link, info)) = linked {
             linked_to(&link);
@@ -122,11 +130,10 @@ pub fn open() -> (StaticInfo, Source) {
 
 /// `link`, if the sensors at its other end said hello, and are of this version (another's speaks another tongue): with
 /// what the machine is.
-fn greeted(link: Option<Link>) -> Option<(Link, StaticInfo)> {
-    let link = link?;
+fn greeted(link: &Link) -> Option<StaticInfo> {
     // (They may be starting: installing their driver, looking at the hardware first; not waited for for ever.)
     match crate::link::receive_within::<Told>(&link.told, STARTED_WITHIN) {
-        Some(Told::Hello { version, info, .. }) if version == env!("CARGO_PKG_VERSION") => Some((link, info)),
+        Some(Told::Hello { version, info, .. }) if version == env!("CARGO_PKG_VERSION") => Some(info),
         Some(Told::Hello { version, .. }) => {
             crate::journal::note(format!("readings: the sensors running are of Glance {version}, not {}", env!("CARGO_PKG_VERSION")));
             None
@@ -231,7 +238,7 @@ impl Source {
                             *ASKING.lock().unwrap() = None;
                             let lasted = LINKED_SINCE.lock().unwrap().take().is_some_and(|since| since.elapsed() >= LASTED_TO_START_AGAIN);
                             if lasted && crate::elevation::start_sensors_unasked() {
-                                if let Some((again, _)) = greeted(Link::connect(STARTED_AGAIN_WITHIN)) {
+                                if let Some(again) = Link::connect(STARTED_AGAIN_WITHIN).filter(|link| greeted(link).is_some()) {
                                     crate::journal::note("readings: the sensors' process went, and was started again");
                                     linked_to(&again);
                                     *link = again;

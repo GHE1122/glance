@@ -21,7 +21,7 @@ use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToS
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND};
 use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId, WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
-use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE};
 
 use crate::presents::GameMode;
 use crate::reading::{Sample, StaticInfo};
@@ -436,6 +436,24 @@ impl Link {
             return None;
         }
         send(&mut link.asked, &Asked::Hello { version: env!("CARGO_PKG_VERSION").into() }).then_some(link)
+    }
+
+    /// The sensors' process at the other end, waited for (its handle, taken while the link is still had, so that
+    /// it is that process and no other): gone within `ceiling`, or already. (Another version's goes as it hears this
+    /// one; its pipes are free only then.)
+    pub fn gone_within(self, ceiling: Duration) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        let mut server = 0u32;
+        let held = unsafe { GetNamedPipeServerProcessId(HANDLE(self.told.as_raw_handle()), &mut server) }
+            .ok()
+            .and_then(|()| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, server) }.ok());
+        drop(self);
+        let Some(process) = held else { return true };
+        let gone = unsafe { WaitForSingleObject(process, ceiling.as_millis().min(u32::MAX as u128) as u32) } == windows::Win32::Foundation::WAIT_OBJECT_0;
+        unsafe {
+            let _ = CloseHandle(process);
+        }
+        gone
     }
 
     pub fn receive(&mut self) -> Option<Told> {
