@@ -20,6 +20,17 @@ pub struct Cover {
     pub pixels: Arc<Vec<u8>>,
     pub base: [f32; 3],
     pub accent: [f32; 3],
+    /// Which cover it is, never another's: what is made of it (its picture drawn, the backdrop blurred from it) is
+    /// kept by it. (By its address, a cover read later where one let go had been was taken for that one, and showed
+    /// as it.)
+    pub key: u64,
+}
+
+impl Cover {
+    pub fn new(pixels: Vec<u8>, base: [f32; 3], accent: [f32; 3]) -> Cover {
+        static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Cover { pixels: Arc::new(pixels), base, accent, key: MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+    }
 }
 
 /// How long after its player gave no cover (or the cover of another track) it is asked again: a player just started,
@@ -95,7 +106,7 @@ pub(crate) fn read(title: &str) -> Option<Cover> {
             pixel[3] = 255;
         }
         let (base, accent) = colours(&pixels);
-        Some(Cover { pixels: Arc::new(pixels), base, accent })
+        Some(Cover::new(pixels, base, accent))
     }
 }
 

@@ -244,7 +244,7 @@ pub struct Music {
     lyrics: Option<usize>,
     last_frame: Instant,
     /// The cover behind it, blurred, and the one it is fading from (with when that began).
-    backdrop: Option<(usize, ID2D1Bitmap1)>,
+    backdrop: Option<(u64, ID2D1Bitmap1)>,
     fading: Option<(ID2D1Bitmap1, Instant)>,
     /// The colours the lyrics are drawn in, easing toward the cover's.
     tint: [f32; 3],
@@ -436,7 +436,7 @@ fn example_cover() -> Arc<Cover> {
                     pixels[at + 3] = 255;
                 }
             }
-            Arc::new(Cover { pixels: Arc::new(pixels), base: [0.85, 0.52, 0.42], accent: [0.98, 0.62, 0.38] })
+            Arc::new(Cover::new(pixels, [0.85, 0.52, 0.42], [0.98, 0.62, 0.38]))
         })
         .clone()
 }
@@ -863,7 +863,7 @@ impl Drawing<'_> {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             (w.to_bits(), h.to_bits(), self.scale.to_bits(), layout, shows, ink, own, self.turn.map(|(_, t)| t.to_bits()), backdrop.as_ref().map(|(key, _)| *key), (shown * 64.0).round() as u32).hash(&mut hasher);
             accent.iter().chain(&tint).map(|v| (v * 255.0).round() as u8).collect::<Vec<_>>().hash(&mut hasher);
-            (&title, &artist, cover.as_ref().map(|cover| Arc::as_ptr(cover) as usize)).hash(&mut hasher);
+            (&title, &artist, cover.as_ref().map(|cover| cover.key)).hash(&mut hasher);
             hasher.finish()
         };
         let radius = RADIUS.min(h / 2.0);
@@ -880,7 +880,7 @@ impl Drawing<'_> {
                     }
                     match &cover {
                         Some(cover) => {
-                            let picture = super::canvas::Picture { key: Arc::as_ptr(cover) as usize as u64, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
+                            let picture = super::canvas::Picture { key: cover.key, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
                             frame.picture(&picture, x, y, side, corner, 1.0);
                         }
                         // None (its player gives none, or it is being read): a plate with a note on it.
@@ -1385,7 +1385,7 @@ impl Drawing<'_> {
         unsafe { frame.dc.SetTransform(&(turned * parent)) };
         match &self.moment.cover {
             Some(cover) => {
-                let picture = super::canvas::Picture { key: Arc::as_ptr(cover) as usize as u64, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
+                let picture = super::canvas::Picture { key: cover.key, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
                 frame.picture(&picture, cx - label, cy - label, 2.0 * label, label, 1.0);
             }
             None => frame.fill_circle(Color::hex(0x2A2A30, 1.0), Point { x: cx, y: cy }, label),
@@ -1696,7 +1696,7 @@ impl Music {
 
     /// The cover behind it, blurred: made once for each cover (the one before fading out over a moment).
     fn backdrop(&mut self, frame: &Frame, cover: &Arc<Cover>) {
-        let key = Arc::as_ptr(cover) as usize;
+        let key = cover.key;
         if self.backdrop.as_ref().is_some_and(|(of, _)| *of == key) {
             return;
         }
@@ -2157,7 +2157,7 @@ mod pictures {
             artist: "Some Artist".into(),
             said: None,
             playing: true,
-            cover: Some(Arc::new(Cover { pixels: Arc::new(pixels), base: [0.85, 0.5, 0.4], accent: [0.95, 0.6, 0.35] })),
+            cover: Some(Arc::new(Cover::new(pixels, [0.85, 0.5, 0.4], [0.95, 0.6, 0.35]))),
             sound: crate::sound::Heard { level: 0.8, bands, beat: 0.3 },
         }
     }
