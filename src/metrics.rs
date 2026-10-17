@@ -1538,7 +1538,7 @@ mod network_tests {
     /// On a PC: the interface the default route goes through, and the wireless network it is on; read three times,
     /// as at three readings (its name asked of Windows only the first time).
     #[test]
-    #[ignore]
+    #[ignore = "reads this PC's network"]
     fn says_the_default_interface() {
         for _ in 0..3 {
             let found = super::default_interface();

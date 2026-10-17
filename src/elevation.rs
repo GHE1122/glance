@@ -1459,7 +1459,7 @@ mod tests {
     /// folder), new, administrators' alone inside; the download noted in it
     /// is removed with its folder, and the note with them.
     #[test]
-    #[ignore]
+    #[ignore = "needs administrator rights; writes in ProgramData and the machine's registry"]
     fn makes_private_folders_elevated() {
         let name = format!("glance-private-test-{}", std::process::id());
         assert!(private_folder(&std::env::temp_dir(), &name).is_none());

@@ -303,7 +303,7 @@ mod tests {
 
     /// Listens for three seconds to what this PC plays and prints what it hears: `cargo test -- --ignored hears_the_pc --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "listens to what this PC plays"]
     fn hears_the_pc() {
         for _ in 0..24 {
             let heard = super::heard();

@@ -1319,7 +1319,7 @@ mod tests {
 
     /// Puts the window up for a few seconds, to be looked at: `cargo test -- --ignored shows_the_window`.
     #[test]
-    #[ignore]
+    #[ignore = "puts a window up on this PC's desktop"]
     fn shows_the_window() {
         use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, FindWindowW, PostMessageW, WM_CLOSE, WS_POPUP, WS_VISIBLE};

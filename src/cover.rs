@@ -213,7 +213,7 @@ mod tests {
 
     /// Reads the cover of the music playing: `cargo test -- --ignored reads_the_cover --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "reads the cover of the music this PC is playing"]
     fn reads_the_cover() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);

@@ -825,7 +825,7 @@ mod tests {
     /// downloaded, and found signed by Glance's publisher; another
     /// publisher's program (`OTHER_SIGNED`) is not.
     #[test]
-    #[ignore]
+    #[ignore = "downloads the latest release over the network"]
     fn finds_downloads_and_checks_the_latest_release() {
         // (As `latest` asks GitHub and Gitee; Glance's own site is asked only by a running Glance.)
         let releases: Vec<(String, String)> = SOURCES.iter().map(|url| release(&get(url).expect("an answer")).expect("a release")).collect();
@@ -846,7 +846,7 @@ mod tests {
     /// A released installer (`GLANCE_INSTALLER`) is signed by Glance's publisher; held, it is not written, but
     /// read by others meanwhile (as its version is).
     #[test]
-    #[ignore]
+    #[ignore = "needs a released installer, named by GLANCE_INSTALLER"]
     fn knows_glances_publisher() {
         let installer = std::env::var("GLANCE_INSTALLER").unwrap();
         let held = hold(Path::new(&installer)).unwrap();
@@ -857,7 +857,7 @@ mod tests {
 
     /// The version an installer (`GLANCE_INSTALLER`, a released one) carries.
     #[test]
-    #[ignore]
+    #[ignore = "needs a released installer, named by GLANCE_INSTALLER"]
     fn reads_an_installers_version() {
         let installer = std::env::var("GLANCE_INSTALLER").unwrap();
         let version = std::env::var("GLANCE_INSTALLER_VERSION").unwrap();

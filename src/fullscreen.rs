@@ -634,7 +634,7 @@ mod pictures {
     /// A frame of it, a line half sung with the next under it and the controls up, to a PNG in the target folder:
     /// `cargo test --features studio -- --ignored draws_the_full_screen`.
     #[test]
-    #[ignore]
+    #[ignore = "draws on this PC's graphics card, to a picture to be looked at"]
     fn draws_the_full_screen() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);

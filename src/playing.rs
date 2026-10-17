@@ -579,7 +579,7 @@ mod tests {
     /// On a desktop, something playing: where its player says it is (reckoned on to now from when it said so), ten
     /// times a second for ten seconds, and each step back.
     #[test]
-    #[ignore]
+    #[ignore = "needs something playing on this PC"]
     fn follows_what_plays() {
         let start = std::time::Instant::now();
         let mut last: Option<f64> = None;
@@ -597,7 +597,7 @@ mod tests {
 
     /// On a desktop: how long one look takes, and what it sees.
     #[test]
-    #[ignore]
+    #[ignore = "needs something playing on this PC"]
     fn times_a_look() {
         super::look(super::Follow::Any);
         let from = std::time::Instant::now();

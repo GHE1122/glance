@@ -533,7 +533,7 @@ mod tests {
     /// Reads the test music made by `mkaudio.py` (in the folder `GLANCE_TEST_MUSIC` names):
     /// `cargo test --lib -- --ignored reads_local_lyrics --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "reads the test music GLANCE_TEST_MUSIC names"]
     fn reads_local_lyrics() {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

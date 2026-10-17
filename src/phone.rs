@@ -395,7 +395,7 @@ mod tests {
     /// (to be run elevated, where that is another thing than this
     /// program's own rights): it answers, and what it keeps stays the user's.
     #[test]
-    #[ignore]
+    #[ignore = "needs administrator rights and the phone remote installed"]
     fn the_remote_is_asked_without_an_administrators_rights() {
         let helper = std::env::current_exe().unwrap().ancestors().find_map(|folder| Some(folder.join("run").join("glance-remote.exe")).filter(|helper| helper.is_file())).expect("a remote built beside");
         let said = said_plainly(&helper, &["qr", "a b"]).expect("an answer");

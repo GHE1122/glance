@@ -2167,7 +2167,7 @@ mod pictures {
     /// same, pixel for pixel, at each
     /// (drawn straight onto the surface, its text came out a little differently in some of them, and shook).
     #[test]
-    #[ignore]
+    #[ignore = "draws on this PC's graphics card"]
     fn what_plays_is_drawn_the_same_wherever_in_the_atlas() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -2213,7 +2213,7 @@ mod pictures {
     /// A player sized into a card, drawn as it turns (at its start, a third, two thirds and the end of the turn), to
     /// PNGs in the target folder: `cargo test --features studio -- --ignored draws_a_turn --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "draws on this PC's graphics card, to pictures to be looked at"]
     fn draws_a_turn() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -2248,7 +2248,7 @@ mod pictures {
     /// Where the fill's edge is (DIPs from the line's start) as a line of characters with spaces between them is sung,
     /// shared out evenly (the line 微 微 微 微 of 微微, from 43.06 s, the next at 48.09 s): printed every 50 ms.
     #[test]
-    #[ignore]
+    #[ignore = "prints for a person to read"]
     fn the_fill_goes_on_evenly() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -2276,7 +2276,7 @@ mod pictures {
     /// 140 and 210 ms in, stacked into one PNG in the target folder: `cargo test --features studio -- --ignored
     /// draws_a_line_coming --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "draws on this PC's graphics card, to a picture to be looked at"]
     fn draws_a_line_coming() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -2310,7 +2310,7 @@ mod pictures {
 
     /// What plays as a row under readings on a light skin (inside another widget, its margins the skin's), to a PNG.
     #[test]
-    #[ignore]
+    #[ignore = "draws on this PC's graphics card, to a picture to be looked at"]
     fn draws_what_plays_hosted() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -2335,7 +2335,7 @@ mod pictures {
     /// sung changes, each line's place moves on by no more than it did the frame before by much (no step in its
     /// speed), in the card and in a player short enough that its rail is bounded by the lines next to the one sung.
     #[test]
-    #[ignore]
+    #[ignore = "draws on this PC's graphics card"]
     fn the_lines_glide_without_a_jump() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -2384,7 +2384,7 @@ mod pictures {
     /// What plays in each layout, at each size, with its switches as each case says, drawn to PNGs in the target
     /// folder: `cargo test --features studio -- --ignored draws_what_plays --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "draws on this PC's graphics card, to pictures to be looked at"]
     fn draws_what_plays() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);

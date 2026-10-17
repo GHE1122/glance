@@ -145,7 +145,7 @@ mod tests {
 
     /// On a desktop: the tip comes where it is asked for, and goes.
     #[test]
-    #[ignore]
+    #[ignore = "puts a tip up on this PC's desktop"]
     fn shows_and_hides() {
         super::show("鼠标穿透已开启，点一下关闭", windows::Win32::Foundation::RECT { left: 590, top: 390, right: 610, bottom: 410 }, true);
         let window = super::TIP.with(|kept| kept.borrow().as_ref().map(|tip| tip.window.hwnd)).expect("no tip was made");

@@ -690,7 +690,7 @@ mod tests {
     /// after each: how many of those were not yet of what is behind (dark, where the windows behind are light).
     /// `cargo test --lib -- --ignored scene_first_frames --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "captures this PC's desktop"]
     fn scene_first_frames() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -745,7 +745,7 @@ mod tests {
     /// What a scene with nothing behind it holds (its window's own surface, which nothing draws), beside one with the
     /// desktop behind it: `cargo test --lib -- --ignored scene_shows --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "captures this PC's desktop"]
     fn scene_shows() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);

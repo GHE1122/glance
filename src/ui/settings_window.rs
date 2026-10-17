@@ -4638,7 +4638,7 @@ mod pictures {
     use super::*;
 
     #[test]
-    #[ignore]
+    #[ignore = "draws on this PC's graphics card, to pictures to be looked at"]
     fn draws_every_page() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);

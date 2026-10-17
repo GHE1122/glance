@@ -763,7 +763,7 @@ mod tests {
 
     /// Asks the sources for two tracks (network): `cargo test -- --ignored finds_lyrics --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "asks the lyrics sources over the network"]
     fn finds_lyrics() {
         let worded = amll(1901371647).ok().flatten().expect("the collection's, word by word");
         println!("AMLL: {} lines; {:?}", worded.len(), worded.iter().find(|line| line.words.len() > 2).map(|line| (&line.text, line.words.len(), &line.translation)));
