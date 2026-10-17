@@ -426,7 +426,16 @@ pub fn ask_of(follow: Follow, what: &str) -> Asked {
         if asked.and_then(|asking| asking.join()).unwrap_or(false) {
             return Asked::Taken;
         }
+        // Not taken by the program followed: the key goes to the program Windows has in front of its media, which
+        // may be another (a video in a browser, while the music is followed), and is pressed only where it is that
+        // one. (Pressed regardless, another program was paused or skipped.)
+        let id = |session: &Session| session.SourceAppUserModelId().map(|id| id.to_string()).ok();
+        let current = manager().and_then(|manager| manager.GetCurrentSession()).ok();
+        if current.as_ref().and_then(id).is_none_or(|current| Some(current) != id(&session)) {
+            return Asked::Not;
+        }
     }
+    // (No program followed tells Windows it plays, or it is the one in front: pressed for it.)
     if press(key) {
         Asked::Pressed
     } else {
