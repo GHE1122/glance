@@ -932,7 +932,7 @@ pub fn ensure_folder(folder: &Path) -> std::io::Result<()> {
 pub fn remove_settings() -> bool {
     // Glance's own, and the phone remote's (the phones paired and how the lights are lit, as kept and as it was being kept anew; and its log).
     let remote = std::env::var_os("APPDATA").map(|roaming| std::path::PathBuf::from(roaming).join("dev.weiyi.glance.remote"));
-    let own = remove_kept(&crate::settings::config_dir(), &["settings.json", crate::journal::FILE]);
+    let own = remove_kept(&crate::settings::config_dir(), &["settings.json", crate::settings::UNREAD, crate::journal::FILE]);
     let remotes = remote.is_none_or(|folder| remove_kept(&folder, &["config.json", "config.json.new", "remote.log"]));
     // And what it fetched and kept (the lyrics found) and its index of the music on this PC, then its local folder.
     let lyrics = crate::lyrics::kept::names();

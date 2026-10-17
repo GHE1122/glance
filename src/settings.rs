@@ -21,7 +21,7 @@ pub fn saved(dir: &Path) -> bool {
 const MOST: u64 = 1 << 20;
 /// The settings file as it was, where it did not read whole (see `Settings::load`).
 #[cfg(windows)]
-const UNREAD: &str = "settings.unread.json";
+pub const UNREAD: &str = "settings.unread.json";
 
 /// The settings `text` holds, and the parts of it left out, by where they are (`widgets[1].layout`): none where it
 /// reads whole. Where it does not, every part that does is kept (see `salvaged`).
