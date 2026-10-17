@@ -373,8 +373,9 @@ pub fn run() {
     }
     // Started elevated with Glance running already: by an earlier version's launch task, which started `glance.exe`
     // (Glance runs it, for the sensors, till their own program makes it again as it is now): the sensors, then, from
-    // their own program.
-    if elevation::is_elevated() && already_running() {
+    // their own program. Not where the desktop's shell runs elevated itself: everything the user starts is elevated
+    // there, and this is the user starting Glance again, which opens its settings (below).
+    if elevation::is_elevated() && already_running() && !handoff::shell_elevated() {
         start_sensors_instead();
         return;
     }
