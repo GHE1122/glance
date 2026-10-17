@@ -4245,8 +4245,10 @@ impl Ui {
             _ => pick(lang, "实时数据，桌面为当前壁纸", "Live readings over your wallpaper"),
         };
         let title_w = frame.gfx.measure(title, head);
-        text_centred(frame, detail, Font::new(Family::Segoe, 12.0, 400.0), palette.text2, x0 + title_w + 12.0, PAD_TOP + 20.0, 400.0, Align::Start);
         let area = Rect { x: x0, y: PAD_TOP + 40.0, w: width - NAV - PANE - 2.0 * PAD_SIDE, h: height - PAD_TOP - 40.0 - PAD_TOP };
+        // (No wider than the preview under it: where it is narrow, cut short with an ellipsis.)
+        let detail_x = x0 + title_w + 12.0;
+        text_centred(frame, detail, Font::new(Family::Segoe, 12.0, 400.0), palette.text2, detail_x, PAD_TOP + 20.0, (area.x + area.w - detail_x).max(0.0), Align::Start);
         if area.w <= 0.0 || area.h <= 0.0 {
             return None;
         }

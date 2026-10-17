@@ -19,13 +19,11 @@ const TILE_PICTURE: f32 = 88.0;
 const TILE_PAD: f32 = 8.0;
 /// What plays, drawn as its strip at the least a music widget is wide, made smaller into its picture.
 const TILE_MUSIC: (f32, f32) = (240.0, 72.0);
-/// The editor's head (the screens to show, every screen alike), and the room round the screens under it.
-const EDITOR_HEAD: f32 = 52.0;
+/// A row of the editor's head (the screens to show, every screen alike), and the room round the screens under it.
+const EDITOR_ROW: f32 = 46.0;
 const EDITOR_ROOM: f32 = 20.0;
-/// How far under the screens' buttons the switch for every screen alike goes, where they do not fit side by side.
-const EDITOR_SECOND_ROW: f32 = 44.0;
-/// The words under the screens, saying how their edges open and what a press does, on two lines.
-const EDITOR_FOOT: f32 = 56.0;
+/// A line of the words under the screens saying how each kind of edge opens.
+const LEGEND_ROW: f32 = 20.0;
 /// How far into a screen its edges take a drop: drawn small, and one screen large.
 const ZONE_SMALL: f32 = 30.0;
 const ZONE_LARGE: f32 = 112.0;
@@ -216,38 +214,62 @@ impl Ui {
         let lang = self.lang;
         self.zones.clear();
         let places = self.settings.places().clone();
-        // The head: a button for every screen together and one for each, and every screen alike.
-        let mut cy = area.y + EDITOR_HEAD / 2.0 + 6.0;
-        let mut x = area.x + EDITOR_ROOM;
+        // The head: a button for every screen together and one for each, and every screen alike. They follow one
+        // another in rows as wide as the editor, a row more where one does not hold the next (the switch at the end
+        // of the last, or on a row of its own).
+        let width = area.w - 2.0 * EDITOR_ROOM;
         let shown = self.editor_screen();
-        // (Where the buttons and the switch do not fit side by side, the switch goes on a row of its own under them.)
-        let mut head = EDITOR_HEAD;
+        let mut head = 6.0;
         if self.screens.len() > 1 {
             let mut views = vec![(pick(lang, "全部屏幕", "All screens").to_string(), None)];
             views.extend(self.screens.iter().enumerate().map(|(i, screen)| (if lang == Lang::Zh { format!("屏幕 {}", i + 1) } else { format!("Screen {}", i + 1) }, Some(screen.id.clone()))));
             let font = Font::new(Family::Segoe, 14.0, 400.0);
-            let widths: Vec<f32> = views.iter().map(|(text, _)| frame.gfx.measure(text, font) + 32.0).collect();
-            let buttons = widths.iter().sum::<f32>() + 8.0 * (widths.len() - 1) as f32;
+            let (mut x, mut cy) = (0.0, area.y + head + EDITOR_ROW / 2.0);
+            for (text, view) in views {
+                let w = frame.gfx.measure(&text, font) + 32.0;
+                if x > 0.0 && x + w > width {
+                    (x, cy) = (0.0, cy + EDITOR_ROW);
+                }
+                let kind = if view == shown { Button::Accent } else { Button::Plain };
+                self.button(frame, palette, &text, area.x + EDITOR_ROOM + x + w, cy, Target::View(view), kind, &hovered);
+                x += w + 8.0;
+            }
             let label = pick(lang, "所有屏幕同样布局", "Every screen alike");
             let label_w = frame.gfx.measure(label, font);
             let switch = label_w + 12.0 + 40.0;
-            for ((text, view), w) in views.into_iter().zip(widths) {
-                let kind = if view == shown { Button::Accent } else { Button::Plain };
-                self.button(frame, palette, &text, x + w, cy, Target::View(view), kind, &hovered);
-                x += w + 8.0;
+            if x + 16.0 + switch > width {
+                cy += EDITOR_ROW;
             }
-            if buttons + 24.0 + switch > area.w - 2.0 * EDITOR_ROOM {
-                cy += EDITOR_SECOND_ROW;
-                head += EDITOR_SECOND_ROW;
-            }
-            let same = places.same;
             let toggle_x = area.x + area.w - EDITOR_ROOM - 40.0;
             text_centred(frame, label, font, palette.text, toggle_x - 12.0 - label_w, cy, label_w + 4.0, Align::Start);
             let pressed = self.pressed == Some(Target::Same);
-            self.toggle(frame, palette, "layout:same".into(), same, true, toggle_x, cy, now, pressed);
+            self.toggle(frame, palette, "layout:same".into(), places.same, true, toggle_x, cy, now, pressed);
             self.targets.push((Rect { x: toggle_x - 12.0 - label_w, y: cy - 16.0, w: label_w + 52.0, h: 32.0 }, Target::Same));
+            head = cy + EDITOR_ROW / 2.0 - area.y;
         }
-        let canvas = Rect { x: area.x + EDITOR_ROOM, y: area.y + head + 8.0, w: area.w - 2.0 * EDITOR_ROOM, h: area.h - head - 8.0 - EDITOR_FOOT };
+        // The words under the screens: how each kind of edge opens (a line each, side by side where they fit), and
+        // under that what a press does, in as many lines as it takes. Measured first: the screens have the rest.
+        let small = Font::new(Family::Segoe, 12.0, 400.0);
+        let legends = [(false, pick(lang, "外边缘：推进去呼出", "Outer edge: push into it")), (true, pick(lang, "两块屏幕相接处：停一下呼出", "Where screens meet: rest on it"))];
+        let mark = 18.0 + 6.0;
+        let mut placed = Vec::new();
+        let (mut x, mut row) = (0.0, 0usize);
+        for (dashed, text) in legends {
+            let w = mark + frame.gfx.measure(text, small);
+            if x > 0.0 && x + w > width {
+                (x, row) = (0.0, row + 1);
+            }
+            placed.push((dashed, text, x, row));
+            x += w + 20.0;
+        }
+        let rest = if shown.is_some() {
+            pick(lang, "点一条边，可以试看它呼出的面板，再点一次收起。底边是任务栏，不放组件", "Press an edge to try the panel it opens, and again to put it away. The bottom is the taskbar's")
+        } else {
+            pick(lang, "点一块屏幕，放大查看。底边是任务栏，不放组件", "Press a screen to see it large. The bottom is the taskbar's")
+        };
+        let rest_h = frame.gfx.wrapped_height(rest, small, width);
+        let foot_h = 12.0 + (row + 1) as f32 * LEGEND_ROW + 4.0 + rest_h + 14.0;
+        let canvas = Rect { x: area.x + EDITOR_ROOM, y: area.y + head + 8.0, w: width, h: area.h - head - 8.0 - foot_h };
         if canvas.w <= 40.0 || canvas.h <= 40.0 {
             return None;
         }
@@ -258,31 +280,21 @@ impl Ui {
                 None
             }
         };
-        // The words under the screens: how an edge opens, and under that what a press on one does.
-        let foot = area.y + area.h - EDITOR_FOOT + 16.0;
-        let small = Font::new(Family::Segoe, 12.0, 400.0);
-        let mut x = area.x + EDITOR_ROOM;
-        let mut legend = |frame: &Frame, dashed: bool, text: &str| {
-            let (w, h) = (18.0, EDGE_LINE);
+        let top = area.y + area.h - foot_h + 12.0;
+        for (dashed, text, x, row) in placed {
+            let (x, cy) = (area.x + EDITOR_ROOM + x, top + row as f32 * LEGEND_ROW + LEGEND_ROW / 2.0);
+            let h = EDGE_LINE;
             if dashed {
                 for i in 0..3 {
-                    fill(frame, palette.selection, x + i as f32 * 7.0, foot - h / 2.0, 4.0, h, h / 2.0);
+                    fill(frame, palette.selection, x + i as f32 * 7.0, cy - h / 2.0, 4.0, h, h / 2.0);
                 }
             } else {
-                fill(frame, palette.selection, x, foot - h / 2.0, w, h, h / 2.0);
+                fill(frame, palette.selection, x, cy - h / 2.0, 18.0, h, h / 2.0);
             }
             let tw = frame.gfx.measure(text, small);
-            text_centred(frame, text, small, palette.text2, x + w + 6.0, foot, tw + 4.0, Align::Start);
-            x += w + 6.0 + tw + 20.0;
-        };
-        legend(frame, false, pick(lang, "外边缘：推进去呼出", "Outer edge: push into it"));
-        legend(frame, true, pick(lang, "两块屏幕相接处：停一下呼出", "Where screens meet: rest on it"));
-        let rest = if shown.is_some() {
-            pick(lang, "点一条边，可以试看它呼出的面板，再点一次收起。底边是任务栏，不放组件", "Press an edge to try the panel it opens, and again to put it away. The bottom is the taskbar's")
-        } else {
-            pick(lang, "点一块屏幕，放大查看。底边是任务栏，不放组件", "Press a screen to see it large. The bottom is the taskbar's")
-        };
-        text_centred(frame, rest, small, palette.text3, area.x + EDITOR_ROOM, foot + 22.0, area.w - 2.0 * EDITOR_ROOM, Align::Start);
+            text_centred(frame, text, small, palette.text2, x + mark, cy, tw + 4.0, Align::Start);
+        }
+        frame.text_wrapped(rest, small, palette.text3, area.x + EDITOR_ROOM, top + (row + 1) as f32 * LEGEND_ROW + 4.0, width);
         // What is carried, at the pointer.
         if let (Some(carry), Some((px, py))) = (self.carry.as_ref().filter(|carry| carry.moved), self.pointer) {
             let part = carry.part;
