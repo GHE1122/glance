@@ -46,6 +46,11 @@ impl Presents {
         }
     }
 
+    /// Whether any of its frames is kept as of `now` (none once it has presented nothing for `KEPT`).
+    pub fn kept_at(&self, now: Duration) -> bool {
+        self.times.back().is_some_and(|&last| now.saturating_sub(last) <= KEPT)
+    }
+
     /// The frames as of `now`: none if it has presented no two frames in the
     /// last second. `heard` is the moment of the latest frame heard of from
     /// any program: frames are told of a while after they are presented
@@ -63,7 +68,10 @@ impl Presents {
         let waited = heard.saturating_sub(last).as_secs_f64();
         let pending = (waited > span / (recent.len() - 1) as f64).then_some(waited);
         let fps = (recent.len() - 1) as f64 / (span + pending.unwrap_or(0.0));
-        let longest_ms = recent.windows(2).map(|pair| (pair[1] - pair[0]).as_secs_f64() * 1000.0).fold(0.0, f64::max);
+        // Each frame presented in the last second as long as from the one before it, that one in the last second or
+        // not (a stall of more than a second is the longest frame as it ends).
+        let shown = self.times.len() - recent.len();
+        let longest_ms = self.times.range(shown.saturating_sub(1)..).collect::<Vec<_>>().windows(2).map(|pair| (*pair[1] - *pair[0]).as_secs_f64() * 1000.0).fold(0.0, f64::max);
         // Every frame time kept: the slowest 1% of them, as the frames a second they come to together.
         // (With them the frame being waited for, where it counts: the frames a second and their 1% low are of the same frames.)
         let mut times: Vec<f64> = self.times.iter().collect::<Vec<_>>().windows(2).map(|pair| (*pair[1] - *pair[0]).as_secs_f64()).chain(pending).collect();
@@ -110,6 +118,31 @@ mod tests {
         // The slowest hundredth are the 50 ms ones: 20 frames a second.
         assert!((stats.low.unwrap() - 20.0).abs() < 0.5, "{stats:?}");
         assert!((stats.longest_ms - 50.0).abs() < 0.5, "{stats:?}");
+    }
+
+    /// A stall longer than a second is the longest frame as it ends, and stays in the 1% low; the frames before it
+    /// are kept through it.
+    #[test]
+    fn a_long_stall_is_the_longest_frame_as_it_ends() {
+        let mut presents = Presents::default();
+        let mut t = 0.0;
+        for _ in 0..300 {
+            t += 10.0;
+            presents.push(ms(t));
+        }
+        // Two seconds with no frame: nothing presented in the last second, its frames kept all the same.
+        assert!(presents.stats(ms(t + 2000.0), ms(t + 2000.0)).is_none());
+        assert!(presents.kept_at(ms(t + 2000.0)));
+        t += 2000.0;
+        for _ in 0..50 {
+            presents.push(ms(t));
+            t += 10.0;
+        }
+        let stats = presents.stats(ms(t), ms(t)).unwrap();
+        assert!((stats.longest_ms - 2000.0).abs() < 0.5, "{stats:?}");
+        // (The slowest 4 of 349: the stall and three of 10 ms, 4 frames in 2.03 s.)
+        assert!((stats.low.unwrap() - 4.0 / 2.03).abs() < 0.01, "{stats:?}");
+        assert!(!presents.kept_at(ms(t + 11_000.0)));
     }
 
     #[test]

@@ -844,7 +844,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let refresh = game.and_then(|g| g.refresh_hz);
             // A stutter: a frame taking as long as three at the screen's rate.
             let stutter = refresh.map(|hz| 3000.0 / hz as f64);
-            let longest = game.map(|g| g.longest_ms);
+            let longest = game.and_then(|g| g.longest_ms);
             let frametimes = on("frametimes");
             let mut facts = Vec::new();
             if on("low") {
@@ -889,15 +889,15 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             // Full scale: the screen's rate, or the most frames drawn, if more
             // (a game not held to the screen's rate draws frames it never shows).
-            let most = scene.history.iter().filter_map(|s| same_game(s, pid).map(|g| g.fps as f64)).fold(0.0, f64::max);
+            let most = scene.history.iter().filter_map(|s| same_game(s, pid).and_then(|g| g.fps).map(f64::from)).fold(0.0, f64::max);
             let scale = refresh.map(f64::from).map(|hz| hz.max(most));
             let mut blocks = vec![
                 head(lang.pick("游戏", "Game"), game.map_or_else(|| if by_hand { waiting(lang) } else { String::new() }, |g| g.name.clone()), shown(refresh, |hz| lang.pick(&format!("屏幕 {hz} Hz"), &format!("Screen {hz} Hz")).to_string()), false),
                 Block::Readout {
-                    figure: shown(game.map(|g| g.fps), |fps| format!("{fps:.0}")),
+                    figure: shown(game.and_then(|g| g.fps), |fps| format!("{fps:.0}")),
                     unit: "FPS",
                     hot: false,
-                    plot: chart.then(|| Plot::new(scene, vec![Box::new(move |s| same_game(s, pid).map(|g| g.fps as f64))], scale, None)),
+                    plot: chart.then(|| Plot::new(scene, vec![Box::new(move |s| same_game(s, pid).and_then(|g| g.fps).map(f64::from))], scale, None)),
                 },
             ];
             if !full {
@@ -906,7 +906,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if full && frametimes {
                 // Full scale: two frames at the screen's rate, or the longest
                 // frame on screen, if longer, rounded up.
-                let series: Series = Box::new(move |s| same_game(s, pid).map(|g| g.longest_ms as f64));
+                let series: Series = Box::new(move |s| same_game(s, pid).and_then(|g| g.longest_ms).map(f64::from));
                 let floor = stutter.map_or(MIN_FRAME_SCALE, |stutter| (stutter * 2.0 / 3.0).max(MIN_FRAME_SCALE));
                 let peak = visible_peak(scene, &series).max(floor);
                 blocks.push(Block::Trace {

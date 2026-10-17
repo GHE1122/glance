@@ -211,7 +211,7 @@ impl Reading {
             // The game shown now: another's frames before it are not its own.
             (Kind::Game, _) => {
                 let playing = scene.history.last().and_then(|last| last.game.as_ref()).map(|g| g.pid);
-                s.game.as_ref().filter(|g| Some(g.pid) == playing).map(|g| g.fps as f64)
+                s.game.as_ref().filter(|g| Some(g.pid) == playing).and_then(|g| g.fps).map(f64::from)
             }
             (Kind::Cpu, _) => s.cpu.map(f64::from),
             (Kind::Gpu(index), _) => s.gpus.get(index)?.usage.map(f64::from),
@@ -286,7 +286,7 @@ fn readings(scene: &Scene) -> Vec<Reading> {
     if game.is_some() || (on("game") && super::view::front_is_game()) {
         // Its ring: how many of the frames its screen shows it draws (or of
         // the most it drew, if more).
-        let most = scene.history.iter().filter_map(|s| s.game.as_ref().map(|g| g.fps)).fold(game.and_then(|g| g.refresh_hz).map_or(0.0, |hz| hz as f32), f32::max);
+        let most = scene.history.iter().filter_map(|s| s.game.as_ref()?.fps).fold(game.and_then(|g| g.refresh_hz).map_or(0.0, |hz| hz as f32), f32::max);
         // Its 1% low, as the game's own lane shows it when switched on: said for as long as there is a game, a
         // dash till enough frames have come.
         let low = game.filter(|_| prefs.shows("game", "low")).map(|game| game.low.map_or("1% low —".to_string(), |low| format!("1% low {low:.0}")));
@@ -297,8 +297,8 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             icon: Icon::Game,
             // Whose frames they are, by its name: what is taken for a game is then seen to be one or not.
             label: game.map(|game| game.name.trim()).filter(|name| !name.is_empty()).unwrap_or(lang.pick("帧率", "Frame rate")).into(),
-            share: Some(game.map_or(0.0, |g| if most > 0.0 { g.fps / most } else { 0.0 })),
-            figure: game.map_or("—".into(), |game| format!("{:.0}", game.fps)),
+            share: Some(game.and_then(|g| g.fps).map_or(0.0, |fps| if most > 0.0 { fps / most } else { 0.0 })),
+            figure: game.and_then(|game| game.fps).map_or("—".into(), |fps| format!("{fps:.0}")),
             unit: "FPS".into(),
             beside: low.clone().unwrap_or_default(),
             // (A tile says the 1% low after the figure: its head is the game's name's.)

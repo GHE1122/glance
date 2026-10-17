@@ -163,11 +163,12 @@ pub struct GameSample {
     pub program: String,
     /// Its process: which game this is, its name read or not.
     pub pid: u32,
-    pub fps: f32,
+    /// Its frames a second; none where frames cannot be counted (Glance left without the right to trace them).
+    pub fps: Option<f32>,
     /// The 1% low, as frames a second; none until enough frames have come.
     pub low: Option<f32>,
-    /// The longest frame of the last second, in milliseconds.
-    pub longest_ms: f32,
+    /// The longest frame of the last second, in milliseconds; none where `fps` is.
+    pub longest_ms: Option<f32>,
     /// The refresh rate of its screen.
     pub refresh_hz: Option<u32>,
     /// Its screen, in physical pixels: left, top, right, bottom.

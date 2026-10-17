@@ -264,6 +264,8 @@ impl Sampler {
         // Taken for a game by hand, the window in front is one though it presents nothing just now: its frames are
         // none a second, not unknown. With Glance's own window in front (or the desktop), the one taken last, while it runs.
         let quiet = || crate::presents::in_front().or_else(|| self.by_hand.clone().filter(|last| self.processes.name_of(last.pid as usize).is_some()));
+        // (Where frames cannot be counted, one taken by hand presents none known, not none.)
+        let counted = chosen.is_some() || crate::presents::counting();
         let chosen = chosen.or_else(|| front.then(quiet).flatten());
         if let Some(taken) = chosen.as_ref().filter(|chosen| front && !chosen.fills_screen) {
             self.by_hand = Some(crate::presents::Presenting { stats: crate::frames::FrameStats { fps: 0.0, low: None, longest_ms: 0.0 }, ..taken.clone() });
@@ -306,9 +308,9 @@ impl Sampler {
             name: if presenting.title.is_empty() { program.clone() } else { presenting.title.clone() },
             program: program.clone(),
             pid: presenting.pid,
-            fps: presenting.stats.fps,
-            low: presenting.stats.low,
-            longest_ms: presenting.stats.longest_ms,
+            fps: counted.then_some(presenting.stats.fps),
+            low: presenting.stats.low.filter(|_| counted),
+            longest_ms: counted.then_some(presenting.stats.longest_ms),
             refresh_hz: presenting.refresh_hz,
             screen: presenting.screen,
             gpu_index: self.adapter_by_pid.get(&pid).and_then(|luid| self.adapters.iter().position(|a| a.luid == *luid)),

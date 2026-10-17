@@ -320,6 +320,11 @@ pub fn forget_mirrored() {
     *MIRRORED.lock().unwrap() = None;
 }
 
+/// Whether frames are counted: told by the sensors' program, or traced here (where Glance may: not, left unelevated).
+pub fn counting() -> bool {
+    MIRRORED.lock().unwrap().is_some() || PRESENTS.lock().unwrap().is_some()
+}
+
 /// Every program presenting frames now, by its topmost window, topmost
 /// first; programs that have stopped presenting are forgotten. Looked at
 /// through their windows alone: no program's process is opened.
@@ -336,7 +341,9 @@ pub fn presenting() -> Vec<Presenting> {
         let mut presents = PRESENTS.lock().unwrap();
         let Some(presents) = presents.as_mut() else { return Vec::new() };
         let heard = ticks(HEARD.load(std::sync::atomic::Ordering::Relaxed));
-        presents.retain(|_, fed| fed.frames.stats(now, heard).is_some());
+        // (A program that presents nothing for a while is kept while its frames are: its next frame is as long as the
+        // wait, and goes with the others into its 1% low.)
+        presents.retain(|_, fed| fed.frames.kept_at(now));
         presents.iter().filter_map(|(pid, fed)| Some((*pid, fed.frames.stats(now, heard)?))).collect()
     };
     if stats.is_empty() {

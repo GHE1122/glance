@@ -363,10 +363,10 @@ pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&
                 Kind::Frames,
                 lang.pick("帧率", "FPS"),
                 vec![
-                    chosen("fps", Some(game.map_or("—".into(), |game| format!("{:.0}", game.fps))), &FRAMES_A_SECOND),
+                    chosen("fps", Some(game.and_then(|game| game.fps).map_or("—".into(), |fps| format!("{fps:.0}"))), &FRAMES_A_SECOND),
                     // No 1% low yet is no part, as for any reading not yet read.
                     chosen("low", Some(game.and_then(|game| game.low).map_or("1% —".into(), |low| format!("1% {low:.0}"))), &LOW),
-                    chosen("frametime", Some(game.map_or("— ms".into(), |game| format!("{:.1} ms", game.longest_ms))), &FRAME_TIME),
+                    chosen("frametime", Some(game.and_then(|game| game.longest_ms).map_or("— ms".into(), |ms| format!("{ms:.1} ms"))), &FRAME_TIME),
                 ],
             )],
             "cpu" => vec![reading(
@@ -424,7 +424,7 @@ pub fn frames<'a>(history: impl DoubleEndedIterator<Item = &'a Sample>, playing:
     if !playing {
         return Vec::new();
     }
-    let mut frames: Vec<Option<f32>> = history.rev().take(CHART).map(|s| s.game.as_ref().map(|game| game.fps)).collect();
+    let mut frames: Vec<Option<f32>> = history.rev().take(CHART).map(|s| s.game.as_ref().and_then(|game| game.fps)).collect();
     frames.reverse();
     frames
 }
@@ -437,9 +437,9 @@ pub fn preview(s: &Sample, items: &[&str], lang: Lang) -> Vec<Reading> {
         name: String::new(),
         program: String::new(),
         pid: 0,
-        fps: 144.0,
+        fps: Some(144.0),
         low: Some(118.0),
-        longest_ms: 8.4,
+        longest_ms: Some(8.4),
         refresh_hz: Some(144),
         screen: None,
         gpu_index: None,
@@ -994,9 +994,9 @@ mod tests {
                 name: "Game".into(),
                 program: "game".into(),
                 pid: 1,
-                fps: 143.6,
+                fps: Some(143.6),
                 low: None,
-                longest_ms: 9.26,
+                longest_ms: Some(9.26),
                 refresh_hz: Some(144),
                 screen: None,
                 gpu_index: None,
