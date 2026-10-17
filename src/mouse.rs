@@ -67,6 +67,16 @@ pub(crate) const ANY_BUTTON_DOWN: u16 = 0x0001 | 0x0004 | 0x0010 | 0x0040 | 0x01
 /// A raw mouse report's flag for a move to a place (a tablet, a remote session), not by so many counts.
 const MOUSE_MOVE_ABSOLUTE: u16 = 1;
 
+/// Which buttons are down (a bit each: left, right, middle, the fourth and the fifth) after a raw report whose
+/// buttons' flags are `flags`, `held` before it: each flag that went down set, each that went up cleared.
+pub(crate) fn held_after(flags: u16, held: u8) -> u8 {
+    (0..5).fold(held, |held, button| {
+        let (down, up) = (1u16 << (2 * button), 1u16 << (2 * button + 1));
+        let held = if flags & down != 0 { held | 1 << button } else { held };
+        if flags & up != 0 { held & !(1 << button) } else { held }
+    })
+}
+
 /// A mouse's raw input: how it moved, and its buttons' flags (what went down and up with it).
 pub(crate) fn read_mouse(handle: HRAWINPUT) -> Option<(Moved, u16)> {
     let mut raw = RAWINPUT::default();
@@ -121,4 +131,20 @@ pub(crate) fn edge_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
         return None;
     }
     (!crate::screens::passes(monitor, edge, along)).then_some(contact)
+}
+
+#[cfg(test)]
+mod tests {
+    /// The buttons held follow each report's flags: down, up, and several in one report.
+    #[test]
+    fn buttons_held_follow_the_reports() {
+        let (left_down, left_up, right_down, right_up) = (0x0001, 0x0002, 0x0004, 0x0008);
+        let held = super::held_after(right_down, 0);
+        assert_eq!(held, 0b10);
+        let held = super::held_after(left_down, held);
+        assert_eq!(held, 0b11);
+        assert_eq!(super::held_after(right_up | left_up, held), 0);
+        // A report with no button in it leaves them as they were.
+        assert_eq!(super::held_after(0, 0b10), 0b10);
+    }
 }

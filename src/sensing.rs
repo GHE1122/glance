@@ -256,8 +256,12 @@ fn watch_edges() {
         let Some((at, _, edge)) = pushed else { return };
         say(&Told::Pushed { edge, at: (at.x, at.y) });
     };
-    // Whether a button was down as last said.
+    // Whether a button was down as last said, and which are, as the raw reports said (see `held_after`; one down as
+    // this began, of no known button).
     let mut down = crate::mouse::buttons_held();
+    let mut held: u8 = if down { 1 } else { 0 };
+    // Whether the system had the buttons otherwise than the reports at the last look (see the timer, below).
+    let mut disagreed = false;
     // What touches the PC, while it is heard: what was heard, and what kind was told when.
     let mut activity: Option<(crate::touch::Heard, Option<(bool, Instant)>)> = None;
     let tell_activity = |heard: &crate::touch::Heard| {
@@ -285,10 +289,13 @@ fn watch_edges() {
                         if let Some(cursor) = crate::mouse::cursor_position() {
                             tell(pusher.heard(&WATCHED.lock().unwrap(), moved, cursor, now));
                         }
-                        // The buttons: a press as the device reports it, whether one is down as read now (this
-                        // process reads them truly).
+                        // The buttons: a press as the device reports it, whether one is down as its reports have it.
+                        // (Read from the system as the report came, a button let go still read down: the system had
+                        // not taken its going up yet, and it stayed down till the mouse next moved; meanwhile each
+                        // panel opened closed at once, as at a press elsewhere.)
                         let pressed = buttons & crate::mouse::ANY_BUTTON_DOWN != 0;
-                        let now_down = crate::mouse::buttons_held();
+                        held = crate::mouse::held_after(buttons, held);
+                        let now_down = held != 0;
                         if pressed || now_down != down {
                             down = now_down;
                             say(&Told::Buttons { down, pressed });
@@ -318,6 +325,16 @@ fn watch_edges() {
                     if let Some(cursor) = crate::mouse::cursor_position() {
                         pusher.looked(&WATCHED.lock().unwrap(), cursor, now);
                     }
+                    // The buttons as the system has them by now (this process reads them truly), where the reports
+                    // missed one going up or down (one let go on the secure desktop, say): taken once the system
+                    // has had them so at two looks running (at one, it may not have taken what was just reported).
+                    let now_down = crate::mouse::buttons_held();
+                    if now_down != down && disagreed {
+                        held = if now_down { held.max(1) } else { 0 };
+                        down = now_down;
+                        say(&Told::Buttons { down, pressed: false });
+                    }
+                    disagreed = now_down != down;
                 }
                 WM_TIMER if message.wParam.0 == RESTING_TIMER => {
                     if let Some(cursor) = crate::mouse::cursor_position() {
