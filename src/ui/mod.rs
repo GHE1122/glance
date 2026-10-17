@@ -34,6 +34,7 @@ pub mod music;
 pub mod settings_window;
 #[cfg(windows)]
 pub mod skins;
+pub mod smoke;
 pub mod text;
 pub mod theme;
 #[cfg(windows)]
