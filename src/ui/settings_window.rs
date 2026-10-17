@@ -282,6 +282,15 @@ fn take_settings() {
     });
 }
 
+/// `settings` as the window takes them, their preferences as it resolved them (`prefs`), which it writes back as
+/// they are: what it changes is then only what was changed in it. (Taken as they were, preferences never yet written
+/// were none, and the first change of any put the window's in place of all of them, over one made elsewhere.)
+fn taken(settings: &Settings, prefs: &Prefs) -> Settings {
+    let mut taken = settings.clone();
+    taken.view = serde_json::to_value(prefs).unwrap();
+    taken
+}
+
 /// Settings changed elsewhere, to be taken up by the window once nothing is in hand (see `follow_when_free`).
 static FOLLOW_OWED: AtomicBool = AtomicBool::new(false);
 /// The overlay's page asked for, to be turned to (see `open_at_overlay`); kept as `FOLLOW_OWED` is.
@@ -1081,7 +1090,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             lang: Lang::resolve(prefs.language),
             dark: false,
             palette: Palette::new(false),
-            base: settings.clone(),
+            base: taken(&settings, &prefs),
             settings,
             prefs,
             page: Page::Layout,
@@ -1413,7 +1422,7 @@ impl Ui {
     /// Takes `settings`, as they are now, as its own.
     fn take(&mut self, settings: Settings) {
         self.prefs = Prefs::resolve(&settings.view, &crate::app().controller.known_modules());
-        self.base = settings.clone();
+        self.base = taken(&settings, &self.prefs);
         self.settings = settings;
     }
 
