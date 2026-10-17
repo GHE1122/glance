@@ -552,7 +552,7 @@ impl Controller {
                 // A menu left for another window come to the front, or for the panel come since it opened (by its
                 // shortcut, an edge).
                 if menu.as_ref().is_some_and(|(open, _)| open.left() || (panel.is_shown() && !open.over_the_panel())) {
-                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
+                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
                 }
                 let mut wait = None;
                 // A capture of the desktop behind the panel come back, up or
@@ -655,8 +655,10 @@ impl Controller {
                 };
                 match handled {
                     Handled::Done(choice) => {
-                        self.end_menu(&mut menu, choice, &mut panel, &mut widgets, &overlay);
-                        if msg.message != WM_HOTKEY || (msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize) {
+                        self.end_menu(&mut menu, choice, &mut panel, &mut widgets, &mut overlay);
+                        // (A shortcut, the panel's too, does what it is for as well; Esc only leaves the menu.)
+                        let shortcut = matches!(msg.message, WM_HOTKEY | TOGGLE | OPEN_FROM_TRAY);
+                        if !shortcut || (msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize) {
                             continue;
                         }
                     }
@@ -763,8 +765,9 @@ impl Controller {
                 OPEN_SETTINGS => settings_window::open(),
                 TRAY_MENU => {
                     let (x, y) = ((msg.lParam.0 & 0xFFFF) as u16 as i16 as i32, ((msg.lParam.0 >> 16) & 0xFFFF) as u16 as i16 as i32);
-                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
+                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
                     menu = crate::tray::open_menu(x, y, panel.is_shown()).map(|(open, choices)| (open, MenuFor::Tray(choices)));
+                    keep_menu_above(&menu, &mut overlay);
                 }
                 RECALL_WIDGET => {
                     widgets.recall();
@@ -781,9 +784,6 @@ impl Controller {
                 RESTYLE => {
                     panel.restyle();
                     draw_overlay(&mut overlay, &panel);
-                    if let Some((open, _)) = menu.as_ref() {
-                        open.raise();
-                    }
                     // An open settings window takes what was changed elsewhere.
                     settings_window::follow_settings();
                 }
@@ -797,9 +797,6 @@ impl Controller {
                         }
                     }
                     draw_overlay(&mut overlay, &panel);
-                    if let Some((open, _)) = menu.as_ref() {
-                        open.raise();
-                    }
                 }
                 // The pinned panel dragged by its bar.
                 WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => panel.press(lparam_point(msg.lParam)),
@@ -871,8 +868,9 @@ impl Controller {
                 WM_MOUSEMOVE if widgets.owns(msg.hwnd) && widgets.held(msg.hwnd) && let_go(&msg) => widgets.release(msg.hwnd, now, false),
                 WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam), panel.lang),
                 WM_RBUTTONUP if widgets.owns(msg.hwnd) => {
-                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
+                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
                     menu = widgets.menu(msg.hwnd, panel.lang, panel.is_shown()).map(|open| (open, MenuFor::Widget(msg.hwnd)));
+                    keep_menu_above(&menu, &mut overlay);
                 }
                 // Let go: the button up, the capture lost, or the pointer moved with the button up (its going up
                 // told to another window).
@@ -949,8 +947,9 @@ impl Controller {
                 WM_MOUSEMOVE if overlay.as_ref().is_some_and(|o| o.owns_bar(msg.hwnd)) => overlay.as_mut().unwrap().bar_hover(),
                 // Its menu, or one of its buttons: the same is done (see `overlay_chosen`).
                 WM_RBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
-                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
+                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
                     menu = overlay.as_ref().unwrap().menu(panel.is_shown()).map(|open| (open, MenuFor::Overlay));
+                    keep_menu_above(&menu, &mut overlay);
                 }
                 WM_LBUTTONUP if overlay.as_ref().is_some_and(|o| o.owns_bar(msg.hwnd)) => {
                     if let Some(choice) = overlay.as_mut().unwrap().bar_press() {
@@ -1051,6 +1050,13 @@ impl Controller {
     }
 }
 
+/// The overlay kept under `menu`, while one is up (see `Overlay::under_menu`).
+fn keep_menu_above(menu: &Option<(crate::ui::menu::Menu, MenuFor)>, overlay: &mut Option<Overlay>) {
+    if let (Some((open, _)), Some(overlay)) = (menu.as_ref(), overlay.as_mut()) {
+        overlay.under_menu(Some(open.hwnd()));
+    }
+}
+
 /// What a menu up is for: the tray icon's (with what each of its choices is), the widget's at a window, or the
 /// overlay's.
 enum MenuFor {
@@ -1061,9 +1067,12 @@ enum MenuFor {
 
 impl Controller {
     /// The menu up, if one is, gone, `choice` chosen in it (the index of one, or none, left): done.
-    fn end_menu(&self, menu: &mut Option<(crate::ui::menu::Menu, MenuFor)>, choice: Option<usize>, panel: &mut Panel, widgets: &mut crate::widget::Widgets, overlay: &Option<Overlay>) {
+    fn end_menu(&self, menu: &mut Option<(crate::ui::menu::Menu, MenuFor)>, choice: Option<usize>, panel: &mut Panel, widgets: &mut crate::widget::Widgets, overlay: &mut Option<Overlay>) {
         let Some((open, of)) = menu.take() else { return };
         open.close();
+        if let Some(overlay) = overlay.as_mut() {
+            overlay.under_menu(None);
+        }
         match of {
             MenuFor::Tray(choices) => crate::tray::chosen(choice, &choices),
             MenuFor::Widget(hwnd) => {

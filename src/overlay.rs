@@ -123,6 +123,8 @@ pub struct Overlay {
     game_screen: Option<[i32; 4]>,
     /// The panel's window while the panel is up: kept above the overlay.
     beneath: Option<HWND>,
+    /// A menu's window while one is up: put back above the overlay each time the overlay is placed (see `under_menu`).
+    menu: Option<HWND>,
 }
 
 /// A drag under way: where the pointer, the overlay and its size were as it
@@ -270,6 +272,7 @@ impl Overlay {
             grab: None,
             game_screen: None,
             beneath: None,
+            menu: None,
         })
     }
 
@@ -388,6 +391,7 @@ impl Overlay {
     /// panel; its shadow's just beneath it.
     fn place(&self) {
         self.window.place_under(self.rect, self.beneath);
+        self.menu_above();
         self.shade.place_under(self.shadow_rect(), Some(self.window.hwnd));
         // Where it was and where it is: a widget that took the desktop with
         // it there takes it again.
@@ -533,6 +537,7 @@ impl Overlay {
             return;
         }
         self.bar.place_under(rect, self.beneath);
+        self.menu_above();
         self.bar.show();
         crate::ui::tip::above();
         if self.bar_at.replace(rect) != Some(rect) {
@@ -736,6 +741,22 @@ impl Overlay {
 
     /// Its menu, and what was chosen in it (the focus put back where it
     /// was by the menu itself).
+    /// Kept under `menu`'s window while it is up (none: no menu is): placed above all as it is drawn (at each sample,
+    /// as its glass clears, as its bar shows), it covered the menu, and a click on it went to the menu underneath.
+    pub fn under_menu(&mut self, menu: Option<HWND>) {
+        self.menu = menu;
+        self.menu_above();
+    }
+
+    fn menu_above(&self) {
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE};
+        if let Some(menu) = self.menu {
+            unsafe {
+                let _ = SetWindowPos(menu, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+    }
+
     /// Its menu, up (see `chose`).
     pub fn menu(&self, over_the_panel: bool) -> Option<crate::ui::menu::Menu> {
         let zh = self.lang == Lang::Zh;

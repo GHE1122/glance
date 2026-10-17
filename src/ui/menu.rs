@@ -184,13 +184,9 @@ impl Menu {
         self.with_the_panel
     }
 
-    /// Put back above every other window (another of this thread's put above all while it is up, the overlay as
-    /// it is drawn, covered it, and a click on that went to the menu underneath).
-    pub fn raise(&self) {
-        use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE};
-        unsafe {
-            let _ = SetWindowPos(self.window.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
+    /// Its window.
+    pub fn hwnd(&self) -> HWND {
+        self.window.hwnd
     }
 
     /// Whether it has been left by something else coming to the front.
