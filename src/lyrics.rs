@@ -468,8 +468,14 @@ pub fn merged(lrc: &str, translation: Option<&str>) -> Vec<Line> {
 /// LRC times them, and after the last, where its end is said) are timed word by word.
 pub fn lrc(text: &str) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
+    let offset = offset(text);
     for (at, said) in timed(text) {
-        let (words, closed) = worded(&said);
+        // (The words' times moved as the lines' are.)
+        let (mut words, mut closed) = worded(&said);
+        for (word, _) in &mut words {
+            *word = (*word - offset).max(0.0);
+        }
+        closed = closed.map(|end| (end - offset).max(0.0));
         let plain = if words.is_empty() { said } else { words.iter().map(|(_, word)| word.as_str()).collect::<String>().trim().to_string() };
         if let Some(line) = lines.last_mut().filter(|line| line.at == at && !line.text.is_empty() && line.translation.is_none()) {
             if !plain.is_empty() {
@@ -523,19 +529,28 @@ fn worded(said: &str) -> (Vec<(f64, String)>, Option<f64>) {
 /// Each timed line of an LRC text: when, and what (trimmed; empty where nothing is sung from then).
 fn timed(lrc: &str) -> Vec<(f64, String)> {
     let mut found = Vec::new();
+    let offset = offset(lrc);
     for line in lrc.replace("\\n", "\n").lines() {
         let mut rest = line.trim();
         let mut times = Vec::new();
         // Its times, one after another; a tag that is no time ("[ar:…]") says nothing sung.
         while let Some(tag) = rest.strip_prefix('[').and_then(|after| after.split_once(']')) {
             let Some(at) = time(tag.0) else { break };
-            times.push(at);
+            times.push((at - offset).max(0.0));
             rest = tag.1;
         }
         found.extend(times.into_iter().map(|at| (at, rest.trim().to_string())));
     }
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
     found
+}
+
+/// What an LRC text says all its times are to be moved by, in seconds (`[offset:500]`: milliseconds, a positive one
+/// showing every line that much sooner); none where it says none.
+fn offset(lrc: &str) -> f64 {
+    lrc.lines()
+        .find_map(|line| line.trim().strip_prefix("[offset:").and_then(|after| after.split_once(']')).and_then(|(ms, _)| ms.trim().parse::<f64>().ok()))
+        .map_or(0.0, |ms| ms / 1000.0)
 }
 
 /// `mm:ss`, `mm:ss.xx` or `mm:ss:xx` as seconds.
@@ -706,6 +721,15 @@ mod tests {
         assert!(matches!(found(None), Held::Found(None)));
         let line = Line { at: 1.0, end: None, text: "kept".into(), words: Vec::new(), backing: None, translation: None };
         assert!(matches!(found(Some(vec![line])), Held::Found(Some(lines)) if lines.len() == 1));
+    }
+
+    /// A file's offset moves all its times, its words' too: a positive one shows each line that much sooner.
+    #[test]
+    fn an_offset_moves_every_line() {
+        let lines = lrc("[offset:+500]\n[00:10.00]one\n[00:12.00]<00:12.00>two<00:13.00>");
+        assert_eq!(lines.iter().map(|line| line.at).collect::<Vec<_>>(), [9.5, 11.5]);
+        assert_eq!((lines[1].words[0].at, lines[1].words[0].end), (11.5, 12.5));
+        assert_eq!(lrc("[00:10.00]one\n[offset:-250]")[0].at, 10.25);
     }
 
     #[test]
