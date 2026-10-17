@@ -27,12 +27,17 @@ pub const UNREAD: &str = "settings.unread.json";
 /// reads whole. Where it does not, every part that does is kept (see `salvaged`).
 fn read(text: &str) -> (Settings, Vec<String>) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else { return (Settings::default(), vec!["all of it (not JSON)".to_string()]) };
+    read_value(value, &Settings::default())
+}
+
+/// The settings `value` holds, and the parts of it left out (see `salvaged`), each as `from` has it.
+fn read_value(value: serde_json::Value, from: &Settings) -> (Settings, Vec<String>) {
     if usable(&value) {
         if let Ok(settings) = serde_json::from_value(value.clone()) {
             return (settings, Vec::new());
         }
     }
-    salvaged(value)
+    salvaged(value, from)
 }
 
 /// Whether `value` is settings as Glance writes them: read, written again and read again alike (a number too large
@@ -44,18 +49,18 @@ fn usable(value: &serde_json::Value) -> bool {
         .is_some_and(|again| serde_json::from_value::<Settings>(again).is_ok())
 }
 
-/// Settings from `kept` that does not read whole: from the defaults, each part of it put in its place where the
-/// whole still reads; one that does not, an object or a list, its own parts one by one (a widget that does not read
+/// Settings from `kept` that does not read whole: from `from` (the defaults, read from a file), each part of it put
+/// in its place where the whole still reads; one that does not, an object or a list, its own parts one by one (a widget that does not read
 /// leaves the others); a part that reads in no way, left as the defaults have it. Returns them, and the parts left
 /// out, by where they are.
-fn salvaged(kept: serde_json::Value) -> (Settings, Vec<String>) {
-    let mut whole = serde_json::to_value(Settings::default()).unwrap_or(serde_json::Value::Null);
+fn salvaged(kept: serde_json::Value, from: &Settings) -> (Settings, Vec<String>) {
+    let mut whole = serde_json::to_value(from).unwrap_or(serde_json::Value::Null);
     let mut left_out = Vec::new();
-    let serde_json::Value::Object(fields) = kept else { return (Settings::default(), vec!["all of it (not an object)".to_string()]) };
+    let serde_json::Value::Object(fields) = kept else { return (from.clone(), vec!["all of it (not an object)".to_string()]) };
     for (name, part) in fields {
         graft(&mut whole, &[Step::Key(name.clone())], &name, part, &mut left_out);
     }
-    (serde_json::from_value(whole).unwrap_or_default(), left_out)
+    (serde_json::from_value(whole).unwrap_or_else(|_| from.clone()), left_out)
 }
 
 /// A step into a JSON value: a field of an object, or a place in a list.
@@ -883,7 +888,14 @@ pub fn merged(held: &Settings, base: &Settings, mine: &Settings) -> Settings {
     }
     let mut value = serde_json::to_value(held).unwrap();
     merge(&mut value, &serde_json::to_value(base).unwrap(), &serde_json::to_value(mine).unwrap());
-    serde_json::from_value(value).expect("settings merged from settings")
+    // (A number that is none, as one infinite or not a number is written, reads not at all: left as it is held,
+    // the rest taken. Read whole, Glance stopped.)
+    let (settings, left_out) = read_value(value, held);
+    if !left_out.is_empty() {
+        #[cfg(windows)]
+        crate::journal::note(format!("settings: changed without {}, which could not be kept", left_out.join(", ")));
+    }
+    settings
 }
 
 #[cfg(test)]
@@ -915,6 +927,17 @@ mod tests {
         // A file that reads whole names nothing.
         let (_, none) = read(&serde_json::to_string(&settings).unwrap());
         assert!(none.is_empty(), "{none:?}");
+    }
+
+    /// A change that is not a number (not kept: written as none at all) is left as it is held, the others taken
+    /// (Glance stopped).
+    #[test]
+    fn a_change_not_a_number_is_left_as_held() {
+        let held = Settings { panel_size: 1.25, ..Settings::default() };
+        let base = held.clone();
+        let mine = Settings { panel_size: f32::NAN, skin: "glass".into(), ..base.clone() };
+        let settings = merged(&held, &base, &mine);
+        assert_eq!((settings.panel_size, settings.skin.as_str()), (1.25, "glass"));
     }
 
     /// A number too large to be one (infinite as an f32, written as none at all) is left out alone, not the whole file.
