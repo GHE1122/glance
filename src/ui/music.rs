@@ -1849,9 +1849,33 @@ fn sung_part(frame: &Frame, layout: &IDWriteTextLayout, text: &str, font: Font, 
         let _ = unsafe { layout.HitTestTextPosition(unit as u32, false, &mut px, &mut py, &mut metrics) };
         (px, metrics.top)
     };
-    let (x0, top) = place(sung.from);
-    let (x1, top1) = place(sung.to);
-    let at = if (top1 - top).abs() < 0.5 { x0 + (x1 - x0) * sung.part } else { x0 };
+    // The part sung as it is laid out, a piece on each row it runs over: as far along all of them as it is sung (on
+    // the second row as soon as the first is passed; taken as on its first alone, it stood still there while it
+    // was sung, then the rows after it came all at once).
+    let mut count = 0;
+    let length = (sung.to - sung.from) as u32;
+    let _ = unsafe { layout.HitTestTextRange(sung.from as u32, length, 0.0, 0.0, None, &mut count) };
+    let mut pieces = vec![DWRITE_HIT_TEST_METRICS::default(); count as usize];
+    let laid = unsafe { layout.HitTestTextRange(sung.from as u32, length, 0.0, 0.0, Some(&mut pieces), &mut count) }.is_ok();
+    pieces.truncate(if laid { count as usize } else { 0 });
+    let (top, at) = match pieces.first() {
+        None => {
+            let (x0, top) = place(sung.from);
+            (top, x0)
+        }
+        Some(first) => {
+            let mut left = pieces.iter().map(|piece| piece.width).sum::<f32>() * sung.part;
+            let mut on = (first.top, first.left);
+            for piece in &pieces {
+                on = (piece.top, piece.left + left.min(piece.width));
+                if left <= piece.width {
+                    break;
+                }
+                left -= piece.width;
+            }
+            on
+        }
+    };
     let mut row_top = 0.0;
     for row in &rows {
         let height = row.height;
