@@ -22,7 +22,7 @@ use crate::ui::smoke::{self, Smoke};
 use crate::ui::window::Window;
 
 /// How long the controls stay after the pointer rests.
-const AWAKE: Duration = Duration::from_millis(2200);
+const AWAKE: Duration = Duration::from_millis(1200);
 /// How long they take to come or go.
 const CONTROLS_FADE: f32 = 0.35;
 /// Two presses no further apart than this are a double click.
@@ -65,6 +65,8 @@ pub struct FullMusic {
     smooth: [f32; crate::sound::BANDS],
     swell: f32,
     flow: f32,
+    /// The beat, up quickly and down slowly (as it is heard, it comes and goes from one frame to the next).
+    beat: f32,
     last: Option<Instant>,
     began: Instant,
     /// The smoke's colours, easing toward the cover's.
@@ -105,6 +107,7 @@ impl FullMusic {
             smooth: [0.0; crate::sound::BANDS],
             swell: 0.0,
             flow: 0.0,
+            beat: 0.0,
             last: None,
             began: now,
             tint: [0.40, 0.95, 0.88],
@@ -142,6 +145,9 @@ impl FullMusic {
         let bass = part(0, 4, &heard.bands);
         self.swell += (bass - self.swell) * (1.0 - (-dt / 0.45).exp());
         self.flow += dt * (0.55 + self.swell * 0.9);
+        let heard_beat = heard.beat.clamp(0.0, 1.0);
+        let pace = if heard_beat > self.beat { 0.04 } else { 0.3 };
+        self.beat += (heard_beat - self.beat) * (1.0 - (-dt / pace).exp());
         // The controls: in while the pointer moved lately (or something is dragged), out after.
         let awake = self.dragging.is_some() || self.moved.is_some_and(|moved| now.duration_since(moved) < AWAKE);
         let to = if awake { 1.0 } else { 0.0 };
@@ -187,7 +193,7 @@ impl FullMusic {
             }
         }
         let t = now.duration_since(self.began).as_secs_f32();
-        let music = Music { smooth: self.smooth, swell: self.swell, beat: heard.beat.clamp(0.0, 1.0), high: part(14, 20, &self.smooth), bass: part(0, 4, &self.smooth) };
+        let music = Music { smooth: self.smooth, swell: self.swell, beat: self.beat, high: part(14, 20, &self.smooth), bass: part(0, 4, &self.smooth) };
         let (smoke, lines, now_index, leaving) = (&self.smoke, self.lines.clone(), self.now, self.leaving);
         let (pointer, controls) = (self.pointer, self.controls);
         let mut hits = Vec::new();
@@ -349,7 +355,7 @@ fn draw_lines(frame: &Frame, (w, h): (f32, f32), lines: &[Line], now: Option<usi
     if let Some(next) = next.filter(|next| !next.text.trim().is_empty()) {
         let font = Font::new(Family::YaHei, (h * 0.029).max(14.0), 700.0);
         let shown = ((position - line.at) as f32 - 0.3).clamp(0.0, 1.0) * 0.5;
-        frame.text(&next.text, font, Color::hex(0xFFFFFF, shown), left + 4.0, baseline + h * 0.09, w - 2.0 * left, Align::Start);
+        frame.text_moving(&next.text, font, Color::hex(0xFFFFFF, shown), left + 4.0, baseline + h * 0.09, w - 2.0 * left, Align::Start);
     }
 }
 
@@ -398,10 +404,10 @@ fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>,
         frame.turned(middle, y - size * 0.35 + rise, tilt * (0.4 + 0.6 * came), (swell, swell), |frame| {
             if came < 1.0 {
                 // Up out of a blur.
-                frame.glow(Color::hex(0xFFFFFF, alpha), (1.0 - came) * 8.0 + 0.5, |frame| frame.text(&said, font, Color::hex(0xFFFFFF, 1.0), middle - room / 2.0, top, room * 2.0, Align::Start));
+                frame.glow(Color::hex(0xFFFFFF, alpha), (1.0 - came) * 8.0 + 0.5, |frame| frame.text_moving(&said, font, Color::hex(0xFFFFFF, 1.0), middle - room / 2.0, top, room * 2.0, Align::Start));
             }
-            frame.glow(Color::hex(0xFFFFFF, 0.85 * alpha), glow / 2.0, |frame| frame.text(&said, font, Color::hex(0xFFFFFF, 1.0), middle - room / 2.0, top, room * 2.0, Align::Start));
-            frame.text(&said, font, Color { r: ink, g: ink * 0.985, b: ink * 0.965, a: alpha * came * came }, middle - room / 2.0, top, room * 2.0, Align::Start);
+            frame.glow(Color::hex(0xFFFFFF, 0.85 * alpha), glow / 2.0, |frame| frame.text_moving(&said, font, Color::hex(0xFFFFFF, 1.0), middle - room / 2.0, top, room * 2.0, Align::Start));
+            frame.text_moving(&said, font, Color { r: ink, g: ink * 0.985, b: ink * 0.965, a: alpha * came * came }, middle - room / 2.0, top, room * 2.0, Align::Start);
         });
     }
 }

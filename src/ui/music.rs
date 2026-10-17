@@ -683,6 +683,11 @@ fn turned(now: Instant, since: Instant) -> Option<f32> {
 
 /// Its parts `t` of the way from where they were (`from`) to where they go (`to`): each there is in both moved, the
 /// others where they go.
+/// The size of the stage's line sung now, `h` tall: larger as it is taller.
+fn stage_line(h: f32) -> f32 {
+    (h / 16.0).clamp(18.0, NOW_FONT.size)
+}
+
 fn tween(from: Placed, to: Placed, t: f32) -> Placed {
     let at = |a: f32, b: f32| a + (b - a) * t;
     Placed {
@@ -694,6 +699,7 @@ fn tween(from: Placed, to: Placed, t: f32) -> Placed {
             (Some(a), Some(b)) => Some((at(a.0, b.0), at(a.1, b.1), at(a.2, b.2), b.3)),
             (_, b) => b,
         },
+        title_zoom: at(from.title_zoom, to.title_zoom),
         below: at(from.below, to.below),
         left: at(from.left, to.left),
         width: at(from.width, to.width),
@@ -759,6 +765,8 @@ const CARD_COVER: f32 = 64.0;
 struct Placed {
     cover: Option<(f32, f32, f32)>,
     title: Option<(f32, f32, f32, bool)>,
+    /// How large what plays is drawn, of its size (the stage's, larger as it is taller, as its lines are).
+    title_zoom: f32,
     below: f32,
     /// Where the words beside the cover begin (the player and the strip), and how wide they are.
     left: f32,
@@ -773,7 +781,7 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             let side = (h - 2.0 * pad).min(if shows.inset.is_some() { HOSTED_COVER } else { f32::MAX }).max(0.0);
             let cover = shows.cover.then_some((pad, (h - side) / 2.0, side));
             let left = if shows.cover { pad + side + 12.0 } else { pad + 4.0 };
-            Placed { cover, title: None, below: 0.0, left, width: (w - pad - left).max(0.0) }
+            Placed { cover, title: None, title_zoom: 1.0, below: 0.0, left, width: (w - pad - left).max(0.0) }
         }
         // The cover as tall as the room above the rows along the bottom (which go all across), no wider than a third.
         // (Narrower than the room above the rows is tall, the cover and the column beside it, level with its top,
@@ -786,14 +794,14 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             let left = if shows.cover { pad + side + 16.0 } else { pad };
             let width = (w - left - pad).max(0.0);
             let title = shows.title.then_some((left, top - 2.0, width, false));
-            Placed { cover, title, below: if shows.title { top + 46.0 } else { top + 4.0 }, left, width }
+            Placed { cover, title, title_zoom: 1.0, below: if shows.title { top + 46.0 } else { top + 4.0 }, left, width }
         }
         Layout::Card => {
             let cover = shows.cover.then_some((pad, pad, CARD_COVER));
             let tx = if shows.cover { pad + CARD_COVER + 14.0 } else { pad };
             let title = shows.title.then_some((tx, pad + if shows.cover { 12.0 } else { 0.0 }, (w - tx - pad).max(0.0), false));
             let below = pad + if shows.cover { CARD_COVER + 12.0 } else if shows.title { 44.0 } else { 0.0 };
-            Placed { cover, title, below, left: pad, width: (w - 2.0 * pad).max(0.0) }
+            Placed { cover, title, title_zoom: 1.0, below, left: pad, width: (w - 2.0 * pad).max(0.0) }
         }
         // The record drawn as it turns (not on the ground); what plays at the top of the column beside it.
         // (Level with the record's top: the record and the column beside it together in the middle.)
@@ -803,7 +811,9 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             let left = pad + side + side * 0.28 + 12.0;
             let width = (w - left - pad).max(0.0);
             let title = shows.title.then_some((left, top + 6.0, width, false));
-            Placed { cover: None, title, below: top + if shows.title { 58.0 } else { 0.0 }, left, width }
+            // (As large as its lines are, of theirs at the least: see `stage`.)
+            let title_zoom = stage_line(h) / 18.0;
+            Placed { cover: None, title, title_zoom, below: top + if shows.title { 58.0 * title_zoom } else { 0.0 }, left, width }
         }
         Layout::Tall => {
             let wide = (w - 2.0 * pad).max(0.0);
@@ -814,7 +824,7 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             if shows.title {
                 y += 44.0;
             }
-            Placed { cover, title, below: y, left: pad, width: wide }
+            Placed { cover, title, title_zoom: 1.0, below: y, left: pad, width: wide }
         }
     }
 }
@@ -881,7 +891,9 @@ impl Drawing<'_> {
                     }
                 }
                 if let Some((x, y, wide, centred)) = at.title {
-                    for (text, font, alpha, down) in [(&title, self.fonts.title, 0.95, 0.0), (&artist, self.fonts.about, 0.62, 21.0)] {
+                    let zoom = at.title_zoom;
+                    let (title_font, about) = (Font { size: self.fonts.title.size * zoom, ..self.fonts.title }, Font { size: self.fonts.about.size * zoom, ..self.fonts.about });
+                    for (text, font, alpha, down) in [(&title, title_font, 0.95, 0.0), (&artist, about, 0.62, 21.0 * zoom)] {
                         let text = fitted(frame, text, font, wide);
                         let from = if centred { x + (wide - frame.measure(&text, font)) / 2.0 } else { x };
                         words(frame, &text, font, Color::hex(ink, alpha), from, y + down, wide + 2.0, Align::Start, edged);
@@ -1341,7 +1353,7 @@ impl Drawing<'_> {
         match self.moment.lines.clone() {
             // (As large as the stage is tall: made taller, its record grows and the column beside it narrows, and the
             // lines grow with it, not smaller.)
-            Some(lines) => self.rail_of_lines(&lines, at.left, top, bottom, at.width, Some(cy), (h / 16.0).clamp(18.0, self.fonts.now.size)),
+            Some(lines) => self.rail_of_lines(&lines, at.left, top, bottom, at.width, Some(cy), stage_line(h)),
             None => {
                 let said = self.moment.said.clone().unwrap_or_default();
                 let y = (top + bottom) / 2.0 - self.fonts.under_font.size;
@@ -1643,9 +1655,7 @@ impl Drawing<'_> {
     #[allow(clippy::too_many_arguments)]
     fn filled(&self, layout: &IDWriteTextLayout, text: &str, font: Font, x: f32, y: f32, width: f32, sung: Filling, dim: Color, bright: Color, soft: f32) {
         if self.edged {
-            for (dx, dy) in [(0.0, 1.2), (0.8, 0.8), (-0.8, 0.8)] {
-                self.frame.text_wrapped(text, font, Color::hex(0x000000, 0.45 * bright.a), x + dx, y + dy, width);
-            }
+            edge(self.frame, bright.a, |frame| frame.text_wrapped(text, font, Color::hex(0xFFFFFF, 1.0), x, y, width));
         }
         filled(self.frame, layout, text, font, x, y, width, sung, dim, bright, soft);
     }
@@ -2005,11 +2015,16 @@ fn fitted(frame: &Frame, text: &str, font: Font, room: f32) -> String {
 #[allow(clippy::too_many_arguments)]
 fn words(frame: &Frame, text: &str, font: Font, colour: Color, x: f32, y: f32, width: f32, align: Align, clear: bool) {
     if clear {
-        for (dx, dy) in [(0.0, 1.2), (0.8, 0.8), (-0.8, 0.8)] {
-            frame.text(text, font, Color::hex(0x000000, 0.45 * colour.a), x + dx, y + dy, width, align);
-        }
+        edge(frame, colour.a, |frame| frame.text(text, font, Color::hex(0xFFFFFF, 1.0), x, y, width, align));
     }
     frame.text(text, font, colour, x, y, width, align);
+}
+
+/// A dark edge all round what `paint` draws (as words are drawn with no ground), `alpha` as strong: its shape
+/// blurred a little, even on every side wherever it falls on the pixels. (Drawn again a little aside each way, the
+/// copies fell now on one pixel, now on the next, as what was drawn moved, and the edge came and went.)
+fn edge(frame: &Frame, alpha: f32, paint: impl FnOnce(&Frame)) {
+    frame.glow(Color::hex(0x000000, 0.7 * alpha), 1.2, paint);
 }
 
 /// Words with a dark edge under them, to be read on whatever is behind.

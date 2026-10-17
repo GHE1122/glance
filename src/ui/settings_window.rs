@@ -4382,10 +4382,20 @@ impl Ui {
             self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, zoom).ok()).map(|b| (zoom_key, b));
         }
         if let Some((_, bitmap)) = &self.stage.bitmap {
+            // (Inside the area's rounded corners.)
+            let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, 8.0)) }) else { return };
+            let layer = D2D1_LAYER_PARAMETERS1 {
+                contentBounds: rect(area.x, area.y, area.w, area.h),
+                geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: 1.0,
+                ..Default::default()
+            };
             unsafe {
-                frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                frame.dc.PushLayer(&layer, None);
                 frame.dc.DrawBitmap(bitmap, Some(&rect(at.0, at.1, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
-                frame.dc.PopAxisAlignedClip();
+                frame.dc.PopLayer();
             }
         }
     }

@@ -1055,6 +1055,20 @@ impl<'a> Frame<'a> {
     }
 
     /// Draws `text` with its first baseline-box at `(x, y)`, in a box `width` wide.
+    /// As `text`, its glyphs where they fall, not put on whole pixels: words moving by less than a pixel a frame
+    /// (put on whole pixels, they stood still, then jumped).
+    pub fn text_moving(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align) {
+        let layout = self.gfx.layout(text, font, width, align);
+        unsafe {
+            self.dc.DrawTextLayout(
+                windows_numerics::Vector2 { X: x, Y: y },
+                &layout,
+                self.brush(color),
+                windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+            )
+        };
+    }
+
     pub fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align) {
         let layout = self.gfx.layout(text, font, width, align);
         unsafe {

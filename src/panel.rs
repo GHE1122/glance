@@ -2504,6 +2504,9 @@ impl<'a> Panel<'a> {
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
         let music = &mut self.music;
         let mut painted = None;
+        let pinned = self.pinned;
+        // Its settings and its pin (as the readings' bar has them), at its top right while the pointer is over it.
+        let mut buttons = Vec::new();
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
         let drawn = surface.draw(&self.gfx, surface_size, px, |frame| {
@@ -2514,6 +2517,17 @@ impl<'a> Panel<'a> {
             }
             frame.origin(x, y);
             painted = Some(music.paint(frame, size, &shows, crate::ui::music::Ground::of(&shows), px, pointer, now));
+            if let Some((px_x, px_y)) = pointer {
+                let ground = music.ground_colour(size);
+                let (side, gap, inset) = (crate::ui::buttons::SIZE, crate::ui::buttons::GAP, 12.0);
+                for (index, (button, hit)) in [(crate::ui::buttons::Button::Pin, Hit::Pin), (crate::ui::buttons::Button::Settings, Hit::Settings)].into_iter().enumerate() {
+                    let (bx, by) = (size.0 - inset - side - index as f32 * (side + gap), inset);
+                    let over = px_x >= bx && px_x < bx + side && px_y >= by && px_y < by + side;
+                    let lit = (button == crate::ui::buttons::Button::Pin && pinned) || over;
+                    crate::ui::buttons::paint_on(frame, crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 }, button, lit, ground);
+                    buttons.push((bx, by, side, side, hit));
+                }
+            }
             frame.origin(0.0, 0.0);
             if opacity < 1.0 {
                 unsafe { frame.dc.PopLayer() };
@@ -2526,7 +2540,8 @@ impl<'a> Panel<'a> {
             return;
         };
         self.gfx.sweep();
-        self.hits = painted.hits;
+        // (Its buttons over what is under them.)
+        self.hits = buttons.into_iter().chain(painted.hits).collect();
         self.corner = (x + offset.0 as f32 / px, y + offset.1 as f32 / px);
         self.bar = view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         let moving = !self.shift.done(now) || !self.opacity.done(now) || painted.busy;
