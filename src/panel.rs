@@ -1634,6 +1634,8 @@ impl<'a> Panel<'a> {
         self.last_frame = now;
         self.frame(now);
         self.window.show();
+        // (Where it stands among the windows as it shows, for the journal with its opening: see below.)
+        let standing = self.window.standing();
         if let Some(placement) = &self.placement {
             crate::widget::own_window_changed(placement.window);
         }
@@ -1641,6 +1643,10 @@ impl<'a> Panel<'a> {
         let took = began.elapsed();
         if took > Duration::from_millis(50) {
             crate::journal::note(format!("panel: opened in {} ms (the desktop behind taken in {} ms)", took.as_millis(), taking.as_millis()));
+        }
+        // Not above all as it shows: said each time (it hides under the windows over its edge).
+        if !standing.starts_with("above all") {
+            crate::journal::note(format!("panel: shown {standing}"));
         }
     }
 
@@ -1943,6 +1949,10 @@ impl<'a> Panel<'a> {
     fn settings_front(&mut self, settings: Option<HWND>) {
         let was = self.window.yielding();
         self.window.yield_to(settings);
+        // (Said as it changes: a panel left under the settings is under every window over its edge.)
+        if was != settings.is_some() {
+            crate::journal::note(format!("panel: {} the settings ({})", if settings.is_some() { "gives way to" } else { "no longer gives way to" }, self.window.standing()));
+        }
         // A capture under way may take the settings in: of no use when it
         // comes back, and taken again once they have gone.
         if settings.is_some() && self.capturing.is_some() {

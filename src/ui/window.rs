@@ -231,6 +231,14 @@ impl Window {
         self.under.get().is_some()
     }
 
+    /// Where it is among the windows, said for the journal: whether it is above all (topmost), and the window it
+    /// gives way to, if it does.
+    pub fn standing(&self) -> String {
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
+        let topmost = unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0 != 0;
+        format!("{}{}", if topmost { "above all" } else { "not above all" }, self.under.get().map_or(String::new(), |under| format!(", giving way to {:?}", under.0)))
+    }
+
     /// Gives way to `window` (an ordinary window in front, as the settings
     /// are), just below it, until it is given way to no more (`None`):
     /// above all again.
