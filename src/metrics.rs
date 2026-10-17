@@ -97,6 +97,8 @@ pub struct Sampler {
     net_prev: Option<(HashMap<u64, (u64, u64)>, Instant)>,
     /// Readers that need the driver; absent without it or without rights.
     cpu_sensors: Option<CpuReader>,
+    /// What the CPU's graphics' plane drew at the last sample (see `CpuSensors::graphics_power`).
+    graphics_power: Option<f32>,
     super_io: Option<crate::superio::Watched>,
     /// The board's chip was not looked at as Glance started, another
     /// program having the bus: looked for again every so often, since when.
@@ -216,6 +218,7 @@ impl Sampler {
             gpu_power,
             net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
             cpu_sensors,
+            graphics_power: None,
             super_io_awaited: super_io.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now()),
             super_io: super_io.ok().map(crate::superio::Watched::new),
             laptop_fans: laptop_fans.ok(),
@@ -382,6 +385,9 @@ impl Sampler {
         // Without the performance counter, the clock reads as its base.
         let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).unwrap_or(100.0);
 
+        // (Read before the GPUs: Intel's graphics built into the CPU take their power from it.)
+        let cpu_sensors = self.cpu_sensors.as_mut().map(CpuReader::read);
+        self.graphics_power = cpu_sensors.as_ref().and_then(|sensors| sensors.graphics_power);
         let gpus = self.sample_gpus(collected);
 
         if refresh_slow {
@@ -451,7 +457,7 @@ impl Sampler {
                 handles: perf.HandleCount,
             },
             battery: battery(),
-            cpu_sensors: self.cpu_sensors.as_mut().map(CpuReader::read),
+            cpu_sensors,
             board: self.board(),
             drive_temps: crate::drives::temperatures(),
             dimm_temps: self.dimms().map(Dimms::read).unwrap_or_default(),
@@ -576,7 +582,13 @@ impl Sampler {
             hot_spot: more.hot_spot,
             fan_rpm: perf.and_then(|p| (p.FanRPM != 0).then_some(p.FanRPM)).or(more.fan_rpm),
             clock_mhz: graphics_clock(adapter.kmt_handle).or(more.clock_mhz),
-            power: adapter.power.and_then(|reader| self.gpu_power.read(reader)),
+            // Intel's graphics built into the CPU: what the CPU counts its graphics' plane drew, where it counts it (its
+            // library said, of older ones, what the whole CPU drew); else what the library says.
+            power: adapter
+                .power
+                .filter(|reader| self.gpu_power.intel_integrated(*reader))
+                .and(self.graphics_power)
+                .or_else(|| adapter.power.and_then(|reader| self.gpu_power.read(reader))),
             ..gpu
         }
     }

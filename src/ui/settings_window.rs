@@ -4302,18 +4302,14 @@ impl Ui {
     /// drawn smaller); the example while no music plays. Returns how soon it is to be drawn again (as the preview's charts' speed: see
     /// `paint`), while something plays.
     fn paint_music_preview(&mut self, frame: &Frame, palette: &Palette, area: Rect) -> Option<f32> {
+        // The desktop over the room above the sizes (inside the preview's rounded corners), what plays clipped to it.
         let (sw, sh) = self.stage.size;
-        let k = (area.w / sw).max(area.h / sh);
-        let (ox, oy) = (area.x + (area.w - sw * k) / 2.0, area.y + (area.h - sh * k) / 2.0);
-        unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-        if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != 1.0f32.to_bits()) {
-            self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, 1.0).ok()).map(|b| (1.0f32.to_bits(), b));
-        }
-        if let Some((_, bitmap)) = &self.stage.bitmap {
-            unsafe { frame.dc.DrawBitmap(bitmap, Some(&rect(ox, oy, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
-        }
-        let shows = super::music::Shows::from(&self.settings.view);
         let room = Rect { x: area.x, y: area.y, w: area.w, h: area.h - MUSIC_SIZES_ROW };
+        let k = (room.w / sw).max(room.h / sh);
+        let (ox, oy) = (room.x + (room.w - sw * k) / 2.0, room.y + (room.h - sh * k) / 2.0);
+        self.stage_picture(frame, room, (ox, oy), k, 1.0);
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(room.x, room.y, room.w, room.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        let shows = super::music::Shows::from(&self.settings.view);
         let most = (room.w - 2.0 * MUSIC_PREVIEW_ROOM, room.h - 2.0 * MUSIC_PREVIEW_ROOM);
         // At rest, as a widget comes to rest at the size it is let go at; while it is sized, as it is. Where the room
         // does not hold the largest of the sizes under it (or this one, larger still), all are made smaller alike, as a
@@ -4358,7 +4354,6 @@ impl Ui {
         let mut x = area.x + (area.w - total) / 2.0;
         let cy = area.y + area.h - MUSIC_SIZES_ROW / 2.0;
         let hovered = self.hovered();
-        fill(frame, palette.card, area.x, area.y + area.h - MUSIC_SIZES_ROW, area.w, MUSIC_SIZES_ROW, 0.0);
         for (at, (name, w)) in names.iter().zip(&widths).enumerate() {
             let kind = if layouts[at] == shown { Button::Accent } else { Button::Plain };
             self.button(frame, palette, name, x + w, cy, Target::MusicSize(at), kind, &hovered);
@@ -4427,7 +4422,6 @@ impl Ui {
         let mut x = area.x + (area.w - total) / 2.0;
         let cy = area.y + area.h - MUSIC_SIZES_ROW / 2.0;
         let hovered = self.hovered();
-        fill(frame, palette.card, area.x, area.y + area.h - MUSIC_SIZES_ROW, area.w, MUSIC_SIZES_ROW, 0.0);
         for (at, (name, w)) in names.iter().zip(&widths).enumerate() {
             let kind = if lit == Some(at) { Button::Accent } else { Button::Plain };
             self.button(frame, palette, name, x + w, cy, Target::WidgetForm(at), kind, &hovered);

@@ -876,7 +876,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
         processes,
         system: SystemSample { uptime_s: 3 * 3600 + 25 * 60 + seed, processes: 312, threads: 4810, handles: 168_000 },
         battery: None::<BatterySample>,
-        cpu_sensors: Some(CpuSensors { temp: Some(package), ccds: vec![(0, package + 2.0), (1, package - 14.0)], power: Some(cpu_power) }),
+        cpu_sensors: Some(CpuSensors { temp: Some(package), ccds: vec![(0, package + 2.0), (1, package - 14.0)], power: Some(cpu_power), graphics_power: None }),
         board: Some(BoardSensors {
             temps: vec![
                 ("system".into(), 33.0 + 3.0 * busy),

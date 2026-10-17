@@ -201,7 +201,7 @@ impl Sampler {
             processes,
             system: SystemSample { uptime_s: uptime(), processes: counted, threads: 0, handles: 0 },
             battery: battery(),
-            cpu_sensors: (chip.is_some() || report.cpu_power.is_some()).then(|| CpuSensors { temp: chip, ccds: Vec::new(), power: report.cpu_power }),
+            cpu_sensors: (chip.is_some() || report.cpu_power.is_some()).then(|| CpuSensors { temp: chip, ccds: Vec::new(), power: report.cpu_power, graphics_power: None }),
             // A Mac's fans, where it has any.
             board: self.smc.as_ref().map(Smc::fans).filter(|fans| !fans.is_empty()).map(|fans| BoardSensors { temps: Vec::new(), fans }),
             // The internal SSD's, by its NAND channels' sensors.

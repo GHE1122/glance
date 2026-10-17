@@ -2071,7 +2071,7 @@ mod tests {
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
-            s.cpu_sensors = Some(CpuSensors { temp: Some(50.0), ccds, power: None });
+            s.cpu_sensors = Some(CpuSensors { temp: Some(50.0), ccds, power: None, graphics_power: None });
             s.drive_temps = drives.into_iter().map(|(id, celsius)| DriveTemperature { id, name: "SSD".into(), celsius }).collect();
             s
         };

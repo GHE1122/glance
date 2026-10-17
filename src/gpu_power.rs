@@ -98,6 +98,15 @@ impl GpuPower {
         Some(igcl.devices.iter().enumerate().map(|(index, device)| format!("{:?}: {}", device.at, igcl.told(index))).collect::<Vec<_>>().join("; "))
     }
 
+    /// Whether it is Intel's graphics built into the CPU (whose power the CPU may count apart: see
+    /// `CpuSensors::graphics_power`).
+    pub fn intel_integrated(&self, reader: Reader) -> bool {
+        match reader {
+            Reader::Intel(index) => self.igcl.as_ref().and_then(|igcl| igcl.devices.get(index)).is_some_and(|device| device.integrated),
+            Reader::Nvidia(_) | Reader::Amd(_) => false,
+        }
+    }
+
     /// The card's power now, in watts.
     pub fn read(&self, reader: Reader) -> Option<f32> {
         match reader {
@@ -516,6 +525,9 @@ struct CtlInitArgs {
     application: [u32; 4],
 }
 
+/// `CtlAdapterProperties::graphics_adapter_properties`: the graphics are built into the CPU.
+const CTL_ADAPTER_PROPERTIES_FLAG_INTEGRATED: u32 = 1;
+
 #[repr(C)]
 struct CtlAdapterProperties {
     size: u32,
@@ -623,6 +635,8 @@ struct CtlTelemetry {
 
 struct IntelDevice {
     at: PciAddress,
+    /// Built into the CPU (not a card of its own).
+    integrated: bool,
     handle: CtlHandle,
     /// The energy counter as last read, and when (the library's own clock, seconds): the power is what was
     /// drawn between two readings.
@@ -677,7 +691,8 @@ impl Igcl {
             about.device_id = luid.as_mut_ptr().cast();
             about.device_id_size = luid.len() as u32;
             if unsafe { properties(handle, &mut about) } == CTL_SUCCESS && about.pci_vendor_id == INTEL_VENDOR {
-                found.devices.push(IntelDevice { at: (about.bdf[0] as u32, about.bdf[1] as u32, about.bdf[2] as u32), handle, last: std::cell::Cell::new(None) });
+                let integrated = about.graphics_adapter_properties & CTL_ADAPTER_PROPERTIES_FLAG_INTEGRATED != 0;
+                found.devices.push(IntelDevice { at: (about.bdf[0] as u32, about.bdf[1] as u32, about.bdf[2] as u32), integrated, handle, last: std::cell::Cell::new(None) });
             }
         }
         Some(found)

@@ -22,6 +22,8 @@ const TILE_MUSIC: (f32, f32) = (240.0, 72.0);
 /// The editor's head (the screens to show, every screen alike), and the room round the screens under it.
 const EDITOR_HEAD: f32 = 52.0;
 const EDITOR_ROOM: f32 = 20.0;
+/// How far under the screens' buttons the switch for every screen alike goes, where they do not fit side by side.
+const EDITOR_SECOND_ROW: f32 = 44.0;
 /// The words under the screens, saying how their edges open and what a press does, on two lines.
 const EDITOR_FOOT: f32 = 56.0;
 /// How far into a screen its edges take a drop: drawn small, and one screen large.
@@ -215,29 +217,37 @@ impl Ui {
         self.zones.clear();
         let places = self.settings.places().clone();
         // The head: a button for every screen together and one for each, and every screen alike.
-        let cy = area.y + EDITOR_HEAD / 2.0 + 6.0;
+        let mut cy = area.y + EDITOR_HEAD / 2.0 + 6.0;
         let mut x = area.x + EDITOR_ROOM;
         let shown = self.editor_screen();
+        // (Where the buttons and the switch do not fit side by side, the switch goes on a row of its own under them.)
+        let mut head = EDITOR_HEAD;
         if self.screens.len() > 1 {
             let mut views = vec![(pick(lang, "全部屏幕", "All screens").to_string(), None)];
             views.extend(self.screens.iter().enumerate().map(|(i, screen)| (if lang == Lang::Zh { format!("屏幕 {}", i + 1) } else { format!("Screen {}", i + 1) }, Some(screen.id.clone()))));
             let font = Font::new(Family::Segoe, 14.0, 400.0);
-            for (text, view) in views {
-                let w = frame.gfx.measure(&text, font) + 32.0;
+            let widths: Vec<f32> = views.iter().map(|(text, _)| frame.gfx.measure(text, font) + 32.0).collect();
+            let buttons = widths.iter().sum::<f32>() + 8.0 * (widths.len() - 1) as f32;
+            let label = pick(lang, "所有屏幕同样布局", "Every screen alike");
+            let label_w = frame.gfx.measure(label, font);
+            let switch = label_w + 12.0 + 40.0;
+            for ((text, view), w) in views.into_iter().zip(widths) {
                 let kind = if view == shown { Button::Accent } else { Button::Plain };
                 self.button(frame, palette, &text, x + w, cy, Target::View(view), kind, &hovered);
                 x += w + 8.0;
             }
+            if buttons + 24.0 + switch > area.w - 2.0 * EDITOR_ROOM {
+                cy += EDITOR_SECOND_ROW;
+                head += EDITOR_SECOND_ROW;
+            }
             let same = places.same;
-            let label = pick(lang, "所有屏幕同样布局", "Every screen alike");
             let toggle_x = area.x + area.w - EDITOR_ROOM - 40.0;
-            let label_w = frame.gfx.measure(label, font);
             text_centred(frame, label, font, palette.text, toggle_x - 12.0 - label_w, cy, label_w + 4.0, Align::Start);
             let pressed = self.pressed == Some(Target::Same);
             self.toggle(frame, palette, "layout:same".into(), same, true, toggle_x, cy, now, pressed);
             self.targets.push((Rect { x: toggle_x - 12.0 - label_w, y: cy - 16.0, w: label_w + 52.0, h: 32.0 }, Target::Same));
         }
-        let canvas = Rect { x: area.x + EDITOR_ROOM, y: area.y + EDITOR_HEAD + 8.0, w: area.w - 2.0 * EDITOR_ROOM, h: area.h - EDITOR_HEAD - 8.0 - EDITOR_FOOT };
+        let canvas = Rect { x: area.x + EDITOR_ROOM, y: area.y + head + 8.0, w: area.w - 2.0 * EDITOR_ROOM, h: area.h - head - 8.0 - EDITOR_FOOT };
         if canvas.w <= 40.0 || canvas.h <= 40.0 {
             return None;
         }

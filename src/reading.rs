@@ -306,6 +306,10 @@ pub struct CpuSensors {
     /// several; one not read this time is left out.
     pub ccds: Vec<(usize, f32)>,
     pub power: Option<f32>,
+    /// What the graphics built into the CPU draw, of `power`, where the CPU counts it apart (Intel's PP1 plane):
+    /// shown as theirs (see `metrics::Sampler::from_driver`), not with the CPU.
+    #[serde(default)]
+    pub graphics_power: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

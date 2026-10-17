@@ -161,23 +161,27 @@ const MOST_WATTS: f64 = 1000.0;
 struct EnergyCounter {
     unit: f64,
     last: Option<(u32, Instant)>,
+    /// Whether it has ever moved.
+    counting: bool,
 }
 
 impl EnergyCounter {
     fn new(unit: f64) -> Self {
-        EnergyCounter { unit, last: None }
+        EnergyCounter { unit, last: None, counting: false }
     }
 
     /// The power drawn since the previous count, given the count now. A
-    /// counter that has not moved is not counting (a running package always
-    /// draws power; a hypervisor may return a constant): no reading.
+    /// counter that has never moved is not counting (a running package always
+    /// draws power; a hypervisor may return a constant): no reading. One that
+    /// has, standing still, says nothing was drawn (the graphics' plane, idle).
     fn power(&mut self, count: u32) -> Option<f32> {
         let now = Instant::now();
         let longest = (1u64 << 32) as f64 * self.unit / MOST_WATTS;
         let power = self.last.and_then(|(before, at)| {
             let seconds = now.duration_since(at).as_secs_f64();
             let counted = count.wrapping_sub(before);
-            (counted > 0 && seconds > 0.0 && seconds < longest).then(|| (counted as f64 * self.unit / seconds) as f32)
+            self.counting |= counted > 0;
+            (self.counting && seconds > 0.0 && seconds < longest).then(|| (counted as f64 * self.unit / seconds) as f32)
         });
         self.last = Some((count, now));
         power
@@ -267,6 +271,8 @@ pub struct IntelCpu {
     thermal_status: u64,
     /// Each package's processors and energy counter, if the CPU has RAPL.
     packages: Vec<(Processors, EnergyCounter)>,
+    /// The first package's graphics plane's (PP1: the graphics built into it) energy counter, where the CPU has one.
+    graphics: Option<(Processors, EnergyCounter)>,
 }
 
 const INTEL_MSR: &[u8] = include_bytes!("../pawnio-modules/IntelMSR.bin");
@@ -275,6 +281,7 @@ const IA32_TEMPERATURE_TARGET: u64 = 0x1A2;
 const IA32_PACKAGE_THERM_STATUS: u64 = 0x1B1;
 const MSR_RAPL_POWER_UNIT: u64 = 0x606;
 const MSR_PKG_ENERGY_STATUS: u64 = 0x611;
+const MSR_PP1_ENERGY_STATUS: u64 = 0x641;
 
 impl IntelCpu {
     /// The CPU's sensors, if it is an Intel one, the driver can be used (the
@@ -302,17 +309,17 @@ impl IntelCpu {
                 (tj_max > 0.0).then_some((place, tj_max))
             })
             .collect::<Vec<_>>();
-        let packages = match module.read("ioctl_read_msr", MSR_RAPL_POWER_UNIT) {
-            Ok(units) => {
-                let unit = energy_unit(units, cpu_family_model_intel());
-                packages.into_iter().map(|p| (p, EnergyCounter::new(unit))).collect()
-            }
-            Err(_) => Vec::new(),
+        let unit = module.read("ioctl_read_msr", MSR_RAPL_POWER_UNIT).ok().map(|units| energy_unit(units, cpu_family_model_intel()));
+        // (The graphics' plane, on CPUs with graphics built in: a register a CPU without one refuses to be read.)
+        let graphics = unit.zip(packages.first().cloned()).filter(|(_, first)| on(first, || module.read("ioctl_read_msr", MSR_PP1_ENERGY_STATUS).ok()).flatten().is_some()).map(|(unit, first)| (first, EnergyCounter::new(unit)));
+        let packages: Vec<(Processors, EnergyCounter)> = match unit {
+            Some(unit) => packages.into_iter().map(|p| (p, EnergyCounter::new(unit))).collect(),
+            None => Vec::new(),
         };
         if thermal.is_empty() && packages.is_empty() {
             return None;
         }
-        Some(IntelCpu { module, thermal, thermal_status, packages })
+        Some(IntelCpu { module, thermal, thermal_status, packages, graphics })
     }
 
     pub fn read(&mut self) -> CpuSensors {
@@ -331,6 +338,10 @@ impl IntelCpu {
         }
         if !self.packages.is_empty() {
             sensors.power = total_power(&self.module, &mut self.packages, MSR_PKG_ENERGY_STATUS);
+        }
+        if let Some((first, counter)) = &mut self.graphics {
+            let count = on(first, || self.module.read("ioctl_read_msr", MSR_PP1_ENERGY_STATUS).ok()).flatten();
+            sensors.graphics_power = count.and_then(|count| counter.power(count as u32));
         }
         sensors
     }
