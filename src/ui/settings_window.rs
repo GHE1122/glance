@@ -917,6 +917,8 @@ struct Ui {
     reporting: Option<(ReportFor, std::thread::JoinHandle<String>)>,
     code: Option<(crate::phone::Code, CodeFor)>,
     phones: Vec<crate::phone::Phone>,
+    /// When the remote had last written the phones, as they were last read.
+    phones_written: Option<std::time::SystemTime>,
     /// The phone remote's helper asked something (and how it is then) on another thread: each answer of its is a
     /// program started and waited for, not to be waited for by the thread that draws every window.
     remote_asked: Option<std::thread::JoinHandle<RemoteAnswer>>,
@@ -1120,6 +1122,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             switching: None,
             reporting: None,
             code: None,
+            phones_written: crate::phone::phones_written(),
             phones: crate::phone::phones(),
             remote_asked: None,
             phones_at: Instant::now(),
@@ -3497,12 +3500,17 @@ impl Ui {
             self.next_frame = now + Duration::from_millis(300);
         }
         // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered appears, and its code goes.
+        // (Read only once the remote has written them since: looked at, not read, every second.)
         if self.page == Page::General && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
-            let phones = crate::phone::phones();
-            if phones.len() > self.phones.len() && self.code.as_ref().is_some_and(|(_, what)| matches!(what, CodeFor::Pairing | CodeFor::WebPairing)) {
-                self.code = None;
+            let written = crate::phone::phones_written();
+            if written != self.phones_written {
+                let phones = crate::phone::phones();
+                if phones.len() > self.phones.len() && self.code.as_ref().is_some_and(|(_, what)| matches!(what, CodeFor::Pairing | CodeFor::WebPairing)) {
+                    self.code = None;
+                }
+                self.phones = phones;
+                self.phones_written = written;
             }
-            self.phones = phones;
             self.phones_at = now;
             self.next_frame = now + Duration::from_secs(1);
         }

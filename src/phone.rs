@@ -314,11 +314,21 @@ pub struct Phone {
 
 /// The phones paired with, as the remote keeps them (pairings offered and not yet taken are not among them).
 pub fn phones() -> Vec<Phone> {
-    let kept = std::env::var_os("APPDATA").map(|roaming| PathBuf::from(roaming).join("dev.weiyi.glance.remote").join("config.json"));
+    let kept = remote_config();
     let config: Option<serde_json::Value> = kept.and_then(|path| std::fs::read_to_string(path).ok()).and_then(|text| serde_json::from_str(&text).ok());
     let Some(list) = config.as_ref().and_then(|config| config.get("phones")).and_then(|phones| phones.as_array()) else { return Vec::new() };
     let text = |phone: &serde_json::Value, name: &str| phone.get(name).and_then(|value| value.as_str()).unwrap_or_default().to_string();
     list.iter().filter(|phone| phone.get("offered_till").is_none_or(|till| till.is_null())).map(|phone| Phone { id: text(phone, "id"), name: text(phone, "name") }).filter(|phone| !phone.id.is_empty()).collect()
+}
+
+/// Where the remote keeps what it was told for this user, the phones paired among it.
+fn remote_config() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|roaming| PathBuf::from(roaming).join("dev.weiyi.glance.remote").join("config.json"))
+}
+
+/// When the remote last wrote what it keeps (a phone paired or unpaired among it); none where it keeps nothing.
+pub fn phones_written() -> Option<std::time::SystemTime> {
+    std::fs::metadata(remote_config()?).and_then(|meta| meta.modified()).ok()
 }
 
 /// Unpairs the phone the remote tells from the others by `id`.

@@ -10,7 +10,7 @@ use std::f32::consts::E;
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::rc::Rc;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, SetForegroundWindow, SC_RESTORE, WM_SYSCOMMAND};
@@ -141,7 +141,8 @@ struct Config {
     panel_at: Option<PanelAt>,
     panel_pinned: Option<((i32, i32), Option<Edge>)>,
     music_rooms: crate::settings::MusicRooms,
-    widgets: Vec<crate::settings::WidgetAt>,
+    /// (Shared: taken at every frame of the widgets, as they are, not copied.)
+    widgets: Arc<[crate::settings::WidgetAt]>,
     over_fullscreen: OverFullscreen,
     close_delay: Duration,
     interval: Duration,
@@ -163,7 +164,7 @@ fn config_from(settings: &Settings) -> Config {
         panel_at: settings.panel_at,
         panel_pinned: settings.panel_pinned.map(|point| (point, settings.panel_pinned_edge)),
         music_rooms: settings.music_rooms,
-        widgets: settings.widgets.clone(),
+        widgets: settings.widgets.as_slice().into(),
         over_fullscreen: settings.over_fullscreen,
         close_delay: settings.close_delay(),
         interval: settings.interval(),
