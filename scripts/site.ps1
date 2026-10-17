@@ -46,14 +46,21 @@ if (-not (Test-Path (Join-Path $served $source))) {
 }
 
 # The music full screen's serif face, as Noto's project published it, and its license: Glance takes it from here
-# the first time its full screen opens, and checks it by this digest (src\serif.rs, whose test holds the two alike).
+# the first time its full screen opens, and checks it by its digest. Its name and its digest are read from
+# src\serif.rs, as the app has them, so that what is served is what the app checks for.
+$serif = Get-Content -Raw src\serif.rs
+$faceName = [regex]::Match($serif, 'pub const FILE: &str = "([^"]+)"').Groups[1].Value
+$faceDigest = [regex]::Match($serif, 'pub const DIGEST: &str = "([0-9a-f]{64})"').Groups[1].Value
+if (-not $faceName -or -not $faceDigest) { throw 'the serif face or its digest is not named in src\serif.rs' }
 $noto = 'https://github.com/notofonts/noto-cjk/raw/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Serif'
-$face = Join-Path $served 'NotoSerifSC-Black.otf'
+$face = Join-Path $served $faceName
 if (-not (Test-Path $face)) {
-    Invoke-WebRequest "$noto/SubsetOTF/SC/NotoSerifSC-Black.otf" -OutFile $face
+    Invoke-WebRequest "$noto/SubsetOTF/SC/$faceName" -OutFile $face
 }
-if ((Get-FileHash $face -Algorithm SHA256).Hash -ne '91dde57622845beeb663f300813999febdb7fcd5e451bde199d7c954a9740cb4') {
-    throw 'NotoSerifSC-Black.otf is not the face Glance checks for'
+if ((Get-FileHash $face -Algorithm SHA256).Hash -ne $faceDigest) {
+    # (Taken away, so that the next run takes it again: one cut short would otherwise stay.)
+    Remove-Item -LiteralPath $face
+    throw "$faceName is not the face Glance checks for"
 }
 if (-not (Test-Path (Join-Path $served 'NotoSerifSC-OFL.txt'))) {
     Invoke-WebRequest "$noto/LICENSE" -OutFile (Join-Path $served 'NotoSerifSC-OFL.txt')

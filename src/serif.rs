@@ -97,12 +97,4 @@ mod tests {
     fn digests_as_sha256_does() {
         assert_eq!(hex(&sha256(b"abc").unwrap()), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     }
-
-    /// The site serves the face this checks for: its script takes the file the digest is of.
-    #[test]
-    fn the_site_serves_this_face() {
-        let script = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/site.ps1")).unwrap();
-        assert!(script.contains(DIGEST), "scripts/site.ps1 does not check for {DIGEST}");
-        assert!(script.contains(FILE), "scripts/site.ps1 does not serve {FILE}");
-    }
 }
