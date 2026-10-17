@@ -6,13 +6,14 @@
 //! go, nothing kept or sent.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
-    WAVEFORMATEXTENSIBLE,
+    eConsole, eRender, EDataFlow, ERole, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT,
+    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
 };
+use windows::core::{implement, PCWSTR};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
 
 /// How many bands the spectrum is in, and the pitches it spans (Hz).
@@ -82,10 +83,53 @@ fn listen() {
     }
 }
 
-/// The sound of the default device for playing, till it is not wanted or the device fails.
+/// Told by Windows as the device sound plays from changes: `.0` set.
+#[implement(IMMNotificationClient)]
+struct DefaultWatch(Arc<AtomicBool>);
+
+impl IMMNotificationClient_Impl for DefaultWatch_Impl {
+    fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, _: &PCWSTR) -> windows::core::Result<()> {
+        if flow == eRender && role == eConsole {
+            self.0.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    fn OnDeviceStateChanged(&self, _: &PCWSTR, _: DEVICE_STATE) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnDeviceAdded(&self, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnDeviceRemoved(&self, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnPropertyValueChanged(&self, _: &PCWSTR, _: &windows::Win32::Foundation::PROPERTYKEY) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+/// The sound of the default device for playing, till it is not wanted, the device fails, or another becomes the
+/// default (the sound then plays from that one: the one listened to on, still there, went quiet or went on with what
+/// else played on it).
 fn listen_to_device(analysis: &mut Analysis) -> windows::core::Result<()> {
     unsafe {
         let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let changed = Arc::new(AtomicBool::new(false));
+        let watch: IMMNotificationClient = DefaultWatch(changed.clone()).into();
+        devices.RegisterEndpointNotificationCallback(&watch)?;
+        let heard = listen_to_default(&devices, analysis, &changed);
+        let _ = devices.UnregisterEndpointNotificationCallback(&watch);
+        heard
+    }
+}
+
+/// As `listen_to_device`, the default device as `devices` has it, till `changed`.
+fn listen_to_default(devices: &IMMDeviceEnumerator, analysis: &mut Analysis, changed: &AtomicBool) -> windows::core::Result<()> {
+    unsafe {
         let device = devices.GetDefaultAudioEndpoint(eRender, eConsole)?;
         let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
         let format = client.GetMixFormat()?;
@@ -99,7 +143,7 @@ fn listen_to_device(analysis: &mut Analysis) -> windows::core::Result<()> {
         analysis.rate = rate as f32;
         let mut last_quiet = Instant::now();
         let outcome = (|| -> windows::core::Result<()> {
-            while wanted() {
+            while wanted() && !changed.load(Ordering::Acquire) {
                 std::thread::sleep(Duration::from_millis(10));
                 let mut took = false;
                 while capture.GetNextPacketSize()? > 0 {
