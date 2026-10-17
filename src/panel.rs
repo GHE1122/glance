@@ -140,6 +140,7 @@ struct Config {
     overlay: OverlaySettings,
     panel_at: Option<PanelAt>,
     panel_pinned: Option<(i32, i32)>,
+    music_rooms: crate::settings::MusicRooms,
     widgets: Vec<crate::settings::WidgetAt>,
     over_fullscreen: OverFullscreen,
     close_delay: Duration,
@@ -161,6 +162,7 @@ fn config_from(settings: &Settings) -> Config {
         overlay: settings.overlay.clone(),
         panel_at: settings.panel_at,
         panel_pinned: settings.panel_pinned,
+        music_rooms: settings.music_rooms,
         widgets: settings.widgets.clone(),
         over_fullscreen: settings.over_fullscreen,
         close_delay: settings.close_delay(),
@@ -817,6 +819,13 @@ impl Controller {
                     // Kept here, in the order things happened (an unpin just
                     // after stands).
                     let kept = panel.let_go(now);
+                    // What plays, sized: kept as large as it came to rest, for the edge it is at (a side or the top).
+                    if let Some(room) = panel.sized_room.take() {
+                        let shows = crate::ui::music::Shows::from(&panel.controller.config.lock().unwrap().view);
+                        let top = panel.edge == Edge::Top;
+                        crate::app().change(|settings| settings.music_rooms.set(top, crate::ui::music::rests_at(room, &shows)));
+                        panel.arrange();
+                    }
                     if std::mem::take(&mut panel.screens_missed) {
                         panel.screens_changed(0, now);
                     }
@@ -1059,6 +1068,8 @@ struct PanelDrag {
     from: POINT,
     rect: RECT,
     size: f32,
+    /// What plays: the room it was given as the drag began (DIPs, at the panel's size 1).
+    room: (f32, f32),
     edges: Edges,
     sized: bool,
 }
@@ -1302,6 +1313,8 @@ struct Panel<'a> {
     /// While it is sized by its edges: the size it is at, and the limit
     /// the pointer is past, if it is (shown on it as it is dragged).
     sizing: Option<(f32, Option<Limit>)>,
+    /// What plays, sized by its edges: the room the hand gives it (DIPs, at the panel's size 1), till it is kept.
+    sized_room: Option<(f32, f32)>,
     /// The sound's track is being slid along.
     sliding: Option<crate::playing::Slider>,
     /// The desktop behind the glass is to be taken again (the panel moved
@@ -1388,6 +1401,7 @@ impl<'a> Panel<'a> {
             drag: None,
             largest: SIZES.1,
             sizing: None,
+            sized_room: None,
             sliding: None,
             recapture: false,
             capturing: None,
@@ -1946,9 +1960,23 @@ impl<'a> Panel<'a> {
     /// The edges of the panel a point `(x, y)` from its corner (DIPs) is
     /// on, if it is near them.
     fn edges_at(&self, x: f32, y: f32) -> Edges {
-        let Some(opening) = &self.opening else { return Edges::default() };
-        let (width, height) = (opening.layout.width(), opening.layout.height());
-        let edges = Edges { left: x < EDGE, right: x >= width - EDGE, top: y < EDGE, bottom: y >= height - EDGE };
+        let (width, height) = match (self.part, &self.opening, &self.placement) {
+            (Part::Music, _, Some(placement)) => ((placement.panel.right - placement.panel.left) as f32 / placement.px, (placement.panel.bottom - placement.panel.top) as f32 / placement.px),
+            (_, Some(opening), _) => (opening.layout.width(), opening.layout.height()),
+            _ => return Edges::default(),
+        };
+        let mut edges = Edges { left: x < EDGE, right: x >= width - EDGE, top: y < EDGE, bottom: y >= height - EDGE };
+        // What plays, against its edge, is sized from its edges out on the screen (it stays against that one).
+        if self.part == Part::Music && !self.floating() {
+            match self.edge {
+                Edge::Left => edges.left = false,
+                Edge::Right => edges.right = false,
+                Edge::Top => edges.top = false,
+            }
+            if !edges.any() {
+                return edges;
+            }
+        }
         // On an edge near a corner: the corner's other edge too.
         let across = edges.left || edges.right;
         let down = edges.top || edges.bottom;
@@ -2001,7 +2029,9 @@ impl<'a> Panel<'a> {
         }
         let Some(edges) = self.grip_at(client) else { return };
         let (Some(from), Some(placement)) = (cursor_position(), &self.placement) else { return };
-        self.drag = Some(PanelDrag { from, rect: placement.panel, size: self.size, edges, sized: false });
+        let rect = placement.panel;
+        let room = self.music_room();
+        self.drag = Some(PanelDrag { from, rect, size: self.size, room, edges, sized: false });
         unsafe {
             windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd);
             SetTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER, FOLLOW_MS, None);
@@ -2088,6 +2118,10 @@ impl<'a> Panel<'a> {
             self.torn = true;
             return;
         }
+        if self.part == Part::Music {
+            self.size_music(drag, (dx, dy), now);
+            return;
+        }
         let (width, height) = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);
         let across = (e.left || e.right).then(|| (width + if e.right { dx } else { -dx } as f32) / width);
         let down = (e.top || e.bottom).then(|| (height + if e.bottom { dy } else { -dy } as f32) / height);
@@ -2137,6 +2171,64 @@ impl<'a> Panel<'a> {
         self.next_frame = now;
     }
 
+    /// What plays, held by its edges `drag.edges` and pulled `(dx, dy)` (physical px) since: given as much more room
+    /// or less as that, as a music widget is (its layout following: a strip, a player, a card, a stage), within its
+    /// screen. The edges across from those held stay where they were.
+    fn size_music(&mut self, drag: PanelDrag, (dx, dy): (i32, i32), now: Instant) {
+        let (e, r) = (drag.edges, drag.rect);
+        let Some(placement) = &self.placement else { return };
+        let (contact, px) = (placement.contact, placement.px);
+        let grown = (
+            if e.right { dx } else if e.left { -dx } else { 0 } as f32 / px,
+            if e.bottom { dy } else if e.top { -dy } else { 0 } as f32 / px,
+        );
+        // No larger than its screen's work area holds (less the gaps round it, and its shadow's room).
+        let round = 2.0 * (GAP * contact.scale + self.theme.margin * px) / px;
+        let most = ((contact.work.right - contact.work.left) as f32 / px - round, (contact.work.bottom - contact.work.top) as f32 / px - round);
+        let least = crate::ui::music::LEAST;
+        let room = (
+            (drag.room.0 + grown.0).clamp(least.0, most.0.max(least.0)),
+            (drag.room.1 + grown.1).clamp(least.1, most.1.max(least.1)),
+        );
+        if self.sized_room == Some(room) {
+            return;
+        }
+        self.sized_room = Some(room);
+        if let Some(drag) = &mut self.drag {
+            drag.sized = true;
+        }
+        let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
+        let size = crate::ui::music::rests_at(room, &shows);
+        let (width, height) = ((size.0 * px).round() as i32, (size.1 * px).round() as i32);
+        let (floating, edge) = (self.floating(), self.edge);
+        let Some(placement) = &mut self.placement else { return };
+        if floating {
+            // Away from the edge: the corner across from the edges held stays.
+            placement.held = Some(Held {
+                at: POINT { x: if e.left { r.right } else { r.left }, y: if e.top { r.bottom } else { r.top } },
+                right: e.left,
+                bottom: e.top,
+            });
+        } else {
+            // Against it, centred along it where it is held: the edge across from the one pulled stays.
+            match edge {
+                Edge::Left | Edge::Right if e.top => placement.anchor.y = r.bottom - height / 2,
+                Edge::Left | Edge::Right if e.bottom => placement.anchor.y = r.top + height / 2,
+                Edge::Top if e.left => placement.anchor.x = r.right - width / 2,
+                Edge::Top if e.right => placement.anchor.x = r.left + width / 2,
+                _ => {}
+            }
+        }
+        self.arrange();
+        self.next_frame = now;
+    }
+
+    /// The room what plays is given from the edge the panel is at (DIPs, at the panel's size 1): as the hand gives it
+    /// now, or as it was kept.
+    fn music_room(&self) -> (f32, f32) {
+        self.sized_room.unwrap_or_else(|| self.controller.config.lock().unwrap().music_rooms.at(self.edge == Edge::Top))
+    }
+
     /// Ends a drag under way.
     fn end_drag(&mut self) -> Option<PanelDrag> {
         self.sizing = None;
@@ -2157,7 +2249,8 @@ impl<'a> Panel<'a> {
         if drag.edges.any() {
             self.arrange();
         }
-        let size = drag.sized.then_some(self.size);
+        // (What plays keeps the room it was given instead: see `sized_room`.)
+        let size = (drag.sized && self.part != Part::Music).then_some(self.size);
         // Moved or sized, the desktop behind is taken again for what it now covers.
         let moved = self.placement.as_ref().is_some_and(|placement| placement.held.is_some());
         self.recapture |= (drag.sized || moved) && self.skin.sees_backdrop();
@@ -2245,10 +2338,10 @@ impl<'a> Panel<'a> {
     /// from the top; the panel's size makes it larger or smaller), the window placed for it.
     fn music_size(&mut self) -> (f32, f32) {
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
-        let room = if self.edge == Edge::Top { crate::ui::music::PANEL_TOP } else { crate::ui::music::PANEL_SIDE };
-        let size = crate::ui::music::rests_at(room, &shows);
+        let size = crate::ui::music::rests_at(self.music_room(), &shows);
+        let sizing = self.drag.is_some_and(|drag| drag.edges.any());
         let placement = self.placement.as_mut().unwrap();
-        place(placement, &self.window, self.edge, &self.theme, size, self.size, false);
+        place(placement, &self.window, self.edge, &self.theme, size, self.size, sizing);
         size
     }
 

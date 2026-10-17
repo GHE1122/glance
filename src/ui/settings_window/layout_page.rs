@@ -337,7 +337,7 @@ impl Ui {
         let (_, r) = self.panel_on_stage(frame, area, None, None, true);
         let k = r.w / self.stage.size.0;
         let shows = super::super::music::Shows::from(&self.settings.view);
-        let room = if edge == Edge::Top { super::super::music::PANEL_TOP } else { super::super::music::PANEL_SIDE };
+        let room = self.settings.music_rooms.at(edge == Edge::Top);
         let zoom = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
         let size = super::super::music::rests_at(room, &shows);
         let (w, h) = (size.0 * zoom, size.1 * zoom);

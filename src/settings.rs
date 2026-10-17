@@ -452,6 +452,30 @@ impl Sensitivity {
     }
 }
 
+/// How large what plays is as the panel slides it out (DIPs, at the panel's size 1), from a side edge and from the
+/// top, where the hand has sized it there by its edges; none: as it was designed (see `music::PANEL_SIDE`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MusicRooms {
+    pub side: Option<(f32, f32)>,
+    pub top: Option<(f32, f32)>,
+}
+
+impl MusicRooms {
+    /// The room from the top (`top`) or from a side.
+    pub fn at(&self, top: bool) -> (f32, f32) {
+        match top {
+            true => self.top.unwrap_or(crate::ui::music::PANEL_TOP),
+            false => self.side.unwrap_or(crate::ui::music::PANEL_SIDE),
+        }
+    }
+
+    /// The room from the top (`top`) or from a side made `room`.
+    pub fn set(&mut self, top: bool, room: (f32, f32)) {
+        *if top { &mut self.top } else { &mut self.side } = Some(room);
+    }
+}
+
 /// Everything the backend acts on, plus the page's own preferences, which it
 /// stores without looking inside.
 #[derive(Clone, Serialize, Deserialize)]
@@ -518,6 +542,8 @@ pub struct Settings {
     /// its screen's): open so again as Glance starts.
     #[serde(default)]
     pub panel_pinned: Option<(i32, i32)>,
+    /// How large what plays is as the panel slides it out, from a side edge and from the top, as the hand made it.
+    pub music_rooms: MusicRooms,
     /// The desktop widgets torn off the panel.
     pub widgets: Vec<WidgetAt>,
     /// The player music is followed from, while it plays (see `media::choose_music`); none: as Glance picks.
@@ -553,6 +579,7 @@ impl Default for Settings {
             overlay: OverlaySettings::default(),
             panel_at: None,
             panel_pinned: None,
+            music_rooms: MusicRooms::default(),
             widgets: Vec::new(),
             music_source: None,
             view: serde_json::Value::Null,
@@ -711,6 +738,15 @@ pub fn merged(held: &Settings, base: &Settings, mine: &Settings) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn music_rooms_kept_per_edge() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.music_rooms.at(true), crate::ui::music::PANEL_TOP);
+        settings.music_rooms.set(false, (300.0, 120.0));
+        let read: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!((read.music_rooms.at(false), read.music_rooms.at(true)), ((300.0, 120.0), crate::ui::music::PANEL_TOP));
+    }
 
     #[test]
     fn a_change_made_elsewhere_stands() {
