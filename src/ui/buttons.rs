@@ -19,6 +19,8 @@ pub enum Button {
     /// Clicks pass through it to what is behind.
     Through,
     Close,
+    /// The music shown over the whole screen.
+    Full,
 }
 
 /// All of them, as they stand in their row.
@@ -40,6 +42,7 @@ impl Button {
             Button::Pin => Icon::Pin,
             Button::Through => Icon::Pointer,
             Button::Close => Icon::Close,
+            Button::Full => Icon::Maximize,
         }
     }
 
@@ -58,8 +61,21 @@ impl Button {
             (Button::Through, true) => p("关闭鼠标穿透", "Turn off click-through"),
             (Button::Close, _) if overlay => p("关闭悬浮窗", "Close the overlay"),
             (Button::Close, _) => p("收起", "Put away"),
+            (Button::Full, _) => p("全屏", "Full screen"),
         }
     }
+}
+
+/// Draws `button` round `centre` beside a widget whose ground is `ground` (straight RGB): a plate of that colour,
+/// a little lighter, the mark white; lit, inverted.
+pub fn paint_on(frame: &dyn Canvas, centre: Point, button: Button, lit: bool, [r, g, b]: [f32; 3]) {
+    let lighter = |c: f32| c + (1.0 - c) * 0.12;
+    let plate = Color { r: lighter(r), g: lighter(g), b: lighter(b), a: 0.94 };
+    let mark = Color::hex(0xFFFFFF, 1.0);
+    let (ground, ink) = if lit { (mark, plate.alpha(1.0)) } else { (plate, mark) };
+    frame.fill_circle(ground, centre, SIZE / 2.0);
+    frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, 0.22)), centre.x - SIZE / 2.0, centre.y - SIZE / 2.0, SIZE, SIZE, SIZE / 2.0, 1.0);
+    frame.icon(button.icon(), centre, 13.0, ink);
 }
 
 /// Draws `button` round `centre`: a plate of its own over whatever is under

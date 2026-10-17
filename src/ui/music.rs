@@ -776,13 +776,17 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             Placed { cover, title: None, below: 0.0, left, width: (w - pad - left).max(0.0) }
         }
         // The cover as tall as the room above the rows along the bottom (which go all across), no wider than a third.
+        // (Narrower than the room above the rows is tall, the cover and the column beside it, level with its top,
+        // stand together in the middle of that room.)
         Layout::Player => {
-            let side = (h - 2.0 * pad - rows_tall(shows) - 10.0).min(w * 0.36).max(0.0);
-            let cover = shows.cover.then_some((pad, pad, side));
+            let room = (h - 2.0 * pad - rows_tall(shows) - 10.0).max(0.0);
+            let side = room.min(w * 0.36).max(0.0);
+            let top = if shows.cover { pad + (room - side) / 2.0 } else { pad };
+            let cover = shows.cover.then_some((pad, top, side));
             let left = if shows.cover { pad + side + 16.0 } else { pad };
             let width = (w - left - pad).max(0.0);
-            let title = shows.title.then_some((left, pad - 2.0, width, false));
-            Placed { cover, title, below: if shows.title { pad + 46.0 } else { pad + 4.0 }, left, width }
+            let title = shows.title.then_some((left, top - 2.0, width, false));
+            Placed { cover, title, below: if shows.title { top + 46.0 } else { top + 4.0 }, left, width }
         }
         Layout::Card => {
             let cover = shows.cover.then_some((pad, pad, CARD_COVER));

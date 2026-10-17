@@ -1042,7 +1042,7 @@ impl Content {
     fn buttons(&self) -> &'static [Button] {
         match self {
             Content::Readings(_) => &buttons::ALL,
-            Content::Music(_) => &[Button::Settings, Button::Pin, Button::Through, Button::Close],
+            Content::Music(_) => &[Button::Full, Button::Settings, Button::Pin, Button::Through, Button::Close],
             // (With readings in it, as theirs.)
             Content::Merged(merged) => merged.parts.iter().find(|part| matches!(part, Content::Readings(_))).map_or(&[Button::Settings, Button::Pin, Button::Through, Button::Close], Content::buttons),
         }
@@ -1070,6 +1070,8 @@ pub struct Widgets {
     live: bool,
     /// A widget in hand held over another, to be merged into it as it is let go (see `look_for_a_drop`).
     dropping: Option<Dropping>,
+    /// The music shown over the whole of a screen, while it is (asked for by a music widget's button).
+    full: Option<crate::fullscreen::FullMusic>,
 }
 
 /// A widget in hand (`guest`) held over another (`target`): since when, whether it goes beside it (else below), and
@@ -1435,9 +1437,35 @@ impl Widgets {
                 crate::show_settings();
                 return;
             }
+            Released::Full => {
+                if self.list[index].tip.take().is_some() {
+                    crate::ui::tip::hide();
+                }
+                let contact = self.list[index].contact;
+                match gfx::current().ok().and_then(|gfx| crate::fullscreen::FullMusic::open(gfx, contact.monitor, contact.scale)) {
+                    Some(full) => self.full = Some(full),
+                    None => note("music full screen: its window could not be made"),
+                }
+                return;
+            }
             Released::Nothing => return,
         }
         self.save();
+    }
+
+    /// The music full screen, while it is up.
+    pub fn full(&mut self) -> Option<&mut crate::fullscreen::FullMusic> {
+        self.full.as_mut()
+    }
+
+    /// Whether `hwnd` is the music full screen's.
+    pub fn full_owns(&self, hwnd: HWND) -> bool {
+        self.full.as_ref().is_some_and(|full| full.owns(hwnd))
+    }
+
+    /// The music full screen left.
+    pub fn leave_full(&mut self) {
+        self.full = None;
     }
 
     /// The menu of the widget at `hwnd` (a right click on it); what to do
@@ -1471,6 +1499,16 @@ impl Widgets {
     }
 
     pub fn tick(&mut self, now: Instant, look: &Look, kept: &[WidgetAt], history: &[Sample], seen: &Seen, controller: &crate::panel::Controller) -> Option<Duration> {
+        // The music full screen, over everything while it is up: drawn at every frame.
+        let full = self.full.as_mut().map(|full| full.tick(now));
+        let due = self.tick_widgets(now, look, kept, history, seen, controller);
+        match (full, due) {
+            (Some(full), Some(due)) => Some(full.min(due)),
+            (full, due) => full.or(due),
+        }
+    }
+
+    fn tick_widgets(&mut self, now: Instant, look: &Look, kept: &[WidgetAt], history: &[Sample], seen: &Seen, controller: &crate::panel::Controller) -> Option<Duration> {
         if !self.restored {
             if gfx::current().is_err() {
                 return None;
@@ -1738,6 +1776,8 @@ enum Released {
     Changed,
     Closed,
     Settings,
+    /// Its music asked to be shown over the whole of its screen.
+    Full,
 }
 
 enum Frame {
@@ -2294,6 +2334,7 @@ impl Widget {
                         }
                         Some(Button::Close) => Released::Closed,
                         Some(Button::Settings) => Released::Settings,
+                        Some(Button::Full) => Released::Full,
                         Some(Button::Game) => {
                             press_game();
                             Released::Nothing
@@ -2984,6 +3025,8 @@ impl Widget {
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
             let local = Matrix3x2::translation(margin, margin);
+            // A music widget's own ground's colour along its edges: its buttons in it.
+            let mut button_ground = None;
             match content {
                 Content::Readings(readings) => {
                     let Some(shown) = readings.last.clone() else { return };
@@ -3026,6 +3069,7 @@ impl Widget {
                         *busy = painted.busy;
                         pressed = Some((painted.hits, (0.0, 0.0)));
                     }
+                    button_ground = Some(music.ground_colour(size));
                 }
                 Content::Merged(merged) => {
                     let backdrop = behind.as_mut().and_then(|behind| {
@@ -3060,7 +3104,10 @@ impl Widget {
             for (centre, button) in offered {
                 // Lit while on: pinned, letting clicks through, the window in front a game.
                 let lit = (button == Button::Pin && pinned) || (button == Button::Through && through) || (button == Button::Game && front_is_game);
-                buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5));
+                match button_ground {
+                    Some(ground) => buttons::paint_on(frame, centre, button, lit, ground),
+                    None => buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5)),
+                }
             }
             frame.origin(0.0, 0.0);
             if opacity < 1.0 {
