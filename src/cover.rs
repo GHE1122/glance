@@ -37,15 +37,16 @@ impl Cover {
 /// or just changed tracks, gives its cover a moment after the rest.
 const AGAIN_AFTER: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// What is known of a track's cover: being read, read (when: see `AGAIN_AFTER`) and none had, or it.
+/// What is known of a track's cover: being read, read (when: see `AGAIN_AFTER`) and none had, or it (and whether it
+/// is to be read once more: see `of`).
 enum Known {
     Reading,
     None(std::time::Instant),
-    Found(Arc<Cover>),
+    Found(Arc<Cover>, bool),
 }
 
-/// The track the cover was asked for (its title and artist), and what is known of it.
-static KNOWN: Mutex<Option<(String, Known)>> = Mutex::new(None);
+/// The track the cover was asked for (its title, artist and album), when it was first, and what is known of it.
+static KNOWN: Mutex<Option<(String, std::time::Instant, Known)>> = Mutex::new(None);
 
 /// The cover of the music playing, as its player gives it; read (on a thread of its own) the first time it is asked
 /// for, and again a while after its player gave none. (By its title, artist and album: the same song on another
@@ -54,14 +55,30 @@ pub fn of(playing: &crate::playing::Now) -> Option<Arc<Cover>> {
     let crate::playing::Now { title, artist, album, .. } = playing;
     let key = format!("{title}\u{1}{artist}\u{1}{album}");
     let mut known = KNOWN.lock().unwrap();
-    match known.as_ref() {
-        Some((of, Known::Found(cover))) if *of == key => return Some(cover.clone()),
-        Some((of, Known::Reading)) if *of == key => return None,
-        Some((of, Known::None(since))) if *of == key && since.elapsed() < AGAIN_AFTER => return None,
-        _ => {}
-    }
-    *known = Some((key.clone(), Known::Reading));
-    let title = title.to_string();
+    // A cover read in the moment after its track came is read once more after it (shown meanwhile): a player that
+    // tells the new title before the new cover gave the last track's with it, and that stood for the whole track.
+    let first = match known.as_mut() {
+        Some((of, first, Known::Found(cover, again))) if *of == key => {
+            let cover = cover.clone();
+            if *again && first.elapsed() >= AGAIN_AFTER {
+                *again = false;
+                read_on(key, title.to_string(), Some(cover.clone()));
+            }
+            return Some(cover);
+        }
+        Some((of, _, Known::Reading)) if *of == key => return None,
+        Some((of, _, Known::None(since))) if *of == key && since.elapsed() < AGAIN_AFTER => return None,
+        Some((of, first, _)) if *of == key => *first,
+        _ => std::time::Instant::now(),
+    };
+    *known = Some((key.clone(), first, Known::Reading));
+    read_on(key, title.to_string(), None);
+    None
+}
+
+/// Reads the cover of the track `title` (known by `key`) on a thread of its own, and keeps it while that is still the
+/// track asked about; `had`, the one read before, if this is it read once more (kept, where none is read now).
+fn read_on(key: String, title: String, had: Option<Arc<Cover>>) {
     std::thread::spawn(move || {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -69,11 +86,17 @@ pub fn of(playing: &crate::playing::Now) -> Option<Arc<Cover>> {
         let read = read(&title).map(Arc::new);
         let mut known = KNOWN.lock().unwrap();
         // (Kept only if the track is still the one asked about.)
-        if known.as_ref().is_some_and(|(of, _)| *of == key) {
-            *known = Some((key, read.map_or_else(|| Known::None(std::time::Instant::now()), Known::Found)));
+        if let Some((of, first, state)) = known.as_mut() {
+            if *of == key {
+                let again = had.is_none() && first.elapsed() < AGAIN_AFTER;
+                *state = match (read, had) {
+                    (Some(cover), _) => Known::Found(cover, again),
+                    (None, Some(had)) => Known::Found(had, false),
+                    (None, None) => Known::None(std::time::Instant::now()),
+                };
+            }
         }
     });
-    None
 }
 
 /// The cover of the music playing (as the player followed for music gives it), if it is the track `title`'s (a

@@ -420,13 +420,14 @@ fn by_artist<'a>(artists: impl IntoIterator<Item = &'a str>, artist: &str) -> bo
     artist.trim().is_empty() || artists.into_iter().any(|theirs| same(theirs, artist))
 }
 
-/// The artists of a track as LRCLIB names them, all in one ("A, B & C feat. D").
+/// The artists of a track as LRCLIB names them, all in one ("A, B & C feat. D"): the whole, and each between the
+/// signs that join them (the whole kept: "AC/DC" and "Simon & Garfunkel" are one each).
 fn artists_in(named: &str) -> Vec<&str> {
     let mut artists = vec![named];
     for between in [",", "&", "/", ";", " feat. ", " ft. ", " x "] {
         artists = artists.into_iter().flat_map(|artist| artist.split(between)).collect();
     }
-    artists.into_iter().map(str::trim).filter(|artist| !artist.is_empty()).collect()
+    std::iter::once(named).chain(artists).map(str::trim).filter(|artist| !artist.is_empty()).collect()
 }
 
 /// LRCLIB's timed lyrics of `track`: the one it has of that title, artist, album and length; else, of those
@@ -617,7 +618,15 @@ pub mod kept {
         asked: u64,
         lines: Option<Vec<Line>>,
         sure: bool,
+        /// How they were found and read (see `FOUND_BY`); none in what earlier versions kept.
+        #[serde(default)]
+        found_by: u32,
     }
+
+    /// How lyrics are found and read, counted up as that changes: what was kept by an earlier way is not taken, and
+    /// they are asked for again. (2: the artist of a track found by its title checked, an LRC file's offset read;
+    /// what was kept before had another artist's song's lyrics, or every line late or early, for good.)
+    const FOUND_BY: u32 = 2;
 
     /// A track's lyrics as kept (none: none had them), when they were asked for, and whether each source answered.
     pub struct Kept {
@@ -658,7 +667,7 @@ pub mod kept {
     pub(super) fn read_in(folder: &std::path::Path, track: &Track) -> Option<Kept> {
         let text = crate::elevation::read_in_place(folder, &name(track), FILE_MOST)?;
         let file: File = serde_json::from_str(&text).ok()?;
-        (file.track == *track).then(|| Kept { lines: file.lines, asked: SystemTime::UNIX_EPOCH + Duration::from_secs(file.asked), sure: file.sure })
+        (file.track == *track && file.found_by == FOUND_BY).then(|| Kept { lines: file.lines, asked: SystemTime::UNIX_EPOCH + Duration::from_secs(file.asked), sure: file.sure })
     }
 
     /// Keeps what was found of `track`'s lyrics (none: none had them), asked for now, and whether each source
@@ -674,7 +683,7 @@ pub mod kept {
             return;
         }
         let asked = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-        let file = File { track: track.clone(), asked, lines: lines.map(<[Line]>::to_vec), sure };
+        let file = File { track: track.clone(), asked, lines: lines.map(<[Line]>::to_vec), sure, found_by: FOUND_BY };
         let Ok(json) = serde_json::to_vec(&file) else { return };
         if crate::elevation::write_in_place(folder, &name(track), &json).is_ok() {
             trimmed(folder);
@@ -753,6 +762,8 @@ mod tests {
         assert!(by_artist(artists_in("Coldplay"), "coldplay"));
         assert!(by_artist(artists_in("Daft Punk feat. Pharrell Williams, Nile Rodgers"), "Pharrell Williams"));
         assert!(by_artist(artists_in("周杰伦/费玉清"), "费玉清"));
+        assert!(by_artist(artists_in("AC/DC"), "AC/DC"));
+        assert!(by_artist(artists_in("Simon & Garfunkel"), "Simon & Garfunkel"));
         assert!(!by_artist(artists_in("Some Cover Band"), "Coldplay"));
         assert!(by_artist(artists_in("Anyone"), ""));
     }

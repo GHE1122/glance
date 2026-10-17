@@ -259,6 +259,11 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
     *POSITION[f].lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, now, playing.playing, playing.rate)));
     let timeline = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, length)| Timeline { at: at.floor(), length, seekable: playing.seekable }));
     let sound = crate::actions::volume();
+    // (The slider held, where it is.)
+    let sound = match *SLID_TO.lock().unwrap() {
+        Some(level) => Some((level, sound.is_some_and(|(_, muted)| muted))),
+        None => sound,
+    };
     let (sung, next) = match playing.as_ref().filter(|playing| follow == Follow::Music && LYRICS.load(Ordering::Relaxed) && !playing.title.is_empty()) {
         Some(playing) => sung(playing),
         None => (None, None),
@@ -330,6 +335,11 @@ pub fn watch(wanted: impl Fn() -> (bool, bool, bool) + Send + 'static, changed: 
                 let heeded = &mut heeding[follow as usize];
                 if !(on && seen) {
                     *heeded = None;
+                    // Where it was, and whether it played, as last looked at, no longer known (not looked at
+                    // meanwhile, a pause then was taken for one just now, and the whole time since added to where it
+                    // was held).
+                    *POSITION[follow as usize].lock().unwrap() = None;
+                    *HELD[follow as usize].lock().unwrap() = None;
                 } else if !heeded.as_ref().is_some_and(|heeded| heeded.stands(follow)) {
                     *heeded = None;
                     *heeded = crate::media::heed(follow, look_now);
@@ -435,8 +445,15 @@ pub fn act_on(follow: Follow, act: Act) {
 /// `act`).
 #[cfg(windows)]
 pub fn slide(level: u8) {
+    *SLID_TO.lock().unwrap() = Some(level);
     set_sound(Some(level), None);
 }
+
+/// Where the volume's slider is, while it is held: shown, whatever the sound read meanwhile says, and set as it is
+/// let go. (Taken from what was shown as it was let go, a reading of the sound from before its last move, shown
+/// meanwhile, was set, and the sound went back.)
+#[cfg(windows)]
+static SLID_TO: Mutex<Option<u8>> = Mutex::new(None);
 
 /// The sound made as loud as `level` and muted or not as `muted` (each, where it is said): shown so at once in what
 /// is followed (the sound is the whole system's, the same for both), and set on a thread of its own (it waits on the
@@ -558,7 +575,7 @@ pub fn dragged_to(_: Follow) -> Option<f64> {
 pub fn slid(slider: Slider, kept: bool) {
     match slider {
         Slider::Volume => {
-            if let Some(level) = now().and_then(|now| now.volume).filter(|_| kept) {
+            if let Some(level) = SLID_TO.lock().unwrap().take().filter(|_| kept) {
                 act(Act::Volume(level));
             }
         }
