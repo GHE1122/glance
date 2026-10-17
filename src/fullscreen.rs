@@ -55,11 +55,14 @@ pub enum Asked {
 pub struct FullMusic {
     gfx: Rc<Gfx>,
     window: Window,
-    surface: Surface,
+    /// (None while it could not be made on the device that draws now: made again at the next frame.)
+    surface: Option<Surface>,
     smoke: Option<Smoke>,
     /// The screen it covers (physical px) and its scale (physical px to a DIP).
     screen: RECT,
     scale: f32,
+    /// That screen's display, as the desktop names it (see `screens::Screen::id`).
+    display: Option<String>,
     /// The music as it goes: each band followed slowly, the swell of the lows, how far the smoke has flowed.
     smooth: [f32; crate::sound::BANDS],
     swell: f32,
@@ -107,10 +110,11 @@ impl FullMusic {
         Some(FullMusic {
             gfx,
             window,
-            surface,
+            surface: Some(surface),
             smoke,
             screen,
             scale,
+            display: crate::screens::all().into_iter().find(|shown| shown.monitor == screen).map(|shown| shown.id),
             smooth: [0.0; crate::sound::BANDS],
             swell: 0.0,
             flow: 0.0,
@@ -138,10 +142,12 @@ impl FullMusic {
         self.window.hwnd == hwnd
     }
 
-    /// The screens changed (a resolution, a scale, a screen gone): over the whole of its screen as it is now, or of
-    /// the nearest, if it is gone.
+    /// The screens changed (a resolution, a scale, a screen gone or moved): over the whole of its own screen as it is
+    /// now, wherever the desktop has it (another screen may be where it was), or of the nearest, if it is gone.
     pub fn screens_changed(&mut self) {
-        let middle = POINT { x: (self.screen.left + self.screen.right) / 2, y: (self.screen.top + self.screen.bottom) / 2 };
+        let own = self.display.as_ref().and_then(|display| crate::screens::all().into_iter().find(|screen| screen.id == *display));
+        let at = own.map_or(self.screen, |screen| screen.monitor);
+        let middle = POINT { x: (at.left + at.right) / 2, y: (at.top + at.bottom) / 2 };
         let Some(contact) = crate::mouse::monitor_at(middle) else { return };
         if (contact.monitor, contact.scale) == (self.screen, self.scale) {
             return;
@@ -225,6 +231,16 @@ impl FullMusic {
         let length = heard_now.as_ref().and_then(|playing| playing.timeline).map(|timeline| timeline.length);
         let (w, h) = self.size();
         let pixels = ((self.screen.right - self.screen.left).max(1) as u32, (self.screen.bottom - self.screen.top).max(1) as u32);
+        // On the device that draws now, if it is not (a driver reset, a device lost): made anew on it. (A window has
+        // one composition target: the old one goes first.)
+        if let Ok(current) = crate::ui::gfx::current() {
+            if !Rc::ptr_eq(&current, &self.gfx) || self.surface.is_none() {
+                self.surface = None;
+                self.surface = Surface::new(&current, self.window.hwnd).ok();
+                self.smoke = Smoke::new(&current).ok();
+                self.gfx = current;
+            }
+        }
         if let Some(smoke) = self.smoke.as_mut() {
             let made = ((pixels.0 as f32 * smoke::SCALE) as u32, (pixels.1 as f32 * smoke::SCALE) as u32);
             if let Err(error) = smoke.render(made, &smoke::Now { flow: self.flow, swell: self.swell, tint: self.tint, tint2: self.tint2 }) {
@@ -240,7 +256,8 @@ impl FullMusic {
         let flash = self.volume_turned.is_some_and(|turned| now.duration_since(turned) < AWAKE);
         let mut hits = Vec::new();
         let gfx = self.gfx.clone();
-        let _ = self.surface.draw(&gfx, pixels, self.scale, |frame| {
+        let Some(surface) = self.surface.as_mut() else { return Duration::ZERO };
+        let drawn = surface.draw(&gfx, pixels, self.scale, |frame| {
             frame.origin(0.0, 0.0);
             frame.fill(Color::hex(0x000000, 1.0), 0.0, 0.0, w, h);
             if let Some(smoke) = smoke {
@@ -259,6 +276,11 @@ impl FullMusic {
                 frame.origin(0.0, 0.0);
             }
         });
+        // Not drawn: the device lost (the next frame is drawn on the one made in its place, above).
+        if drawn.is_err() {
+            crate::ui::gfx::lost();
+            self.surface = None;
+        }
         self.hits = hits;
         self.volume_open = volume_open;
         // What was laid out for lines no longer drawn, let go (with no widget or panel drawing meanwhile, it was kept

@@ -224,7 +224,8 @@ const RECALL: usize = 5;
 
 /// The icon's menu, opening up from `(x, y)` on the screen as the taskbar's do, up (see `menu::Menu`), with what each
 /// of its choices is (see `chosen`). On the panel's thread.
-pub fn open_menu(x: i32, y: i32) -> Option<(crate::ui::menu::Menu, Vec<usize>)> {
+/// (`over_the_panel`: opened with the panel up: see `Menu::over_the_panel`.)
+pub fn open_menu(x: i32, y: i32, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<usize>)> {
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
     let zh = crate::update::language() == crate::ui::text::Lang::Zh;
@@ -241,7 +242,7 @@ pub fn open_menu(x: i32, y: i32) -> Option<(crate::ui::menu::Menu, Vec<usize>)> 
     let items: Vec<Item<'static>> = choices.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
     MENU_UP.store(true, Ordering::Relaxed);
     show_tip(false);
-    let Some(menu) = Menu::open_at(items, crate::os::apps_dark(), POINT { x, y }, true) else {
+    let Some(menu) = Menu::open_at(items, crate::os::apps_dark(), POINT { x, y }, true, over_the_panel) else {
         chosen(None, &[]);
         return None;
     };

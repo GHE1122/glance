@@ -53,8 +53,12 @@ pub struct Window {
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
-        // Clicking the panel must leave the focus where it was.
-        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        // Clicking the panel must leave the focus where it was; a window that comes to the front (a menu, the music
+        // full screen) comes there as it is clicked, with the keyboard.
+        WM_MOUSEACTIVATE => {
+            let never = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_NOACTIVATE.0 != 0;
+            LRESULT(if never { MA_NOACTIVATE } else { windows::Win32::UI::WindowsAndMessaging::MA_ACTIVATE } as isize)
+        }
         WM_NCHITTEST => LRESULT(HTCLIENT as isize),
         // The pointer's shape, as the window's owner last set it (see
         // `Window::point`): asked for at every move, before the move itself.

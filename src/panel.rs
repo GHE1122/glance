@@ -549,8 +549,9 @@ impl Controller {
                     continue;
                 }
                 frame_at = None;
-                // A menu left for another window come to the front.
-                if menu.as_ref().is_some_and(|(open, _)| open.left()) {
+                // A menu left for another window come to the front, or for the panel come since it opened (by its
+                // shortcut, an edge).
+                if menu.as_ref().is_some_and(|(open, _)| open.left() || (panel.is_shown() && !open.over_the_panel())) {
                     self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
                 }
                 let mut wait = None;
@@ -642,12 +643,12 @@ impl Controller {
                 return;
             }
             // A menu's own messages; a shortcut leaves it (Esc, the panel's while it is open, is the menu's own: the
-            // panel stays), the rest are taken up as ever.
+            // panel stays), the rest are taken up as ever. (The panel's own shortcut comes as `TOGGLE`.)
             if let Some((open, _)) = menu.as_mut() {
                 use crate::ui::menu::Handled;
                 let handled = if open.owns(msg.hwnd) {
                     open.handle(&msg)
-                } else if msg.message == WM_HOTKEY {
+                } else if matches!(msg.message, WM_HOTKEY | TOGGLE | OPEN_FROM_TRAY) {
                     Handled::Done(None)
                 } else {
                     Handled::Not
@@ -763,7 +764,7 @@ impl Controller {
                 TRAY_MENU => {
                     let (x, y) = ((msg.lParam.0 & 0xFFFF) as u16 as i16 as i32, ((msg.lParam.0 >> 16) & 0xFFFF) as u16 as i16 as i32);
                     self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
-                    menu = crate::tray::open_menu(x, y).map(|(open, choices)| (open, MenuFor::Tray(choices)));
+                    menu = crate::tray::open_menu(x, y, panel.is_shown()).map(|(open, choices)| (open, MenuFor::Tray(choices)));
                 }
                 RECALL_WIDGET => {
                     widgets.recall();
@@ -780,6 +781,9 @@ impl Controller {
                 RESTYLE => {
                     panel.restyle();
                     draw_overlay(&mut overlay, &panel);
+                    if let Some((open, _)) = menu.as_ref() {
+                        open.raise();
+                    }
                     // An open settings window takes what was changed elsewhere.
                     settings_window::follow_settings();
                 }
@@ -792,7 +796,10 @@ impl Controller {
                             panel.open_by_hand(now);
                         }
                     }
-                    draw_overlay(&mut overlay, &panel)
+                    draw_overlay(&mut overlay, &panel);
+                    if let Some((open, _)) = menu.as_ref() {
+                        open.raise();
+                    }
                 }
                 // The pinned panel dragged by its bar.
                 WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => panel.press(lparam_point(msg.lParam)),
@@ -865,7 +872,7 @@ impl Controller {
                 WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam), panel.lang),
                 WM_RBUTTONUP if widgets.owns(msg.hwnd) => {
                     self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
-                    menu = widgets.menu(msg.hwnd, panel.lang).map(|open| (open, MenuFor::Widget(msg.hwnd)));
+                    menu = widgets.menu(msg.hwnd, panel.lang, panel.is_shown()).map(|open| (open, MenuFor::Widget(msg.hwnd)));
                 }
                 // Let go: the button up, the capture lost, or the pointer moved with the button up (its going up
                 // told to another window).
@@ -907,7 +914,8 @@ impl Controller {
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST | WM_MOUSEMOVE
                     if msg.hwnd == panel.window.hwnd && panel.sliding.is_some() && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
                 {
-                    panel.slid()
+                    // (The pointer taken from it mid-drag: given up, nowhere sought.)
+                    panel.slid(msg.message != crate::ui::window::CAPTURE_LOST)
                 }
                 // Let go of the panel after a widget was torn off it (the button went up before the widget took
                 // the pointer): the widget is let go.
@@ -942,7 +950,7 @@ impl Controller {
                 // Its menu, or one of its buttons: the same is done (see `overlay_chosen`).
                 WM_RBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
                     self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
-                    menu = overlay.as_ref().unwrap().menu().map(|open| (open, MenuFor::Overlay));
+                    menu = overlay.as_ref().unwrap().menu(panel.is_shown()).map(|open| (open, MenuFor::Overlay));
                 }
                 WM_LBUTTONUP if overlay.as_ref().is_some_and(|o| o.owns_bar(msg.hwnd)) => {
                     if let Some(choice) = overlay.as_mut().unwrap().bar_press() {
@@ -2182,13 +2190,14 @@ impl<'a> Panel<'a> {
     }
 
     /// The track let go: as it was left.
-    fn slid(&mut self) {
+    /// The slider in hand let go: where it is taken (`taken`), or given up.
+    fn slid(&mut self, taken: bool) {
         let Some(slider) = self.sliding.take() else { return };
         unsafe {
             let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
         }
-        crate::playing::slid(slider, true);
+        crate::playing::slid(slider, taken);
     }
 
     /// Follows the pointer while it is dragged: the panel moves with it,

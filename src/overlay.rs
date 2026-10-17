@@ -737,7 +737,7 @@ impl Overlay {
     /// Its menu, and what was chosen in it (the focus put back where it
     /// was by the menu itself).
     /// Its menu, up (see `chose`).
-    pub fn menu(&self) -> Option<crate::ui::menu::Menu> {
+    pub fn menu(&self, over_the_panel: bool) -> Option<crate::ui::menu::Menu> {
         let zh = self.lang == Lang::Zh;
         use crate::ui::icons::Icon;
         use crate::ui::menu::{Item, Menu};
@@ -747,7 +747,7 @@ impl Overlay {
             Item { label: if zh { "关闭悬浮窗" } else { "Close the overlay" }, icon: Some(Icon::Close), checked: false, rule_before: false },
             Item { label: if zh { "设置…" } else { "Settings…" }, icon: Some(Icon::Settings), checked: false, rule_before: true },
         ];
-        Menu::open(items, crate::os::apps_dark())
+        Menu::open(items, crate::os::apps_dark(), over_the_panel)
     }
 
     /// The choice at `row` of its menu made (see `menu`).

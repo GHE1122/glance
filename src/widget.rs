@@ -1010,13 +1010,16 @@ impl Content {
         matches!(self, Content::Merged(merged) if merged.music_apart())
     }
 
-    /// Whether `guest` (one of its own, not merged) may be merged into it: a kind it has not got, its parts not too
-    /// many.
+    /// Whether `guest` may be merged into it: one of its own, not merged (merged ones' parts would be nested in it,
+    /// drawn by nothing, and kept as what plays alone), of a kind it has not got, its parts not too many.
     fn takes(&self, guest: &Content) -> bool {
+        if matches!(guest, Content::Merged(_)) {
+            return false;
+        }
         let same = |part: &Content| std::mem::discriminant(part) == std::mem::discriminant(guest);
         match self {
             Content::Merged(merged) => merged.parts.len() < PARTS_MOST && !merged.parts.iter().any(same),
-            _ => !same(self) && !matches!(guest, Content::Merged(_)),
+            _ => !same(self),
         }
     }
 
@@ -1486,8 +1489,8 @@ impl Widgets {
     }
 
     /// The menu of the widget at `hwnd` (a right click on it), up (see `chose`).
-    pub fn menu(&mut self, hwnd: HWND, lang: Lang) -> Option<crate::ui::menu::Menu> {
-        self.list.iter().find(|w| w.window.hwnd == hwnd)?.menu(lang)
+    pub fn menu(&mut self, hwnd: HWND, lang: Lang, over_the_panel: bool) -> Option<crate::ui::menu::Menu> {
+        self.list.iter().find(|w| w.window.hwnd == hwnd)?.menu(lang, over_the_panel)
     }
 
     /// The choice at `row` of the menu of the widget at `hwnd` made (see `menu`); what to do for the panel's side of
@@ -3205,8 +3208,8 @@ impl Widget {
     }
 
     /// Its menu, up (as the apps are, light or dark).
-    fn menu(&self, lang: Lang) -> Option<crate::ui::menu::Menu> {
-        crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop).into(), crate::os::apps_dark())
+    fn menu(&self, lang: Lang, over_the_panel: bool) -> Option<crate::ui::menu::Menu> {
+        crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop).into(), crate::os::apps_dark(), over_the_panel)
     }
 }
 

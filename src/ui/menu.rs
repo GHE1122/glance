@@ -73,21 +73,23 @@ pub struct Menu {
     lit: Option<usize>,
     /// What was in front before it, given the front back as it goes.
     before: HWND,
+    /// Opened with the panel up (see `over_the_panel`).
+    with_the_panel: bool,
     /// Shown till it goes (see `life`): counted before its surface is made, so that it is let go of after it.
     _showing: super::life::Showing,
 }
 
 impl Menu {
     /// Shows `items` at the pointer, light or `dark`.
-    pub fn open(items: Vec<Item<'static>>, dark: bool) -> Option<Menu> {
+    pub fn open(items: Vec<Item<'static>>, dark: bool, with_the_panel: bool) -> Option<Menu> {
         let mut cursor = POINT::default();
         unsafe { GetCursorPos(&mut cursor) }.ok()?;
-        Menu::open_at(items, dark, cursor, false)
+        Menu::open_at(items, dark, cursor, false, with_the_panel)
     }
 
     /// Shows `items` with a corner at `at` (physical px), its bottom there for `above` (as a menu from the taskbar
     /// opens), light or `dark`. None where it could not be shown, or was not let to the front.
-    pub fn open_at(items: Vec<Item<'static>>, dark: bool, at: POINT, above: bool) -> Option<Menu> {
+    pub fn open_at(items: Vec<Item<'static>>, dark: bool, at: POINT, above: bool, with_the_panel: bool) -> Option<Menu> {
         let contact = crate::mouse::monitor_at(at)?;
         let gfx = gfx::current().ok()?;
         let showing = super::life::Showing::of(&gfx);
@@ -114,7 +116,7 @@ impl Menu {
         let left = left.clamp(work.left - margin, (work.right - w + margin).max(work.left - margin));
         let top = top.clamp(work.top - margin, (work.bottom - h + margin).max(work.top - margin));
         let rect = RECT { left, top, right: left + w, bottom: top + h };
-        let mut menu = Menu { gfx, window, surface, items, sheet, dark, scale, size: (w, h), rect, lit: None, before: HWND::default(), _showing: showing };
+        let mut menu = Menu { gfx, window, surface, items, sheet, dark, scale, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, _showing: showing };
         if !menu.draw() {
             menu.window.destroy();
             return None;
@@ -173,6 +175,21 @@ impl Menu {
             // Alt, as with a system menu, or the mouse taken from it.
             WM_SYSKEYDOWN | CAPTURE_LOST => Handled::Done(None),
             _ => Handled::Not,
+        }
+    }
+
+    /// Whether it was opened with the panel up: one that was not is left as the panel comes (by its shortcut, an
+    /// edge), which would cover it and take what it was opened for.
+    pub fn over_the_panel(&self) -> bool {
+        self.with_the_panel
+    }
+
+    /// Put back above every other window (another of this thread's put above all while it is up, the overlay as
+    /// it is drawn, covered it, and a click on that went to the menu underneath).
+    pub fn raise(&self) {
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE};
+        unsafe {
+            let _ = SetWindowPos(self.window.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
 
