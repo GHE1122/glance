@@ -1,44 +1,71 @@
 //! The fans of Lenovo laptops (Legion, LOQ and others of their line), as
 //! their firmware reports them to Lenovo's own software through WMI
-//! (root\wmi): on those of 2024 on, LENOVO_OTHER_METHOD's GetFeatureValue,
-//! asked for each fan's speed by its feature's number; on those before,
+//! (root\wmi): on the newer, LENOVO_OTHER_METHOD's GetFeatureValue, asked
+//! for each fan's speed by its feature's number; on the older,
 //! LENOVO_FAN_METHOD's Fan_GetCurrentFanSpeed, by the fan's number. Which a
-//! laptop has is told by its fan table (LENOVO_FAN_TABLE_DATA): the sensors
-//! and fans it pairs. As Lenovo Legion Toolkit has them (its sensors'
-//! controllers, versions 1 to 3). A laptop's fans are its embedded
-//! controller's; this asks the firmware, which knows, instead of reading
-//! the controller (whose registers differ from model to model).
+//! laptop has is told by its fan table (LENOVO_FAN_TABLE_DATA), the sensors
+//! and fans it pairs, or, where no table says, by its fan test data
+//! (LENOVO_FAN_TEST_DATA), the fans it names. As Lenovo Legion Toolkit has
+//! them (its team's, which knows the laptops of 2025 on: their tables pair
+//! the processor's fan with sensor 1, or name a chipset fan besides). A
+//! laptop's fans are its embedded controller's; this asks the firmware,
+//! which knows, instead of reading the controller (whose registers differ
+//! from model to model).
 
 use windows::core::{BSTR, PCWSTR};
 use windows::Win32::System::Com::{CoCreateInstance, CoSetProxyBlanket, CLSCTX_INPROC_SERVER, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE};
+use windows::Win32::System::Ole::{SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound};
 use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE};
-use windows::Win32::System::Variant::VARIANT;
+use windows::Win32::System::Variant::{VARIANT, VT_ARRAY, VT_I1, VT_I2, VT_I4, VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4};
 use windows::Win32::System::Wmi::{IWbemClassObject, IWbemLocator, IWbemServices, WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_FLAG_RETURN_WBEM_COMPLETE, WBEM_INFINITE};
 
-/// How a generation of Lenovo's firmware is asked for its fans: which sensor and fan its fan table pairs for the
-/// processor and for the graphics (what tells it is that generation), the class and method asked, the method's
-/// argument and answer, and what it is asked with for each fan, with the name the page translates.
-struct Generation {
-    number: u8,
-    pairs: [(u32, u32); 2],
+/// How the firmware is asked for a fan's speed: the class and method, the method's argument and its answer.
+struct Method {
     class: &'static str,
     method: &'static str,
     argument: &'static str,
     answer: &'static str,
-    fans: [(i32, &'static str); 2],
 }
 
-/// Newest first: a laptop is of the first whose pairs its fan table has.
-const GENERATIONS: [Generation; 3] = [
-    // The features' numbers: the processor's fan's speed, the graphics'.
-    Generation { number: 3, pairs: [(4, 1), (5, 2)], class: "LENOVO_OTHER_METHOD", method: "GetFeatureValue", argument: "IDs", answer: "Value", fans: [(0x0403_0001, "cpu_fan"), (0x0403_0002, "gpu_fan")] },
-    Generation { number: 2, pairs: [(3, 0), (4, 1)], class: "LENOVO_FAN_METHOD", method: "Fan_GetCurrentFanSpeed", argument: "FanID", answer: "CurrentFanSpeed", fans: [(0, "cpu_fan"), (1, "gpu_fan")] },
-    Generation { number: 1, pairs: [(0, 0), (0, 1)], class: "LENOVO_FAN_METHOD", method: "Fan_GetCurrentFanSpeed", argument: "FanID", answer: "CurrentFanSpeed", fans: [(0, "cpu_fan"), (1, "gpu_fan")] },
+/// By a feature's number (the laptops of 2023 on).
+const FEATURE: Method = Method { class: "LENOVO_OTHER_METHOD", method: "GetFeatureValue", argument: "IDs", answer: "Value" };
+/// By a fan's number (those before).
+const FAN: Method = Method { class: "LENOVO_FAN_METHOD", method: "Fan_GetCurrentFanSpeed", argument: "FanID", answer: "CurrentFanSpeed" };
+
+/// The features' numbers of the processor's fan's speed, the graphics', the chipset's; with the names the page
+/// translates.
+const CPU: (i32, &str) = (0x0403_0001, "cpu_fan");
+const GPU: (i32, &str) = (0x0403_0002, "gpu_fan");
+const PCH: (i32, &str) = (0x0403_0004, "pch_fan");
+
+/// A kind of laptop: the sensor and fan pairs its fan table has (what tells it is of that kind), how its fans are
+/// asked, and what each is asked with.
+struct Kind {
+    pairs: &'static [(u32, u32)],
+    method: &'static Method,
+    fans: &'static [(i32, &'static str)],
+}
+
+/// In order: a laptop is of the first whose pairs its fan table all has (the ones with a chipset fan named before
+/// those that would match them without it).
+const KINDS: [Kind; 6] = [
+    Kind { pairs: &[(4, 1), (5, 2), (1, 4), (5, 5)], method: &FEATURE, fans: &[CPU, GPU, PCH] },
+    Kind { pairs: &[(1, 1), (5, 2), (4, 4)], method: &FEATURE, fans: &[CPU, GPU, PCH] },
+    Kind { pairs: &[(1, 1), (5, 2), (4, 1)], method: &FEATURE, fans: &[CPU, GPU] },
+    Kind { pairs: &[(4, 1), (5, 2)], method: &FEATURE, fans: &[CPU, GPU] },
+    Kind { pairs: &[(3, 0), (4, 1)], method: &FAN, fans: &[(0, "cpu_fan"), (1, "gpu_fan")] },
+    Kind { pairs: &[(0, 0), (0, 1)], method: &FAN, fans: &[(0, "cpu_fan"), (1, "gpu_fan")] },
 ];
+
+/// A laptop whose fan table says none of the above, whose fan test data names the processor's fan or the
+/// graphics' (fans 1 and 2).
+const TESTED: Kind = Kind { pairs: &[], method: &FEATURE, fans: &[CPU, GPU] };
 
 pub struct LenovoFans {
     services: IWbemServices,
-    generation: &'static Generation,
+    method: &'static Method,
+    /// What told the kind of laptop, for a report.
+    told: String,
     /// The object the method is asked of, and the method's input, to be filled in.
     path: BSTR,
     input: IWbemClassObject,
@@ -47,35 +74,44 @@ pub struct LenovoFans {
 }
 
 impl LenovoFans {
-    /// The laptop's fans, if it is a Lenovo one whose firmware reports them.
-    pub fn open() -> Option<Self> {
+    /// The laptop's fans, if it is a Lenovo one whose firmware reports them. Else, for a Lenovo, what was found of
+    /// them (for a report), none for another maker's.
+    pub fn open() -> Result<Self, Option<String>> {
         // (Asked only of a Lenovo: WMI takes a while to say a class is not there.)
         let maker = crate::metrics::reg_string(windows::core::w!(r"HARDWARE\DESCRIPTION\System\BIOS"), windows::core::w!("SystemManufacturer"));
         if !maker.trim().eq_ignore_ascii_case("lenovo") {
-            return None;
+            return Err(None);
         }
-        let locator: IWbemLocator = unsafe { CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER) }.ok()?;
-        let empty = BSTR::new();
-        let services = unsafe { locator.ConnectServer(&BSTR::from(r"root\wmi"), &empty, &empty, &empty, 0, &empty, None) }.ok()?;
-        unsafe { CoSetProxyBlanket(&services, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, None, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, None, EOAC_NONE) }.ok()?;
-        let generation = GENERATIONS.iter().find(|generation| generation.pairs.iter().all(|(sensor, fan)| pairs(&services, *sensor, *fan)))?;
-        let class = BSTR::from(generation.class);
+        let services = services(r"root\wmi").ok_or_else(|| Some("Lenovo firmware: its WMI could not be reached".to_string()))?;
+        let table = table(&services);
+        let tested = tested(&services);
+        let (kind, told) = match KINDS.iter().find(|kind| kind.pairs.iter().all(|pair| table.contains(pair))) {
+            Some(kind) => (kind, format!("fan table {}", shown(kind.pairs))),
+            None if tested.iter().any(|fan| [1, 2].contains(fan)) => (&TESTED, format!("fan test data, fans {tested:?}")),
+            None => return Err(Some(format!("Lenovo firmware: no kind known (fan table {}; fan test data: fans {tested:?})", shown(&table)))),
+        };
+        let found = |what: &str| Some(format!("Lenovo firmware, by its {told}: {what}"));
+        let class = BSTR::from(kind.method.class);
         // The object the method is asked of: the class's one instance.
-        let objects = unsafe { services.CreateInstanceEnum(&class, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_WBEM_COMPLETE, None) }.ok()?;
-        let mut found = [None];
+        let objects = unsafe { services.CreateInstanceEnum(&class, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_WBEM_COMPLETE, None) }.map_err(|_| found("no LENOVO method class"))?;
+        let mut instance = [None];
         let mut returned = 0u32;
-        let _ = unsafe { objects.Next(WBEM_INFINITE, &mut found, &mut returned) };
-        let object = found[0].take().filter(|_| returned == 1)?;
-        let path = BSTR::try_from(&get(&object, "__PATH")?).ok()?;
+        let _ = unsafe { objects.Next(WBEM_INFINITE, &mut instance, &mut returned) };
+        let object = instance[0].take().filter(|_| returned == 1).ok_or_else(|| found("no instance of its method class"))?;
+        let path = get(&object, "__PATH").and_then(|path| BSTR::try_from(&path).ok()).ok_or_else(|| found("no path to its method class"))?;
         // The method's input, from the class's definition of it.
         let mut definition = None;
-        unsafe { services.GetObject(&class, Default::default(), None, Some(&mut definition), None) }.ok()?;
+        unsafe { services.GetObject(&class, Default::default(), None, Some(&mut definition), None) }.map_err(|_| found("its method class undefined"))?;
         let (mut input, mut output) = (None, None);
-        let method: Vec<u16> = generation.method.encode_utf16().chain([0]).collect();
-        unsafe { definition?.GetMethod(PCWSTR(method.as_ptr()), 0, &mut input, &mut output) }.ok()?;
-        let mut fans = LenovoFans { services, generation, path, input: input?, fans: Vec::new() };
-        fans.fans = generation.fans.into_iter().filter(|(asked, _)| fans.ask(*asked).is_some_and(|speed| speed >= 0)).collect();
-        (!fans.fans.is_empty()).then_some(fans)
+        let method: Vec<u16> = kind.method.method.encode_utf16().chain([0]).collect();
+        unsafe { definition.ok_or_else(|| found("its method class undefined"))?.GetMethod(PCWSTR(method.as_ptr()), 0, &mut input, &mut output) }.map_err(|_| found("no such method"))?;
+        let input = input.ok_or_else(|| found("no input to its method"))?;
+        let mut fans = LenovoFans { services, method: kind.method, told: told.clone(), path, input, fans: Vec::new() };
+        fans.fans = kind.fans.iter().copied().filter(|(asked, _)| fans.ask(*asked).is_some_and(|speed| speed >= 0)).collect();
+        if fans.fans.is_empty() {
+            return Err(found("no fan answered"));
+        }
+        Ok(fans)
     }
 
     /// Each fan's speed (RPM), by name.
@@ -86,28 +122,69 @@ impl LenovoFans {
     /// What the firmware answers the method asked with `value`.
     fn ask(&self, value: i32) -> Option<i64> {
         let input = unsafe { self.input.SpawnInstance(0) }.ok()?;
-        let argument: Vec<u16> = self.generation.argument.encode_utf16().chain([0]).collect();
+        let argument: Vec<u16> = self.method.argument.encode_utf16().chain([0]).collect();
         // (A uint32 goes to WMI as a 32-bit integer.)
         unsafe { input.Put(PCWSTR(argument.as_ptr()), 0, &VARIANT::from(value), 0) }.ok()?;
         let mut output = None;
-        unsafe { self.services.ExecMethod(&self.path, &BSTR::from(self.generation.method), Default::default(), None, &input, Some(&mut output), None) }.ok()?;
-        number(&get(output.as_ref()?, self.generation.answer)?)
+        unsafe { self.services.ExecMethod(&self.path, &BSTR::from(self.method.method), Default::default(), None, &input, Some(&mut output), None) }.ok()?;
+        number(&get(output.as_ref()?, self.method.answer)?)
     }
 
     /// The fans found, for a report.
     pub fn describe(&self) -> String {
-        format!("Lenovo firmware (generation {}): {}", self.generation.number, self.fans.iter().map(|(_, name)| *name).collect::<Vec<_>>().join(", "))
+        format!("Lenovo firmware, by its {}: {}", self.told, self.fans.iter().map(|(_, name)| *name).collect::<Vec<_>>().join(", "))
     }
 }
 
-/// Whether the laptop's fan table pairs sensor `sensor` with fan `fan`.
-fn pairs(services: &IWbemServices, sensor: u32, fan: u32) -> bool {
-    let query = BSTR::from(format!("SELECT * FROM LENOVO_FAN_TABLE_DATA WHERE Sensor_ID = {sensor} AND Fan_Id = {fan}"));
-    let Ok(objects) = (unsafe { services.ExecQuery(&BSTR::from("WQL"), &query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, None) }) else { return false };
-    let mut found = [None];
-    let mut returned = 0u32;
-    let _ = unsafe { objects.Next(WBEM_INFINITE, &mut found, &mut returned) };
-    returned == 1
+/// WMI's namespace `namespace` (root\wmi is where the firmware's classes are).
+fn services(namespace: &str) -> Option<IWbemServices> {
+    let locator: IWbemLocator = unsafe { CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER) }.ok()?;
+    let empty = BSTR::new();
+    let services = unsafe { locator.ConnectServer(&BSTR::from(namespace), &empty, &empty, &empty, 0, &empty, None) }.ok()?;
+    unsafe { CoSetProxyBlanket(&services, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, None, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, None, EOAC_NONE) }.ok()?;
+    Some(services)
+}
+
+/// Every object of a query's answer.
+fn every(services: &IWbemServices, query: &str) -> Vec<IWbemClassObject> {
+    let Ok(objects) = (unsafe { services.ExecQuery(&BSTR::from("WQL"), &BSTR::from(query), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, None) }) else { return Vec::new() };
+    let mut all = Vec::new();
+    loop {
+        let mut found = [None];
+        let mut returned = 0u32;
+        let _ = unsafe { objects.Next(WBEM_INFINITE, &mut found, &mut returned) };
+        match found[0].take().filter(|_| returned == 1) {
+            Some(object) => all.push(object),
+            None => return all,
+        }
+    }
+}
+
+/// The sensor and fan pairs of the laptop's fan table, each once, in order.
+fn table(services: &IWbemServices) -> Vec<(u32, u32)> {
+    let mut pairs: Vec<(u32, u32)> = every(services, "SELECT Sensor_ID, Fan_Id FROM LENOVO_FAN_TABLE_DATA")
+        .iter()
+        .filter_map(|row| Some((u32::try_from(number(&get(row, "Sensor_ID")?)?).ok()?, u32::try_from(number(&get(row, "Fan_Id")?)?).ok()?)))
+        .collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
+
+/// The fans the laptop's fan test data names, each once, in order.
+fn tested(services: &IWbemServices) -> Vec<i64> {
+    let mut fans: Vec<i64> = every(services, "SELECT FanId FROM LENOVO_FAN_TEST_DATA").iter().filter_map(|row| get(row, "FanId")).flat_map(|ids| numbers(&ids)).collect();
+    fans.sort_unstable();
+    fans.dedup();
+    fans
+}
+
+/// Pairs as a report writes them.
+fn shown(pairs: &[(u32, u32)]) -> String {
+    if pairs.is_empty() {
+        return "empty".into();
+    }
+    pairs.iter().map(|(sensor, fan)| format!("{sensor}-{fan}")).collect::<Vec<_>>().join(" ")
 }
 
 fn get(object: &IWbemClassObject, name: &str) -> Option<VARIANT> {
@@ -122,6 +199,35 @@ fn number(value: &VARIANT) -> Option<i64> {
     i32::try_from(value).map(i64::from).or_else(|_| u32::try_from(value).map(i64::from)).or_else(|_| i64::try_from(value)).ok()
 }
 
+/// The whole numbers of an array, whichever width WMI gives them in (none, if it is not an array of them).
+fn numbers(value: &VARIANT) -> Vec<i64> {
+    let vt = value.vt();
+    if vt.0 & VT_ARRAY.0 == 0 {
+        return Vec::new();
+    }
+    let array = unsafe { value.Anonymous.Anonymous.Anonymous.parray };
+    if array.is_null() {
+        return Vec::new();
+    }
+    let (Ok(low), Ok(high)) = (unsafe { SafeArrayGetLBound(array, 1) }, unsafe { SafeArrayGetUBound(array, 1) }) else { return Vec::new() };
+    (low..=high)
+        .filter_map(|index| {
+            // Each element read into eight bytes, as wide as its type (little-endian).
+            let mut element = 0u64;
+            unsafe { SafeArrayGetElement(array, &index, (&mut element as *mut u64).cast()) }.ok()?;
+            Some(match vt.0 & VT_TYPEMASK.0 {
+                t if t == VT_UI1.0 => element as u8 as i64,
+                t if t == VT_I1.0 => element as u8 as i8 as i64,
+                t if t == VT_UI2.0 => element as u16 as i64,
+                t if t == VT_I2.0 => element as u16 as i16 as i64,
+                t if t == VT_UI4.0 => element as u32 as i64,
+                t if t == VT_I4.0 => element as u32 as i32 as i64,
+                _ => return None,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -132,6 +238,38 @@ mod tests {
         }
         let started = std::time::Instant::now();
         let fans = super::LenovoFans::open();
-        println!("{:?} in {:?}", fans.as_ref().map(|fans| (fans.describe(), fans.read())), started.elapsed());
+        println!("{:?} in {:?}", fans.as_ref().map(|fans| (fans.describe(), fans.read())).map_err(|why| why.clone()), started.elapsed());
+    }
+
+    /// An array WMI gives (the BIOS's characteristics, numbers of 16 bits) read whole.
+    #[test]
+    #[ignore = "asks this machine's WMI"]
+    fn reads_an_array() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let services = super::services(r"root\cimv2").unwrap();
+        let rows = super::every(&services, "SELECT BiosCharacteristics FROM Win32_BIOS");
+        let read = super::numbers(&super::get(&rows[0], "BiosCharacteristics").unwrap());
+        println!("{read:?}");
+        assert!(!read.is_empty() && read.iter().all(|n| (0..64).contains(n)));
+    }
+
+    /// The kinds are told apart as Lenovo Legion Toolkit's team tells them: the first whose pairs are all there.
+    #[test]
+    fn tells_a_laptop_by_its_fan_table() {
+        let kind = |table: &[(u32, u32)]| super::KINDS.iter().position(|kind| kind.pairs.iter().all(|pair| table.contains(pair)));
+        // A Legion of 2025 whose processor's fan is paired with sensor 1, and the chipset's fan with sensor 4.
+        assert_eq!(kind(&[(1, 1), (4, 4), (5, 2)]), Some(1));
+        // One without the chipset's fan.
+        assert_eq!(kind(&[(1, 1), (4, 1), (5, 2)]), Some(2));
+        // Those of 2023 and 2024.
+        assert_eq!(kind(&[(4, 1), (5, 2)]), Some(3));
+        assert_eq!(kind(&[(1, 4), (4, 1), (5, 2), (5, 5)]), Some(0));
+        // Older ones.
+        assert_eq!(kind(&[(3, 0), (4, 1)]), Some(4));
+        assert_eq!(kind(&[(0, 0), (0, 1)]), Some(5));
+        // A table of none of them (its fan test data then says).
+        assert_eq!(kind(&[(1, 1), (5, 2)]), None);
     }
 }
