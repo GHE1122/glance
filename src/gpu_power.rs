@@ -77,7 +77,8 @@ impl GpuPower {
 
     /// What else the card's maker's library says of it now: Intel's, all
     /// that Windows does not have of its graphics; NVIDIA's and AMD's, the
-    /// warmest point of the chip, on the cards that say it.
+    /// warmest point of the chip, on the cards that say it, and whether its
+    /// fans stand still (AMD's, their speed).
     pub fn more(&self, reader: Reader) -> Option<More> {
         match reader {
             Reader::Intel(index) => self.igcl.as_ref()?.more(index),
@@ -88,7 +89,7 @@ impl GpuPower {
                 let fan_rpm = nvml.fans_still(index).filter(|still| *still).map(|_| 0);
                 Some(More { hot_spot: self.nvapi.as_ref().and_then(|nvapi| nvapi.hot_spot(at)), fan_rpm, ..More::default() })
             }
-            Reader::Amd(index) => Some(More { hot_spot: self.adl.as_ref()?.hot_spot(index), ..More::default() }),
+            Reader::Amd(index) => self.adl.as_ref()?.more(index),
         }
     }
 
@@ -376,6 +377,7 @@ const ADL_PMLOG_MAX_SENSORS: usize = 256;
 const PMLOG_BOARD_POWER: usize = 73;
 const PMLOG_ASIC_POWER: usize = 23;
 const PMLOG_TEMPERATURE_HOTSPOT: usize = 27;
+const PMLOG_FAN_RPM: usize = 14;
 /// AMD's PCI vendor id 1002h, as ADL writes it: the hex digits read as a
 /// decimal number (AMD's sample compares with 1002; ADL also lists other
 /// makers' cards, an NVIDIA one as 10).
@@ -486,15 +488,19 @@ impl Adl {
             .map(|(_, watts)| watts as f32)
     }
 
-    /// The warmest point of the card's chip (°C), where its driver logs it.
-    fn hot_spot(&self, index: usize) -> Option<f32> {
+    /// What its driver logs of the card now: the warmest point of its chip (°C), and its fans' speed (RPM: 0, its
+    /// fans standing still, as a card's do while it is cool, at rest; not unread), each where it logs it.
+    fn more(&self, index: usize) -> Option<More> {
         let adapter = self.adapters.get(index)?.1;
         let mut data = PmLogData { size: size_of::<PmLogData>() as i32, sensors: [(0, 0); ADL_PMLOG_MAX_SENSORS] };
         if unsafe { (self.query)(self.context, adapter, &mut data) } != ADL_OK {
             return None;
         }
         let (supported, celsius) = data.sensors[PMLOG_TEMPERATURE_HOTSPOT];
-        (supported != 0 && celsius > 0).then_some(celsius as f32)
+        let hot_spot = (supported != 0 && celsius > 0).then_some(celsius as f32);
+        let (supported, rpm) = data.sensors[PMLOG_FAN_RPM];
+        let fan_rpm = (supported != 0 && rpm >= 0).then_some(rpm as u32);
+        Some(More { hot_spot, fan_rpm, ..More::default() })
     }
 }
 
