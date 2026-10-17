@@ -8,6 +8,7 @@ use crate::reading::BoardSensors;
 use crate::pawnio::Module;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::sensors::{NamedLock, LOCK_WAIT};
 
@@ -162,9 +163,14 @@ pub struct SuperIo {
     /// (register, and name), and the fans in use (register, and name).
     ec_temps: Vec<(u16, String)>,
     ec_fans: Vec<(u16, String)>,
-    /// The latest readings, kept while another program has the ISA bus.
-    last: BoardSensors,
+    /// The latest readings and when they were read, kept while another program has the ISA bus (no longer than
+    /// `STALE_AFTER`).
+    last: (BoardSensors, Instant),
 }
+
+/// How long the last readings stand for the board's while another program has the bus: after, none (they would show
+/// a reading frozen as if live).
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl SuperIo {
     /// What chip was found, where, and whether this board's wiring of it is
@@ -240,7 +246,7 @@ impl SuperIo {
                 seen.push(format!("{port:#X}: chip {chip:04X} with its monitor at {base:#X}, not usable"));
                 continue;
             }
-            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, port, slot, ec_temps: Vec::new(), ec_fans: Vec::new(), last: BoardSensors::default() };
+            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, port, slot, ec_temps: Vec::new(), ec_fans: Vec::new(), last: (BoardSensors::default(), Instant::now()) };
             let failed = match kind {
                 Kind::NuvotonEc => found.set_up_ec().err(),
                 // A Nuvoton monitor that answers is one from Nuvoton.
@@ -341,7 +347,8 @@ impl SuperIo {
         READS.fetch_add(1, Ordering::Relaxed);
         let Some(_lock) = NamedLock::acquire(ISA_LOCK, patience) else {
             MISSED.fetch_add(1, Ordering::Relaxed);
-            return self.last.clone();
+            let (last, at) = &self.last;
+            return if at.elapsed() < STALE_AFTER { last.clone() } else { BoardSensors::default() };
         };
         let mut sensors = BoardSensors::default();
         // Unconnected inputs read 0 or −128 / 127.
@@ -385,7 +392,7 @@ impl SuperIo {
                 // software does, on its boards: every register then reads all ones, which reads as nothing
                 // connected): unlocked again, as it was found.
                 if !self.answers() && !self.unlocked_again() {
-                    self.last = sensors.clone();
+                    self.last = (sensors.clone(), Instant::now());
                     return sensors;
                 }
                 for (register, name) in NUVOTON_TEMPERATURES[..temps].iter().copied() {
@@ -405,7 +412,7 @@ impl SuperIo {
                 }
             }
         }
-        self.last = sensors.clone();
+        self.last = (sensors.clone(), Instant::now());
         sensors
     }
 

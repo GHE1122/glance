@@ -210,8 +210,9 @@ pub struct AmdCpu {
     ccds: Option<(u64, u64)>,
     /// Each package's processors and energy counter.
     packages: Vec<(Processors, EnergyCounter)>,
-    /// The latest temperatures, kept while another program has the PCI bus.
-    last: (Option<f32>, Vec<(usize, f32)>),
+    /// The latest temperatures and when they were read, kept while another program has the PCI bus (no longer than
+    /// `STALE_AFTER`).
+    last: (Option<f32>, Vec<(usize, f32)>, Instant),
     /// How far above the die's own temperature its control temperature (Tctl) reads, on the CPUs that read so
     /// (see `tctl_offset`).
     tctl_offset: f32,
@@ -231,6 +232,9 @@ fn tctl_offset(family: u32, name: &str) -> f32 {
     ];
     OFFSETS.iter().find(|(of, part, _)| *of == family && name.contains(part)).map_or(0.0, |(.., offset)| *offset)
 }
+
+/// How long the last temperatures stand for the CPU's while another program has the bus.
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The CPU's name as it says it (CPUID leaves 0x80000002 to 0x80000004).
 fn cpu_name() -> String {
@@ -252,7 +256,7 @@ impl AmdCpu {
         let units = module.read("ioctl_read_msr", MSR_PWR_UNIT).ok()?;
         let unit = 1.0 / (1u64 << ((units >> 8) & 0x1F)) as f64;
         let packages = topology(RelationProcessorPackage).into_iter().map(|p| (p, EnergyCounter::new(unit))).collect();
-        Some(AmdCpu { module, ccds, packages, last: (None, Vec::new()), tctl_offset: tctl_offset(family, &cpu_name()) })
+        Some(AmdCpu { module, ccds, packages, last: (None, Vec::new(), Instant::now()), tctl_offset: tctl_offset(family, &cpu_name()) })
     }
 
     /// One SMN register. Reached through an index and a data register on
@@ -283,9 +287,13 @@ impl AmdCpu {
                     ccds.push((ccd as usize, (raw & CCD_TEMP_MASK) as f32 * 0.125 - 49.0));
                 }
             }
-            self.last = (temp, ccds);
+            self.last = (temp, ccds, Instant::now());
         }
-        (sensors.temp, sensors.ccds) = self.last.clone();
+        // (Read too long ago, none: they would show a temperature frozen as if live.)
+        let (temp, ccds, at) = &self.last;
+        if at.elapsed() < STALE_AFTER {
+            (sensors.temp, sensors.ccds) = (*temp, ccds.clone());
+        }
         sensors.power = total_power(&self.module, &mut self.packages, MSR_PKG_ENERGY_STAT);
         sensors
     }
