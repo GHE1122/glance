@@ -169,11 +169,6 @@ pub(crate) fn pictured(info: StaticInfo, history: Vec<reading::Sample>) {
 
 #[cfg(windows)]
 impl App {
-    /// Changes the settings where they are held, under their lock, so that
-    /// changes made at once in several places (the panel, the overlay, the
-    /// settings window) all stand; keeps them; and only then has the panel,
-    /// the settings window and the tray follow, so that they read them as
-    /// changed.
     /// Shows the settings as `change` would make them, without keeping them (a slider while it is slid): under
     /// their lock as `change` does, so that a change made elsewhere meanwhile is neither undone nor reaches the panel
     /// out of order.
@@ -184,6 +179,11 @@ impl App {
         self.controller.apply(&shown);
     }
 
+    /// Changes the settings where they are held, under their lock, so that
+    /// changes made at once in several places (the panel, the overlay, the
+    /// settings window) all stand; keeps them; and only then has the panel,
+    /// the settings window and the tray follow, so that they read them as
+    /// changed.
     pub fn change(&self, change: impl FnOnce(&mut Settings)) {
         {
             let mut held = self.settings.lock().unwrap();
