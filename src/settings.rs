@@ -693,6 +693,9 @@ pub struct Settings {
     /// its screen's): open so again as Glance starts.
     #[serde(default)]
     pub panel_pinned: Option<(i32, i32)>,
+    /// The edge it was pinned at (none, pinned before this was kept: the edge nearest that point).
+    #[serde(default)]
+    pub panel_pinned_edge: Option<Edge>,
     /// How large what plays is as the panel slides it out, from a side edge and from the top, as the hand made it.
     pub music_rooms: MusicRooms,
     /// The desktop widgets torn off the panel.
@@ -730,6 +733,7 @@ impl Default for Settings {
             overlay: OverlaySettings::default(),
             panel_at: None,
             panel_pinned: None,
+            panel_pinned_edge: None,
             music_rooms: MusicRooms::default(),
             widgets: Vec::new(),
             music_source: None,

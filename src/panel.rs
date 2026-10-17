@@ -139,7 +139,7 @@ struct Config {
     size: f32,
     overlay: OverlaySettings,
     panel_at: Option<PanelAt>,
-    panel_pinned: Option<(i32, i32)>,
+    panel_pinned: Option<((i32, i32), Option<Edge>)>,
     music_rooms: crate::settings::MusicRooms,
     widgets: Vec<crate::settings::WidgetAt>,
     over_fullscreen: OverFullscreen,
@@ -161,7 +161,7 @@ fn config_from(settings: &Settings) -> Config {
         size: settings.panel_size.clamp(SIZES.0, SIZES.1),
         overlay: settings.overlay.clone(),
         panel_at: settings.panel_at,
-        panel_pinned: settings.panel_pinned,
+        panel_pinned: settings.panel_pinned.map(|point| (point, settings.panel_pinned_edge)),
         music_rooms: settings.music_rooms,
         widgets: settings.widgets.clone(),
         over_fullscreen: settings.over_fullscreen,
@@ -557,19 +557,21 @@ impl Controller {
                 }
                 // A pinned panel that gave way to another edge's: back where it was once that one is gone.
                 if !panel.is_shown() && pinned_at.is_none() {
-                    if let Some(point) = panel.yielded.take() {
+                    if let Some((point, edge)) = panel.yielded.take() {
                         if let Some(contact) = monitor_at(point) {
-                            panel.open(point, contact, panel.edge_for(point, contact), None, now);
+                            let edge = panel.pinned_edge(point, contact, Some(edge));
+                            panel.open(point, contact, edge, None, now);
                             panel.pinned = panel.is_open();
                         }
                     }
                 }
-                if let Some(point) = pinned_at.filter(|_| !self.history.read().unwrap().is_empty()) {
+                if let Some((point, edge)) = pinned_at.filter(|_| !self.history.read().unwrap().is_empty()) {
                     pinned_at = None;
                     let point = POINT { x: point.0, y: point.1 };
                     // On its screen, or the nearest, if it is gone.
                     if let Some(contact) = monitor_at(point) {
-                        panel.open(point, contact, panel.edge_for(point, contact), None, now);
+                        let edge = panel.pinned_edge(point, contact, edge);
+                        panel.open(point, contact, edge, None, now);
                         panel.pinned = panel.is_open();
                     }
                 }
@@ -1279,7 +1281,7 @@ struct Panel<'a> {
     /// Its music asked to be shown over the whole of its screen (see `Widgets::open_full`): on which screen.
     full_asked: Option<Contact>,
     /// Pinned at its edge, it gave way to another's (see `open`): where it was, to come back once that one goes.
-    yielded: Option<POINT>,
+    yielded: Option<(POINT, Edge)>,
     /// A game holding the screen in exclusive fullscreen when the panel
     /// opened over it, which sent it to the background: brought back when
     /// the panel has closed, unless a press elsewhere closed it.
@@ -1536,6 +1538,17 @@ impl<'a> Panel<'a> {
     /// pushed into one (the shortcut, the tray): of those that open one
     /// there, the nearest to `point`; where none does, the one a panel
     /// opened so shows (see `Places::by_hand`).
+    /// The edge a panel pinned at `point` opens at again: the one it was pinned at (`kept`), where that one still
+    /// opens a panel on its screen; else the nearest that does. (By the point alone, a panel opened in the middle of
+    /// its edge, the screen's middle, came back at whichever edge was nearest it: the top, on a wide screen.)
+    fn pinned_edge(&self, point: POINT, contact: Contact, kept: Option<Edge>) -> Edge {
+        let lit = {
+            let config = self.controller.config.lock().unwrap();
+            crate::screens::lit(&config.edges.places, contact.monitor)
+        };
+        kept.filter(|edge| lit.has(*edge)).unwrap_or_else(|| self.edge_for(point, contact))
+    }
+
     fn edge_for(&self, point: POINT, contact: Contact) -> Edge {
         let config = self.controller.config.lock().unwrap();
         let m = contact.monitor;
@@ -1556,7 +1569,7 @@ impl<'a> Panel<'a> {
             if !(self.pinned && elsewhere && !self.floating()) {
                 return;
             }
-            self.yielded = self.placement.as_ref().map(|placement| placement.anchor);
+            self.yielded = self.placement.as_ref().map(|placement| (placement.anchor, self.edge));
             self.dismiss();
         }
         let began = Instant::now();
@@ -2788,7 +2801,7 @@ impl<'a> Panel<'a> {
                     crate::app().place_panel(self.kept_at());
                 } else {
                     // At its edge, kept so across restarts too.
-                    let at = self.placement.as_ref().filter(|_| self.pinned).map(|p| (p.anchor.x, p.anchor.y));
+                    let at = self.placement.as_ref().filter(|_| self.pinned).map(|p| ((p.anchor.x, p.anchor.y), self.edge));
                     crate::app().pin_panel(at);
                 }
             }

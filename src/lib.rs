@@ -267,8 +267,11 @@ impl App {
 
     /// The panel pinned open at its edge, along it at `at` (physical px), or
     /// no longer.
-    pub fn pin_panel(&self, at: Option<(i32, i32)>) {
-        self.change(|settings| settings.panel_pinned = at);
+    pub fn pin_panel(&self, at: Option<((i32, i32), settings::Edge)>) {
+        self.change(|settings| {
+            settings.panel_pinned = at.map(|(point, _)| point);
+            settings.panel_pinned_edge = at.map(|(_, edge)| edge);
+        });
     }
 
     /// The overlay was dragged where, and to the size, `placed` says.
