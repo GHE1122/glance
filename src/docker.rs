@@ -326,8 +326,10 @@ struct Counters {
     at: Instant,
     cpu: u64,
     system: u64,
-    net: u64,
-    io: u64,
+    /// None where the engine does not count them (a container with no network; the reads and writes, where its
+    /// cgroups do not say them): their rate unknown, not none.
+    net: Option<u64>,
+    io: Option<u64>,
 }
 
 /// The engine asked once: its containers running, each with what it uses
@@ -364,8 +366,8 @@ fn read(before: &mut HashMap<String, Counters>, asking: &Mutex<Option<Instant>>,
             at: Instant::now(),
             cpu: stats.cpu_stats.cpu_usage.total_usage,
             system: stats.cpu_stats.system_cpu_usage.unwrap_or(0),
-            net: stats.networks.as_ref().map_or(0, |networks| networks.values().map(|n| n.rx_bytes + n.tx_bytes).sum()),
-            io: stats.blkio_stats.io_service_bytes_recursive.as_ref().map_or(0, |entries| {
+            net: stats.networks.as_ref().map(|networks| networks.values().map(|n| n.rx_bytes + n.tx_bytes).sum()),
+            io: stats.blkio_stats.io_service_bytes_recursive.as_ref().map(|entries| {
                 entries.iter().filter(|e| e.op.eq_ignore_ascii_case("read") || e.op.eq_ignore_ascii_case("write")).map(|e| e.value).sum()
             }),
         };
@@ -376,7 +378,8 @@ fn read(before: &mut HashMap<String, Counters>, asking: &Mutex<Option<Instant>>,
                 let seconds = now.at.duration_since(was.at).as_secs_f64().max(0.001);
                 let system = now.system.saturating_sub(was.system);
                 let cpu = (system > 0).then(|| (now.cpu.saturating_sub(was.cpu) as f64 / system as f64 * 100.0).clamp(0.0, 100.0) as f32);
-                (cpu, Some(now.net.saturating_sub(was.net) as f64 / seconds), Some(now.io.saturating_sub(was.io) as f64 / seconds))
+                let rate = |now: Option<u64>, was: Option<u64>| now.zip(was).map(|(now, was)| now.saturating_sub(was) as f64 / seconds);
+                (cpu, rate(now.net, was.net), rate(now.io, was.io))
             }
             None => (None, None, None),
         };
