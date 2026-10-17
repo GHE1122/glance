@@ -392,14 +392,10 @@ impl Controller {
         self.post(DISMISS);
     }
 
-    /// The settings window came to the front or left it: a panel that
-    /// stays up gives way to it meanwhile, so that it never covers it. (Which
-    /// it is, is read as the message is taken: one taken late, after a menu,
-    /// does not undo a later one.)
-    /// The settings window is in front (`Some`: it), or no longer (gone to another window, or closed). Told by the
-    /// settings' own thread as it happens, not found out here as the message comes: by then the window in front may
-    /// not yet be the one that comes, nor the settings gone, and the panel stayed under them, under every window over
-    /// them too (a full screen terminal over its edge hid it).
+    /// The settings window is in front (`Some`: it), or no longer (gone to another window, or closed): the panel and
+    /// the widgets give way to it meanwhile, so that they never cover it (see `Window::yield_to`). Told by the
+    /// settings' own thread as it happens, in the message: found out here as the message is taken, the window in
+    /// front may not yet be the one that comes, nor the settings gone.
     pub fn settings_front(&self, front: Option<HWND>) {
         let sink = self.sink.load(Ordering::Acquire);
         if sink != 0 {
@@ -408,7 +404,8 @@ impl Controller {
         }
     }
 
-    /// Opens the settings window, which this thread carries too.
+    /// Opens the settings window (on a thread of its own: see `settings_window::open`), asked of this thread, which
+    /// takes the tray's and the overlay's asking.
     pub fn open_settings(&self) {
         self.post(OPEN_SETTINGS);
     }

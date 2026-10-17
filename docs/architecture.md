@@ -724,13 +724,37 @@ Declined, five deaths, a standard account, or another account's credentials:
 ## Threads in the app
 
 - Main thread: the tray window and its menu.
-- Panel thread: the panel, widgets, overlay, settings window, menus, tips,
-  dialogs, lyric windows, the drag controller. It only enqueues work for the
-  link, network, reports and switches, and is told back by posted messages.
-  **Now** the settings' switches wait up to 20 s on it and reports are put
-  together on it.
-- Workers: the link's reader and writer, media, update checks, the widgets'
-  window watch (four looks a second), reports.
+- Panel thread (`panel::Controller::run`): the panel, the desktop widgets, the
+  music full screen, the overlay, menus, tips, the drag controller. It only
+  enqueues work for the link, network, reports and switches, and is told back
+  by posted messages.
+- Settings thread (`settings_window::run`, since 2026-10-17): the settings
+  window and the dialogs it opens, on a graphics device of its own, given back
+  as the window closes. Moved or sized by hand, the system holds this thread in
+  a loop of its own, and the panel thread draws on meanwhile.
+- Workers: the link's reader and writer, what plays (`playing::watch`), media
+  actions (`playing::act_on`, the sound set by `playing::set_sound`), update
+  checks, the widgets' window watch (four looks a second), reports.
+
+What the threads share, and how:
+
+- The settings: `App::settings` under its lock, changed only through
+  `App::change` (kept) or `App::preview` (shown while a slider slides), both
+  of which reach the panel's `Config` under that lock, in order. The settings
+  window holds its own copy and takes changes made elsewhere when told
+  (`settings_window::follow_settings` posts to it).
+- The readings: `Controller::history` behind a read-write lock: the sampler
+  writes a sample at a time and keeps it in one piece; the panel and the
+  settings threads read it, each for as long as it draws, without waiting for
+  each other (`panel::contiguous`).
+- A message between threads carries the state it is about, rather than having
+  the receiver read it again as the message is taken: by then it may have
+  changed (whether the settings are in front, `Controller::settings_front`,
+  is the case that taught it).
+- Above all windows: the panel and the widgets stay among the windows above
+  all for their whole life (`Window::stand`); the settings window is above all
+  while it is in front, and they give way just below it. Once out of them, a
+  window cannot come back while a full-screen window is in front.
 - No WinEvent hooks anywhere in the app: in the Task Manager hang the panel
   thread, hooked out of context for most event types, did nothing but take
   those callbacks for over a minute (trace of 2026-10-12); polling replaced it.
