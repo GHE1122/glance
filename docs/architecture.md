@@ -735,7 +735,7 @@ Declined, five deaths, a standard account, or another account's credentials:
 
 ## Threads in the app
 
-- Main thread: the tray window and its menu.
+- Main thread: the tray icon's window (its menu is the panel thread's).
 - Panel thread (`panel::Controller::run`): the panel, the desktop widgets, the
   music full screen, the overlay, menus, tips, the drag controller. It only
   enqueues work for the link, network, reports and switches, and is told back
