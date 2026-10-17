@@ -573,6 +573,11 @@ impl Music {
             left -= dt;
         }
         let settling = (self.rail - target).abs() > 0.002 || self.rail_speed.abs() > 0.002;
+        // Near enough and slow enough, it is there (a spring only nears its rest, by less and less, never reaching it).
+        if !settling {
+            self.rail = target;
+            self.rail_speed = 0.0;
+        }
         // The controls, in toward the pointer over it and out after it (kept showing, always in).
         let controls_to = if pointer.is_some() || shows.controls { 1.0 } else { 0.0 };
         self.controls_in = if controls_to > self.controls_in { (self.controls_in + step / CONTROLS_FADE).min(controls_to) } else { (self.controls_in - step / CONTROLS_FADE).max(controls_to) };
@@ -1460,9 +1465,12 @@ impl Drawing<'_> {
         };
         let gap = 10.0;
         let size = (width / 16.0).clamp(18.0, self.fonts.now.size);
+        // Each line is broken into rows at its full size and drawn smaller as a whole (laid out again at each size, a
+        // line just filling its rows broke now after a character, now before it, as the sizes' rounding went).
+        let full = Font { size, ..self.fonts.now };
         let height_of = |index: usize, scale: f32| {
             let line = &lines[index];
-            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, Font { size: size * scale, ..self.fonts.now }, width * scale) + if translated && line.translation.is_some() { TRANSLATION_ROW * scale } else { 0.0 }
+            (frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, full, width) + if translated && line.translation.is_some() { TRANSLATION_ROW } else { 0.0 }) * scale
         };
         let rail = self.music.rail;
         let base = rail.floor().max(-1.0);
@@ -1545,17 +1553,18 @@ impl Drawing<'_> {
                     frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| interlude(frame, x, y, font.size, done, Color::hex(0, 0.0), bright));
                     interlude(frame, x, y, font.size, done, dim, bright);
                 } else {
-                    // (Broken into rows as at its full size, smaller as a whole: as many rows whatever its size.)
-                    let wrap = width * scale;
-                    let layout = frame.gfx.wrapped(&text, font, wrap);
+                    // (At its full size, drawn smaller as a whole: see `full`.)
+                    let layout = frame.gfx.wrapped(&text, full, width);
                     let sung = sung_to(&parts, self.moment.position);
-                    let soft = (font.size * 0.45).clamp(6.0, 16.0);
-                    // What is sung glows in the cover's colour.
-                    frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, font, x, y, wrap, sung, bright, soft));
-                    self.filled(&layout, &text, font, x, y, wrap, sung, dim, bright, soft);
+                    let soft = (font.size * 0.45).clamp(6.0, 16.0) / scale;
+                    frame.scaled(x, y, scale, |frame| {
+                        // What is sung glows in the cover's colour.
+                        frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, full, x, y, width, sung, bright, soft));
+                        self.filled(&layout, &text, full, x, y, width, sung, dim, bright, soft);
+                    });
                 }
                 if let Some(translation) = line.translation.as_ref().filter(|_| translated) {
-                    let under = if text.trim().is_empty() { font.size * 1.4 } else { frame.gfx.wrapped_height(&text, font, width * scale) };
+                    let under = if text.trim().is_empty() { font.size * 1.4 } else { frame.gfx.wrapped_height(&text, full, width) * scale };
                     let small = Font { size: self.fonts.under_font.size * scale, ..self.fonts.under_font };
                     words(frame, &fitted(frame, translation, small, width), small, Color::hex(self.ink, 0.62 * alpha), x, y + under + 2.0 * scale, width, Align::Start, clear);
                 }
@@ -1563,14 +1572,12 @@ impl Drawing<'_> {
                 let shown = Color::hex(self.ink, if clear { 0.7 } else { 0.5 } * alpha);
                 if line.text.trim().is_empty() {
                     interlude(frame, x, y, font.size, 0.0, shown, shown);
-                } else if clear {
-                    outlined(frame, &line.text, font, shown, x, y, width * scale);
                 } else {
-                    frame.text_wrapped(&line.text, font, shown, x, y, width * scale);
+                    frame.scaled(x, y, scale, |frame| if clear { outlined(frame, &line.text, full, shown, x, y, width) } else { frame.text_wrapped(&line.text, full, shown, x, y, width) });
                 }
                 // Its translation under it, as the line sung now's is (smaller with it).
                 if let Some(translation) = line.translation.as_ref().filter(|_| translated && !line.text.trim().is_empty()) {
-                    let under = frame.gfx.wrapped_height(&line.text, font, width * scale);
+                    let under = frame.gfx.wrapped_height(&line.text, full, width) * scale;
                     let small = Font { size: self.fonts.under_font.size * scale, ..self.fonts.under_font };
                     words(frame, &fitted(frame, translation, small, width), small, Color::hex(self.ink, 0.42 * alpha), x, y + under + 2.0 * scale, width, Align::Start, clear);
                 }

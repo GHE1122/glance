@@ -986,6 +986,16 @@ impl<'a> Frame<'a> {
         unsafe { self.dc.SetTransform(&(transform * self.base)) };
     }
 
+    /// Draws what `paint` draws `scale` times as large about `(x, y)` (DIPs), placed as it is now otherwise.
+    pub fn scaled(&self, x: f32, y: f32, scale: f32, paint: impl FnOnce(&Frame)) {
+        let mut was = Matrix3x2::default();
+        unsafe { self.dc.GetTransform(&mut was) };
+        let about = Matrix3x2::translation(-x, -y) * Matrix3x2 { M11: scale, M12: 0.0, M21: 0.0, M22: scale, M31: 0.0, M32: 0.0 } * Matrix3x2::translation(x, y);
+        unsafe { self.dc.SetTransform(&(about * was)) };
+        paint(self);
+        unsafe { self.dc.SetTransform(&was) };
+    }
+
     pub fn brush(&self, color: Color) -> &ID2D1SolidColorBrush {
         unsafe { self.brush.SetColor(&color.d2d()) };
         &self.brush
