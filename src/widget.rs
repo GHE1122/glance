@@ -2349,7 +2349,7 @@ impl Widget {
                             let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
                             match self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4) {
                                 Some(view::Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
-                                Some(view::Hit::Drive(place)) => crate::panel::open_drive(place),
+                                Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter),
                                 Some(view::Hit::Line(index)) => {
                                     music::play_line(index);
                                     match &mut self.content {

@@ -716,8 +716,9 @@ enum Target {
     Pair(bool),
     /// Shows the code that opens the remote's web page again.
     OpenPage,
-    /// Unpairs the phone at that place among those shown.
-    Unpair(usize),
+    /// Unpairs the phone of that id (not by its place among those shown: the list is read again every second, and a
+    /// phone paired or removed meanwhile would move another into it).
+    Unpair(String),
     /// Sends the diagnostics to Glance's site, shown first in a window of
     /// their own to be read and agreed to.
     SendReport,
@@ -763,7 +764,8 @@ enum Row {
     Code,
     /// Where the remote's page for a phone's browser is.
     WebPage,
-    Phone(usize, String),
+    /// A phone paired with: its id and its name.
+    Phone(String, String),
     /// What the rows under it are, said small above them: a group of their own.
     Group(&'static str),
 }
@@ -1551,7 +1553,7 @@ impl Ui {
                 }
             }
             // The phones paired, each a row.
-            rows.extend(self.phones.iter().enumerate().map(|(at, phone)| Row::Phone(at, phone.name.clone())));
+            rows.extend(self.phones.iter().map(|phone| Row::Phone(phone.id.clone(), phone.name.clone())));
         }
     }
 
@@ -1963,7 +1965,7 @@ impl Ui {
             Row::Phone(at, name) => (
                 if name.is_empty() { p("一部手机", "A phone") } else { name.clone() },
                 p("已配对", "Paired"),
-                vec![(p("移除", "Remove"), Target::Unpair(*at), Button::Plain)],
+                vec![(p("移除", "Remove"), Target::Unpair(at.clone()), Button::Plain)],
             ),
             Row::Quit => (
                 p("退出 Glance", "Quit Glance"),
@@ -2889,13 +2891,11 @@ impl Ui {
             Target::OpenPage if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::WebPage) => self.code = None,
             // (Where it is now: this PC's address may have changed.)
             Target::OpenPage => self.ask_remote(|| Some(crate::phone::web_address().as_deref().and_then(crate::phone::code_of).map(|code| (code, CodeFor::WebPage)))),
-            Target::Unpair(at) => {
-                if let Some(id) = self.phones.get(at).map(|phone| phone.id.clone()) {
-                    self.ask_remote(move || {
-                        crate::phone::unpair(&id);
-                        None
-                    });
-                }
+            Target::Unpair(id) => {
+                self.ask_remote(move || {
+                    crate::phone::unpair(&id);
+                    None
+                });
             }
             // Slid by the pointer, stepped by the arrows; pressing alone does nothing more.
             Target::Grip(_) | Target::Slider(_) => {}
@@ -2949,7 +2949,7 @@ impl Ui {
                 Row::GetApp => vec![Target::GetApp],
                 Row::Pair => vec![Target::Pair(false), Target::Pair(true)],
                 Row::WebPage => vec![Target::OpenPage],
-                Row::Phone(at, _) => vec![Target::Unpair(at)],
+                Row::Phone(id, _) => vec![Target::Unpair(id)],
                 Row::Code | Row::Group(_) => vec![],
                 Row::More(_) => vec![Target::More],
                 Row::Tabs => TABS.iter().map(|tab| Target::Tab(*tab)).collect(),

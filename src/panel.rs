@@ -2793,7 +2793,7 @@ impl<'a> Panel<'a> {
                 crate::ui::music::play_line(index);
                 self.music.back_to_now();
             }
-            Some(Hit::Drive(place)) => open_drive(place),
+            Some(Hit::Drive(letter)) => open_drive(letter),
             Some(Hit::Sort(sort)) if sort != self.drawn.processes.sort => {
                 self.prefs.processes.sort = sort;
                 self.drawn.processes.sort = sort;
@@ -3083,7 +3083,7 @@ pub(crate) fn opens_drive(name: &str, lang: Lang) -> String {
 /// What a press on `hit` does, said under it, for what says so (a drive's row; the line that switches players).
 pub(crate) fn says(hit: Hit, lang: Lang) -> Option<String> {
     match hit {
-        Hit::Drive(place) => crate::app().controller.seen.lock().unwrap().volumes.get(place as usize).map(|name| opens_drive(name, lang)),
+        Hit::Drive(letter) => Some(opens_drive(&format!("{letter}:"), lang)),
         Hit::Media(crate::playing::Key::Player, _) => {
             let players = crate::playing::now().map_or(0, |now| now.players);
             Some(match lang {
@@ -3097,10 +3097,9 @@ pub(crate) fn says(hit: Hit, lang: Lang) -> Option<String> {
 
 /// Opens the drive seen at `place` (see `Hit::Drive`) where the user browses files, on another thread (the shell may
 /// take a while).
-pub(crate) fn open_drive(place: u16) {
-    let Some(name) = crate::app().controller.seen.lock().unwrap().volumes.get(place as usize).cloned() else { return };
+pub(crate) fn open_drive(letter: char) {
     std::thread::spawn(move || {
-        let root = windows::core::HSTRING::from(format!("{name}\\"));
+        let root = windows::core::HSTRING::from(format!("{letter}:\\"));
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
             windows::Win32::UI::Shell::ShellExecuteW(None, windows::core::w!("open"), &root, windows::core::PCWSTR::null(), windows::core::PCWSTR::null(), windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);

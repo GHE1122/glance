@@ -154,8 +154,9 @@ pub enum Hit {
     Volume,
     /// The track of what is followed, pressed (and dragged along) where in it it is to play from.
     Seek(crate::playing::Follow),
-    /// A drive's row in the storage lane: the drive opened (by its place among the drives seen).
-    Drive(u16),
+    /// A drive's row in the storage lane: the drive opened, by its letter (not its place among the drives seen: a
+    /// drive put in or taken out between the drawing and the press would move another into it).
+    Drive(char),
     /// A line of the lyrics turned to by the wheel (by its place among them): played from its start.
     Line(u16),
 }
@@ -262,7 +263,7 @@ enum Block {
     /// and what the tag over it says while the pointer is on it.
     Threads(Vec<(Option<f32>, bool, String)>),
     /// A labelled bar; `opens`: a click on it opens that drive (its place among those seen: see `Hit::Drive`).
-    Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32, opens: Option<u16> },
+    Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32, opens: Option<char> },
     Facts { rows: Vec<(String, String, bool)>, gap: f32 },
     /// How loud the sound is, on a track it is dragged along, and what
     /// mutes it.
@@ -793,7 +794,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     value: shown(volume, |v| text::usage(v.used, v.total)),
                     hot: fraction * 100.0 > hot_load,
                     gap: if i == 0 { 0.0 } else { 8.0 },
-                    opens: scene.seen.volumes.iter().position(|seen| seen == name).map(|place| place as u16),
+                    opens: scene.seen.volumes.iter().any(|seen| seen == name).then(|| name.chars().next()).flatten(),
                 });
             }
             blocks
