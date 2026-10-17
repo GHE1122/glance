@@ -80,6 +80,12 @@ enum Held {
 /// How long lyrics a source could not be reached for are taken to be none before they are asked for again.
 const UNREACHED_FOR: Duration = Duration::from_secs(60);
 
+/// Lyrics found, as they are held: none, where they have no line (a file kept on this PC may say so; shown as
+/// lyrics, they were turned through from nothing, and Glance stopped).
+fn found(lines: Option<Vec<Line>>) -> Held {
+    Held::Found(lines.filter(|lines| !lines.is_empty()).map(Arc::new))
+}
+
 /// What is known of `track`'s lyrics; asked for (on a thread of its own) the first time, and again a while after
 /// a source could not be reached.
 pub fn of(track: &Track) -> Known {
@@ -99,11 +105,11 @@ pub fn of(track: &Track) -> Known {
     std::thread::spawn(move || {
         // A file of it on this PC with lyrics: those (as they are now; not kept, as the file can change).
         if let Some(lines) = crate::library::lyrics(&track) {
-            KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, Held::Found(Some(Arc::new(lines))));
+            KNOWN.lock().unwrap().get_or_insert_with(HashMap::new).insert(track, found(Some(lines)));
             return;
         }
         let held = match kept::read(&track) {
-            Some(kept) if kept.fresh() => Held::Found(kept.lines.map(Arc::new)),
+            Some(kept) if kept.fresh() => found(kept.lines),
             kept => {
                 let said = find(&track);
                 // (That none has them, only where each source said so.)
@@ -111,9 +117,9 @@ pub fn of(track: &Track) -> Known {
                     kept::write(&track, said.found.as_deref(), said.sure);
                 }
                 match (said.found, kept) {
-                    (Some(lines), _) => Held::Found(Some(Arc::new(lines))),
+                    (Some(lines), _) => found(Some(lines)),
                     // Not found now, a source unreached: what was found before, where there was.
-                    (None, Some(kept)) if !said.sure => Held::Found(kept.lines.map(Arc::new)),
+                    (None, Some(kept)) if !said.sure => found(kept.lines),
                     (None, _) if !said.sure => Held::Unreached(Instant::now()),
                     (None, _) => Held::Found(None),
                 }
@@ -682,6 +688,15 @@ mod tests {
         let file = r#"<tt><p begin="00:00.5"</p><p begin="00:01.000" end="00:02.000"><span begin="00:01.000" end="00:02.000">kept</span></p></tt>"#;
         let lines = ttml(file);
         assert_eq!(lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(), ["kept"]);
+    }
+
+    /// Lyrics with no line are held as none found, wherever they come from.
+    #[test]
+    fn lyrics_with_no_line_are_none() {
+        assert!(matches!(found(Some(Vec::new())), Held::Found(None)));
+        assert!(matches!(found(None), Held::Found(None)));
+        let line = Line { at: 1.0, end: None, text: "kept".into(), words: Vec::new(), backing: None, translation: None };
+        assert!(matches!(found(Some(vec![line])), Held::Found(Some(lines)) if lines.len() == 1));
     }
 
     #[test]
