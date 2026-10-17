@@ -818,7 +818,12 @@ impl Controller {
                 {
                     // Kept here, in the order things happened (an unpin just
                     // after stands).
+                    let tapped = msg.message == WM_LBUTTONUP && panel.tapped();
                     let kept = panel.let_go(now);
+                    // Let go where it was pressed: a tap on what was pressed (a line of what plays).
+                    if tapped {
+                        panel.click(lparam_point(msg.lParam));
+                    }
                     // What plays, sized: kept as large as it came to rest, for the edge it is at (a side or the top).
                     if let Some(room) = panel.sized_room.take() {
                         let shows = crate::ui::music::Shows::from(&panel.controller.config.lock().unwrap().view);
@@ -2002,7 +2007,14 @@ impl<'a> Panel<'a> {
         if edges.any() {
             return Some(edges);
         }
-        self.hit_at(client).is_none_or(|hit| !hit.takes_press()).then_some(edges)
+        // (A line of what plays takes a press too, as a tap: pulled, it moves the panel, or tears off what plays, as
+        // a music widget's lines do. Most of a card is its lines.)
+        self.hit_at(client).is_none_or(|hit| !hit.takes_press() || matches!(hit, Hit::Line(_))).then_some(edges)
+    }
+
+    /// Whether the press in hand is a tap so far: neither moved nor sized since.
+    fn tapped(&self) -> bool {
+        self.drag.is_some_and(|drag| !drag.edges.any() && !drag.sized) && self.placement.as_ref().is_some_and(|placement| placement.held.is_none())
     }
 
     /// Whether `client` (physical px in the window) is on the panel's bar.
