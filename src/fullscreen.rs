@@ -79,6 +79,8 @@ pub struct FullMusic {
     pointer: Option<(f32, f32)>,
     moved: Option<Instant>,
     controls: f32,
+    /// Whether the volume's bar is open (the pointer over its icon, or over the bar since).
+    volume_open: bool,
     /// Whether the pointer over it is hidden, as last told.
     pointer_hidden: Option<bool>,
     /// What a press is on, as last drawn; the last press (for a double click); what is dragged.
@@ -120,6 +122,7 @@ impl FullMusic {
             moved: Some(now),
             controls: 1.0,
             pointer_hidden: None,
+            volume_open: false,
             hits: Vec::new(),
             pressed: None,
             dragging: None,
@@ -212,7 +215,8 @@ impl FullMusic {
         let t = now.duration_since(self.began).as_secs_f32();
         let music = Music { smooth: self.smooth, swell: self.swell, beat: self.beat, high: part(14, 20, &self.smooth), bass: part(0, 4, &self.smooth) };
         let (smoke, lines, now_index, leaving) = (&self.smoke, self.lines.clone(), self.now, self.leaving);
-        let (pointer, controls) = (self.pointer, self.controls);
+        let (pointer, controls, dragging) = (self.pointer, self.controls, self.dragging);
+        let mut volume_open = self.volume_open;
         let mut hits = Vec::new();
         let gfx = self.gfx.clone();
         let _ = self.surface.draw(&gfx, pixels, self.scale, |frame| {
@@ -228,10 +232,11 @@ impl FullMusic {
                 draw_said(frame, (w, h), title, artist, why);
             }
             if controls > 0.0 {
-                draw_controls(frame, (w, h), controls, pointer, playing, position, length, &mut hits);
+                draw_controls(frame, (w, h), controls, pointer, dragging, &mut volume_open, playing, position, length, &mut hits);
             }
         });
         self.hits = hits;
+        self.volume_open = volume_open;
         Duration::ZERO
     }
 
@@ -503,7 +508,7 @@ fn draw_said(frame: &Frame, (w, h): (f32, f32), title: &str, artist: &str, why: 
 /// ends, the keys under it, the volume and the way out at the right; each lit under the pointer. What they are is
 /// put in `hits`.
 #[allow(clippy::too_many_arguments)]
-fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<(f32, f32)>, playing: bool, position: f64, length: Option<f64>, hits: &mut Vec<((f32, f32, f32, f32), Hit)>) {
+fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<(f32, f32)>, dragging: Option<Hit>, volume_open: &mut bool, playing: bool, position: f64, length: Option<f64>, hits: &mut Vec<((f32, f32, f32, f32), Hit)>) {
     let under = |x: f32, y: f32, wide: f32, tall: f32| pointer.is_some_and(|(px, py)| px >= x && px < x + wide && py >= y && py < y + tall);
     // A darkening along the bottom for them to be read on.
     frame.fill_shape(
@@ -521,41 +526,60 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
         hits.push(((x, row, cell, cell), hit));
         x += cell + 18.0;
     }
-    // The track, short, above them; its times at its ends.
+    // The track, short, above them; its times at its ends. Under the pointer (or dragged), thicker, its knob on it,
+    // and over the pointer the time it is at.
     if let Some(length) = length.filter(|length| *length > 0.0) {
         let time = Font::new(Family::Segoe, 12.0, 500.0);
         let wide = (w * 0.42).min(420.0);
         let (from, y) = (w / 2.0 - wide / 2.0, row - 22.0);
-        let lit = under(from - 8.0, y - 10.0, wide + 16.0, 20.0);
-        let thick = if lit { 5.0 } else { 3.0 };
+        let lit = under(from - 8.0, y - 10.0, wide + 16.0, 20.0) || dragging == Some(Hit::Track);
         let fraction = (position / length).clamp(0.0, 1.0) as f32;
-        frame.fill_rounded(Color::hex(0xFFFFFF, 0.22 * shown), from, y - thick / 2.0, wide, thick, thick / 2.0);
-        frame.fill_rounded(Color::hex(0xFFFFFF, shown), from, y - thick / 2.0, wide * fraction, thick, thick / 2.0);
+        slider(frame, (from, y, wide), fraction, lit, shown);
         let clock = |seconds: f64| crate::ui::text::clock(seconds.max(0.0).round() as u32);
         frame.text(&clock(position), time, Color::hex(0xFFFFFF, 0.6 * shown), from - 70.0, y - 9.0, 60.0, Align::End);
         frame.text(&clock(length), time, Color::hex(0xFFFFFF, 0.6 * shown), from + wide + 10.0, y - 9.0, 60.0, Align::Start);
+        if let Some((px, _)) = pointer.filter(|_| lit) {
+            let at = ((px - from) / wide).clamp(0.0, 1.0);
+            let said = clock(at as f64 * length);
+            let pill = frame.measure(&said, time) + 16.0;
+            let x = (from + wide * at - pill / 2.0).clamp(from - 8.0, from + wide - pill + 8.0);
+            frame.fill_rounded(Color::hex(0x000000, 0.6 * shown), x, y - 36.0, pill, 22.0, 6.0);
+            frame.text(&said, time, Color::hex(0xFFFFFF, 0.95 * shown), x + 8.0, y - 33.0, pill, Align::Start);
+        }
         hits.push(((from - 8.0, y - 10.0, wide + 16.0, 20.0), Hit::Track));
     }
-    // The volume and the way out, at the right.
+    // At the right, the way out, and the sound's icon beside it; its bar opening to the left of the icon while the
+    // pointer is over the icon or the bar (nothing moves as it opens).
     let (level, muted) = crate::actions::volume().unwrap_or((0, false));
     let leave_x = w - 30.0 - cell;
-    let lit = under(leave_x, row, cell, cell);
-    frame.icon(Icon::Minimize, Point { x: leave_x + cell / 2.0, y: row + cell / 2.0 }, 20.0, ink(lit));
-    hits.push(((leave_x, row, cell, cell), Hit::Leave));
-    let bar = 96.0;
-    let bar_x = leave_x - 12.0 - bar;
     let middle = row + cell / 2.0;
-    let fraction = if muted { 0.0 } else { level as f32 / 100.0 };
-    frame.fill_rounded(Color::hex(0xFFFFFF, 0.22 * shown), bar_x, middle - 1.5, bar, 3.0, 1.5);
-    frame.fill_rounded(Color::hex(0xFFFFFF, shown), bar_x, middle - 1.5, bar * fraction, 3.0, 1.5);
-    if under(bar_x - 8.0, row, bar + 16.0, cell) {
-        frame.fill_circle(Color::hex(0xFFFFFF, shown), Point { x: bar_x + bar * fraction, y: middle }, 6.0);
-    }
-    hits.push(((bar_x - 8.0, row, bar + 16.0, cell), Hit::Volume));
-    let mute_x = bar_x - 8.0 - cell;
-    let lit = under(mute_x, row, cell, cell);
-    frame.icon(if muted || level == 0 { Icon::Muted } else { Icon::Volume }, Point { x: mute_x + cell / 2.0, y: middle }, 20.0, ink(lit));
+    let lit = under(leave_x, row, cell, cell);
+    frame.icon(Icon::Minimize, Point { x: leave_x + cell / 2.0, y: middle }, 20.0, ink(lit));
+    hits.push(((leave_x, row, cell, cell), Hit::Leave));
+    let mute_x = leave_x - 8.0 - cell;
+    let bar = 96.0;
+    let bar_x = mute_x - 6.0 - bar;
+    let on_icon = under(mute_x, row, cell, cell);
+    *volume_open = on_icon || dragging == Some(Hit::Volume) || (*volume_open && under(bar_x - 12.0, row, mute_x + cell - bar_x + 12.0, cell));
+    frame.icon(if muted || level == 0 { Icon::Muted } else { Icon::Volume }, Point { x: mute_x + cell / 2.0, y: middle }, 20.0, ink(on_icon));
     hits.push(((mute_x, row, cell, cell), Hit::Mute));
+    if *volume_open {
+        let fraction = if muted { 0.0 } else { level as f32 / 100.0 };
+        let lit = under(bar_x - 8.0, row, bar + 16.0, cell) || dragging == Some(Hit::Volume);
+        slider(frame, (bar_x, middle, bar), fraction, lit, shown);
+        hits.push(((bar_x - 8.0, row, bar + 16.0, cell), Hit::Volume));
+    }
+}
+
+/// A slider along `(x, y, wide)` (its middle line), `fraction` of it filled, `shown` of it drawn: a thin line,
+/// thicker with its knob on it where it is `lit` (the pointer over it, or dragged). The track and the volume alike.
+fn slider(frame: &Frame, (x, y, wide): (f32, f32, f32), fraction: f32, lit: bool, shown: f32) {
+    let thick = if lit { 5.0 } else { 3.0 };
+    frame.fill_rounded(Color::hex(0xFFFFFF, 0.22 * shown), x, y - thick / 2.0, wide, thick, thick / 2.0);
+    frame.fill_rounded(Color::hex(0xFFFFFF, shown), x, y - thick / 2.0, wide * fraction, thick, thick / 2.0);
+    if lit {
+        frame.fill_circle(Color::hex(0xFFFFFF, shown), Point { x: x + wide * fraction, y }, 6.5);
+    }
 }
 
 #[cfg(all(test, feature = "studio"))]
@@ -583,7 +607,7 @@ mod pictures {
                 smoke.paint(frame, rect(0.0, 0.0, w, h));
                 draw_lines(frame, (w, h), &lines, Some(0), None, 12.6, 3.0, &music);
                 let mut hits = Vec::new();
-                draw_controls(frame, (w, h), 1.0, Some((w / 2.0, h - 40.0)), true, 80.0, Some(226.0), &mut hits);
+                draw_controls(frame, (w, h), 1.0, Some((w / 2.0, h - 88.0)), None, &mut true, true, 80.0, Some(226.0), &mut hits);
             })
             .unwrap();
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));

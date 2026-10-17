@@ -136,6 +136,8 @@ fn opens_marked(frame: &dyn Canvas, theme: &Theme, label: &str, left: f32, top: 
 pub enum Hit {
     Settings,
     Pin,
+    /// The music shown over the whole of its screen.
+    Full,
     Sort(ProcessSort),
     /// The process list, and how far it scrolls.
     Processes(u32),

@@ -836,7 +836,13 @@ impl Controller {
                     let torn = widgets.torn_in_hand().unwrap();
                     widgets.release(torn, now, false)
                 }
-                WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
+                WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => {
+                    panel.click(lparam_point(msg.lParam));
+                    // Its music asked to be shown over the whole of its screen.
+                    if let Some(contact) = panel.full_asked.take() {
+                        widgets.open_full(contact.monitor, contact.scale);
+                    }
+                }
                 // The overlay dragged into place.
                 WM_LBUTTONDOWN if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().press(),
                 // Let go: the button up, the capture lost, or the pointer moved with the button up.
@@ -1235,6 +1241,8 @@ struct Panel<'a> {
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
     pinned: bool,
+    /// Its music asked to be shown over the whole of its screen (see `Widgets::open_full`): on which screen.
+    full_asked: Option<Contact>,
     /// A game holding the screen in exclusive fullscreen when the panel
     /// opened over it, which sent it to the background: brought back when
     /// the panel has closed, unless a press elsewhere closed it.
@@ -1347,6 +1355,7 @@ impl<'a> Panel<'a> {
             scroll_target: 0.0,
             hover: None,
             pinned: false,
+            full_asked: None,
             game: None,
             opening: None,
             game_at: (false, false),
@@ -2505,7 +2514,8 @@ impl<'a> Panel<'a> {
         let music = &mut self.music;
         let mut painted = None;
         let pinned = self.pinned;
-        // Its settings and its pin (as the readings' bar has them), at its top right while the pointer is over it.
+        // Its settings and its pin (as the readings' bar has them) and the full screen, at its top right while the
+        // pointer is over it.
         let mut buttons = Vec::new();
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
@@ -2520,7 +2530,7 @@ impl<'a> Panel<'a> {
             if let Some((px_x, px_y)) = pointer {
                 let ground = music.ground_colour(size);
                 let (side, gap, inset) = (crate::ui::buttons::SIZE, crate::ui::buttons::GAP, 12.0);
-                for (index, (button, hit)) in [(crate::ui::buttons::Button::Pin, Hit::Pin), (crate::ui::buttons::Button::Settings, Hit::Settings)].into_iter().enumerate() {
+                for (index, (button, hit)) in [(crate::ui::buttons::Button::Pin, Hit::Pin), (crate::ui::buttons::Button::Settings, Hit::Settings), (crate::ui::buttons::Button::Full, Hit::Full)].into_iter().enumerate() {
                     let (bx, by) = (size.0 - inset - side - index as f32 * (side + gap), inset);
                     let over = px_x >= bx && px_x < bx + side && px_y >= by && px_y < by + side;
                     let lit = (button == crate::ui::buttons::Button::Pin && pinned) || over;
@@ -2589,6 +2599,9 @@ impl<'a> Panel<'a> {
         match self.hit_at(client) {
             Some(Hit::Settings) => {
                 crate::show_settings();
+            }
+            Some(Hit::Full) => {
+                self.full_asked = self.placement.as_ref().map(|placement| placement.contact);
             }
             Some(Hit::Pin) => {
                 // Pinned, it stays as it is: not moved, not sized, and not

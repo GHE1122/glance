@@ -1442,15 +1442,20 @@ impl Widgets {
                     crate::ui::tip::hide();
                 }
                 let contact = self.list[index].contact;
-                match gfx::current().ok().and_then(|gfx| crate::fullscreen::FullMusic::open(gfx, contact.monitor, contact.scale)) {
-                    Some(full) => self.full = Some(full),
-                    None => note("music full screen: its window could not be made"),
-                }
+                self.open_full(contact.monitor, contact.scale);
                 return;
             }
             Released::Nothing => return,
         }
         self.save();
+    }
+
+    /// The music shown over the whole of the screen `monitor` (physical px) at `scale`.
+    pub fn open_full(&mut self, monitor: RECT, scale: f32) {
+        match gfx::current().ok().and_then(|gfx| crate::fullscreen::FullMusic::open(gfx, monitor, scale)) {
+            Some(full) => self.full = Some(full),
+            None => note("music full screen: its window could not be made"),
+        }
     }
 
     /// The music full screen, while it is up.
