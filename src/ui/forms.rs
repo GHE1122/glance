@@ -286,7 +286,8 @@ fn readings(scene: &Scene) -> Vec<Reading> {
     if game.is_some() || (on("game") && super::view::front_is_game()) {
         // Its ring: how many of the frames its screen shows it draws (or of
         // the most it drew, if more).
-        let most = scene.history.iter().filter_map(|s| s.game.as_ref()?.fps).fold(game.and_then(|g| g.refresh_hz).map_or(0.0, |hz| hz as f32), f32::max);
+        // (Of this game's frames alone: another's before it set the scale.)
+        let most = scene.history.iter().filter_map(|s| s.game.as_ref().filter(|g| Some(g.pid) == game.map(|game| game.pid))?.fps).fold(game.and_then(|g| g.refresh_hz).map_or(0.0, |hz| hz as f32), f32::max);
         // Its 1% low, as the game's own lane shows it when switched on: said for as long as there is a game, a
         // dash till enough frames have come.
         let low = game.filter(|_| prefs.shows("game", "low")).map(|game| game.low.map_or("1% low —".to_string(), |low| format!("1% low {low:.0}")));

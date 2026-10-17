@@ -50,7 +50,7 @@ const EVENT_TRACE_USE_MS_FLUSH_TIMER: u32 = 0x10;
 /// Its keywords asked for: Base and Present (as PresentMon asks).
 const DXGKRNL_KEYWORDS: u64 = 0x1 | 0x800_0000;
 
-/// The session's name: one per Glance (a debug build has its own).
+/// The session's name: one per Glance (a debug build has its own), and per account (see `name`).
 #[cfg(not(debug_assertions))]
 const SESSION: &str = "Glance.Frames";
 #[cfg(debug_assertions)]
@@ -156,8 +156,17 @@ impl Properties {
     }
 }
 
+/// This account's session's name: each account's Glance traces under its own (under one name, a Glance started in
+/// another account took the first's session for one left over, and stopped it, and the first counted no frames).
 fn name() -> Vec<u16> {
-    SESSION.encode_utf16().chain([0]).collect()
+    format!("{SESSION}.{}", crate::elevation::user_sid().unwrap_or_default()).encode_utf16().chain([0]).collect()
+}
+
+/// The session as versions before 0.3.13 named it, one for every account (all of them ended by the install that
+/// replaced them): stopped, if one was left (one left with nothing reading it loses the providers' events for all).
+fn stop_unnamed() {
+    let name: Vec<u16> = SESSION.encode_utf16().chain([0]).collect();
+    let _ = unsafe { ControlTraceW(CONTROLTRACE_HANDLE::default(), PCWSTR(name.as_ptr()), Properties::new(&name).get(), EVENT_TRACE_CONTROL_STOP) };
 }
 
 /// Starts listening, on a thread of its own, for as long as Glance runs
@@ -169,6 +178,7 @@ pub fn start() {
         return;
     }
     *FREQUENCY.lock().unwrap() = frequency;
+    stop_unnamed();
     let name = name();
     let mut handle = CONTROLTRACE_HANDLE::default();
     let mut status = unsafe { StartTraceW(&mut handle, PCWSTR(name.as_ptr()), Properties::new(&name).get()) };
@@ -236,6 +246,8 @@ pub fn start() {
             let _ = ProcessTrace(&[trace], None, None);
             let _ = CloseTrace(trace);
         }
+        // Stopped (by Glance as it ends, or by anything else): no frames are counted from now (see `counting`).
+        *PRESENTS.lock().unwrap() = None;
     }).expect("a thread started");
 }
 

@@ -176,6 +176,10 @@ pub struct SuperIo {
     /// The latest readings and when they were read, kept while another program has the ISA bus (no longer than
     /// `STALE_AFTER`).
     last: (BoardSensors, Instant),
+    /// The fans seen turning since it was found, by their number (a bit each): one of them read as stopped is
+    /// stopped, 0 RPM (as its firmware stops it, cool); one never seen turning reads as stopped as an empty header
+    /// does, and is none.
+    spun: u32,
 }
 
 /// How long the last readings stand for the board's while another program has the bus: after, none (they would show
@@ -256,7 +260,7 @@ impl SuperIo {
                 seen.push(format!("{port:#X}: chip {chip:04X} with its monitor at {base:#X}, not usable"));
                 continue;
             }
-            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, board, chip), base, port, slot, ec_temps: Vec::new(), ec_fans: Vec::new(), last: (BoardSensors::default(), Instant::now()) };
+            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, board, chip), base, port, slot, ec_temps: Vec::new(), ec_fans: Vec::new(), last: (BoardSensors::default(), Instant::now()), spun: 0 };
             let failed = match kind {
                 Kind::NuvotonEc => found.set_up_ec().err(),
                 // A Nuvoton monitor that answers is one from Nuvoton.
@@ -375,9 +379,12 @@ impl SuperIo {
                         continue;
                     };
                     let count = (high as u32) << 8 | low as u32;
-                    // A stopped or absent fan reads all ones.
+                    // A stopped or absent fan reads all ones (stopped, once seen turning: see `spun`).
                     if count > 0 && count < 0xFFFF {
+                        self.spun |= 1 << fan;
                         sensors.fans.push((self.name(fan, |l| l.fans), 1.35e6 / (count as f32 * 2.0)));
+                    } else if count == 0xFFFF && self.spun & 1 << fan != 0 {
+                        sensors.fans.push((self.name(fan, |l| l.fans), 0.0));
                     }
                 }
             }
@@ -415,9 +422,12 @@ impl SuperIo {
                         continue;
                     };
                     let rpm = (high as u32) << 8 | low as u32;
-                    // A stopped or absent fan reads zero.
+                    // A stopped or absent fan reads zero (stopped, once seen turning: see `spun`).
                     if rpm > 0 && rpm < 0xFFFF {
+                        self.spun |= 1 << fan;
                         sensors.fans.push(((fan + 1).to_string(), rpm as f32));
+                    } else if rpm == 0 && self.spun & 1 << fan != 0 {
+                        sensors.fans.push(((fan + 1).to_string(), 0.0));
                     }
                 }
             }

@@ -220,7 +220,8 @@ pub struct MemorySample {
     pub cached: u64,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+/// (Its default: nothing read of it.)
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct GpuSample {
     /// Percent, as busy as its busiest engine; `None` (as the memory's)
     /// where the counters could not be read this time.

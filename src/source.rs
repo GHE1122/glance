@@ -130,6 +130,34 @@ pub fn open() -> (StaticInfo, Source) {
     (sampler.info.clone(), Source::Own { sampler, next: Instant::now(), tick: 0 })
 }
 
+/// Where each of the GPUs Glance started with (`App::info`) is among those the readings now come with, by the
+/// index of each in theirs (none: not among them); none while they are the same, in the same order. (A sensors'
+/// process started again, or Glance reading itself, finds the GPUs again: docked, undocked, a driver changed, they
+/// may be listed otherwise, and each was shown the readings of another.)
+static GPUS_AS: Mutex<Option<Vec<Option<usize>>>> = Mutex::new(None);
+
+/// The readings come with the GPUs of `info` from now.
+fn gpus_found(info: &StaticInfo) {
+    let first = &crate::app().info.gpus;
+    let same = first.len() == info.gpus.len() && first.iter().zip(&info.gpus).all(|(a, b)| a.identity == b.identity);
+    let order = (!same).then(|| first.iter().map(|gpu| info.gpus.iter().position(|now| now.identity == gpu.identity)).collect());
+    if !same {
+        crate::journal::note("readings: the GPUs are listed otherwise than as Glance started; each read where it is now (one new is shown once Glance starts again)");
+    }
+    *GPUS_AS.lock().unwrap() = order;
+}
+
+/// `sample` with its GPUs in the order Glance started with (see `GPUS_AS`).
+fn as_first(mut sample: Sample) -> Sample {
+    let Some(order) = GPUS_AS.lock().unwrap().clone() else { return sample };
+    let read = std::mem::take(&mut sample.gpus);
+    sample.gpus = order.iter().map(|at| at.and_then(|at| read.get(at).cloned()).unwrap_or_default()).collect();
+    if let Some(game) = sample.game.as_mut() {
+        game.gpu_index = game.gpu_index.and_then(|now| order.iter().position(|at| *at == Some(now)));
+    }
+    sample
+}
+
 /// `link`, if the sensors at its other end said hello, and are of this version (another's speaks another tongue): with
 /// what the machine is.
 fn greeted(link: &Link) -> Option<StaticInfo> {
@@ -239,7 +267,7 @@ impl Source {
                 drop(told);
                 loop {
                     match link.receive() {
-                        Some(Told::Sample(sample)) => return Some(*sample),
+                        Some(Told::Sample(sample)) => return Some(as_first(*sample)),
                         Some(Told::Presenting { games, mode }) => crate::presents::mirror(games, mode.into()),
                         Some(Told::Report(lines)) => *REPORTED.lock().unwrap() = Some(lines),
                         Some(Told::Pushed { edge, at }) => crate::app().controller.pushed(edge, at),
@@ -258,9 +286,10 @@ impl Source {
                             *ASKING.lock().unwrap() = None;
                             let lasted = LINKED_SINCE.lock().unwrap().take().is_some_and(|since| since.elapsed() >= LASTED_TO_START_AGAIN);
                             if lasted && crate::elevation::start_sensors_unasked() {
-                                if let Some(again) = Link::connect(STARTED_AGAIN_WITHIN).filter(|link| greeted(link).is_some()) {
+                                if let Some((again, info)) = Link::connect(STARTED_AGAIN_WITHIN).and_then(|link| greeted(&link).map(|info| (link, info))) {
                                     crate::journal::note("readings: the sensors' process went, and was started again");
                                     linked_to(&again);
+                                    gpus_found(&info);
                                     *link = again;
                                     return None;
                                 }
@@ -271,6 +300,7 @@ impl Source {
                             crate::update::link_lost();
                             crate::app().controller.hear_own();
                             let sampler = Sampler::new();
+                            gpus_found(&sampler.info);
                             crate::presents::start();
                             *self = Source::Own { sampler, next: Instant::now(), tick: 0 };
                             return None;
@@ -288,7 +318,7 @@ impl Source {
                 }
                 std::thread::sleep(next.saturating_duration_since(now));
                 *tick += 1;
-                sampler.sample(want.refresh_slow || *tick % crate::HIDDEN_SLOW_TICKS == 0, want.wsl, want.docker, interval)
+                sampler.sample(want.refresh_slow || *tick % crate::HIDDEN_SLOW_TICKS == 0, want.wsl, want.docker, interval).map(as_first)
             }
         }
     }
