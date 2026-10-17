@@ -148,6 +148,8 @@ const WIDGET_FORMS: [(Option<arrange::Form>, &str, &str); 7] = [
     (Some(arrange::Form::Small(super::forms::Small::Strip { rich: true })), "横条", "Strip"),
     (Some(arrange::Form::Small(super::forms::Small::Micro)), "迷你", "Micro"),
 ];
+/// The room round the readings' preview as a widget (DIPs).
+const WIDGET_PREVIEW_ROOM: f32 = 12.0;
 /// The least the readings' preview is sized to (DIPs; less, the least of its forms shows all the same).
 const WIDGET_LEAST: f32 = 40.0;
 
@@ -3891,8 +3893,13 @@ impl Ui {
     /// asks for, filled in the accent; returns where its left edge is.
     #[allow(clippy::too_many_arguments)]
     fn button(&mut self, frame: &Frame, palette: &Palette, text: &str, right: f32, cy: f32, target: Target, kind: Button, hovered: &Option<Target>) -> f32 {
-        let font = Font::new(Family::Segoe, 14.0, 400.0);
-        let w = frame.gfx.measure(text, font) + 32.0;
+        self.button_in(frame, palette, text, (Font::new(Family::Segoe, 14.0, 400.0), 32.0), right, cy, target, kind, hovered)
+    }
+
+    /// A button as `button` draws one, its words in `font` with `pad` round them (both sides together).
+    #[allow(clippy::too_many_arguments)]
+    fn button_in(&mut self, frame: &Frame, palette: &Palette, text: &str, (font, pad): (Font, f32), right: f32, cy: f32, target: Target, kind: Button, hovered: &Option<Target>) -> f32 {
+        let w = frame.gfx.measure(text, font) + pad;
         let rect = Rect { x: right - w, y: cy - 16.0, w, h: 32.0 };
         let hover = kind != Button::Quiet && hovered.as_ref() == Some(&target);
         let ink = match kind {
@@ -3908,7 +3915,7 @@ impl Ui {
                 if kind == Button::Quiet { palette.text2 } else { palette.text }
             }
         };
-        text_centred(frame, text, font, ink, rect.x + 16.0, cy, w, Align::Start);
+        text_centred(frame, text, font, ink, rect.x + pad / 2.0, cy, w, Align::Start);
         if kind != Button::Quiet {
             self.targets.push((rect, target));
         }
@@ -4415,16 +4422,23 @@ impl Ui {
             (Some(form), Some(shown)) => same_kind(*form, shown),
             _ => false,
         });
-        let font = Font::new(Family::Segoe, 14.0, 400.0);
+        // As wide as the names and the room round them; where the row does not hold that, the room round them less,
+        // and then the names smaller, till it does.
         let names: Vec<&str> = WIDGET_FORMS.iter().map(|(_, zh, en)| pick(self.lang, zh, en)).collect();
-        let widths: Vec<f32> = names.iter().map(|name| frame.gfx.measure(name, font) + 24.0).collect();
-        let total: f32 = widths.iter().sum::<f32>() + 6.0 * (names.len() - 1) as f32;
+        let gaps = 6.0 * (names.len() - 1) as f32;
+        let room = area.w - 16.0 - gaps;
+        let named = |size: f32| names.iter().map(|name| frame.gfx.measure(name, Font::new(Family::Segoe, size, 400.0))).sum::<f32>();
+        let size = [14.0, 13.0, 12.0, 11.0].into_iter().find(|size| named(*size) + 12.0 * names.len() as f32 <= room).unwrap_or(11.0);
+        let font = Font::new(Family::Segoe, size, 400.0);
+        let pad = ((room - named(size)) / names.len() as f32).clamp(12.0, 24.0);
+        let widths: Vec<f32> = names.iter().map(|name| frame.gfx.measure(name, font) + pad).collect();
+        let total: f32 = widths.iter().sum::<f32>() + gaps;
         let mut x = area.x + (area.w - total) / 2.0;
         let cy = area.y + area.h - MUSIC_SIZES_ROW / 2.0;
         let hovered = self.hovered();
         for (at, (name, w)) in names.iter().zip(&widths).enumerate() {
             let kind = if lit == Some(at) { Button::Accent } else { Button::Plain };
-            self.button(frame, palette, name, x + w, cy, Target::WidgetForm(at), kind, &hovered);
+            self.button_in(frame, palette, name, (font, pad), x + w, cy, Target::WidgetForm(at), kind, &hovered);
             x += w + 6.0;
         }
         pace
@@ -4457,7 +4471,6 @@ impl Ui {
         let heights = view::heights(&probe);
         let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
         let readings = super::forms::count(&probe);
-        let ladder = arrange::Ladder::new(&measure, &heights.iter().map(|(_, height)| *height).collect::<Vec<_>>(), readings);
         let work = (sw, sh);
         // Sized: what its room shows (holding the form it showed, as a widget does); else the form chosen.
         let want = match self.widget_sizing {
@@ -4475,16 +4488,14 @@ impl Ui {
         if self.widget_sizing.is_none() {
             self.widget_room = drawn;
         }
-        // One scale for all its forms (as each is drawn by itself), and this one; while it is sized, the scale it
-        // began at, so that its corner follows the hand.
-        let most = (area.w - 2.0 * MUSIC_PREVIEW_ROOM, area.h - 2.0 * MUSIC_PREVIEW_ROOM);
-        let largest = WIDGET_FORMS.iter().filter_map(|(form, ..)| *form).fold(drawn, |most, form| {
-            let size = ladder.drawn(ladder.keep(arrange::Choice { form, scale: 1.0, extra: (0.0, 0.0) }));
-            (most.0.max(size.0), most.1.max(size.1))
-        });
+        // As large as it is, or as the room holds it. (Not at one scale with its other forms, as what plays is: these
+        // differ too much, the lanes in full several times as tall as the strip, and the strip several times as wide
+        // as the rings; at one scale the small ones could not be read.) While it is sized, at the scale it began at,
+        // so that its corner follows the hand.
+        let most = (area.w - 2.0 * WIDGET_PREVIEW_ROOM, area.h - 2.0 * WIDGET_PREVIEW_ROOM);
         let k = match self.widget_sizing {
             Some(_) => self.widget_shrunk,
-            None => (most.0 / largest.0).min(most.1 / largest.1).min(1.0),
+            None => (most.0 / drawn.0).min(most.1 / drawn.1).min(1.0),
         };
         self.widget_shrunk = k;
         let (w, h) = (drawn.0 * k, drawn.1 * k);
