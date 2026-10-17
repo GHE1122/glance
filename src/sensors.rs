@@ -438,9 +438,13 @@ mod tests {
         counter.last = Some((u32::MAX - 16384 * 50 + 1, start));
         let watts = counter.power(16384 * 50).unwrap();
         assert!((watts - 100.0).abs() < 0.5, "{watts}");
-        // A counter standing still is not counting.
+        // Standing still once it has counted: nothing drawn.
         counter.last = Some((7, Instant::now() - std::time::Duration::from_secs(1)));
-        assert_eq!(counter.power(7), None);
+        assert_eq!(counter.power(7), Some(0.0));
+        // A counter that has never moved is not counting.
+        let mut still = EnergyCounter::new(unit);
+        still.last = Some((7, Instant::now() - std::time::Duration::from_secs(1)));
+        assert_eq!(still.power(7), None);
         // A gap the counter could wrap in more than once gives nothing.
         counter.last = Some((0, Instant::now() - std::time::Duration::from_secs(400)));
         assert_eq!(counter.power(5), None);
