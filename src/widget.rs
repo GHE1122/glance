@@ -1246,6 +1246,11 @@ impl Widgets {
     }
 
     /// Whether a widget on the screen now shows the process list (what it was last drawn with says).
+    /// Whether any is on the screen, or the music full screen is up.
+    pub fn any_seen(&self) -> bool {
+        self.full.is_some() || self.list.iter().any(|widget| widget.showing.is_some())
+    }
+
     pub fn any_showing_processes(&self) -> bool {
         self.list.iter().any(|widget| widget.showing.is_some() && widget.hits.iter().any(|hit| matches!(hit.4, view::Hit::Processes(_))))
     }

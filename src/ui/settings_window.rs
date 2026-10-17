@@ -183,6 +183,7 @@ pub fn show() {
         let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindowAsync(hwnd, SW_RESTORE);
         let _ = SetForegroundWindow(hwnd);
     }
+    crate::playing::look_now();
 }
 
 /// Makes the window, centred on the monitor the pointer is on, on the
@@ -228,6 +229,8 @@ fn run(overlay: bool) {
     let made = gfx::current().ok().and_then(|gfx| make(gfx, true));
     if let Some(hwnd) = made {
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
+        // (What plays, looked at only while something on the screen can show it: at once, for the previews.)
+        crate::playing::look_now();
     }
     OPENING.store(false, Ordering::Release);
     if made.is_none() {

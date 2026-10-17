@@ -483,9 +483,10 @@ pub fn run() {
         touches::start();
     }
     thread::spawn(move || {
-        // What plays and how loud, while the module that shows them is on.
-        // The lyrics too, while either shows them.
+        // What plays and how loud, while the module that shows them is on and something that can show it is on the
+        // screen (the panel, a widget, the settings). The lyrics too, while either shows them.
         playing::watch(|| {
+            let seen = app().controller.plays_seen() || ui::settings_window::is_seen();
             let settings = app().settings.lock().unwrap();
             let view = &settings.view;
             // Whatever plays, while a time and media lane shows it (the readings', or the workbench's); music, while an
@@ -495,7 +496,7 @@ pub fn run() {
                 shown("modules") || shown("workbench")
             };
             let music = settings.places().shows(settings::Part::Music) || settings.widgets.iter().any(settings::WidgetAt::shows_music) || time(true) || playing::shown_in_settings();
-            (time(false), music)
+            (time(false), music, seen)
         }, || app().controller.lyric_changed());
         let mut watch = watch::Watch::default();
         // What the remote-control helper is told of each sample.

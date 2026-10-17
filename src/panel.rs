@@ -204,6 +204,8 @@ pub struct Controller {
     widget_put_away: AtomicBool,
     /// Whether a widget on the screen shows the process list (read afresh each sample then, as while the panel is).
     widget_processes: AtomicBool,
+    /// Whether a widget is on the screen, or the music full screen is up.
+    widgets_seen: AtomicBool,
 }
 
 impl Controller {
@@ -220,6 +222,7 @@ impl Controller {
             shown: AtomicBool::new(false),
             widget_put_away: AtomicBool::new(false),
             widget_processes: AtomicBool::new(false),
+            widgets_seen: AtomicBool::new(false),
         }
     }
 
@@ -370,6 +373,19 @@ impl Controller {
     /// Whether a desktop widget was put away that can be brought back.
     pub fn widget_processes(&self) -> bool {
         self.widget_processes.load(Ordering::Relaxed)
+    }
+
+    /// Whether anything of the panel's thread that can show what plays is on the screen: the panel, a widget, the
+    /// music full screen.
+    pub fn plays_seen(&self) -> bool {
+        self.is_shown() || self.widgets_seen.load(Ordering::Relaxed)
+    }
+
+    /// Whether `seen`, as `plays_seen` is now: what plays looked at again at once, as it comes on the screen.
+    fn set_seen(&self, flag: &AtomicBool, seen: bool) {
+        if !flag.swap(seen, Ordering::Relaxed) && seen {
+            crate::playing::look_now();
+        }
     }
 
     pub fn widget_put_away(&self) -> bool {
@@ -560,6 +576,7 @@ impl Controller {
                     }
                     self.widget_put_away.store(widgets.any_put_away(), Ordering::Relaxed);
                     self.widget_processes.store(widgets.any_showing_processes(), Ordering::Relaxed);
+                    self.set_seen(&self.widgets_seen, widgets.any_seen());
                 }
                 // A pinned panel that gave way to another edge's: back where it was once that one is gone.
                 if !panel.is_shown() && pinned_at.is_none() {
@@ -1700,7 +1717,7 @@ impl<'a> Panel<'a> {
         // Presses from before it opened are no press elsewhere (what was seen of them is otherwise as old as the
         // last look while it was away, which may be long ago: opened by the shortcut, it closed at once).
         self.presses_seen = PRESSES.load(Ordering::Relaxed);
-        self.controller.shown.store(true, Ordering::Relaxed);
+        self.controller.set_seen(&self.controller.shown, true);
         self.exclude();
         // Away from the edge it has nowhere to slide from: it fades in.
         if reduced_motion() || self.floating() {
