@@ -79,15 +79,6 @@ pub(super) fn part_icon(part: Part) -> Icon {
     }
 }
 
-/// Each component's own colour, its pills drawn in it.
-fn part_colour(part: Part) -> Color {
-    match part {
-        Part::Monitor => Color::hex(0x2F6FE0, 1.0),
-        Part::Workbench => Color::hex(0x1F8A7A, 1.0),
-        Part::Music => Color::hex(0xC2408F, 1.0),
-    }
-}
-
 impl Ui {
     /// The library row's height: its words, then the components' tiles side by side.
     pub(super) fn library_height(&self) -> f32 {
@@ -309,7 +300,7 @@ impl Ui {
         // What is carried, at the pointer.
         if let (Some(carry), Some((px, py))) = (self.carry.as_ref().filter(|carry| carry.moved), self.pointer) {
             let part = carry.part;
-            self.chip(frame, part, Rect { x: px + 10.0, y: py + 6.0, w: self.chip_width(frame, part) - CHIP + 8.0, h: CHIP }, true, 0.92, None);
+            self.chip(frame, palette, part, Rect { x: px + 10.0, y: py + 6.0, w: self.chip_width(frame, part) - CHIP + 8.0, h: CHIP }, true, 0.92, None);
         }
         creep
     }
@@ -340,7 +331,8 @@ impl Ui {
             stroke_inside(frame, r, MAP_RADIUS * 2.0, palette.card_stroke);
             let digit = (index + 1).to_string();
             let digit_w = frame.gfx.measure(&digit, number);
-            let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            // (At its foot, the taskbar's edge, which holds nothing: clear of the pills on its other edges.)
+            let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h - 6.0 - 13.0);
             fill(frame, palette.window.alpha(0.92), cx - 13.0, cy - 13.0, 26.0, 26.0, 13.0);
             text_centred(frame, &digit, number, palette.text, cx - digit_w / 2.0, cy, digit_w + 1.0, Align::Start);
             let along = |px: i32, upright: bool| if upright { r.y + (px - m.top) as f32 * r.h / (m.bottom - m.top).max(1) as f32 } else { r.x + (px - m.left) as f32 * r.w / (m.right - m.left).max(1) as f32 };
@@ -429,9 +421,11 @@ impl Ui {
             }
             // The line along the edge, stretch by stretch.
             let colour = if part.is_some() { palette.selection } else { pale };
-            let (from, to) = if upright { (r.y, r.y + r.h) } else { (r.x, r.x + r.w) };
+            // (Each kept clear of the corners, and of the line along the top: they meet none.)
+            let corner = 2.0 + EDGE_LINE + MAP_RADIUS * 2.0;
+            let (from, to) = if upright { (r.y + corner, r.y + r.h - corner) } else { (r.x + corner, r.x + r.w - corner) };
             for (a, b, seam) in crate::screens::stretches(monitors, index, edge, eased) {
-                let (a, b) = (along(a, upright).max(from + 4.0), along(b, upright).min(to - 4.0));
+                let (a, b) = (along(a, upright).max(from), along(b, upright).min(to));
                 if b <= a {
                     continue;
                 }
@@ -463,7 +457,7 @@ impl Ui {
                 };
                 let lifted = self.carry.as_ref().is_some_and(|carry| carry.moved && carry.from.as_ref().is_some_and(|(s, e)| s == screen && *e == edge));
                 let pointed = hovered.as_ref().is_some_and(|target| matches!(target, Target::Chip(s, e, _) | Target::Unplace(s, e) if s == screen && *e == edge));
-                self.chip(frame, part, rect, large, if lifted || over { 0.35 } else { 1.0 }, large.then_some(pointed && !carrying));
+                self.chip(frame, palette, part, rect, large, if lifted || over { 0.35 } else { 1.0 }, large.then_some(pointed && !carrying));
                 // What takes a press: the pill's button first, then the pill.
                 if large {
                     self.targets.push((Rect { x: rect.x + rect.w - CHIP, y: rect.y, w: CHIP, h: rect.h }, Target::Unplace(screen.to_string(), edge)));
@@ -482,25 +476,26 @@ impl Ui {
         8.0 + 16.0 + 6.0 + frame.gfx.measure(part_name(part, self.lang), Font::new(Family::Segoe, 13.0, 600.0)) + 8.0 + CHIP - 6.0
     }
 
-    /// A component's pill at `r`, as opaque as `opacity`: in its colour, its icon (and, large, its name, and where
-    /// `button` says, the button that takes it off, lit while the pointer is on the pill).
+    /// A component's pill at `r`, as opaque as `opacity`: frosted as the screens' numbers are, its icon in the
+    /// window's ink (and, large, its name, and where `button` says, the button that takes it off, lit while the
+    /// pointer is on the pill). (Which edges hold one, their lines say, in the accent.)
     #[allow(clippy::too_many_arguments)]
-    fn chip(&self, frame: &Frame, part: Part, r: Rect, large: bool, opacity: f32, button: Option<bool>) {
-        let white = Color::hex(0xFFFFFF, opacity);
-        fill(frame, Color::hex(0x000000, 0.18 * opacity), r.x, r.y + 1.0, r.w, r.h, r.h / 2.0);
-        fill(frame, part_colour(part).alpha(opacity), r.x, r.y, r.w, r.h, r.h / 2.0);
+    fn chip(&self, frame: &Frame, palette: &Palette, part: Part, r: Rect, large: bool, opacity: f32, button: Option<bool>) {
+        let ink = palette.text.alpha(opacity);
+        fill(frame, Color::hex(0x000000, 0.14 * opacity), r.x, r.y + 1.0, r.w, r.h, r.h / 2.0);
+        fill(frame, palette.window.alpha(0.92 * opacity), r.x, r.y, r.w, r.h, r.h / 2.0);
         if !large {
-            frame.icon(part_icon(part), Point { x: r.x + r.w / 2.0, y: r.y + r.h / 2.0 }, 12.0, white);
+            frame.icon(part_icon(part), Point { x: r.x + r.w / 2.0, y: r.y + r.h / 2.0 }, 12.0, ink);
             return;
         }
-        frame.icon(part_icon(part), Point { x: r.x + 8.0 + 8.0, y: r.y + r.h / 2.0 }, 14.0, white);
+        frame.icon(part_icon(part), Point { x: r.x + 8.0 + 8.0, y: r.y + r.h / 2.0 }, 14.0, ink);
         let font = Font::new(Family::Segoe, 13.0, 600.0);
         let name = part_name(part, self.lang);
-        text_centred(frame, name, font, white, r.x + 30.0, r.y + r.h / 2.0, frame.gfx.measure(name, font) + 4.0, Align::Start);
+        text_centred(frame, name, font, ink, r.x + 30.0, r.y + r.h / 2.0, frame.gfx.measure(name, font) + 4.0, Align::Start);
         let Some(pointed) = button else { return };
         let (cx, cy) = (r.x + r.w - CHIP / 2.0, r.y + r.h / 2.0);
-        fill(frame, Color::hex(0x000000, if pointed { 0.32 } else { 0.18 } * opacity), cx - 8.0, cy - 8.0, 16.0, 16.0, 8.0);
-        frame.icon(Icon::Close, Point { x: cx, y: cy }, 10.0, white);
+        fill(frame, palette.text.alpha(if pointed { 0.16 } else { 0.08 } * opacity), cx - 8.0, cy - 8.0, 16.0, 16.0, 8.0);
+        frame.icon(Icon::Close, Point { x: cx, y: cy }, 10.0, ink);
     }
 
     /// A press on a component (in the library, or on an edge): carried from there once the pointer moves.

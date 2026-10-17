@@ -127,9 +127,8 @@ const MAP_GAP: f32 = 3.0;
 const SKINS_ROW: f32 = 16.0 + 72.0 + 10.0 + 18.0 + 16.0;
 /// Desktop shown beside the panel in the preview (DIPs of screen).
 const PREVIEW_MARGIN: f32 = 160.0;
-/// The music page's preview: the room at least as wide round what plays, and how often it is drawn while something
-/// plays (as a chart's speed: a quarter pixel each thirtieth of a second, see `draw`).
-const MUSIC_PREVIEW_ROOM: f32 = 24.0;
+/// How often the music page's preview is drawn while something plays (as a chart's speed: a quarter pixel each
+/// thirtieth of a second, see `draw`).
 const MUSIC_PREVIEW_PACE: f32 = 7.5;
 /// How far a wheel notch scrolls the choices, and how quickly they follow.
 const WHEEL: f32 = 100.0;
@@ -1737,9 +1736,13 @@ impl Ui {
         })
     }
 
-    /// The component the preview shows: the workbench on its page, else the readings.
+    /// The component the preview shows: the workbench on its page, what plays on the music's, else the readings.
     fn previewed(&self) -> Part {
-        if self.page == Page::Workbench { Part::Workbench } else { Part::Monitor }
+        match self.page {
+            Page::Workbench => Part::Workbench,
+            Page::Music => Part::Music,
+            _ => Part::Monitor,
+        }
     }
 
     /// The edge the preview's panel opens from, on the screen it shows: the first of that screen's that opens what it
@@ -4207,30 +4210,37 @@ impl Ui {
         unsafe { frame.dc.PopAxisAlignedClip() };
     }
 
-    /// What plays, with the elements chosen, as the panel slides it out from a side edge (as large as it was made
-    /// there: see `MusicRooms`), over the desktop (the whole of it the room holds); larger than the room, drawn smaller;
-    /// the example while no music plays. (Not sized here: how it looks at other sizes is seen sizing it on the screen.)
-    /// Returns how soon it is to be drawn again (as the preview's charts' speed: see `paint`), while something plays.
+    /// What plays, with the elements chosen, slid out from the edge that opens it on the screen the window opened on
+    /// (as large as it was made there: see `MusicRooms`), as the readings' and the workbench's previews show theirs;
+    /// the example while no music plays. Returns how soon it is to be drawn again (as the preview's charts' speed: see
+    /// `paint`), while something plays.
     fn paint_music_preview(&mut self, frame: &Frame, area: Rect) -> Option<f32> {
+        let edge = self.preview_edge();
         let (sw, sh) = self.stage.size;
-        let k = (area.w / sw).max(area.h / sh);
-        let (ox, oy) = (area.x + (area.w - sw * k) / 2.0, area.y + (area.h - sh * k) / 2.0);
-        self.stage_picture(frame, area, (ox, oy), k, 1.0);
-        unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         let shows = super::music::Shows::from(&self.settings.view);
-        let size = super::music::rests_at(self.settings.music_rooms.at(false), &shows);
-        let most = (area.w - 2.0 * MUSIC_PREVIEW_ROOM, area.h - 2.0 * MUSIC_PREVIEW_ROOM);
-        let k = (most.0 / size.0).min(most.1 / size.1).min(1.0);
-        let (w, h) = (size.0 * k, size.1 * k);
-        let at = (area.x + (area.w - w) / 2.0, area.y + (area.h - h) / 2.0);
-        let pointer = self.pointer.map(|(x, y)| ((x - at.0) / k, (y - at.1) / k)).filter(|(x, y)| *x >= 0.0 && *y >= 0.0 && *x < size.0 && *y < size.1);
-        frame.place(Matrix3x2::scale(k, k) * Matrix3x2::translation(at.0, at.1));
+        let size = super::music::rests_at(self.settings.music_rooms.at(edge == Edge::Top), &shows);
+        let zoom = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
+        let (pw, ph) = (size.0 * zoom, size.1 * zoom);
+        let inset = Theme::new(Skin::named(&self.settings.skin), false).inset * zoom;
+        let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
+        let pos = match edge {
+            Edge::Left => (inset, along(sh / 2.0, ph, sh)),
+            Edge::Right => (sw - inset - pw, along(sh / 2.0, ph, sh)),
+            Edge::Top => (along(sw / 2.0, pw, sw), inset),
+        };
+        let (k, stage_x, stage_y) = self.staged(area, edge, (pw, ph), false);
+        let (ox, oy) = (area.x + stage_x, area.y + stage_y);
+        self.stage_picture(frame, area, (ox, oy), k, zoom);
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        let (at, scale) = ((ox + pos.0 * k, oy + pos.1 * k), zoom * k);
+        let pointer = self.pointer.map(|(x, y)| ((x - at.0) / scale, (y - at.1) / scale)).filter(|(x, y)| *x >= 0.0 && *y >= 0.0 && *x < size.0 && *y < size.1);
+        frame.place(Matrix3x2::scale(scale, scale) * Matrix3x2::translation(at.0, at.1));
         let ground = super::music::Ground::of(&shows);
         let now = Instant::now();
         let painted = if super::music::heard() {
-            self.music.paint(frame, size, &shows, ground, self.scale * k, pointer, now)
+            self.music.paint(frame, size, &shows, ground, self.scale * scale, pointer, now)
         } else {
-            self.music.paint_example(frame, size, &shows, ground, self.scale * k, pointer, now, self.example_from.elapsed().as_secs_f64())
+            self.music.paint_example(frame, size, &shows, ground, self.scale * scale, pointer, now, self.example_from.elapsed().as_secs_f64())
         };
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };
@@ -4284,6 +4294,36 @@ impl Ui {
         self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false).0
     }
 
+    /// How the stage is shown in `area` with a panel `(pw, ph)` large (stage DIPs) slid out from `edge`: how large a
+    /// stage DIP is drawn, and where the stage's corner is in the area. The whole screen (`whole`), else the whole
+    /// height of it (along the top, the panel and the screen below) with the whole panel and a strip of desktop
+    /// beside it.
+    fn staged(&self, area: Rect, edge: Edge, (pw, ph): (f32, f32), whole: bool) -> (f32, f32, f32) {
+        let (sw, sh) = self.stage.size;
+        let fit = (area.w / sw).min(area.h / sh).min(1.0);
+        match (whole, edge) {
+            (true, _) => (fit, (area.w - sw * fit) / 2.0, (area.h - sh * fit) / 2.0),
+            (false, Edge::Left | Edge::Right) => {
+                let k = (area.h / sh).min(area.w / (pw + PREVIEW_MARGIN).min(sw)).min(1.0);
+                // A screen that fits whole, in the middle; one that does
+                // not, its side the panel is on.
+                let x = if sw * k <= area.w {
+                    (area.w - sw * k) / 2.0
+                } else if edge == Edge::Left {
+                    0.0
+                } else {
+                    area.w - sw * k
+                };
+                (k, x, (area.h - sh * k) / 2.0)
+            }
+            (false, Edge::Top) => {
+                let shown = ph + PREVIEW_MARGIN;
+                let k = (area.w / sw).min(area.h / shown).min(1.0);
+                (k, (area.w - sw * k) / 2.0, ((area.h - shown * k) / 2.0).max(0.0))
+            }
+        }
+    }
+
     /// The stage's desktop in `area` and, where `edge` is one, the panel showing `prefs` slid out from it, running
     /// live: the whole screen (`whole`), else the whole height of it (along the top, the panel and the screen below)
     /// with the whole panel and a strip of desktop beside it. Returns how fast the panel's charts move (physical pixels
@@ -4335,29 +4375,7 @@ impl Ui {
         let scene = Scene { music_apart: false, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let lanes = view::lanes(&scene);
 
-        let (k, stage_x, stage_y) = match (whole, edge) {
-            (true, _) => (fit, (area.w - sw * fit) / 2.0, (area.h - sh * fit) / 2.0),
-            // The whole height of the screen, and the whole panel with a strip of
-            // desktop beside it; along the top, the panel and the screen below.
-            (false, Edge::Left | Edge::Right) => {
-                let k = (area.h / sh).min(area.w / (pw + PREVIEW_MARGIN).min(sw)).min(1.0);
-                // A screen that fits whole, in the middle; one that does
-                // not, its side the panel is on.
-                let x = if sw * k <= area.w {
-                    (area.w - sw * k) / 2.0
-                } else if edge == Edge::Left {
-                    0.0
-                } else {
-                    area.w - sw * k
-                };
-                (k, x, (area.h - sh * k) / 2.0)
-            }
-            (false, Edge::Top) => {
-                let shown = ph + PREVIEW_MARGIN;
-                let k = (area.w / sw).min(area.h / shown).min(1.0);
-                (k, (area.w - sw * k) / 2.0, ((area.h - shown * k) / 2.0).max(0.0))
-            }
-        };
+        let (k, stage_x, stage_y) = self.staged(area, edge, (pw, ph), whole);
         let (ox, oy) = (area.x + stage_x, area.y + stage_y);
         let mask = unsafe {
             frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(area.x, area.y, area.w, area.h), radiusX: 8.0, radiusY: 8.0 })
