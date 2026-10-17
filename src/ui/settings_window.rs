@@ -224,7 +224,7 @@ fn run(overlay: bool) {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
-    let made = gfx::current().ok().and_then(make);
+    let made = gfx::current().ok().and_then(|gfx| make(gfx, true));
     if let Some(hwnd) = made {
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
     }
@@ -1006,8 +1006,8 @@ impl Lives for Ui {
     }
 }
 
-/// Makes the window, draws its first frame, and shows it.
-fn make(gfx: Rc<Gfx>) -> Option<HWND> {
+/// Makes the window, draws its first frame, and shows it (unless not `shown`: for pictures of it, drawn off screen).
+fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
     let (work, scale) = crate::panel::work_area_at_cursor()?;
     let scale = scale as f32;
     unsafe {
@@ -1153,6 +1153,9 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         ui.restyle();
         ui.draw(Instant::now());
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
+        if !shown {
+            return Some(hwnd);
+        }
         // Glance started hidden (by the scheduler, an installer, a script)
         // has the system apply that to the first window of its own it
         // shows, in place of what is asked: shown again, it shows.
@@ -1308,16 +1311,16 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Gone to another window: a new shortcut is no longer being taken.
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
             with_ui(|ui| ui.record(false));
-            crate::app().controller.settings_front();
+            crate::app().controller.settings_front(None);
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         // In front: the panel, staying up, gives way to it.
         WM_ACTIVATE => {
-            crate::app().controller.settings_front();
+            crate::app().controller.settings_front(Some(hwnd));
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_DESTROY => {
-            crate::app().controller.settings_front();
+            crate::app().controller.settings_front(None);
             // The shortcut, if let go while a new one was taken, is taken up again.
             crate::tray::hold_hotkey(false);
             // Its surfaces and bitmaps go first; then the device gives back
@@ -4182,7 +4185,17 @@ impl Ui {
         let view = |at: f32, length: f32, room: f32, extent: f32| (at + length / 2.0 - room / 2.0 / k).clamp(0.0, (extent - room / k).max(0.0));
         let (vx, vy) = (view(x, w, area.w, sw), view(y, h, area.h, sh));
         let (ox, oy) = (area.x - vx * k + ((area.w - sw * k) / 2.0).max(0.0), area.y - vy * k + ((area.h - sh * k) / 2.0).max(0.0));
-        unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        // (Inside the preview's rounded corners.)
+        let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, 8.0)) }) else { return };
+        let layer = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: rect(area.x, area.y, area.w, area.h),
+            geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: 1.0,
+            ..Default::default()
+        };
+        unsafe { frame.dc.PushLayer(&layer, None) };
         if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != 1.0f32.to_bits()) {
             self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, 1.0).ok()).map(|b| (1.0f32.to_bits(), b));
         }
@@ -4207,7 +4220,8 @@ impl Ui {
         super::overlay::shadow(frame, &readings, shape, glass, false, px);
         super::overlay::paint(frame, &readings, &frames, shape, glass, super::overlay::Hand::Free, px);
         frame.origin(0.0, 0.0);
-        unsafe { frame.dc.PopAxisAlignedClip() };
+        unsafe { frame.dc.PopLayer() };
+        drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
     }
 
     /// What plays, with the elements chosen, slid out from the edge that opens it on the screen the window opened on
@@ -4593,6 +4607,72 @@ fn skin_miniature(frame: &Frame, skin: Skin, r: Rect) {
                 let (w, color) = if i == 0 { (inner.1 * 0.6, theme::accent(false)) } else { (inner.1, Color::hex(0xC8CCD2, 1.0)) };
                 fill(frame, color, inner.0, y, w, 3.0, 1.5);
             }
+        }
+    }
+}
+
+/// Pictures of every page (and each of the monitor's tabs) at the least, the usual and a wide size of the window,
+/// drawn off screen (the window made, not shown), to see that nothing reaches past what holds it. Into
+/// `target/settings`: `cargo test --release --lib --features studio draws_every_page -- --ignored`.
+#[cfg(all(test, feature = "studio"))]
+mod pictures {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn draws_every_page() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        // This machine's names, and two minutes of made-up readings up to now.
+        let info = crate::metrics::Sampler::new().info;
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
+        let history = (0..120).map(|i| crate::studio::made_up(&info, now_ms - (120 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
+        crate::pictured(info, history);
+        let gfx = gfx::current().unwrap();
+        let hwnd = make(gfx.clone(), false).unwrap();
+        let out = std::path::PathBuf::from(format!("{}/target/settings", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let shown = [
+            (Page::Layout, Tab::Look, "layout"),
+            (Page::Monitor, Tab::Look, "monitor-look"),
+            (Page::Monitor, Tab::Shown, "monitor-shown"),
+            (Page::Monitor, Tab::Data, "monitor-data"),
+            (Page::Monitor, Tab::Overlay, "monitor-overlay"),
+            (Page::Workbench, Tab::Look, "workbench"),
+            (Page::Music, Tab::Look, "music"),
+            (Page::General, Tab::Look, "general"),
+        ];
+        let scale = with_ui(|ui| ui.scale).unwrap();
+        for (w, h) in [MIN_SIZE, SIZE, (1700.0, 900.0)] {
+            unsafe {
+                let _ = SetWindowPos(hwnd, None, 0, 0, (w * scale) as i32, (h * scale) as i32, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            for (page, tab, name) in shown {
+                with_ui(|ui| {
+                    ui.tab = tab;
+                    ui.turn_to(page);
+                });
+                // Drawn a while (the desktops read meanwhile, what moves come to rest), then pictured.
+                for _ in 0..12 {
+                    with_ui(|ui| ui.draw(Instant::now()));
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+                let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+                let size = ((cw * scale).round() as u32, (ch * scale).round() as u32);
+                let pixels = gfx.draw_offscreen(size, scale, |frame| {
+                    with_ui(|ui| {
+                        // (On the window's own ground: Mica is the system's, not drawn.)
+                        fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                        ui.paint(frame, Instant::now())
+                    });
+                })
+                .unwrap();
+                crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
+            }
+        }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
         }
     }
 }

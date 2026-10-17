@@ -392,8 +392,16 @@ impl Controller {
     /// stays up gives way to it meanwhile, so that it never covers it. (Which
     /// it is, is read as the message is taken: one taken late, after a menu,
     /// does not undo a later one.)
-    pub fn settings_front(&self) {
-        self.post(SETTINGS_FRONT);
+    /// The settings window is in front (`Some`: it), or no longer (gone to another window, or closed). Told by the
+    /// settings' own thread as it happens, not found out here as the message comes: by then the window in front may
+    /// not yet be the one that comes, nor the settings gone, and the panel stayed under them, under every window over
+    /// them too (a full screen terminal over its edge hid it).
+    pub fn settings_front(&self, front: Option<HWND>) {
+        let sink = self.sink.load(Ordering::Acquire);
+        if sink != 0 {
+            let front = front.map_or(0, |hwnd| hwnd.0 as usize);
+            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), SETTINGS_FRONT, WPARAM(front), LPARAM(0)) };
+        }
     }
 
     /// Opens the settings window, which this thread carries too.
@@ -714,8 +722,7 @@ impl Controller {
                     widgets.draw_soon();
                 }
                 SETTINGS_FRONT => {
-                    let front = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
-                    let settings = settings_window::hwnd().filter(|settings| *settings == front);
+                    let settings = (msg.wParam.0 != 0).then(|| HWND(msg.wParam.0 as *mut _));
                     panel.settings_front(settings);
                     widgets.settings_front(settings);
                 }

@@ -761,7 +761,7 @@ fn motion(shot: &Shot, t: f32) -> (f32, f32) {
 /// out), playing `game` if one is named, varying from second to second as
 /// real ones do: the same for the same `seed`, so that a shot films the
 /// same every time.
-fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str>) -> Sample {
+pub(crate) fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str>) -> Sample {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
     let mut noise = move || {
         state ^= state << 13;

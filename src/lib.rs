@@ -154,6 +154,19 @@ pub(crate) fn app() -> &'static App {
     APP.get().unwrap()
 }
 
+/// Glance as pictures of its windows need it, off screen: this machine's names, the settings kept, and `history`
+/// (made up) as what it has read.
+#[cfg(all(test, feature = "studio"))]
+pub(crate) fn pictured(info: StaticInfo, history: Vec<reading::Sample>) {
+    let config = settings::config_dir();
+    let settings = Settings::load(&config);
+    let controller = Arc::new(Controller::new(info.clone(), &settings));
+    for sample in history {
+        controller.record(sample);
+    }
+    let _ = APP.set(App { info, controller, settings: Mutex::new(settings), config });
+}
+
 #[cfg(windows)]
 impl App {
     /// Changes the settings where they are held, under their lock, so that
