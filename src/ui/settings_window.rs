@@ -294,6 +294,10 @@ fn taken(settings: &Settings, prefs: &Prefs) -> Settings {
     taken
 }
 
+/// Whether Glance starts at sign-in and the phone remote is on, as the window last read them: shown so as it opens,
+/// while they are read again (read before it showed, its opening waited on Task Scheduler).
+static SWITCHES_READ: std::sync::Mutex<Option<(bool, bool)>> = std::sync::Mutex::new(None);
+
 /// Settings changed elsewhere, to be taken up by the window once nothing is in hand (see `follow_when_free`).
 static FOLLOW_OWED: AtomicBool = AtomicBool::new(false);
 /// The overlay's page asked for, to be turned to (see `open_at_overlay`); kept as `FOLLOW_OWED` is.
@@ -905,6 +909,9 @@ struct Ui {
     /// A switch that needs the sensors' rights, being turned (on another thread: their process is asked, and
     /// answers when the system has done it); what it is then.
     switching: Option<(SwitchAsked, std::thread::JoinHandle<bool>)>,
+    /// Whether Glance starts at sign-in and the phone remote is on, being read as the window opens (on another
+    /// thread: Task Scheduler is asked); shown meanwhile as last read (see `SWITCHES_READ`).
+    reading_switches: Option<std::thread::JoinHandle<(bool, bool)>>,
     /// The diagnostics being put together (on another thread: the sensors' part is asked of their process), and
     /// what for.
     reporting: Option<(ReportFor, std::thread::JoinHandle<String>)>,
@@ -1101,9 +1108,10 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             sources: Vec::new(),
             music: super::music::Music::default(),
             example_from: Instant::now(),
-            autostart: crate::source::autostart(),
+            autostart: SWITCHES_READ.lock().unwrap().is_some_and(|(autostart, _)| autostart),
             remote_there: crate::phone::helper().is_some(),
-            remote: crate::phone::on(),
+            remote: SWITCHES_READ.lock().unwrap().is_some_and(|(_, remote)| remote),
+            reading_switches: Some(std::thread::spawn(|| (crate::source::autostart(), crate::phone::on()))),
             // (As its helper says, asked as the window opens: see `remote_asked`.)
             remote_lights: false,
             remote_screens: false,
@@ -2406,7 +2414,7 @@ impl Ui {
             }
             Switch::Remote => {
                 // What the system then reports, not what was asked (see `tick`).
-                if self.remote_there && self.switching.is_none() {
+                if self.remote_there && self.switching.is_none() && self.reading_switches.is_none() {
                     let on = !self.remote;
                     self.switching = Some((SwitchAsked::Remote, std::thread::spawn(move || crate::source::switch(crate::link::Switch::Remote, on))));
                 }
@@ -2415,7 +2423,7 @@ impl Ui {
             }
             Switch::Startup => {
                 // What the system then reports, not what was asked (see `tick`).
-                if self.switching.is_none() {
+                if self.switching.is_none() && self.reading_switches.is_none() {
                     let on = !self.autostart;
                     self.switching = Some((SwitchAsked::Startup, std::thread::spawn(move || crate::source::switch(crate::link::Switch::Autostart, on))));
                 }
@@ -3423,6 +3431,15 @@ impl Ui {
         if self.sending.is_some() {
             self.next_frame = now + Duration::from_millis(300);
         }
+        // The switches as they are, read.
+        if self.reading_switches.as_ref().is_some_and(|reading| reading.is_finished()) {
+            if let Ok((autostart, remote)) = self.reading_switches.take().unwrap().join() {
+                self.autostart = autostart;
+                self.remote = remote;
+            }
+            *SWITCHES_READ.lock().unwrap() = Some((self.autostart, self.remote));
+            self.next_frame = now;
+        }
         // A switch turned: as it is now.
         if self.switching.as_ref().is_some_and(|(_, turning)| turning.is_finished()) {
             let (what, turning) = self.switching.take().unwrap();
@@ -3436,6 +3453,7 @@ impl Ui {
                     self.ask_remote(|| None);
                 }
             }
+            *SWITCHES_READ.lock().unwrap() = Some((self.autostart, self.remote));
             self.next_frame = now;
         }
         // The diagnostics put together: copied, or shown to be sent.
@@ -3466,7 +3484,7 @@ impl Ui {
             }
             self.next_frame = now;
         }
-        if self.switching.is_some() || self.reporting.is_some() || self.remote_asked.is_some() {
+        if self.switching.is_some() || self.reading_switches.is_some() || self.reporting.is_some() || self.remote_asked.is_some() {
             self.next_frame = self.next_frame.min(now + Duration::from_millis(100));
         }
         // The lights' program fetched (or taken away): how that went, once it is over.
