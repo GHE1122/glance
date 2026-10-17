@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, RECT};
-use windows::Win32::UI::WindowsAndMessaging::IDC_ARROW;
 
 use crate::lyrics::Line;
 use crate::playing::{Follow, Sung};
@@ -80,6 +79,8 @@ pub struct FullMusic {
     pointer: Option<(f32, f32)>,
     moved: Option<Instant>,
     controls: f32,
+    /// Whether the pointer over it is hidden, as last told.
+    pointer_hidden: Option<bool>,
     /// What a press is on, as last drawn; the last press (for a double click); what is dragged.
     hits: Vec<((f32, f32, f32, f32), Hit)>,
     pressed: Option<Instant>,
@@ -118,6 +119,7 @@ impl FullMusic {
             pointer: None,
             moved: Some(now),
             controls: 1.0,
+            pointer_hidden: None,
             hits: Vec::new(),
             pressed: None,
             dragging: None,
@@ -152,10 +154,12 @@ impl FullMusic {
         let awake = self.dragging.is_some() || self.moved.is_some_and(|moved| now.duration_since(moved) < AWAKE);
         let to = if awake { 1.0 } else { 0.0 };
         self.controls += (to - self.controls).signum() * (dt / CONTROLS_FADE).min((to - self.controls).abs());
-        if awake {
-            self.window.point(IDC_ARROW);
-        } else {
-            self.window.point_none();
+        // The pointer hidden with them, and back with them: told as that changes, not at every frame (where the
+        // pointer was over another screen, it came and went there).
+        if self.pointer_hidden != Some(!awake) {
+            self.pointer_hidden = Some(!awake);
+            let over = crate::mouse::cursor_position().is_some_and(|at| at.x >= self.screen.left && at.x < self.screen.right && at.y >= self.screen.top && at.y < self.screen.bottom);
+            self.window.point_none(!awake, over);
         }
         // What plays, and its cover's colours.
         let heard_now = crate::playing::music();
@@ -169,10 +173,23 @@ impl FullMusic {
                 self.tint2 = std::array::from_fn(|i| self.tint2[i] + (tint2[i] - self.tint2[i]) * ease);
             }
         }
-        let (lines, sung_now) = match heard_now.as_ref().and_then(|playing| playing.sung.clone()) {
-            Some(Sung::Lines { lines, now, .. }) => (Some(lines), now),
+        let sung = heard_now.as_ref().and_then(|playing| playing.sung.clone());
+        let (lines, sung_now) = match &sung {
+            Some(Sung::Lines { lines, now, .. }) => (Some(lines.clone()), *now),
             _ => (None, None),
         };
+        // With no lines to show, what plays large, and why there are none under it.
+        let said = lines.is_none().then(|| {
+            let lang = crate::update::language();
+            let why = match (&heard_now, &sung) {
+                (None, _) => lang.pick("没有正在播放的音乐", "No music is playing"),
+                (Some(_), Some(Sung::Asking)) => lang.pick("正在查找歌词…", "Finding the lyrics…"),
+                (Some(_), Some(Sung::Untimed { .. })) => lang.pick("播放器未提供播放进度，无法同步歌词", "The player does not tell how far into the track it is, so the lyrics cannot follow it"),
+                _ => lang.pick("没有找到歌词", "No lyrics were found"),
+            };
+            let (title, artist) = heard_now.as_ref().map_or_else(Default::default, |playing| (playing.title.clone(), playing.artist.clone()));
+            (title, artist, why.to_string())
+        });
         if lines.as_ref().map(Arc::as_ptr) != self.lines.as_ref().map(Arc::as_ptr) {
             self.leaving = None;
         } else if sung_now != self.now {
@@ -206,6 +223,9 @@ impl FullMusic {
             }
             if let Some(lines) = &lines {
                 draw_lines(frame, (w, h), lines, now_index, leaving.map(|(index, since)| (index, now.duration_since(since).as_secs_f32())), position, t, &music);
+            }
+            if let Some((title, artist, why)) = &said {
+                draw_said(frame, (w, h), title, artist, why);
             }
             if controls > 0.0 {
                 draw_controls(frame, (w, h), controls, pointer, playing, position, length, &mut hits);
@@ -375,6 +395,22 @@ fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>,
     sizes.iter_mut().for_each(|size| *size *= fit);
     rooms.iter_mut().for_each(|room| *room *= fit);
     let sway = (t * 0.4).sin() * 0.04;
+    // Each character as it stands now: what it says, its face, its middle and top, the point it turns and swells
+    // about, its tilt and swell, how far it has come, how lit it is, how much of it shows, its room.
+    struct Glyph {
+        said: String,
+        font: Font,
+        middle: f32,
+        top: f32,
+        pivot: f32,
+        tilt: f32,
+        swell: f32,
+        came: f32,
+        lit: f32,
+        alpha: f32,
+        room: f32,
+    }
+    let mut glyphs = Vec::new();
     let mut x = left;
     for (k, ((ch, at, each), (size, room))) in chars.iter().zip(sizes.iter().zip(&rooms)).enumerate() {
         let middle = x + room / 2.0;
@@ -388,28 +424,79 @@ fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>,
         }
         let font = Font::new(Family::YaHei, *size, 700.0);
         let y = baseline + (k as f32 * 0.9 + t * 0.8 + which as f32).sin() * base * 0.18 + (middle - w / 2.0) * sway;
-        let tilt = TILTS[(k + which) % 8] + (t * 0.6 + k as f32).sin() * 0.025;
         let came = ease((age + 0.25) / 0.55);
         // How lit it is: up as it is sung, down after.
         let lit = ease((age + 0.08) / 0.18) * (1.0 - ease((age - *each as f32 - 0.1) / 0.5)) * (1.0 - out);
         let breathe = 1.0 + 0.02 * (t * 1.7 + k as f32 * 1.3).sin() * (0.5 + music.swell);
-        let swell = breathe * (1.0 + lit * (0.14 * music.bass + 0.04 * music.beat));
-        let glow = 10.0 + 8.0 * music.swell + lit * (14.0 + 30.0 * music.high);
         let rise = (1.0 - came) * 26.0 - out * 60.0 - music.beat * 3.0;
-        let alpha = (came * 1.4).min(1.0) * (1.0 - out);
         let (ascent, _) = frame.gfx.baseline(font);
-        let said = ch.to_string();
-        let top = y - ascent + rise;
-        let ink = 0.92 + 0.08 * lit;
-        frame.turned(middle, y - size * 0.35 + rise, tilt * (0.4 + 0.6 * came), (swell, swell), |frame| {
-            if came < 1.0 {
-                // Up out of a blur.
-                frame.glow(Color::hex(0xFFFFFF, alpha), (1.0 - came) * 8.0 + 0.5, |frame| frame.text_moving(&said, font, Color::hex(0xFFFFFF, 1.0), middle - room / 2.0, top, room * 2.0, Align::Start));
-            }
-            frame.glow(Color::hex(0xFFFFFF, 0.85 * alpha), glow / 2.0, |frame| frame.text_moving(&said, font, Color::hex(0xFFFFFF, 1.0), middle - room / 2.0, top, room * 2.0, Align::Start));
-            frame.text_moving(&said, font, Color { r: ink, g: ink * 0.985, b: ink * 0.965, a: alpha * came * came }, middle - room / 2.0, top, room * 2.0, Align::Start);
+        glyphs.push(Glyph {
+            said: ch.to_string(),
+            font,
+            middle,
+            top: y - ascent + rise,
+            pivot: y - size * 0.35 + rise,
+            tilt: (TILTS[(k + which) % 8] + (t * 0.6 + k as f32).sin() * 0.025) * (0.4 + 0.6 * came),
+            swell: breathe * (1.0 + lit * (0.14 * music.bass + 0.04 * music.beat)),
+            came,
+            lit,
+            alpha: (came * 1.4).min(1.0) * (1.0 - out),
+            room: *room,
         });
     }
+    // Each drawn in `colour`, so much of it as `of` says.
+    let draw = |frame: &Frame, colour: [f32; 3], of: &dyn Fn(&Glyph) -> f32| {
+        for glyph in &glyphs {
+            let a = of(glyph);
+            if a <= 0.004 {
+                continue;
+            }
+            frame.turned(glyph.middle, glyph.pivot, glyph.tilt, (glyph.swell, glyph.swell), |frame| {
+                frame.text_moving(&glyph.said, glyph.font, Color { r: colour[0], g: colour[1], b: colour[2], a }, glyph.middle - glyph.room / 2.0, glyph.top, glyph.room * 2.0, Align::Start)
+            });
+        }
+    };
+    // The glows, each for the whole line at once (one blur for each, not one for each character: so many a frame,
+    // the frames came late and the line moved by jumps): every character's, softly; the one being sung's, wider and
+    // stronger with the highs; and those still coming, out of a blur.
+    let white = [1.0, 1.0, 1.0];
+    frame.glow(Color::hex(0xFFFFFF, 0.85), (10.0 + 8.0 * music.swell) / 2.0, |frame| draw(frame, white, &|glyph| glyph.alpha));
+    if glyphs.iter().any(|glyph| glyph.lit > 0.01) {
+        frame.glow(Color::hex(0xFFFFFF, 0.85), (24.0 + 30.0 * music.high) / 2.0, |frame| draw(frame, white, &|glyph| glyph.alpha * glyph.lit));
+    }
+    if glyphs.iter().any(|glyph| glyph.came < 1.0) {
+        frame.glow(Color::hex(0xFFFFFF, 1.0), 4.0, |frame| draw(frame, white, &|glyph| glyph.alpha * (1.0 - glyph.came)));
+    }
+    for glyph in &glyphs {
+        let ink = 0.92 + 0.08 * glyph.lit;
+        let a = glyph.alpha * glyph.came * glyph.came;
+        if a > 0.004 {
+            frame.turned(glyph.middle, glyph.pivot, glyph.tilt, (glyph.swell, glyph.swell), |frame| {
+                frame.text_moving(&glyph.said, glyph.font, Color { r: ink, g: ink * 0.985, b: ink * 0.965, a }, glyph.middle - glyph.room / 2.0, glyph.top, glyph.room * 2.0, Align::Start)
+            });
+        }
+    }
+}
+
+/// What plays, large at the left where the lines would be (its title, its artist under it), and why no lines show
+/// under that.
+fn draw_said(frame: &Frame, (w, h): (f32, f32), title: &str, artist: &str, why: &str) {
+    let left = w * 0.081;
+    let baseline = h * 0.62;
+    let big = Font::new(Family::YaHei, h * 0.09, 700.0);
+    let small = Font::new(Family::YaHei, (h * 0.029).max(14.0), 700.0);
+    let (ascent, _) = frame.gfx.baseline(big);
+    let room = w - 2.0 * left;
+    if !title.is_empty() {
+        frame.glow(Color::hex(0xFFFFFF, 0.6), 8.0, |frame| frame.text_moving(title, big, Color::hex(0xFFFFFF, 1.0), left, baseline - ascent, room, Align::Start));
+        frame.text_moving(title, big, Color::hex(0xF4F1EC, 0.95), left, baseline - ascent, room, Align::Start);
+    }
+    let mut y = baseline + h * 0.03;
+    if !artist.is_empty() {
+        frame.text_moving(artist, small, Color::hex(0xFFFFFF, 0.75), left + 4.0, y, room, Align::Start);
+        y += small.size * 1.6;
+    }
+    frame.text_moving(why, small, Color::hex(0xFFFFFF, 0.5), left + 4.0, y, room, Align::Start);
 }
 
 /// The controls, `shown` of them, along the bottom of `(w, h)`: the track short in the middle with its times at its

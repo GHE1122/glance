@@ -318,11 +318,14 @@ impl Window {
 
     /// The pointer's shape over the window from here on: `shape`, one of
     /// the system's (IDC_*).
-    /// Shows no pointer over it, till `point` is asked again.
-    pub fn point_none(&self) {
+    /// Shows no pointer over it (`none`), or the arrow, from the pointer's next move over it on, and at once where
+    /// it is over it (`over`): told elsewhere, the pointer over another window would come and go.
+    pub fn point_none(&self, none: bool, over: bool) {
         unsafe {
-            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, NO_POINTER);
-            SetCursor(None);
+            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, if none { NO_POINTER } else { 0 });
+            if over {
+                SetCursor(if none { None } else { LoadCursorW(None, IDC_ARROW).ok() });
+            }
         }
     }
 
