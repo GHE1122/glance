@@ -73,25 +73,31 @@ fn note_in(dir: &std::path::Path, what: impl Display) {
     if NOTING.with(|noting| noting.replace(true)) {
         return;
     }
-    let what = private(&what.to_string());
     let mut log = LOG.lock().unwrap_or_else(PoisonError::into_inner);
-    let log = log.get_or_insert_with(|| read(dir));
-    let now = Instant::now();
-    let again = log.last.as_mut().filter(|(last, at, _)| *last == what && now.duration_since(*at) < REPEATS_WITHIN);
-    if let Some((_, _, more)) = again {
-        *more += 1;
-    } else {
-        if let Some((_, _, more)) = log.last.take().filter(|(_, _, more)| *more > 0) {
-            push(&mut log.lines, format!("(the line before came {more} more times)"));
+    log.get_or_insert_with(|| read(dir)).add(dir, what);
+    NOTING.with(|noting| noting.set(false));
+}
+
+impl Log {
+    /// Adds `what` and keeps the log in `dir` (a line that came just before is counted, not written).
+    fn add(&mut self, dir: &std::path::Path, what: impl Display) {
+        let what = private(&what.to_string());
+        let now = Instant::now();
+        let again = self.last.as_mut().filter(|(last, at, _)| *last == what && now.duration_since(*at) < REPEATS_WITHIN);
+        if let Some((_, _, more)) = again {
+            *more += 1;
+            return;
         }
-        push(&mut log.lines, what.clone());
-        log.last = Some((what, now, 0));
-        let text: String = log.lines.iter().map(|line| format!("{line}\n")).collect();
+        if let Some((_, _, more)) = self.last.take().filter(|(_, _, more)| *more > 0) {
+            push(&mut self.lines, format!("(the line before came {more} more times)"));
+        }
+        push(&mut self.lines, what.clone());
+        self.last = Some((what, now, 0));
+        let text: String = self.lines.iter().map(|line| format!("{line}\n")).collect();
         if crate::elevation::ensure_folder(dir).is_ok() {
             let _ = crate::elevation::write_in_place(dir, FILE, text.as_bytes());
         }
     }
-    NOTING.with(|noting| noting.set(false));
 }
 
 /// Adds `what`, stamped with the local time, keeping only the latest lines.
@@ -164,15 +170,17 @@ mod tests {
 
     #[test]
     fn keeps_the_latest_lines_counts_repeats_and_names_no_one() {
+        // (A log of the test's own, in a folder of its own: the process's is written by the other tests meanwhile.)
         let dir = std::env::temp_dir().join(format!("glance-journal-test-{}", std::process::id()));
+        let mut log = read(&dir);
         for i in 0..KEPT + 5 {
-            note_in(&dir, format!("line {i}\nwith a break"));
+            log.add(&dir, format!("line {i}\nwith a break"));
         }
         // The same line again: counted, and told once another comes.
         for _ in 0..3 {
-            note_in(&dir, "again");
+            log.add(&dir, "again");
         }
-        note_in(&dir, r"could not read C:\Users\Someone O'Else\AppData\x and D:\Users\me/y");
+        log.add(&dir, r"could not read C:\Users\Someone O'Else\AppData\x and D:\Users\me/y");
         let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), KEPT);
@@ -180,7 +188,6 @@ mod tests {
         assert!(lines[KEPT - 3].ends_with("  again"));
         assert!(lines[KEPT - 2].ends_with("  (the line before came 2 more times)"));
         assert!(lines[KEPT - 1].ends_with(r"could not read C:\Users\<user>\AppData\x and D:\Users\<user>/y"), "{}", lines[KEPT - 1]);
-        assert_eq!(recent(2).len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

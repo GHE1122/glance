@@ -612,7 +612,12 @@ pub mod kept {
     }
 
     pub fn read(track: &Track) -> Option<Kept> {
-        let text = crate::elevation::read_in_place(&folder(), &name(track), FILE_MOST)?;
+        read_in(&folder(), track)
+    }
+
+    /// As `read`, from `folder`.
+    pub(super) fn read_in(folder: &std::path::Path, track: &Track) -> Option<Kept> {
+        let text = crate::elevation::read_in_place(folder, &name(track), FILE_MOST)?;
         let file: File = serde_json::from_str(&text).ok()?;
         (file.track == *track).then(|| Kept { lines: file.lines, asked: SystemTime::UNIX_EPOCH + Duration::from_secs(file.asked), sure: file.sure })
     }
@@ -621,15 +626,19 @@ pub mod kept {
     /// answered; and, kept the most, lets the files written longest ago go. (Not kept where it cannot be written:
     /// they are asked for again.)
     pub fn write(track: &Track, lines: Option<&[Line]>, sure: bool) {
-        let folder = folder();
-        if folder.parent().is_none_or(|own| crate::elevation::ensure_folder(own).is_err()) || crate::elevation::ensure_folder(&folder).is_err() {
+        write_in(&folder(), track, lines, sure);
+    }
+
+    /// As `write`, into `folder`.
+    pub(super) fn write_in(folder: &std::path::Path, track: &Track, lines: Option<&[Line]>, sure: bool) {
+        if folder.parent().is_none_or(|own| crate::elevation::ensure_folder(own).is_err()) || crate::elevation::ensure_folder(folder).is_err() {
             return;
         }
         let asked = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
         let file = File { track: track.clone(), asked, lines: lines.map(<[Line]>::to_vec), sure };
         let Ok(json) = serde_json::to_vec(&file) else { return };
-        if crate::elevation::write_in_place(&folder, &name(track), &json).is_ok() {
-            trimmed(&folder);
+        if crate::elevation::write_in_place(folder, &name(track), &json).is_ok() {
+            trimmed(folder);
         }
     }
 
@@ -728,19 +737,22 @@ mod tests {
         assert_eq!((lines[1].text.as_str(), lines[1].translation.as_deref()), ("Again", None));
     }
 
+    /// Kept in a folder of the test's own (the user's kept lyrics are not touched: written there, the oldest of them
+    /// could be let go).
     #[test]
     fn keeps_lyrics_while_they_are_fresh() {
+        let folder = std::env::temp_dir().join(format!("glance-kept-lyrics-{}", std::process::id())).join("lyrics");
         let track = Track { netease: Some(7), title: "kept test".into(), artist: "nobody".into(), album: String::new(), seconds: 1 };
         let worded = word_timed("[1000,500](1000,500,0)la", None);
-        kept::write(&track, Some(&worded), true);
-        let read = kept::read(&track).expect("kept");
+        kept::write_in(&folder, &track, Some(&worded), true);
+        let read = kept::read_in(&folder, &track).expect("kept");
         assert_eq!(read.lines.as_deref(), Some(&worded[..]));
         assert!(read.fresh());
-        kept::write(&track, None, true);
-        assert!(kept::read(&track).is_some_and(|kept| kept.lines.is_none() && kept.fresh()));
+        kept::write_in(&folder, &track, None, true);
+        assert!(kept::read_in(&folder, &track).is_some_and(|kept| kept.lines.is_none() && kept.fresh()));
         let other = Track { seconds: 2, ..track.clone() };
-        assert!(kept::read(&other).is_none());
-        std::fs::remove_file(kept::folder().join(kept::name(&track))).unwrap();
+        assert!(kept::read_in(&folder, &other).is_none());
+        let _ = std::fs::remove_dir_all(folder.parent().unwrap());
     }
 
     #[test]

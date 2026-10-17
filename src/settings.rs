@@ -4,9 +4,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
+#[cfg(not(test))]
 use windows::Win32::System::Com::CoTaskMemFree;
 #[cfg(windows)]
-use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_RoamingAppData};
+#[cfg(all(windows, not(test)))]
+use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 
 #[cfg(windows)]
 const FILE: &str = "settings.json";
@@ -770,7 +773,15 @@ pub fn local_dir() -> PathBuf {
     own_folder_in(&FOLDERID_LocalAppData)
 }
 
-#[cfg(windows)]
+/// In a test, a folder of this test process's own, where both are (a test never reads or writes the user's: run as
+/// a release, as tests are, they are the installed Glance's).
+#[cfg(all(windows, test))]
+fn own_folder_in(known: &windows::core::GUID) -> PathBuf {
+    let which = if *known == FOLDERID_RoamingAppData { "roaming" } else { "local" };
+    std::env::temp_dir().join(format!("glance-test-{}", std::process::id())).join(which)
+}
+
+#[cfg(all(windows, not(test)))]
 fn own_folder_in(known: &windows::core::GUID) -> PathBuf {
     let folder = unsafe { SHGetKnownFolderPath(known, KF_FLAG_DEFAULT, None) }.expect("application data folder");
     let path = PathBuf::from(unsafe { folder.to_string() }.expect("folder path"));
