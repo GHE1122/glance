@@ -19,6 +19,149 @@ pub fn saved(dir: &Path) -> bool {
 /// Larger than this, a settings file is not one Glance wrote.
 #[cfg(windows)]
 const MOST: u64 = 1 << 20;
+/// The settings file as it was, where it did not read whole (see `Settings::load`).
+#[cfg(windows)]
+const UNREAD: &str = "settings.unread.json";
+
+/// The settings `text` holds, and the parts of it left out, by where they are (`widgets[1].layout`): none where it
+/// reads whole. Where it does not, every part that does is kept (see `salvaged`).
+fn read(text: &str) -> (Settings, Vec<String>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else { return (Settings::default(), vec!["all of it (not JSON)".to_string()]) };
+    if usable(&value) {
+        if let Ok(settings) = serde_json::from_value(value.clone()) {
+            return (settings, Vec::new());
+        }
+    }
+    salvaged(value)
+}
+
+/// Whether `value` is settings as Glance writes them: read, written again and read again alike (a number too large
+/// to be one reads as infinite, and is written as none at all).
+fn usable(value: &serde_json::Value) -> bool {
+    serde_json::from_value::<Settings>(value.clone())
+        .ok()
+        .and_then(|settings| serde_json::to_value(&settings).ok())
+        .is_some_and(|again| serde_json::from_value::<Settings>(again).is_ok())
+}
+
+/// Settings from `kept` that does not read whole: from the defaults, each part of it put in its place where the
+/// whole still reads; one that does not, an object or a list, its own parts one by one (a widget that does not read
+/// leaves the others); a part that reads in no way, left as the defaults have it. Returns them, and the parts left
+/// out, by where they are.
+fn salvaged(kept: serde_json::Value) -> (Settings, Vec<String>) {
+    let mut whole = serde_json::to_value(Settings::default()).unwrap_or(serde_json::Value::Null);
+    let mut left_out = Vec::new();
+    let serde_json::Value::Object(fields) = kept else { return (Settings::default(), vec!["all of it (not an object)".to_string()]) };
+    for (name, part) in fields {
+        graft(&mut whole, &[Step::Key(name.clone())], &name, part, &mut left_out);
+    }
+    (serde_json::from_value(whole).unwrap_or_default(), left_out)
+}
+
+/// A step into a JSON value: a field of an object, or a place in a list.
+#[derive(Clone)]
+enum Step {
+    Key(String),
+    Place(usize),
+}
+
+/// `part` put at `path` in `whole` where `whole` still reads as settings (see `usable`); where it does not, an
+/// object or a list, put there empty first and filled part by part (each that fits kept, the others left out and
+/// named in `left_out` as the file has them: `shown`); else left out whole, `whole` as it was.
+fn graft(whole: &mut serde_json::Value, path: &[Step], shown: &str, part: serde_json::Value, left_out: &mut Vec<String>) {
+    let before = at(whole, path).cloned();
+    *slot(whole, path) = part.clone();
+    if usable(whole) {
+        return;
+    }
+    let empty = match &part {
+        serde_json::Value::Object(_) => Some(serde_json::Value::Object(serde_json::Map::new())),
+        serde_json::Value::Array(_) => Some(serde_json::Value::Array(Vec::new())),
+        _ => None,
+    };
+    // (An object starts from what the defaults have there, where they have one: its fields that do not read keep
+    // theirs.)
+    let start = match (&part, &before) {
+        (serde_json::Value::Object(_), Some(serde_json::Value::Object(defaults))) => Some(serde_json::Value::Object(defaults.clone())),
+        _ => empty,
+    };
+    if let Some(start) = start {
+        *slot(whole, path) = start;
+        if usable(whole) {
+            match part {
+                serde_json::Value::Object(fields) => {
+                    for (name, inner) in fields {
+                        let mut deeper = path.to_vec();
+                        deeper.push(Step::Key(name.clone()));
+                        graft(whole, &deeper, &format!("{shown}.{name}"), inner, left_out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, item) in items.into_iter().enumerate() {
+                        let place = at(whole, path).and_then(serde_json::Value::as_array).map_or(0, Vec::len);
+                        if let Some(serde_json::Value::Array(list)) = at_mut(whole, path) {
+                            list.push(serde_json::Value::Null);
+                        }
+                        let mut deeper = path.to_vec();
+                        deeper.push(Step::Place(place));
+                        graft(whole, &deeper, &format!("{shown}[{index}]"), item, left_out);
+                        // (One that does not fit is taken out again, not left as a hole.)
+                        if at(whole, &deeper).is_some_and(serde_json::Value::is_null) {
+                            if let Some(serde_json::Value::Array(list)) = at_mut(whole, path) {
+                                list.pop();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+    }
+    left_out.push(shown.to_string());
+    match before {
+        Some(before) => *slot(whole, path) = before,
+        None => remove(whole, path),
+    }
+}
+
+/// The value at `path` in `whole`, if there is one.
+fn at<'a>(whole: &'a serde_json::Value, path: &[Step]) -> Option<&'a serde_json::Value> {
+    path.iter().try_fold(whole, |value, step| match step {
+        Step::Key(name) => value.get(name),
+        Step::Place(place) => value.get(*place),
+    })
+}
+
+fn at_mut<'a>(whole: &'a mut serde_json::Value, path: &[Step]) -> Option<&'a mut serde_json::Value> {
+    path.iter().try_fold(whole, |value, step| match step {
+        Step::Key(name) => value.get_mut(name),
+        Step::Place(place) => value.get_mut(*place),
+    })
+}
+
+/// The place at `path` in `whole`, made where it is not there yet (its parent is: `graft` goes down from it).
+fn slot<'a>(whole: &'a mut serde_json::Value, path: &[Step]) -> &'a mut serde_json::Value {
+    let (last, parent) = path.split_last().expect("a path has a step");
+    let parent = at_mut(whole, parent).expect("the parent is there");
+    match last {
+        Step::Key(name) => {
+            if !parent.is_object() {
+                *parent = serde_json::Value::Object(serde_json::Map::new());
+            }
+            parent.as_object_mut().unwrap().entry(name.clone()).or_insert(serde_json::Value::Null)
+        }
+        Step::Place(place) => &mut parent.as_array_mut().expect("a list")[*place],
+    }
+}
+
+fn remove(whole: &mut serde_json::Value, path: &[Step]) {
+    let Some((Step::Key(name), parent)) = path.split_last() else { return };
+    if let Some(serde_json::Value::Object(fields)) = at_mut(whole, parent) {
+        fields.remove(name);
+    }
+}
+
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -632,22 +775,30 @@ fn own_folder_in(known: &windows::core::GUID) -> PathBuf {
 
 #[cfg(windows)]
 impl Settings {
-    /// A missing or hand-edited file that no longer parses means defaults;
-    /// numbers outside what the settings offer are brought within it.
-    /// Read and written so that Glance, running elevated, never follows a
-    /// link someone put in the user's folder (see `elevation::read_in_place`).
+    /// A missing file means defaults. A file that does not read whole (written by a later version, or edited by
+    /// hand) keeps every part of it that does read, the rest as it would be without it (see `salvaged`); what was
+    /// left out is noted, and the file as it was kept beside it (`UNREAD`), as the next save writes over it. Numbers
+    /// outside what the settings offer are brought within it. Read and written so that Glance, running elevated,
+    /// never follows a link someone put in the user's folder (see `elevation::read_in_place`).
     pub fn load(dir: &Path) -> Self {
         let kept = crate::elevation::read_in_place(dir, FILE, MOST);
         // With none kept, this is where Glance begins here.
         let begins = kept.is_none().then(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs() / 86400));
-        let mut settings: Settings = kept.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        let mut settings = match kept {
+            None => Settings::default(),
+            Some(text) => {
+                let (settings, left_out) = read(&text);
+                if !left_out.is_empty() {
+                    crate::journal::note(format!("settings: read without {} (the file as it was kept as {UNREAD})", left_out.join(", ")));
+                    if let Err(error) = crate::elevation::write_in_place(dir, UNREAD, text.as_bytes()) {
+                        crate::journal::note(format!("settings: the file as it was not kept ({error})"));
+                    }
+                }
+                settings
+            }
+        };
         if begins.is_some() {
             settings.began = begins;
-        }
-        // A number too large to be one (it reads as infinite, and is written
-        // as none at all): not a file Glance wrote.
-        if serde_json::to_value(&settings).and_then(serde_json::from_value::<Settings>).is_err() {
-            settings = Settings::default();
         }
         settings.interval_ms = settings.interval_ms.clamp(250, 10_000);
         settings.close_delay_ms = settings.close_delay_ms.min(10_000);
@@ -738,6 +889,42 @@ pub fn merged(held: &Settings, base: &Settings, mine: &Settings) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file that does not read whole keeps every part that does: a field of the wrong kind and a widget that does
+    /// not read leave the others, and only they are named. (Before, every setting went back to its default, and the
+    /// next save wrote over the file.)
+    #[test]
+    fn a_file_that_does_not_read_whole_keeps_what_does() {
+        let widget = |x: i32| serde_json::json!({ "at": [x, 0], "layout": { "form": "music", "scale": 1.0, "extra": [0.0, 0.0] } });
+        let mut broken = widget(30);
+        broken["layout"]["scale"] = serde_json::json!("large");
+        let text = serde_json::json!({
+            "skin": "glass",
+            "interval_ms": "fast",
+            "panel_size": 1.5,
+            "widgets": [widget(10), broken, widget(20)],
+        })
+        .to_string();
+        // (Read whole, as it was before, it reads not at all: every setting went back to its default.)
+        assert!(serde_json::from_str::<Settings>(&text).is_err());
+        let (settings, left_out) = read(&text);
+        assert_eq!((settings.skin.as_str(), settings.panel_size), ("glass", 1.5));
+        assert_eq!(settings.interval_ms, Settings::default().interval_ms);
+        assert_eq!(settings.widgets.iter().map(|widget| widget.at.0).collect::<Vec<_>>(), vec![10, 20]);
+        assert_eq!(left_out, vec!["interval_ms".to_string(), "widgets[1]".to_string()]);
+        // A file that reads whole names nothing.
+        let (_, none) = read(&serde_json::to_string(&settings).unwrap());
+        assert!(none.is_empty(), "{none:?}");
+    }
+
+    /// A number too large to be one (infinite as an f32, written as none at all) is left out alone, not the whole file.
+    #[test]
+    fn a_number_too_large_is_left_out_alone() {
+        let (settings, left_out) = read(r#"{ "skin": "glass", "panel_size": 1e39 }"#);
+        assert_eq!(settings.skin, "glass");
+        assert_eq!(settings.panel_size, Settings::default().panel_size);
+        assert_eq!(left_out, vec!["panel_size".to_string()]);
+    }
 
     #[test]
     fn music_rooms_kept_per_edge() {

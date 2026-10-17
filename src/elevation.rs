@@ -895,7 +895,9 @@ pub fn write_in_place(folder: &Path, name: &str, contents: &[u8]) -> std::io::Re
         file.delete();
         return Err(refused());
     }
-    if let Err(error) = file.0.write_all(contents) {
+    // On the disk before it takes the name's place: a power cut or a stop of the system just after would otherwise
+    // leave the name on an empty file (the settings then read as none).
+    if let Err(error) = file.0.write_all(contents).and_then(|()| file.0.sync_all()) {
         file.delete();
         return Err(error);
     }

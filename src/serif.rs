@@ -67,7 +67,7 @@ pub fn want() {
 }
 
 /// The face had (a picture's test drawing with it), if `bytes` are it.
-#[cfg(test)]
+#[cfg(all(test, feature = "studio"))]
 pub fn have(bytes: Vec<u8>) {
     assert!(is_it(&bytes), "not the face");
     let _ = FACE.set(bytes);
