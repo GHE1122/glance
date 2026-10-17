@@ -696,6 +696,10 @@ pub struct Settings {
     /// The edge it was pinned at (none, pinned before this was kept: the edge nearest that point).
     #[serde(default)]
     pub panel_pinned_edge: Option<Edge>,
+    /// Each GPU's number in the module that shows it ("gpu:N"), by what it is (see `GpuInfo::identity`), as it was
+    /// first given (see `slot_gpus`).
+    #[serde(default)]
+    pub gpu_slots: Vec<(String, usize)>,
     /// How large what plays is as the panel slides it out, from a side edge and from the top, as the hand made it.
     pub music_rooms: MusicRooms,
     /// The desktop widgets torn off the panel.
@@ -734,6 +738,7 @@ impl Default for Settings {
             panel_at: None,
             panel_pinned: None,
             panel_pinned_edge: None,
+            gpu_slots: Vec::new(),
             music_rooms: MusicRooms::default(),
             widgets: Vec::new(),
             music_source: None,
@@ -871,6 +876,28 @@ impl Settings {
     }
 }
 
+/// Gives each GPU of `gpus` its number in the module that shows it: the one it was given before, by what it is
+/// (`kept`); a GPU not seen before, the lowest no other was given, and is kept with it. (Numbered as Windows listed
+/// them, a GPU took another's number, and its settings, as a screen's cable moved from one to the other or an
+/// external one came: they were listed in another order.) With none kept yet, each keeps the number counted as before
+/// (the order Windows lists them in), that the settings made for it stay its own. Whether any was new.
+pub fn slot_gpus(gpus: &mut [crate::reading::GpuInfo], kept: &mut Vec<(String, usize)>) -> bool {
+    let first = kept.is_empty();
+    let mut new = false;
+    for gpu in gpus.iter_mut() {
+        if let Some((_, slot)) = kept.iter().find(|(identity, _)| *identity == gpu.identity) {
+            gpu.slot = *slot;
+            continue;
+        }
+        if !first {
+            gpu.slot = (0..).find(|slot| !kept.iter().any(|(_, taken)| taken == slot)).unwrap();
+        }
+        kept.push((gpu.identity.clone(), gpu.slot));
+        new = true;
+    }
+    new
+}
+
 /// `held` (the settings as they are now) with what `mine` changed from
 /// `base` (as they were when `mine` was taken from them): a change made
 /// elsewhere meanwhile stands unless `mine` changed the same setting.
@@ -942,6 +969,25 @@ mod tests {
         // A file that reads whole names nothing.
         let (_, none) = read(&serde_json::to_string(&settings).unwrap());
         assert!(none.is_empty(), "{none:?}");
+    }
+
+    /// Each GPU keeps its number by what it is, listed in whatever order; the first time, each keeps the number
+    /// counted from Windows' order; one new takes the lowest free.
+    #[test]
+    fn a_gpu_keeps_its_number_whatever_order_it_comes_in() {
+        let gpu = |identity: &str, slot| crate::reading::GpuInfo { slot, identity: identity.into(), name: String::new(), mem_total: 0, shared_total: 0 };
+        let slots = |gpus: &[crate::reading::GpuInfo]| gpus.iter().map(|gpu| (gpu.identity.clone(), gpu.slot)).collect::<Vec<_>>();
+        let mut kept = Vec::new();
+        let mut gpus = [gpu("discrete", 0), gpu("integrated", 2)];
+        assert!(slot_gpus(&mut gpus, &mut kept));
+        assert_eq!(slots(&gpus), [("discrete".into(), 0), ("integrated".into(), 2)]);
+        // Listed the other way round, with an external one: each its own, the new one the lowest free.
+        let mut gpus = [gpu("integrated", 0), gpu("external", 1), gpu("discrete", 2)];
+        assert!(slot_gpus(&mut gpus, &mut kept));
+        assert_eq!(slots(&gpus), [("integrated".into(), 2), ("external".into(), 1), ("discrete".into(), 0)]);
+        let mut gpus = [gpu("discrete", 0)];
+        assert!(!slot_gpus(&mut gpus, &mut kept));
+        assert_eq!(gpus[0].slot, 0);
     }
 
     /// Read from its file as Glance reads it: numbers outside what the settings offer brought within it; a file that

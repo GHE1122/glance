@@ -1996,7 +1996,7 @@ mod tests {
             board: "Board".into(),
             threads: 4,
             mem_total: 1 << 32,
-            gpus: vec![GpuInfo { slot: 0, name: "GPU".into(), mem_total: 1 << 30, shared_total: 0 }],
+            gpus: vec![GpuInfo { slot: 0, identity: String::new(), name: "GPU".into(), mem_total: 1 << 30, shared_total: 0 }],
             found: Vec::new(),
         }
     }

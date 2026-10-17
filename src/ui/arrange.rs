@@ -718,7 +718,7 @@ mod tests {
             board: String::new(),
             threads: 1,
             mem_total: 1,
-            gpus: vec![GpuInfo { slot: 0, name: String::new(), mem_total: 0, shared_total: 0 }],
+            gpus: vec![GpuInfo { slot: 0, identity: String::new(), name: String::new(), mem_total: 0, shared_total: 0 }],
             found: Vec::new(),
         };
         // The CPU's lane a column of its own; the GPU's and the memory's

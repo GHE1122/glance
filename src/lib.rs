@@ -454,7 +454,7 @@ pub fn run() {
 
     journal::note_crashes();
     let config = settings::config_dir();
-    let settings = Settings::load(&config);
+    let mut settings = Settings::load(&config);
 
     // Started elevated (an earlier version's task, a build run by hand), Glance reads the sensors itself, and does
     // what the sensors' process does as it starts (see elevation.rs): its task kept, the driver in place.
@@ -467,9 +467,15 @@ pub fn run() {
     }
 
     // The readings: from the sensors' process, started now if it is not running; else Glance's own.
-    let (info, mut source) = source::open();
+    let (mut info, mut source) = source::open();
+    // Each GPU by the number it was given.
+    let new_gpus = settings::slot_gpus(&mut info.gpus, &mut settings.gpu_slots);
+    let gpu_slots = settings.gpu_slots.clone();
     let controller = Arc::new(Controller::new(info.clone(), &settings));
     let _ = APP.set(App { info, controller: controller.clone(), settings: Mutex::new(settings), config });
+    if new_gpus {
+        app().change(|settings| settings.gpu_slots = gpu_slots);
+    }
 
     thread::Builder::new().name("glance: panel".into()).spawn({
         let controller = controller.clone();

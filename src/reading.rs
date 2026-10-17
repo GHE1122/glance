@@ -43,10 +43,12 @@ impl StaticInfo {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GpuInfo {
     /// Its number in the module that shows it ("gpu:N"). Numbers stay with
-    /// the GPUs they were given to, adapters since left out (display-only
-    /// ones) keeping theirs, so that each GPU's lane keeps the settings
-    /// made for it.
+    /// the GPUs they were given to (see `settings::slot_gpus`), so that each
+    /// GPU's lane keeps the settings made for it.
     pub slot: usize,
+    /// What it is, as no other GPU here is: its maker's and model's numbers,
+    /// and where it sits on the PCI bus.
+    pub identity: String,
     pub name: String,
     pub mem_total: u64,
     pub shared_total: u64,
@@ -336,7 +338,7 @@ mod tests {
 
     #[test]
     fn finds_gpus_by_the_number_they_were_given() {
-        let gpu = |slot| GpuInfo { slot, name: format!("GPU {slot}"), mem_total: 0, shared_total: 0 };
+        let gpu = |slot| GpuInfo { slot, identity: String::new(), name: format!("GPU {slot}"), mem_total: 0, shared_total: 0 };
         // The second adapter (a virtual display's) left out: the third keeps "gpu:2".
         let info = StaticInfo {
             cpu_name: String::new(),

@@ -1129,11 +1129,15 @@ fn enumerate_gpus(power: &GpuPower) -> (Vec<Adapter>, Vec<GpuInfo>) {
             continue;
         }
         let LUID { LowPart, HighPart } = desc.AdapterLuid;
-        let power = adapter_address(open.hAdapter).and_then(|address| power.reader(address));
+        let address = adapter_address(open.hAdapter);
+        let power = address.and_then(|address| power.reader(address));
+        let identity = format!("{:04X}:{:04X}:{:08X}:{:02X}", desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision)
+            + &address.map_or(String::new(), |(bus, device, function)| format!("@{bus}.{device}.{function}"));
         adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter, power });
         let name_len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
         infos.push(GpuInfo {
             slot,
+            identity,
             name: String::from_utf16_lossy(&desc.Description[..name_len]),
             mem_total: desc.DedicatedVideoMemory as u64,
             shared_total: desc.SharedSystemMemory as u64,

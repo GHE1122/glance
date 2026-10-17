@@ -496,7 +496,7 @@ fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
             let statistics = accelerator.dictionary("PerformanceStatistics")?;
             // A figure the driver does not give is not read, not 0.
             let percent = |key| iokit::number(&statistics, key).map(|value| value.clamp(0, 100) as f32);
-            let info = GpuInfo { slot: 0, name: format!("{model} GPU"), mem_total: memory, shared_total: 0 };
+            let info = GpuInfo { slot: 0, identity: model.clone(), name: format!("{model} GPU"), mem_total: memory, shared_total: 0 };
             let reading = GpuSample {
                 usage: percent("Device Utilization %"),
                 engines: percent("Renderer Utilization %").map(|load| vec![("3D".to_string(), load)]),
