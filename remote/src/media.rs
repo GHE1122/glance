@@ -435,6 +435,12 @@ pub fn ask_of(follow: Follow, what: &str) -> Asked {
             return Asked::Not;
         }
     }
+    // Music followed and no music player tells Windows it plays (one only heard, NetEase without its plug-in): the
+    // key reaches such a player only where no program has Windows' media in front; where one has (a video in a
+    // browser), it would go to that one, and is not pressed.
+    else if follow == Follow::Music && manager().and_then(|manager| manager.GetCurrentSession()).is_ok() {
+        return Asked::Not;
+    }
     // (No program followed tells Windows it plays, or it is the one in front: pressed for it.)
     if press(key) {
         Asked::Pressed

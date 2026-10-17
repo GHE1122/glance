@@ -369,9 +369,9 @@ pub fn act_on(follow: Follow, act: Act) {
             }
             Act::Key(Key::Mute) => {
                 let muted = crate::actions::volume().is_some_and(|(_, muted)| muted);
-                let _ = crate::actions::set_volume(None, Some(!muted));
+                sound_to(None, Some(!muted));
             }
-            Act::Volume(level) => drop(crate::actions::set_volume(Some(level), None)),
+            Act::Volume(level) => sound_to(Some(level), None),
             Act::Seek(at) => {
                 // Shown there at once, and till the player says it is.
                 *SEEKING[f].lock().unwrap() = Some((at, Some(std::time::Instant::now() + SETTLES)));
@@ -405,8 +405,34 @@ pub fn slide(level: u8) {
 #[cfg(windows)]
 pub fn set_sound(level: Option<u8>, muted: Option<bool>) {
     if shown_sound(level, muted) {
-        std::thread::spawn(move || drop(crate::actions::set_volume(level, muted)));
+        sound_to(level, muted);
     }
+}
+
+/// The sound set to `level` and `muted` (each, where it is said), on the one thread that sets it, in the order asked;
+/// what was asked meanwhile taken together, the latest of each standing. (Set each on a thread of its own, as a
+/// slider was dragged, an earlier value could come after a later one and stand: the sound left louder than it was
+/// turned down to.)
+#[cfg(windows)]
+fn sound_to(level: Option<u8>, muted: Option<bool>) {
+    static SETTING: Mutex<Option<std::sync::mpsc::Sender<(Option<u8>, Option<bool>)>>> = Mutex::new(None);
+    let mut setting = SETTING.lock().unwrap();
+    let sender = setting.get_or_insert_with(|| {
+        let (asked, asking) = std::sync::mpsc::channel::<(Option<u8>, Option<bool>)>();
+        std::thread::Builder::new()
+            .name("glance: the sound set".into())
+            .spawn(move || {
+                while let Ok(mut wanted) = asking.recv() {
+                    while let Ok(later) = asking.try_recv() {
+                        wanted = (later.0.or(wanted.0), later.1.or(wanted.1));
+                    }
+                    let _ = crate::actions::set_volume(wanted.0, wanted.1);
+                }
+            })
+            .expect("a thread started");
+        asked
+    });
+    let _ = sender.send((level, muted));
 }
 
 /// The sound shown as `set_sound` sets it, at once; whether it is to be set (something shown changed, or nothing is
