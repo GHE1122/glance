@@ -217,7 +217,16 @@ fn folders_hold(folder: &Path) -> bool {
 
 /// What an install folder may already hold: an earlier Glance (and what an install of it leaves while it runs, or
 /// if it was cut short).
-const INSTALLED: [&str; 9] = [APP, SENSORS, "glance-remote.exe", "uninstall.exe", "resources", "licenses", INCOMING, REPLACED, TASKS_OFF];
+const INSTALLED: [&str; 12] = [APP, SENSORS, "glance-remote.exe", "uninstall.exe", "resources", "licenses", INCOMING, REPLACED, DONE_WITH, TASKS_OFF, TASKS_OFF_NEW, INSTALLING];
+/// What an install leaves while it runs (or left, cut short): none of it is an earlier Glance's own files.
+const UNDER_WAY: [&str; 6] = [INCOMING, REPLACED, DONE_WITH, TASKS_OFF, TASKS_OFF_NEW, INSTALLING];
+/// Held, sharing nothing, by the install under way, for the whole of it: another finds it held, and does nothing.
+/// (Gone as it is let go, even by an install ended part way.)
+const INSTALLING: &str = ".installing";
+/// The earlier files moved aside (`REPLACED`) once every new one is in place: no longer to be put back, only taken
+/// away. (Taken away from `REPLACED` itself, an install cut short in the middle of it left some of them, and the
+/// next put those back over their new ones.)
+const DONE_WITH: &str = ".done-with";
 /// Where an install puts the new files, all of them, before any goes in place.
 const INCOMING: &str = ".incoming";
 /// Where an install moves the files it replaces, till all the new ones are in place (put back if one could not be).
@@ -225,6 +234,8 @@ const REPLACED: &str = ".replaced";
 /// The tasks an install has turned off while it runs, by name, a line each: turned on again after, even if the
 /// install was cut short (see `TasksOff`).
 const TASKS_OFF: &str = ".tasks-off";
+/// The record of the tasks turned off as it is written, before it takes the place of the last (see `write_down`).
+const TASKS_OFF_NEW: &str = ".tasks-off.new";
 
 /// What a folder chosen to install into is, or why installing failed.
 #[derive(Debug, PartialEq)]
@@ -285,8 +296,8 @@ fn only_ours(folder: &Path) -> bool {
 /// nothing else beside them).
 fn claimable(folder: &Path) -> bool {
     let ours_there = INSTALLED.iter().any(|name| folder.join(name).exists());
-    // (An install cut short may have moved them aside: see `put_in_place`.)
-    let whole = ["glance.exe", "uninstall.exe"].iter().all(|name| folder.join(name).is_file()) || folder.join(REPLACED).is_dir();
+    // (An install cut short may have moved them aside, or not have come to them: see `install_into`.)
+    let whole = ["glance.exe", "uninstall.exe"].iter().all(|name| folder.join(name).is_file()) || UNDER_WAY.iter().any(|name| folder.join(name).exists());
     let earlier = whole && only_ours(folder);
     !ours_there || earlier
 }
@@ -636,6 +647,8 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
     if direct(&folder).is_none() {
         return Err(InstallFolder::Indirect);
     }
+    // One install at a time: another under way, this one does nothing (two at once undid each other's files).
+    let _installing = installing(&folder).map_err(|_| InstallFolder::Failed)?;
     if !(claimable(&folder) && only_trusted_inside(&folder)) {
         return Err(InstallFolder::Occupied);
     }
@@ -651,6 +664,39 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
     put_in_place(payload, &folder).map_err(|_| InstallFolder::Failed)
 }
 
+/// Holds `INSTALLING` in `folder`, sharing nothing, owned by the Administrators group (see `own_as_administrators`):
+/// till it is dropped, no other install there can. An error where another holds it.
+fn installing(folder: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Security::Authorization::{ConvertStringSidToSidW, SetSecurityInfo};
+    let held = held_alone(&folder.join(INSTALLING))?;
+    let mut administrators = PSID::default();
+    unsafe { ConvertStringSidToSidW(w!("S-1-5-32-544"), &mut administrators) }.map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xFFFF))?;
+    let set = unsafe { SetSecurityInfo(HANDLE(held.as_raw_handle()), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, Some(administrators), None, None, None) };
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(administrators.0)));
+    }
+    if set.is_err() {
+        return Err(std::io::Error::from_raw_os_error(set.0 as i32));
+    }
+    Ok(held)
+}
+
+/// `path` made (or opened) and held sharing nothing, able to change its owner; gone once let go, however the holder
+/// ends. An error where another holds it.
+fn held_alone(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_FLAG_DELETE_ON_CLOSE;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .access_mode((FILE_GENERIC_WRITE | DELETE | WRITE_OWNER).0)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE.0)
+        .open(path)
+}
+
 /// Puts the files in `payload` in `folder`, all of them or none: each copied in beside them first (`INCOMING`), then
 /// each in place of its earlier one, which is moved aside (`REPLACED`) till all are, and put back if one could not
 /// be. (Copied over one by one, an install that failed halfway, out of room or at a file held, left programs of two
@@ -658,6 +704,7 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
 fn put_in_place(payload: &Path, folder: &Path) -> std::io::Result<()> {
     let (incoming, replaced) = (folder.join(INCOMING), folder.join(REPLACED));
     put_back(folder)?;
+    remove(&folder.join(DONE_WITH))?;
     remove(&incoming)?;
     std::fs::create_dir(&incoming)?;
     own_as_administrators(&incoming)?;
@@ -699,8 +746,12 @@ fn swap_in(folder: &Path) -> std::io::Result<()> {
             return Err(error);
         }
     }
-    // (What is left here of the earlier version, were it not taken now, would be by the next install.)
-    let _ = remove(&replaced);
+    // All in place: the earlier ones no longer to be put back (moved at once, as one), then taken away. (What is
+    // left of them, were they not taken now, would be by the next install.)
+    let done_with = folder.join(DONE_WITH);
+    remove(&done_with)?;
+    patiently(|| std::fs::rename(&replaced, &done_with))?;
+    let _ = remove(&done_with);
     let _ = remove(&incoming);
     Ok(())
 }
@@ -837,12 +888,18 @@ fn left_off(install: &Path) -> Vec<String> {
     read_in_place(install, TASKS_OFF, 64 * 1024).map(|names| names.lines().filter(|name| is_glance_task(name)).map(str::to_string).collect()).unwrap_or_default()
 }
 
-/// Writes down `names` as the tasks an install in `install` turns off, on the disk before anything is.
+/// Writes down `names` as the tasks an install in `install` turns off, on the disk before anything is: written
+/// beside the record first, then put in its place whole (written over in place, an install ended meanwhile left it
+/// empty, and the tasks it named off for good), owned by the Administrators group as the rest is.
 fn write_down(install: &Path, names: &[String]) -> std::io::Result<()> {
     use std::io::Write;
-    let mut file = std::fs::File::create(install.join(TASKS_OFF))?;
+    let beside = install.join(TASKS_OFF_NEW);
+    let mut file = std::fs::File::create(&beside)?;
     file.write_all(names.join("\n").as_bytes())?;
-    file.sync_all()
+    file.sync_all()?;
+    drop(file);
+    own_as_administrators(&beside)?;
+    std::fs::rename(&beside, install.join(TASKS_OFF))
 }
 
 fn turn_on(names: &[String]) {
@@ -1590,6 +1647,19 @@ mod tests {
 
     fn named(files: &[(&str, &str)]) -> Vec<(String, String)> {
         files.iter().map(|(name, text)| (name.to_string(), text.to_string())).collect()
+    }
+
+    /// One install at a time: held by one, another cannot have it; let go, it is gone.
+    #[test]
+    fn one_install_at_a_time() {
+        let folder = folder_of("installing", &[]);
+        let lock = folder.join(INSTALLING);
+        let first = held_alone(&lock).unwrap();
+        assert!(held_alone(&lock).is_err());
+        drop(first);
+        assert!(!lock.exists());
+        assert!(held_alone(&lock).is_ok());
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// The new files go in place of the earlier ones, and those new here beside them; nothing is left aside.
