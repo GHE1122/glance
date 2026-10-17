@@ -120,7 +120,7 @@ fn is_music(session: &Session) -> bool {
 /// The session followed for `follow`: the chosen program's, while it has one. Else, for whatever plays, what Windows
 /// would act on were a media key pressed now; for music, of the sessions playing music the one playing (the one
 /// followed last first), else the one followed last, else the first.
-fn session_of(follow: Follow) -> Result<Session> {
+pub fn session_of(follow: Follow) -> Result<Session> {
     let manager = manager()?;
     let sessions: Vec<Session> = manager.GetSessions()?.into_iter().collect();
     let id = |session: &Session| session.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default();

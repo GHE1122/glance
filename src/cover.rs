@@ -6,7 +6,6 @@
 use std::sync::{Arc, Mutex};
 
 use windows::core::Interface;
-use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as Manager;
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapInterpolationModeFant, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
 };
@@ -23,37 +22,56 @@ pub struct Cover {
     pub accent: [f32; 3],
 }
 
-/// The track the cover was asked for (its title and artist), and what was found: being read, none, or it.
-static KNOWN: Mutex<Option<(String, Option<Option<Arc<Cover>>>)>> = Mutex::new(None);
+/// How long after its player gave no cover (or the cover of another track) it is asked again: a player just started,
+/// or just changed tracks, gives its cover a moment after the rest.
+const AGAIN_AFTER: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// The cover of the track `title` by `artist` as it plays now; read (on a thread of its own) the first time it is
-/// asked for: none till then, and none where its player gives none.
+/// What is known of a track's cover: being read, read (when: see `AGAIN_AFTER`) and none had, or it.
+enum Known {
+    Reading,
+    None(std::time::Instant),
+    Found(Arc<Cover>),
+}
+
+/// The track the cover was asked for (its title and artist), and what is known of it.
+static KNOWN: Mutex<Option<(String, Known)>> = Mutex::new(None);
+
+/// The cover of the music playing, the track `title` by `artist`, as its player gives it; read (on a thread of its
+/// own) the first time it is asked for, and again a while after its player gave none.
 pub fn of(title: &str, artist: &str) -> Option<Arc<Cover>> {
     let key = format!("{title}\u{1}{artist}");
     let mut known = KNOWN.lock().unwrap();
     match known.as_ref() {
-        Some((of, found)) if *of == key => return found.clone().flatten(),
+        Some((of, Known::Found(cover))) if *of == key => return Some(cover.clone()),
+        Some((of, Known::Reading)) if *of == key => return None,
+        Some((of, Known::None(since))) if *of == key && since.elapsed() < AGAIN_AFTER => return None,
         _ => {}
     }
-    *known = Some((key.clone(), None));
+    *known = Some((key.clone(), Known::Reading));
+    let title = title.to_string();
     std::thread::spawn(move || {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let read = read().map(Arc::new);
+        let read = read(&title).map(Arc::new);
         let mut known = KNOWN.lock().unwrap();
         // (Kept only if the track is still the one asked about.)
         if known.as_ref().is_some_and(|(of, _)| *of == key) {
-            *known = Some((key, Some(read)));
+            *known = Some((key, read.map_or_else(|| Known::None(std::time::Instant::now()), Known::Found)));
         }
     });
     None
 }
 
-/// The cover of what plays now, as its player gives it.
-pub(crate) fn read() -> Option<Cover> {
-    let session = Manager::RequestAsync().ok()?.join().ok()?.GetCurrentSession().ok()?;
-    let thumbnail = session.TryGetMediaPropertiesAsync().ok()?.join().ok()?.Thumbnail().ok()?;
+/// The cover of the music playing (as the player followed for music gives it), if it is the track `title`'s (a
+/// player changing tracks tells the new title a moment before the new cover).
+pub(crate) fn read(title: &str) -> Option<Cover> {
+    let session = crate::media::session_of(crate::media::Follow::Music).ok()?;
+    let properties = session.TryGetMediaPropertiesAsync().ok()?.join().ok()?;
+    if properties.Title().ok()?.to_string() != title {
+        return None;
+    }
+    let thumbnail = properties.Thumbnail().ok()?;
     let stream = thumbnail.OpenReadAsync().ok()?.join().ok()?;
     unsafe {
         let stream: IStream = CreateStreamOverRandomAccessStream(&stream.cast::<windows::core::IUnknown>().ok()?).ok()?;
@@ -193,14 +211,17 @@ mod tests {
         assert!((back[0] - 0.8).abs() < 1e-3 && (back[1] - 0.2).abs() < 1e-3);
     }
 
-    /// Reads the cover of what plays now: `cargo test -- --ignored reads_the_cover --nocapture`.
+    /// Reads the cover of the music playing: `cargo test -- --ignored reads_the_cover --nocapture`.
     #[test]
     #[ignore]
     fn reads_the_cover() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let cover = read().expect("a cover");
+        let session = crate::media::session_of(crate::media::Follow::Music).expect("music playing");
+        let title = session.TryGetMediaPropertiesAsync().unwrap().join().unwrap().Title().unwrap().to_string();
+        let cover = read(&title).expect("a cover");
+        println!("{title}");
         println!("base {:?}, accent {:?}, {} bytes", cover.base, cover.accent, cover.pixels.len());
     }
 }
