@@ -283,6 +283,10 @@ impl FullMusic {
             Some(Hit::Leave) => return Asked::Leave,
             Some(dragged @ (Hit::Track | Hit::Volume)) => {
                 self.dragging = Some(dragged);
+                // (The pointer held till it is let go, wherever it goes: see `lost`.)
+                unsafe {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd);
+                }
                 self.drag(dragged, at);
             }
             None => {
@@ -300,6 +304,17 @@ impl FullMusic {
     pub fn release(&mut self) {
         if let Some(Hit::Track) = self.dragging.take() {
             crate::playing::slid(crate::playing::Slider::Seek(Follow::Music), true);
+        }
+        unsafe {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+        }
+    }
+
+    /// The pointer taken from it mid-drag (another window took it, or it is being left): the drag given up, the
+    /// track as it was (left dragged, what plays stayed shown where the drag had it).
+    pub fn lost(&mut self) {
+        if let Some(Hit::Track) = self.dragging.take() {
+            crate::playing::slid(crate::playing::Slider::Seek(Follow::Music), false);
         }
     }
 

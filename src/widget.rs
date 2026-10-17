@@ -1470,6 +1470,10 @@ impl Widgets {
 
     /// The music full screen left.
     pub fn leave_full(&mut self) {
+        // (A drag under way given up first: left mid-drag, the track stayed dragged.)
+        if let Some(full) = self.full.as_mut() {
+            full.lost();
+        }
         self.full = None;
     }
 

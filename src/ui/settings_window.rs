@@ -259,6 +259,7 @@ fn run(overlay: bool) {
 /// The overlay's page, turned to.
 fn to_overlay() {
     with_ui(|ui| {
+        OVERLAY_OWED.store(false, Ordering::Release);
         ui.tab = Tab::Overlay;
         ui.turn_to(Page::Monitor);
     });
@@ -273,12 +274,18 @@ pub fn follow_settings() {
 }
 
 fn take_settings() {
+    // (Owed outside the window's state: told while a dialog of it is up, which holds that state, it was dropped.)
+    FOLLOW_OWED.store(true, Ordering::Release);
     with_ui(|ui| {
-        ui.follow_owed = true;
         ui.next_frame = Instant::now();
         ui.follow_when_free();
     });
 }
+
+/// Settings changed elsewhere, to be taken up by the window once nothing is in hand (see `follow_when_free`).
+static FOLLOW_OWED: AtomicBool = AtomicBool::new(false);
+/// The overlay's page asked for, to be turned to (see `open_at_overlay`); kept as `FOLLOW_OWED` is.
+static OVERLAY_OWED: AtomicBool = AtomicBool::new(false);
 
 /// Draws the window if a frame is due, and says when the next one is; `None`
 /// while there is no window.
@@ -934,8 +941,6 @@ struct Ui {
     view: Option<String>,
     /// A component carried in the layout's editor, and its edges as last drawn (where they take it).
     carry: Option<Carry>,
-    /// Settings changed elsewhere, to be taken up once nothing is in hand (see `follow_when_free`).
-    follow_owed: bool,
     zones: Vec<Zone>,
     /// What plays, as the layout's library shows it; the readings and the workbench, as it shows them (each drawn
     /// in layers of its own: see `render::PanelLayers`).
@@ -1121,7 +1126,6 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             shown_edge: None,
             view: None,
             carry: None,
-            follow_owed: false,
             zones: Vec::new(),
             library_music: super::music::Music::default(),
             library_layers: [PanelLayers::default(), PanelLayers::default()],
@@ -1187,6 +1191,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         TO_OVERLAY => {
+            OVERLAY_OWED.store(true, Ordering::Release);
             to_overlay();
             LRESULT(0)
         }
@@ -2766,10 +2771,15 @@ impl Ui {
     /// the panel's settings, a row or a component dragged is kept as it is let go; taken meanwhile, what is in hand
     /// went back where it was.
     fn follow_when_free(&mut self) {
-        if !self.follow_owed || self.sliding.is_some() || self.drag.is_some() || self.carry.is_some() {
+        if OVERLAY_OWED.load(Ordering::Acquire) {
+            OVERLAY_OWED.store(false, Ordering::Release);
+            self.tab = Tab::Overlay;
+            self.turn_to(Page::Monitor);
+        }
+        if !FOLLOW_OWED.load(Ordering::Acquire) || self.sliding.is_some() || self.drag.is_some() || self.carry.is_some() {
             return;
         }
-        self.follow_owed = false;
+        FOLLOW_OWED.store(false, Ordering::Release);
         let settings = crate::app().settings.lock().unwrap().clone();
         self.take(settings);
         self.next_frame = Instant::now();

@@ -788,6 +788,11 @@ impl Controller {
                         full.release();
                     }
                 }
+                crate::ui::window::CAPTURE_LOST if widgets.full_owns(msg.hwnd) => {
+                    if let Some(full) = widgets.full() {
+                        full.lost();
+                    }
+                }
                 WM_MOUSEMOVE if widgets.full_owns(msg.hwnd) => {
                     let at = lparam_point(msg.lParam);
                     if let Some(full) = widgets.full() {
@@ -2210,9 +2215,7 @@ impl<'a> Panel<'a> {
             if e.right { dx } else if e.left { -dx } else { 0 } as f32 / px,
             if e.bottom { dy } else if e.top { -dy } else { 0 } as f32 / px,
         );
-        // No larger than its screen's work area holds (less the gaps round it, and its shadow's room).
-        let round = 2.0 * (GAP * contact.scale + self.theme.margin * px) / px;
-        let most = ((contact.work.right - contact.work.left) as f32 / px - round, (contact.work.bottom - contact.work.top) as f32 / px - round);
+        let most = self.music_most(contact, px);
         let least = crate::ui::music::LEAST;
         let room = (
             (drag.room.0 + grown.0).clamp(least.0, most.0.max(least.0)),
@@ -2249,6 +2252,13 @@ impl<'a> Panel<'a> {
         }
         self.arrange();
         self.next_frame = now;
+    }
+
+    /// The most room what plays has on the screen `contact` at `px` physical pixels a DIP: its work area, less the gaps
+    /// round it and its shadow's room.
+    fn music_most(&self, contact: Contact, px: f32) -> (f32, f32) {
+        let round = 2.0 * (GAP * contact.scale + self.theme.margin * px) / px;
+        ((contact.work.right - contact.work.left) as f32 / px - round, (contact.work.bottom - contact.work.top) as f32 / px - round)
     }
 
     /// The room what plays is given from the edge the panel is at (DIPs, at the panel's size 1): as the hand gives it
@@ -2366,7 +2376,13 @@ impl<'a> Panel<'a> {
     /// from the top; the panel's size makes it larger or smaller), the window placed for it.
     fn music_size(&mut self) -> (f32, f32) {
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
-        let size = crate::ui::music::rests_at(self.music_room(), &shows);
+        // (No larger than the screen it opens on holds: kept as it was made on a larger one, it reached past this one.)
+        let room = self.music_room();
+        let contact = self.placement.as_ref().unwrap().contact;
+        let most = self.music_most(contact, contact.scale * self.size);
+        let least = crate::ui::music::LEAST;
+        let room = (room.0.min(most.0).max(least.0), room.1.min(most.1).max(least.1));
+        let size = crate::ui::music::rests_at(room, &shows);
         let sizing = self.drag.is_some_and(|drag| drag.edges.any());
         let placement = self.placement.as_mut().unwrap();
         place(placement, &self.window, self.edge, &self.theme, size, self.size, sizing);
