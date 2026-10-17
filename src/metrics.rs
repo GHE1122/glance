@@ -165,7 +165,7 @@ impl Sampler {
         let (adapters, gpus) = enumerate_gpus(&gpu_power);
         let cpu_key = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
         let cpu_sensors = CpuReader::open();
-        let super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")));
+        let super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")), &reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")));
         let dimms = Dimms::open();
         let dimms_awaited = (dimms.as_ref().err() == Some(&crate::dimm::Missing::BusHeld)).then(Instant::now);
         let laptop_fans = LaptopFans::open();
@@ -1382,7 +1382,7 @@ impl Sampler {
         // Another program had the bus as Glance started: the chip is looked for again, every half minute,
         // till the bus is free (or something else stands in the way, which waiting does not change).
         if self.super_io_awaited.is_some_and(|since| since.elapsed() >= SUPER_IO_AGAIN) {
-            let found = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")));
+            let found = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")), &reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")));
             crate::superio::say_later(found.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe));
             self.super_io_awaited = found.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now());
             self.super_io = found.ok().map(crate::superio::Watched::new);

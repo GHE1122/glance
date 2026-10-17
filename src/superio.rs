@@ -124,11 +124,14 @@ const MSI_NCT6687D: Layout = Layout {
     fans: &["cpu_fan", "pump_fan", "system_fan_1", "system_fan_2", "system_fan_3", "system_fan_4", "system_fan_5", "system_fan_6"],
 };
 
-fn layout(vendor: &str, chip: u16) -> Option<&'static Layout> {
+/// What the inputs of the chip `chip` are wired to on the board `board` made by `vendor`, where that is known.
+/// (Gigabyte's by the board's socket: its Intel boards with the same chips wire them otherwise, and were shown the AM5
+/// boards' names.)
+fn layout(vendor: &str, board: &str, chip: u16) -> Option<&'static Layout> {
     if vendor.starts_with("Gigabyte") {
         return match chip {
-            0x8689 => Some(&GIGABYTE_IT8689E),
-            0x8696 => Some(&GIGABYTE_IT8696E),
+            0x8689 if am5(board) => Some(&GIGABYTE_IT8689E),
+            0x8696 if am5(board) => Some(&GIGABYTE_IT8696E),
             _ => None,
         };
     }
@@ -137,6 +140,13 @@ fn layout(vendor: &str, chip: u16) -> Option<&'static Layout> {
         return Some(&MSI_NCT6687D);
     }
     None
+}
+
+/// Whether `board` (its maker's name for it: "X870E AORUS MASTER", "B650M DS3H") is an AM5 board: by its chipset,
+/// which leads its name.
+fn am5(board: &str) -> bool {
+    let chipset = board.split_whitespace().next().unwrap_or_default().to_ascii_uppercase();
+    ["A620", "B650", "X670", "B840", "B850", "X870"].iter().any(|am5| chipset.starts_with(am5))
 }
 
 #[derive(Clone, Copy)]
@@ -217,8 +227,8 @@ impl SuperIo {
 
     /// Finds a supported chip at either configuration port; or says what
     /// stood in the way, for a report (what each port showed).
-    /// `vendor` is the board's maker, which decides what the inputs are named.
-    pub fn open(vendor: &str) -> Result<Self, String> {
+    /// `vendor` and `board` are the board's maker and its name for it, which decide what the inputs are named.
+    pub fn open(vendor: &str, board: &str) -> Result<Self, String> {
         let mut module = Module::load(LPC_IO).map_err(|_| "PawnIO driver not available".to_string())?;
         // Entering configuration mode writes to the chip: only with the bus to ourselves.
         let _lock = NamedLock::taken(ISA_LOCK, 1000).map_err(|why| format!("{BUS_NOT_HAD}: {why}"))?;
@@ -246,7 +256,7 @@ impl SuperIo {
                 seen.push(format!("{port:#X}: chip {chip:04X} with its monitor at {base:#X}, not usable"));
                 continue;
             }
-            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, port, slot, ec_temps: Vec::new(), ec_fans: Vec::new(), last: (BoardSensors::default(), Instant::now()) };
+            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, board, chip), base, port, slot, ec_temps: Vec::new(), ec_fans: Vec::new(), last: (BoardSensors::default(), Instant::now()) };
             let failed = match kind {
                 Kind::NuvotonEc => found.set_up_ec().err(),
                 // A Nuvoton monitor that answers is one from Nuvoton.
@@ -628,6 +638,16 @@ fn nuvoton_layout(chip: u16) -> Option<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
+    /// Gigabyte's inputs named by the board's socket: an Intel board with the same chip gets no AM5 board's names.
+    #[test]
+    fn names_gigabytes_inputs_by_its_board() {
+        let gigabyte = "Gigabyte Technology Co., Ltd.";
+        assert!(super::layout(gigabyte, "X870E AORUS MASTER", 0x8696).is_some());
+        assert!(super::layout(gigabyte, "B650M DS3H", 0x8689).is_some());
+        assert!(super::layout(gigabyte, "Z790 AORUS ELITE AX", 0x8689).is_none());
+        assert!(super::layout("Micro-Star International Co., Ltd.", "MAG B650 TOMAHAWK WIFI (MS-7D75)", 0xD592).is_some());
+    }
+
     #[test]
     fn knows_nuvoton_chips() {
         assert_eq!(super::nuvoton_layout(0xD42B), Some((7, 7)));
@@ -657,11 +677,11 @@ mod tests {
     #[test]
     fn knows_the_boards_whose_wiring_it_has() {
         // MSI's NCT6687D, whatever its revision, by the channel's and the input's own number.
-        let msi = super::layout("Micro-Star International Co., Ltd.", 0xD592).expect("MSI's NCT6687D");
+        let msi = super::layout("Micro-Star International Co., Ltd.", "MAG X670E TOMAHAWK WIFI (MS-7E12)", 0xD592).expect("MSI's NCT6687D");
         assert_eq!((msi.temps[1], msi.temps[4], msi.fans[0], msi.fans[2]), ("system", "cpu_socket", "cpu_fan", "system_fan_1"));
-        assert!(super::layout("Micro-Star International Co., Ltd.", 0xD42B).is_none());
-        assert!(super::layout("Gigabyte Technology Co., Ltd.", 0x8689).is_some());
-        assert!(super::layout("ASUSTeK COMPUTER INC.", 0xD592).is_none());
+        assert!(super::layout("Micro-Star International Co., Ltd.", "MAG X670E TOMAHAWK WIFI (MS-7E12)", 0xD42B).is_none());
+        assert!(super::layout("Gigabyte Technology Co., Ltd.", "X670E AORUS MASTER", 0x8689).is_some());
+        assert!(super::layout("ASUSTeK COMPUTER INC.", "ROG STRIX X670E-E GAMING WIFI", 0xD592).is_none());
         // Looked for again only where it was the bus that was not to be had.
         assert!(super::waits_for_the_bus(&format!("{}: held by another program for 1000 ms and more", super::BUS_NOT_HAD)));
         assert!(!super::waits_for_the_bus("0x2E: nothing; 0x4E: chip 5509, not supported"));
@@ -671,7 +691,7 @@ mod tests {
     #[test]
     #[ignore = "needs administrator rights and the PawnIO driver; run with --ignored"]
     fn reads_this_board() {
-        let mut chip = super::SuperIo::open("Gigabyte Technology Co., Ltd.").expect("a supported Super I/O chip, elevated");
+        let mut chip = super::SuperIo::open("Gigabyte Technology Co., Ltd.", "X870E AORUS MASTER").expect("a supported Super I/O chip, elevated");
         println!("{:?}", chip.read(crate::sensors::LOCK_WAIT));
     }
 }
