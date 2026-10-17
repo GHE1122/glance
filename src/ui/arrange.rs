@@ -474,6 +474,20 @@ mod tests {
         assert!(zoom < 1.0);
     }
 
+    /// On every skin, two columns take the room of two and their gap, and of the panel's inset from its edge: just
+    /// that room holds two, a little less holds one. (On paper both are none, and a layout that forgot them passed.)
+    #[test]
+    fn columns_take_their_gaps_and_inset_on_every_skin() {
+        for skin in [Skin::Paper, Skin::Fluent, Skin::Glass] {
+            let theme = Theme::new(skin, false);
+            let two = 2.0 * COLUMN_WIDTH + theme.column_gap + GAP + theme.inset;
+            let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two + 0.5, 2000.0), Some(4), 1.0);
+            assert_eq!(layout.columns, 2, "{skin:?}");
+            let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two - 2.0, 2000.0), Some(4), 1.0);
+            assert_eq!(layout.columns, 1, "{skin:?}");
+        }
+    }
+
     #[test]
     fn grows_to_the_size_chosen_as_far_as_the_screen_allows() {
         let theme = Theme::new(Skin::Paper, false);

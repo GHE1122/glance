@@ -940,6 +940,25 @@ mod tests {
         assert!(none.is_empty(), "{none:?}");
     }
 
+    /// Read from its file as Glance reads it: numbers outside what the settings offer brought within it; a file that
+    /// does not read whole read in part, the file as it was kept beside it.
+    #[test]
+    #[cfg(windows)]
+    fn loads_from_its_file_as_glance_reads_it() {
+        let dir = std::env::temp_dir().join(format!("glance-settings-load-{}", std::process::id()));
+        crate::elevation::ensure_folder(&dir).unwrap();
+        crate::elevation::write_in_place(&dir, FILE, br#"{ "interval_ms": 1, "close_delay_ms": 99999, "skin": "glass" }"#).unwrap();
+        let settings = Settings::load(&dir);
+        assert_eq!((settings.interval_ms, settings.close_delay_ms, settings.skin.as_str()), (250, 10_000, "glass"));
+        assert!(!dir.join(UNREAD).exists());
+        let broken = br#"{ "skin": "glass", "interval_ms": "fast" }"#;
+        crate::elevation::write_in_place(&dir, FILE, broken).unwrap();
+        let settings = Settings::load(&dir);
+        assert_eq!(settings.skin, "glass");
+        assert_eq!(std::fs::read(dir.join(UNREAD)).unwrap(), broken);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A change that is not a number (not kept: written as none at all) is left as it is held, the others taken
     /// (Glance stopped).
     #[test]
