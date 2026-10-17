@@ -343,7 +343,7 @@ struct Hint {
     window: Window,
     surface: Option<Surface>,
     /// Where and how it was last drawn: drawn again only when that changes.
-    drawn: Option<(RECT, bool, u32)>,
+    drawn: Option<(RECT, bool, u32, Option<[u32; 3]>)>,
 }
 
 /// The desktop the panel had taken, lent to a widget torn off it: its
@@ -2424,7 +2424,7 @@ impl Widget {
     /// Shows where it would stick, as the skin draws it: `rect` (physical
     /// px), firmer once letting go would stick it there, `strength` as
     /// strong.
-    fn show_hint(&mut self, rect: RECT, firm: bool, strength: f32, theme: &Theme) {
+    fn show_hint(&mut self, rect: RECT, firm: bool, strength: f32, theme: &Theme, ground: Option<[f32; 3]>) {
         if self.hint.is_none() {
             let Ok(mut window) = Window::new() else { return };
             window.set_click_through(true);
@@ -2435,7 +2435,7 @@ impl Widget {
             self.hint = Some(Hint { window, surface, drawn: None });
         }
         let Some(hint) = self.hint.as_mut() else { return };
-        let this = (rect, firm, strength.to_bits());
+        let this = (rect, firm, strength.to_bits(), ground.map(|c| c.map(f32::to_bits)));
         if hint.drawn == Some(this) {
             return;
         }
@@ -2450,7 +2450,7 @@ impl Widget {
         let (w, h) = (pixels.0 as f32 / scale, pixels.1 as f32 / scale);
         let _ = surface.draw(&self.gfx, pixels, scale, |frame| {
             frame.origin(0.0, 0.0);
-            paint_hint(frame, theme, (w, h), firm, strength);
+            paint_hint(frame, theme, (w, h), firm, strength, ground);
         });
     }
 
@@ -2762,7 +2762,12 @@ impl Widget {
                 let firm = away < STICK;
                 // In steps: drawn again as it changes visibly, not each frame.
                 let strength = if firm { 1.0 } else { ((0.25 + 0.5 * (1.0 - (away - STICK) / (HINT_SEEN - STICK))) * 20.0).round() / 20.0 };
-                self.show_hint(RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 }, firm, strength, &theme);
+                // (A music widget with its own ground, in its own colour.)
+                let ground = match &self.content {
+                    Content::Music(shown) => Some(shown.music.ground_colour()),
+                    _ => None,
+                };
+                self.show_hint(RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 }, firm, strength, &theme, ground);
             }
             None => self.hide_hint(),
         }
@@ -3128,9 +3133,17 @@ impl Widget {
 }
 
 /// Where a widget let go would stick, `size` DIPs from the canvas's origin,
-/// as `theme`'s skin draws it: firmer once letting go would stick it there,
+/// as `theme`'s skin draws it (or, a widget with a ground of its own, in that
+/// ground's colour and corners): firmer once letting go would stick it there,
 /// `strength` as strong.
-pub(crate) fn paint_hint(canvas: &dyn Canvas, theme: &Theme, (w, h): (f32, f32), firm: bool, strength: f32) {
+pub(crate) fn paint_hint(canvas: &dyn Canvas, theme: &Theme, (w, h): (f32, f32), firm: bool, strength: f32, ground: Option<[f32; 3]>) {
+    if let Some([r, g, b]) = ground {
+        let (fill, rim) = (Color { r, g, b, a: (if firm { 0.85 } else { 0.5 }) * strength }, Color::hex(0xFFFFFF, (if firm { 0.3 } else { 0.18 }) * strength));
+        let radius = crate::ui::music::RADIUS;
+        canvas.fill_rounded(fill, 0.5, 0.5, w - 1.0, h - 1.0, radius);
+        canvas.stroke_rounded(Fill::Solid(rim), 0.5, 0.5, w - 1.0, h - 1.0, radius, 1.0);
+        return;
+    }
     let (fill, line, width, dashed) = match theme.skin {
         // A pencilled outline on the paper's own colour.
         Skin::Paper => (theme.paper.alpha(if firm { 0.75 } else { 0.45 }), if firm { theme.text2 } else { theme.text3 }, 1.5, !firm),

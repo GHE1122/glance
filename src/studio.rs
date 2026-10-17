@@ -679,7 +679,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                     // window for it is).
                     if let Some((x, y, w, h, firm, strength)) = hint {
                         frame.place(Matrix3x2::translation(*x, *y));
-                        crate::widget::paint_hint(frame, &theme, (*w, *h), *firm, *strength);
+                        crate::widget::paint_hint(frame, &theme, (*w, *h), *firm, *strength, None);
                         frame.origin(0.0, 0.0);
                     }
                 }
