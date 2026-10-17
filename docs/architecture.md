@@ -21,8 +21,10 @@ worth its cost for a desktop monitor. Stage 1 builds, in this order:
    reading pipeline.
 5. Updates: the signer by Artifact Signing's profile OID and the root's hash;
    the installer's own version read and compared.
-6. The installer: tasks disabled, processes stopped and seen gone, files
-   replaced, tasks restored; a failure is fixed by running it again.
+6. The installer: tasks disabled (written down first), processes stopped and
+   seen gone, files staged and swapped in all or none, tasks restored; an
+   install cut short is put back by the next, and its tasks turned on again
+   by the next install or the service's start.
 
 All six are built. Deferred until something shows they are needed: the
 maintenance record and its phased recovery, the watchdog's table (stage 1
@@ -676,8 +678,18 @@ the installed one; an installer of ≤ 0.3.7 run over a newer Glance is not a
 supported way back (it would leave the newer tasks); going back is
 uninstalling, then installing the older release.
 
-**Now**: the installer kills by image name, copies over the running folder,
-and leaves the tasks enabled throughout.
+**Now** (built, short of the record above): the helper (`elevation::install_into`)
+writes the names of the enabled tasks to `.tasks-off` in the install folder and
+then disables them (the next install, or the service as it starts, enables
+those still listed: `tasks_left_off`); ends the programs whose image is in the
+folder, by handle, and waits for each to be gone; copies the payload into
+`.incoming` in the folder; then, for each entry, moves the installed one into
+`.replaced` and the new one into its place, putting everything back if one
+step fails (`put_in_place`). What an install cut short left in `.replaced` is
+put back before the next one starts. A task made again keeps the enabled state
+it had (`task_enabled`). Uninstalling removes `uninstall.exe` last, and only
+when everything else is gone; otherwise Glance stays registered, to be
+uninstalled again.
 
 ### Migration
 
@@ -727,14 +739,20 @@ Declined, five deaths, a standard account, or another account's credentials:
 - Panel thread (`panel::Controller::run`): the panel, the desktop widgets, the
   music full screen, the overlay, menus, tips, the drag controller. It only
   enqueues work for the link, network, reports and switches, and is told back
-  by posted messages.
+  by posted messages. A menu (the tray's, a widget's, the overlay's) is a
+  window of this loop like the others (`menu::Menu`), not a loop of its own:
+  everything else goes on drawing while it is up.
 - Settings thread (`settings_window::run`, since 2026-10-17): the settings
   window and the dialogs it opens, on a graphics device of its own, given back
   as the window closes. Moved or sized by hand, the system holds this thread in
   a loop of its own, and the panel thread draws on meanwhile.
-- Workers: the link's reader and writer, what plays (`playing::watch`), media
-  actions (`playing::act_on`, the sound set by `playing::set_sound`), update
-  checks, the widgets' window watch (four looks a second), reports.
+- Workers: the link's reader and writer, what plays (`playing::watch`: only
+  while something that can show it is on the screen, woken at once as one
+  comes or as a player says it changed, through `media::heed`), media actions
+  (`playing::act_on`, the sound set by `playing::set_sound`), update checks,
+  the widgets' window watch (four looks a second), reports. The settings
+  window reads what needs Task Scheduler (the sign-in and remote switches) on
+  a worker too, showing the last values read meanwhile.
 
 What the threads share, and how:
 
