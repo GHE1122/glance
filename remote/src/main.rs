@@ -742,8 +742,9 @@ fn main() -> std::io::Result<()> {
         // glance-remote pair [web] [cells]: a pairing offered, as its link
         // (for a phone's browser rather than the app, with "web"). With
         // "cells", the link's QR code follows as rows of 1 and 0 (for
-        // Glance to draw); without, it is written as a picture, whose
-        // path follows.
+        // Glance to draw); without, it follows drawn in the console's
+        // characters, to be scanned off the screen (written to a file, the
+        // key in it was left on the disk).
         Some("pair") => {
             let asked = |word: &str| std::env::args().skip(2).any(|given| given == word);
             let key = Config::offer()?;
@@ -753,10 +754,7 @@ fn main() -> std::io::Result<()> {
                 say!("{}", cells(&link)?.trim_end());
             } else {
                 let code = qrcode::QrCode::new(link.as_bytes()).map_err(std::io::Error::other)?;
-                let picture = code.render::<qrcode::render::svg::Color>().min_dimensions(480, 480).quiet_zone(true).build();
-                let path = std::env::temp_dir().join("glance-pair.svg");
-                std::fs::write(&path, picture)?;
-                say!("{}", path.display());
+                say!("{}", code.render::<qrcode::render::unicode::Dense1x2>().dark_color(qrcode::render::unicode::Dense1x2::Light).light_color(qrcode::render::unicode::Dense1x2::Dark).quiet_zone(true).build());
             }
             return Ok(());
         }
