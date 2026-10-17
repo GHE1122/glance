@@ -225,8 +225,12 @@ pub fn ttml(xml: &str) -> Vec<Line> {
     let mut rest = xml;
     while let Some(start) = rest.find("<p ") {
         let after = &rest[start..];
-        let Some(head_end) = after.find('>') else { break };
         let Some(close) = after.find("</p>") else { break };
+        // (Its head closed before its end, or it is not a line: left out, the lines after it read.)
+        let Some(head_end) = after[..close].find('>') else {
+            rest = &after[close + 4..];
+            continue;
+        };
         let head = &after[..head_end];
         let body = &after[head_end + 1..close];
         rest = &after[close + 4..];
@@ -669,6 +673,15 @@ mod tests {
         let words: Vec<(f64, f64, &str)> = lines[1].words.iter().map(|w| (w.at, w.end, w.text.as_str())).collect();
         assert_eq!(words, vec![(2.5, 3.0, "Hel"), (3.0, 3.4, "lo "), (3.4, 4.0, "you")]);
         assert_eq!((lines[2].words[0].at, lines[2].words[0].end), (5.0, 7.0));
+    }
+
+    /// A line whose head is not closed before its end is left out, and the lines after it read (it was cut from
+    /// past its end, and Glance stopped: what the collection serves is not checked before it is read).
+    #[test]
+    fn a_line_not_closed_is_left_out() {
+        let file = r#"<tt><p begin="00:00.5"</p><p begin="00:01.000" end="00:02.000"><span begin="00:01.000" end="00:02.000">kept</span></p></tt>"#;
+        let lines = ttml(file);
+        assert_eq!(lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(), ["kept"]);
     }
 
     #[test]
