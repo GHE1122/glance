@@ -380,6 +380,70 @@ fn heard(follow: Follow) -> Option<Playing> {
     Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None, seekable: false, said_ago: None, rate: 1.0 })
 }
 
+/// A program's session listened to (see `heed`), till this is dropped.
+pub struct Heeding {
+    session: Session,
+    /// The program, as Windows identifies it.
+    id: String,
+    playback: i64,
+    properties: i64,
+}
+
+impl Heeding {
+    /// Whether it is the session followed for `follow` now.
+    pub fn stands(&self, follow: Follow) -> bool {
+        session_of(follow).is_ok_and(|session| session.SourceAppUserModelId().is_ok_and(|id| id == self.id.as_str()))
+    }
+}
+
+impl Drop for Heeding {
+    fn drop(&mut self) {
+        let _ = self.session.RemovePlaybackInfoChanged(self.playback);
+        let _ = self.session.RemoveMediaPropertiesChanged(self.properties);
+    }
+}
+
+/// Listens to the session followed for `follow`: `changed` is called as its program says it plays another track, or
+/// plays or pauses. None where none is followed.
+pub fn heed(follow: Follow, changed: fn()) -> Option<Heeding> {
+    use windows::Foundation::TypedEventHandler;
+    let session = session_of(follow).ok()?;
+    let id = session.SourceAppUserModelId().ok()?.to_string();
+    let playback = session
+        .PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
+            changed();
+            Ok(())
+        }))
+        .ok()?;
+    let properties = session.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
+        changed();
+        Ok(())
+    }));
+    match properties {
+        Ok(properties) => Some(Heeding { session, id, playback, properties }),
+        Err(_) => {
+            let _ = session.RemovePlaybackInfoChanged(playback);
+            None
+        }
+    }
+}
+
+/// Listens, for as long as the process runs, to the sessions as a whole: `changed` is called as one comes or goes,
+/// or another becomes the one a media key acts on. Whether it does.
+pub fn heed_sessions(changed: fn()) -> bool {
+    use windows::Foundation::TypedEventHandler;
+    let Ok(manager) = manager() else { return false };
+    let sessions = manager.SessionsChanged(&TypedEventHandler::new(move |_, _| {
+        changed();
+        Ok(())
+    }));
+    let current = manager.CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
+        changed();
+        Ok(())
+    }));
+    sessions.is_ok() && current.is_ok()
+}
+
 /// What is playing (or paused); none, when nothing is.
 pub fn playing() -> Option<Playing> {
     playing_of(Follow::Any)

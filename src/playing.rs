@@ -313,39 +313,55 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
 }
 
 /// Looks every second at what `wanted` says is shown (whatever plays, and music with its lyrics), while what can show
-/// it is on the screen (its third), and as each line of the lyrics is due; forgets what it saw of one while it is
-/// not shown. (Looked at with nothing on the screen to show it, Windows was asked what plays, and how loud, every
-/// second for nothing.)
+/// it is on the screen (its third), as each line of the lyrics is due, and as its player says it changed (another
+/// track, played or paused, another player); forgets what it saw of one while it is not shown. (Looked at with
+/// nothing on the screen to show it, Windows was asked what plays, and how loud, every second for nothing.)
 #[cfg(windows)]
 pub fn watch(wanted: impl Fn() -> (bool, bool, bool) + Send + 'static, changed: impl Fn() + Send + Sync + 'static) {
     let _ = TOLD.set(Box::new(changed));
-    std::thread::Builder::new().name("glance: what plays".into()).spawn(move || loop {
-        let (any, music, seen) = wanted();
-        LYRICS.store(music, Ordering::Relaxed);
-        // (Off the screen, what was seen last kept: shown again, it shows that till it is looked at, at once.)
-        match (any, seen) {
-            (true, true) => drop(look(Follow::Any)),
-            (true, false) => {}
-            (false, _) => keep(Follow::Any, None),
-        }
-        let next = match (music, seen) {
-            (true, true) => look(Follow::Music),
-            (true, false) => None,
-            (false, _) => {
-                keep(Follow::Music, None);
-                None
+    std::thread::Builder::new().name("glance: what plays".into()).spawn(move || {
+        crate::actions::com();
+        crate::media::heed_sessions(look_now);
+        // The player followed for each, listened to while it is looked at.
+        let mut heeding: [Option<crate::media::Heeding>; 2] = [None, None];
+        loop {
+            let (any, music, seen) = wanted();
+            for (follow, on) in [(Follow::Any, any), (Follow::Music, music)] {
+                let heeded = &mut heeding[follow as usize];
+                if !(on && seen) {
+                    *heeded = None;
+                } else if !heeded.as_ref().is_some_and(|heeded| heeded.stands(follow)) {
+                    *heeded = None;
+                    *heeded = crate::media::heed(follow, look_now);
+                }
             }
-        };
-        // (Not sooner than a twentieth of a second: a line due already is looked at as the next comes.)
-        let wait = next.map_or(std::time::Duration::from_secs(1), |next| next.clamp(std::time::Duration::from_millis(50), std::time::Duration::from_secs(1)));
-        let (asked, woken) = &LOOK_NOW;
-        let asked = asked.lock().unwrap();
-        let mut asked = woken.wait_timeout_while(asked, wait, |asked| !*asked).unwrap().0;
-        *asked = false;
+            LYRICS.store(music, Ordering::Relaxed);
+            // (Off the screen, what was seen last kept: shown again, it shows that till it is looked at, at once.)
+            match (any, seen) {
+                (true, true) => drop(look(Follow::Any)),
+                (true, false) => {}
+                (false, _) => keep(Follow::Any, None),
+            }
+            let next = match (music, seen) {
+                (true, true) => look(Follow::Music),
+                (true, false) => None,
+                (false, _) => {
+                    keep(Follow::Music, None);
+                    None
+                }
+            };
+            // (Not sooner than a twentieth of a second: a line due already is looked at as the next comes.)
+            let wait = next.map_or(std::time::Duration::from_secs(1), |next| next.clamp(std::time::Duration::from_millis(50), std::time::Duration::from_secs(1)));
+            let (asked, woken) = &LOOK_NOW;
+            let asked = asked.lock().unwrap();
+            let mut asked = woken.wait_timeout_while(asked, wait, |asked| !*asked).unwrap().0;
+            *asked = false;
+        }
     }).expect("a thread started");
 }
 
-/// Asked to look at what plays at once (something that shows it came on the screen), and the watch woken for it.
+/// Asked to look at what plays at once (something that shows it came on the screen, or its player said it changed),
+/// and the watch woken for it.
 #[cfg(windows)]
 static LOOK_NOW: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
 
@@ -375,8 +391,8 @@ pub fn act(act: Act) {
     act_on(Follow::Any, act);
 }
 
-/// Does `act` on what is followed for `follow`, on a thread of its own, and looks at how it is then: at once, and
-/// again a moment later (a program says that it has paused a little after it was asked to).
+/// Does `act` on what is followed for `follow`, on a thread of its own, and looks at how it is then (and again as its
+/// player says it has changed: a program says that it has paused a little after it was asked to; see `watch`).
 #[cfg(windows)]
 pub fn act_on(follow: Follow, act: Act) {
     let f = follow as usize;
@@ -410,11 +426,7 @@ pub fn act_on(follow: Follow, act: Act) {
                 }
             }
         }
-        // (The last, once what was asked for no longer stands for what is said.)
-        for wait in [0, 150, 500, 900] {
-            std::thread::sleep(std::time::Duration::from_millis(wait));
-            let _ = look(follow);
-        }
+        let _ = look(follow);
     });
 }
 
