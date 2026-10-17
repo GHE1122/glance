@@ -11,11 +11,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use super::*;
 use crate::settings::{Part, Places, PARTS};
 
-/// The library: each component's card, how tall it is, and the room between cards.
-const CARD: f32 = 132.0;
-const CARD_GAP: f32 = 8.0;
-/// What plays, as a strip in its card.
-const CARD_SAMPLE: f32 = 56.0;
+/// The library: a tile for each component, side by side, how tall each is and the room between them; the picture of
+/// the component at its top, how tall, and the room round it.
+const TILE: f32 = 148.0;
+const TILE_GAP: f32 = 8.0;
+const TILE_PICTURE: f32 = 88.0;
+const TILE_PAD: f32 = 8.0;
+/// What plays, drawn as its strip at the least a music widget is wide, made smaller into its picture.
+const TILE_MUSIC: (f32, f32) = (240.0, 72.0);
 /// The editor's head (the screens to show, every screen alike), and the room round the screens under it.
 const EDITOR_HEAD: f32 = 52.0;
 const EDITOR_ROOM: f32 = 20.0;
@@ -57,11 +60,12 @@ pub(super) fn part_name(part: Part, lang: Lang) -> &'static str {
     }
 }
 
+/// What a component shows, in a few words (under its name in its tile).
 fn part_word(part: Part, lang: Lang) -> &'static str {
     match part {
-        Part::Monitor => pick(lang, "处理器、显卡、内存、网络等实时数据", "Live readings: processor, graphics, memory, network"),
-        Part::Workbench => pick(lang, "时间与正在播放的内容，以及手头常用的工具", "The time, what plays, and the tools at hand"),
-        Part::Music => pick(lang, "正在播放的歌曲、歌词与播放控制", "What plays, its lyrics and its controls"),
+        Part::Monitor => pick(lang, "实时硬件数据", "Live readings"),
+        Part::Workbench => pick(lang, "时间与工具", "Time and tools"),
+        Part::Music => pick(lang, "歌曲与歌词", "Songs and lyrics"),
     }
 }
 
@@ -83,11 +87,11 @@ fn part_colour(part: Part) -> Color {
 }
 
 impl Ui {
-    /// The library row's height: its words, then a card for each component.
+    /// The library row's height: its words, then the components' tiles side by side.
     pub(super) fn library_height(&self) -> f32 {
         let (_, word) = self.library_words();
         let room = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
-        22.0 + self.gfx.wrapped_height(word, Font::new(Family::Segoe, 12.0, 400.0), room) + 14.0 + PARTS.len() as f32 * (CARD + CARD_GAP) - CARD_GAP + ROW_SIDE
+        22.0 + self.gfx.wrapped_height(word, Font::new(Family::Segoe, 12.0, 400.0), room) + 14.0 + TILE + ROW_SIDE
     }
 
     fn library_words(&self) -> (&'static str, &'static str) {
@@ -101,8 +105,9 @@ impl Ui {
         )
     }
 
-    /// The library: a card for each component, showing it as it is now (the readings' look and figures, what plays as
-    /// its strip shows it), to be dragged onto an edge.
+    /// The library: a tile for each component, side by side, to be dragged onto an edge: at its top the component
+    /// as it looks now, small (the readings' load and its chart, the workbench's time and what plays, what plays as its
+    /// strip shows it), its name and what it shows under that.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_library(&mut self, frame: &Frame, palette: &Palette, left: f32, y: f32, width: f32, height: f32, hovered: &Option<Target>) {
         card(frame, palette, left, y, width, height, palette.card);
@@ -111,62 +116,68 @@ impl Ui {
         let room = width - 2.0 * ROW_SIDE;
         let head = 22.0 + self.gfx.wrapped_height(word, hint, room) + 14.0;
         field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + head / 2.0, room);
-        let mut top = y + head;
-        for part in PARTS {
-            let r = Rect { x: left + ROW_SIDE, y: top, w: room, h: CARD };
+        let wide = (room - TILE_GAP * (PARTS.len() - 1) as f32) / PARTS.len() as f32;
+        for (index, part) in PARTS.into_iter().enumerate() {
+            let r = Rect { x: left + ROW_SIDE + index as f32 * (wide + TILE_GAP), y: y + head, w: wide, h: TILE };
             let target = Target::Library(part);
             let carried = self.carry.as_ref().is_some_and(|carry| carry.moved && carry.part == part && carry.from.is_none());
             fill(frame, if hovered.as_ref() == Some(&target) || carried { palette.control_on } else { palette.control }, r.x, r.y, r.w, r.h, 8.0);
             stroke_inside(frame, r, 8.0, palette.card_stroke);
-            // Its pill, as on an edge; its name and what it shows.
-            let tile = Rect { x: r.x + 14.0, y: r.y + 14.0, w: 36.0, h: 36.0 };
-            fill(frame, part_colour(part), tile.x, tile.y, tile.w, tile.h, 8.0);
-            frame.icon(part_icon(part), Point { x: tile.x + tile.w / 2.0, y: tile.y + tile.h / 2.0 }, 18.0, Color::hex(0xFFFFFF, 1.0));
-            field_label_line(frame, palette, part_name(part, self.lang), Some(part_word(part, self.lang)), Font::new(Family::Segoe, 14.0, 600.0), hint, tile.x + tile.w + 12.0, tile.y + tile.h / 2.0, r.w - tile.w - 40.0);
-            let sample = Rect { x: r.x + 14.0, y: r.y + r.h - 14.0 - CARD_SAMPLE, w: r.w - 28.0, h: CARD_SAMPLE };
+            let picture = Rect { x: r.x + TILE_PAD, y: r.y + TILE_PAD, w: r.w - 2.0 * TILE_PAD, h: TILE_PICTURE };
+            fill(frame, palette.window, picture.x, picture.y, picture.w, picture.h, 6.0);
+            unsafe { frame.dc.PushAxisAlignedClip(&rect(picture.x, picture.y, picture.w, picture.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
             match part {
-                Part::Monitor => self.monitor_sample(frame, palette, sample),
-                Part::Workbench => self.workbench_sample(frame, palette, sample),
+                Part::Monitor => self.monitor_sample(frame, palette, picture),
+                Part::Workbench => self.workbench_sample(frame, palette, picture),
                 Part::Music => {
                     let mut shows = super::super::music::Shows::from(&self.settings.view);
-                    // As a strip: one line, the cover and what plays beside it.
+                    // As a strip: one line, the cover and what plays beside it, made smaller into the picture.
                     shows.clear = false;
-                    frame.origin(sample.x, sample.y);
-                    let (size, ground, now) = ((sample.w, sample.h), super::super::music::Ground::Own, Instant::now());
+                    let k = ((picture.w - 8.0) / TILE_MUSIC.0).min((picture.h - 8.0) / TILE_MUSIC.1);
+                    let (w, h) = (TILE_MUSIC.0 * k, TILE_MUSIC.1 * k);
+                    frame.place(Matrix3x2::scale(k, k) * Matrix3x2::translation(picture.x + (picture.w - w) / 2.0, picture.y + (picture.h - h) / 2.0));
+                    let (ground, now) = (super::super::music::Ground::Own, Instant::now());
                     let _ = if super::super::music::heard() {
-                        self.library_music.paint(frame, size, &shows, ground, self.scale, None, now)
+                        self.library_music.paint(frame, TILE_MUSIC, &shows, ground, self.scale * k, None, now)
                     } else {
-                        self.library_music.paint_example(frame, size, &shows, ground, self.scale, None, now, self.example_from.elapsed().as_secs_f64())
+                        self.library_music.paint_example(frame, TILE_MUSIC, &shows, ground, self.scale * k, None, now, self.example_from.elapsed().as_secs_f64())
                     };
                     frame.origin(0.0, 0.0);
                 }
             }
+            unsafe { frame.dc.PopAxisAlignedClip() };
+            let below = picture.y + picture.h + 8.0;
+            text_centred(frame, part_name(part, self.lang), Font::new(Family::Segoe, 13.5, 600.0), palette.text, r.x + TILE_PAD + 2.0, below + 10.0, r.w - 2.0 * TILE_PAD, Align::Start);
+            text_centred(frame, part_word(part, self.lang), hint, palette.text2, r.x + TILE_PAD + 2.0, below + 30.0, r.w - 2.0 * TILE_PAD, Align::Start);
             self.targets.push((r, target));
-            top += CARD + CARD_GAP;
         }
     }
 
-    /// The readings as the panel's skin shows them, small: the skin's miniature, and the processor's, the graphics'
-    /// and the memory's load now.
+    /// The readings, small: the processor's and the graphics' load now, and the processor's over the last minute as a
+    /// line under them.
     fn monitor_sample(&self, frame: &Frame, palette: &Palette, r: Rect) {
-        let skin = Skin::named(&self.settings.skin);
-        skin_miniature(frame, skin, Rect { x: r.x, y: r.y, w: r.h * 1.4, h: r.h });
         let app = crate::app();
         let history = app.controller.history.lock().unwrap();
         let Some(sample) = history.back() else { return };
-        let total = app.info.mem_total as f64;
-        let figures = [
-            ("CPU", sample.cpu),
-            ("GPU", sample.gpus.first().and_then(|gpu| gpu.usage)),
-            (pick(self.lang, "内存", "Memory"), (total > 0.0).then(|| (sample.memory.used as f64 / total * 100.0) as f32)),
-        ];
-        let x0 = r.x + r.h * 1.4 + 16.0;
-        let cell = (r.w - (x0 - r.x)) / figures.len() as f32;
+        let figures = [("CPU", sample.cpu), ("GPU", sample.gpus.first().and_then(|gpu| gpu.usage))];
+        let cell = (r.w - 16.0) / figures.len() as f32;
         for (i, (name, figure)) in figures.into_iter().enumerate() {
-            let x = x0 + i as f32 * cell;
-            text_centred(frame, name, Font::new(Family::Segoe, 11.0, 400.0), palette.text2, x, r.y + 14.0, cell, Align::Start);
+            let x = r.x + 8.0 + i as f32 * cell;
+            text_centred(frame, name, Font::new(Family::Segoe, 10.0, 400.0), palette.text2, x, r.y + 13.0, cell, Align::Start);
             let shown = figure.map_or("—".to_string(), |f| format!("{f:.0}%"));
-            text_centred(frame, &shown, Font::new(Family::Segoe, 20.0, 600.0), palette.text, x, r.y + 38.0, cell, Align::Start);
+            text_centred(frame, &shown, Font::new(Family::Segoe, 17.0, 600.0), palette.text, x, r.y + 31.0, cell, Align::Start);
+        }
+        // The processor's load, a point a sample, the last minute of it (as much of it as there is).
+        let loads: Vec<f32> = history.iter().rev().take(60).filter_map(|sample| sample.cpu).collect();
+        if loads.len() < 2 {
+            return;
+        }
+        let (x0, x1, bottom, top) = (r.x + 8.0, r.x + r.w - 8.0, r.y + r.h - 8.0, r.y + 46.0);
+        let step = (x1 - x0) / 59.0;
+        let point = |i: usize, load: f32| Vector2 { X: x1 - i as f32 * step, Y: bottom - (bottom - top) * (load / 100.0).clamp(0.0, 1.0) };
+        let brush = frame.brush(palette.selection);
+        for (i, pair) in loads.windows(2).enumerate() {
+            unsafe { frame.dc.DrawLine(point(i, pair[0]), point(i + 1, pair[1]), brush, 1.4, None) };
         }
     }
 
@@ -176,19 +187,15 @@ impl Ui {
         let Some(t) = app.controller.history.lock().unwrap().back().map(|sample| sample.t) else { return };
         let now = super::super::text::Local::at(t);
         let (figure, unit) = now.time(false, self.lang);
-        let clock = format!("{figure}{unit}");
-        let big = Font::new(Family::Segoe, 26.0, 600.0);
-        let clock_w = frame.gfx.measure(&clock, big);
-        text_centred(frame, &clock, big, palette.text, r.x, r.y + 20.0, clock_w + 4.0, Align::Start);
-        text_centred(frame, &now.date(self.lang), Font::new(Family::Segoe, 11.0, 400.0), palette.text2, r.x, r.y + 44.0, clock_w + 40.0, Align::Start);
-        let x = r.x + clock_w.max(110.0) + 24.0;
+        let (x, w) = (r.x + 10.0, r.w - 20.0);
+        text_centred(frame, &format!("{figure}{unit}"), Font::new(Family::Segoe, 22.0, 600.0), palette.text, x, r.y + 24.0, w, Align::Start);
+        text_centred(frame, &now.date(self.lang), Font::new(Family::Segoe, 10.5, 400.0), palette.text2, x, r.y + 45.0, w, Align::Start);
         let playing = crate::playing::now().filter(|heard| !heard.title.is_empty());
-        let (title, about) = match &playing {
-            Some(heard) => (heard.title.clone(), heard.artist.clone()),
-            None => (pick(self.lang, "没有正在播放的内容", "Nothing is playing").to_string(), String::new()),
+        let title = match &playing {
+            Some(heard) => heard.title.clone(),
+            None => pick(self.lang, "没有正在播放的内容", "Nothing is playing").to_string(),
         };
-        text_centred(frame, &title, Font::new(Family::Segoe, 13.0, 600.0), palette.text, x, r.y + 18.0, r.x + r.w - x, Align::Start);
-        text_centred(frame, &about, Font::new(Family::Segoe, 11.0, 400.0), palette.text2, x, r.y + 38.0, r.x + r.w - x, Align::Start);
+        text_centred(frame, &title, Font::new(Family::Segoe, 10.5, 600.0), palette.text, x, r.y + 68.0, w, Align::Start);
     }
 
     /// The screen shown large in the editor, by its name: the one chosen, while it is there; every screen small, else
