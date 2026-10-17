@@ -284,9 +284,12 @@ pub fn receive_within<T: for<'de> Deserialize<'de> + Send + 'static>(from: &File
     got
 }
 
-/// Asks the sensors `asked`, on the rest's asking end.
-pub fn ask_on(to: &mut File, asked: &Asked) -> bool {
-    send(to, asked)
+/// `asked` as it goes on the pipe: its length, then it (see `send`); none where it cannot be written.
+pub fn framed(asked: &Asked) -> Option<Vec<u8>> {
+    let body = serde_json::to_vec(asked).ok()?;
+    let mut framed = (body.len() as u32).to_le_bytes().to_vec();
+    framed.extend(body);
+    Some(framed)
 }
 
 impl Sensors {

@@ -33,7 +33,9 @@ pub enum Source {
 }
 
 /// The link's asking end, for what is asked of the sensors from any thread; whether there is a link.
-static ASKING: Mutex<Option<std::fs::File>> = Mutex::new(None);
+/// What the sensors are asked goes to them through this, written to their pipe on a thread of the link's own
+/// (see `linked_to`): asked from the threads that draw, a pipe the sensors have stopped reading would hold them.
+static ASKING: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>> = Mutex::new(None);
 static LINKED: AtomicBool = AtomicBool::new(false);
 /// Since when the link there is has been there.
 static LINKED_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
@@ -144,8 +146,21 @@ fn greeted(link: &Link) -> Option<StaticInfo> {
 
 /// From now on what is asked goes over `link`; nothing asked of the sensors before is taken to be known to them.
 fn linked_to(link: &Link) {
-    if let Ok(asking) = link.asked.try_clone() {
-        *ASKING.lock().unwrap() = Some(asking);
+    if let Ok(mut asking) = link.asked.try_clone() {
+        // (Its thread ends as the link is replaced or lost: what sends to it is dropped then.)
+        let (ask, asked) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::Builder::new()
+            .name("glance: asking the sensors".into())
+            .spawn(move || {
+                use std::io::Write;
+                for framed in asked {
+                    if asking.write_all(&framed).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("a thread started");
+        *ASKING.lock().unwrap() = Some(ask);
     }
     *WANTED.lock().unwrap() = None;
     *EDGES.lock().unwrap() = None;
@@ -170,8 +185,8 @@ pub fn linked() -> bool {
 }
 
 fn ask(asked: &Asked) {
-    if let Some(asking) = ASKING.lock().unwrap().as_mut() {
-        let _ = crate::link::ask_on(asking, asked);
+    if let (Some(asking), Some(framed)) = (ASKING.lock().unwrap().as_ref(), crate::link::framed(asked)) {
+        let _ = asking.send(framed);
     }
 }
 
