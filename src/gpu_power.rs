@@ -721,7 +721,9 @@ impl Igcl {
             hot_spot: None,
             temp: read.gpu_temperature.number().filter(|celsius| *celsius > 0.0).map(|celsius| celsius as f32),
             clock_mhz: read.gpu_clock.number().filter(|mhz| *mhz > 0.0).map(|mhz| mhz as f32),
-            fan_rpm: read.fans.iter().filter_map(CtlItem::number).find(|rpm| *rpm > 0.0).map(|rpm| rpm as u32),
+            // (The fastest of the fans it reads; one it reads standing still is 0, not unread: a card's fans stop
+            // while it is idle.)
+            fan_rpm: read.fans.iter().filter_map(CtlItem::number).filter(|rpm| *rpm >= 0.0).fold(None, |fastest: Option<f64>, rpm| Some(fastest.map_or(rpm, |fastest| fastest.max(rpm)))).map(|rpm| rpm as u32),
         })
     }
 

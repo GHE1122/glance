@@ -90,7 +90,8 @@ pub struct Sampler {
     system_times: Option<(u64, u64)>,
     processes: ProcessTable,
     slow: Slow,
-    base_mhz: f64,
+    /// The processor's base clock (MHz), as the registry says; none where it does not.
+    base_mhz: Option<f64>,
     adapters: Vec<Adapter>,
     gpu_power: GpuPower,
     /// The totals at the last successful read of the interface table.
@@ -213,7 +214,7 @@ impl Sampler {
             system_times: system_times(),
             processes,
             slow: Slow::default(),
-            base_mhz: reg_dword(cpu_key, w!("~MHz")) as f64,
+            base_mhz: Some(reg_dword(cpu_key, w!("~MHz")) as f64).filter(|mhz| *mhz > 0.0),
             adapters,
             gpu_power,
             net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
@@ -382,8 +383,9 @@ impl Sampler {
             (total > 0).then(|| ((busy - busy_before) as f64 / total as f64 * 100.0) as f32)
         });
         self.system_times = times;
-        // Without the performance counter, the clock reads as its base.
-        let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).unwrap_or(100.0);
+        // (Without the performance counter, or the base clock, the clock is not read: shown as its base, it looked
+        // read when it was not.)
+        let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100));
 
         // (Read before the GPUs: Intel's graphics built into the CPU take their power from it.)
         let cpu_sensors = self.cpu_sensors.as_mut().map(CpuReader::read);
@@ -430,7 +432,7 @@ impl Sampler {
             t: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
             cpu,
             threads,
-            ghz: Some((self.base_mhz * performance / 100_000.0) as f32),
+            ghz: self.base_mhz.zip(performance).map(|(base, performance)| (base * performance / 100_000.0) as f32),
             kinds_ghz,
             threads_ghz,
             memory: MemorySample {

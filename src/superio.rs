@@ -373,8 +373,9 @@ impl SuperIo {
                     }
                 }
                 for (register, name) in &self.ec_fans {
-                    // A stopped fan reads zero.
-                    if let Some(rpm) = self.register16(*register).filter(|&rpm| rpm > 0 && rpm < 0xFFFF) {
+                    // A stopped fan reads zero, and is shown so (its header is in use: see `ec_fans`); all ones is
+                    // no reading.
+                    if let Some(rpm) = self.register16(*register).filter(|&rpm| rpm < 0xFFFF) {
                         sensors.fans.push((name.clone(), rpm as f32));
                     }
                 }
