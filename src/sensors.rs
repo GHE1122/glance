@@ -212,6 +212,35 @@ pub struct AmdCpu {
     packages: Vec<(Processors, EnergyCounter)>,
     /// The latest temperatures, kept while another program has the PCI bus.
     last: (Option<f32>, Vec<(usize, f32)>),
+    /// How far above the die's own temperature its control temperature (Tctl) reads, on the CPUs that read so
+    /// (see `tctl_offset`).
+    tctl_offset: f32,
+}
+
+/// How far above the die's temperature an AMD CPU's control temperature (Tctl) reads (degrees), from its family and
+/// its name: the CPUs that read so, and by how much, as Linux's k10temp driver has them (`tctl_offset_table`), named
+/// by a part of their name. Most read none.
+fn tctl_offset(family: u32, name: &str) -> f32 {
+    const OFFSETS: [(u32, &str, f32); 6] = [
+        (0x17, "AMD Ryzen 5 1600X", 20.0),
+        (0x17, "AMD Ryzen 7 1700X", 20.0),
+        (0x17, "AMD Ryzen 7 1800X", 20.0),
+        (0x17, "AMD Ryzen 7 2700X", 10.0),
+        (0x17, "AMD Ryzen Threadripper 19", 27.0),
+        (0x17, "AMD Ryzen Threadripper 29", 27.0),
+    ];
+    OFFSETS.iter().find(|(of, part, _)| *of == family && name.contains(part)).map_or(0.0, |(.., offset)| *offset)
+}
+
+/// The CPU's name as it says it (CPUID leaves 0x80000002 to 0x80000004).
+fn cpu_name() -> String {
+    let bytes: Vec<u8> = (0x8000_0002u32..=0x8000_0004)
+        .flat_map(|leaf| {
+            let r = std::arch::x86_64::__cpuid(leaf);
+            [r.eax, r.ebx, r.ecx, r.edx].into_iter().flat_map(u32::to_le_bytes)
+        })
+        .collect();
+    String::from_utf8_lossy(&bytes).trim_matches(char::from(0)).trim().to_string()
 }
 
 impl AmdCpu {
@@ -223,7 +252,7 @@ impl AmdCpu {
         let units = module.read("ioctl_read_msr", MSR_PWR_UNIT).ok()?;
         let unit = 1.0 / (1u64 << ((units >> 8) & 0x1F)) as f64;
         let packages = topology(RelationProcessorPackage).into_iter().map(|p| (p, EnergyCounter::new(unit))).collect();
-        Some(AmdCpu { module, ccds, packages, last: (None, Vec::new()) })
+        Some(AmdCpu { module, ccds, packages, last: (None, Vec::new()), tctl_offset: tctl_offset(family, &cpu_name()) })
     }
 
     /// One SMN register. Reached through an index and a data register on
@@ -240,9 +269,10 @@ impl AmdCpu {
         // While another program has the bus, the last temperatures stand.
         if let Some(_lock) = NamedLock::acquire(PCI_LOCK, LOCK_WAIT) {
             let mut ccds = Vec::new();
+            // (The die's: the control temperature less what it reads above it, on the CPUs that do.)
             let temp = self.smn(THM_TCON_CUR_TMP).map(|raw| {
                 let offset = if raw & (1 << 19) != 0 { 49.0 } else { 0.0 };
-                ((raw >> 21) & 0x7FF) as f32 * 0.125 - offset
+                ((raw >> 21) & 0x7FF) as f32 * 0.125 - offset - self.tctl_offset
             });
             let (offset, count) = self.ccds.unwrap_or_default();
             for ccd in 0..count {
@@ -415,6 +445,18 @@ fn cpu_family_model_intel() -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CPUs whose control temperature reads above their die's are read less by as much, by their name and
+    /// family as Linux's k10temp has them; the others as they read.
+    #[test]
+    fn some_cpus_read_their_control_temperature_above_the_die() {
+        assert_eq!(tctl_offset(0x17, "AMD Ryzen 7 1800X Eight-Core Processor"), 20.0);
+        assert_eq!(tctl_offset(0x17, "AMD Ryzen 7 2700X Eight-Core Processor"), 10.0);
+        assert_eq!(tctl_offset(0x17, "AMD Ryzen Threadripper 2950X 16-Core Processor"), 27.0);
+        assert_eq!(tctl_offset(0x17, "AMD Ryzen 7 2700 Eight-Core Processor"), 0.0);
+        assert_eq!(tctl_offset(0x19, "AMD Ryzen 9 7950X 16-Core Processor"), 0.0);
+        assert_eq!(tctl_offset(0x1A, "AMD Ryzen 7 1800X"), 0.0);
+    }
 
     #[test]
     fn finds_this_machines_processors() {
