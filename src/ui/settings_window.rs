@@ -179,7 +179,8 @@ pub fn show() {
     }
     let hwnd = HWND(hwnd as *mut _);
     unsafe {
-        let _ = ShowWindow(hwnd, SW_RESTORE);
+        // (Asked of its own thread, not waited for: called from the tray's and the panel's.)
+        let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindowAsync(hwnd, SW_RESTORE);
         let _ = SetForegroundWindow(hwnd);
     }
 }
