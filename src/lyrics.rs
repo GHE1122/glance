@@ -401,18 +401,36 @@ pub fn word_timed(yrc: &str, translation: Option<&str>) -> Vec<Line> {
 }
 
 /// The track on NetEase Cloud Music that is `track`: of those found by its title and artist, the first of its
-/// title and of its length (to two seconds).
+/// title, by its artist, and of its length (to two seconds).
 fn netease_search(track: &Track) -> Answer<u64> {
     let asked = format!("{} {}", track.title, track.artist);
     let said = netease_said(&format!("https://music.163.com/api/search/get?s={}&type=1&limit=10", escaped(&asked)))?;
     Ok(said["result"]["songs"].as_array().into_iter().flatten().find_map(|song| {
         let length = song["duration"].as_f64()? / 1000.0;
-        (same(song["name"].as_str()?, &track.title) && (length - track.seconds as f64).abs() <= 2.0).then(|| song["id"].as_u64()).flatten()
+        let artists = song["artists"].as_array().into_iter().flatten().filter_map(|artist| artist["name"].as_str());
+        let by = by_artist(artists, &track.artist);
+        (same(song["name"].as_str()?, &track.title) && by && (length - track.seconds as f64).abs() <= 2.0).then(|| song["id"].as_u64()).flatten()
     }))
 }
 
+/// Whether a track by `artists` (as a collection names them) is by `artist` (as its player does): one of them is,
+/// but for case and spaces. Any is, where the player names none. (By title and length alone, another artist's song
+/// of that name, a cover, was taken for it, and its lyrics shown.)
+fn by_artist<'a>(artists: impl IntoIterator<Item = &'a str>, artist: &str) -> bool {
+    artist.trim().is_empty() || artists.into_iter().any(|theirs| same(theirs, artist))
+}
+
+/// The artists of a track as LRCLIB names them, all in one ("A, B & C feat. D").
+fn artists_in(named: &str) -> Vec<&str> {
+    let mut artists = vec![named];
+    for between in [",", "&", "/", ";", " feat. ", " ft. ", " x "] {
+        artists = artists.into_iter().flat_map(|artist| artist.split(between)).collect();
+    }
+    artists.into_iter().map(str::trim).filter(|artist| !artist.is_empty()).collect()
+}
+
 /// LRCLIB's timed lyrics of `track`: the one it has of that title, artist, album and length; else, of those
-/// it finds by title and artist, the first of that length (to two seconds) with timed lyrics.
+/// it finds by title and artist, the first by that artist of that length (to two seconds) with timed lyrics.
 fn lrclib(track: &Track) -> Answer<Vec<Line>> {
     let timed = |said: &serde_json::Value| said["syncedLyrics"].as_str().map(|lrc| merged(lrc, None)).filter(|lines| lines.iter().any(|line| !line.text.is_empty()));
     let exact = format!(
@@ -427,7 +445,13 @@ fn lrclib(track: &Track) -> Answer<Vec<Line>> {
     }
     let search = format!("https://lrclib.net/api/search?track_name={}&artist_name={}", escaped(&track.title), escaped(&track.artist));
     let said = fetched_json(&search)?.unwrap_or_default();
-    Ok(said.as_array().into_iter().flatten().filter(|one| one["duration"].as_f64().is_some_and(|length| (length - track.seconds as f64).abs() <= 2.0)).find_map(timed))
+    Ok(said
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|one| one["duration"].as_f64().is_some_and(|length| (length - track.seconds as f64).abs() <= 2.0))
+        .filter(|one| by_artist(artists_in(one["artistName"].as_str().unwrap_or_default()), &track.artist))
+        .find_map(timed))
 }
 
 /// Whether two titles are the same, but for case and spaces.
@@ -721,6 +745,16 @@ mod tests {
         assert!(matches!(found(None), Held::Found(None)));
         let line = Line { at: 1.0, end: None, text: "kept".into(), words: Vec::new(), backing: None, translation: None };
         assert!(matches!(found(Some(vec![line])), Held::Found(Some(lines)) if lines.len() == 1));
+    }
+
+    /// A track found is by the artist asked about: one of its artists, however they are joined.
+    #[test]
+    fn a_track_found_is_by_its_artist() {
+        assert!(by_artist(artists_in("Coldplay"), "coldplay"));
+        assert!(by_artist(artists_in("Daft Punk feat. Pharrell Williams, Nile Rodgers"), "Pharrell Williams"));
+        assert!(by_artist(artists_in("周杰伦/费玉清"), "费玉清"));
+        assert!(!by_artist(artists_in("Some Cover Band"), "Coldplay"));
+        assert!(by_artist(artists_in("Anyone"), ""));
     }
 
     /// A file's offset moves all its times, its words' too: a positive one shows each line that much sooner.
