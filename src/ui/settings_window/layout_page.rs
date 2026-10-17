@@ -17,8 +17,10 @@ const TILE: f32 = 148.0;
 const TILE_GAP: f32 = 8.0;
 const TILE_PICTURE: f32 = 88.0;
 const TILE_PAD: f32 = 8.0;
-/// What plays, drawn as its strip at the least a music widget is wide, made smaller into its picture.
+/// What plays, drawn as its strip at the least a music widget is wide, made smaller into its picture; the room round
+/// each component in its picture.
 const TILE_MUSIC: (f32, f32) = (240.0, 72.0);
+const TILE_ROOM: f32 = 8.0;
 /// A row of the editor's head (the screens to show, every screen alike), and the room round the screens under it.
 const EDITOR_ROW: f32 = 46.0;
 const EDITOR_ROOM: f32 = 20.0;
@@ -123,19 +125,27 @@ impl Ui {
             let carried = self.carry.as_ref().is_some_and(|carry| carry.moved && carry.part == part && carry.from.is_none());
             fill(frame, if hovered.as_ref() == Some(&target) || carried { palette.control_on } else { palette.control }, r.x, r.y, r.w, r.h, 8.0);
             stroke_inside(frame, r, 8.0, palette.card_stroke);
+            // Its picture: the component as it looks now, as a widget of it would on the desktop, small (each the
+            // same way: the real thing over the wallpaper).
             let picture = Rect { x: r.x + TILE_PAD, y: r.y + TILE_PAD, w: r.w - 2.0 * TILE_PAD, h: TILE_PICTURE };
-            fill(frame, palette.window, picture.x, picture.y, picture.w, picture.h, 6.0);
+            let (sw, sh) = self.stage.size;
+            let cover = (picture.w / sw).max(picture.h / sh);
+            // (The desktop as held already, whatever the panel's size it was made for: drawn to the picture's size, it
+            // is not made again for each.)
+            let held = self.stage.bitmap.as_ref().map_or(1.0, |(key, _)| f32::from_bits(*key));
+            self.stage_picture(frame, picture, (picture.x + (picture.w - sw * cover) / 2.0, picture.y + (picture.h - sh * cover) / 2.0), cover, held);
             unsafe { frame.dc.PushAxisAlignedClip(&rect(picture.x, picture.y, picture.w, picture.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+            let inside = Rect { x: picture.x + TILE_ROOM, y: picture.y + TILE_ROOM, w: picture.w - 2.0 * TILE_ROOM, h: picture.h - 2.0 * TILE_ROOM };
             match part {
-                Part::Monitor => self.monitor_sample(frame, palette, picture),
-                Part::Workbench => self.workbench_sample(frame, palette, picture),
+                Part::Monitor => self.component_picture(frame, Part::Monitor, inside, 0),
+                Part::Workbench => self.component_picture(frame, Part::Workbench, inside, 1),
                 Part::Music => {
                     let mut shows = super::super::music::Shows::from(&self.settings.view);
                     // As a strip: one line, the cover and what plays beside it, made smaller into the picture.
                     shows.clear = false;
-                    let k = ((picture.w - 8.0) / TILE_MUSIC.0).min((picture.h - 8.0) / TILE_MUSIC.1);
+                    let k = (inside.w / TILE_MUSIC.0).min(inside.h / TILE_MUSIC.1).min(1.0);
                     let (w, h) = (TILE_MUSIC.0 * k, TILE_MUSIC.1 * k);
-                    frame.place(Matrix3x2::scale(k, k) * Matrix3x2::translation(picture.x + (picture.w - w) / 2.0, picture.y + (picture.h - h) / 2.0));
+                    frame.place(Matrix3x2::scale(k, k) * Matrix3x2::translation(inside.x + (inside.w - w) / 2.0, inside.y + (inside.h - h) / 2.0));
                     let (ground, now) = (super::super::music::Ground::Own, Instant::now());
                     let _ = if super::super::music::heard() {
                         self.library_music.paint(frame, TILE_MUSIC, &shows, ground, self.scale * k, None, now)
@@ -153,49 +163,50 @@ impl Ui {
         }
     }
 
-    /// The readings, small: the processor's and the graphics' load now, and the processor's over the last minute as a
-    /// line under them.
-    fn monitor_sample(&self, frame: &Frame, palette: &Palette, r: Rect) {
+    /// The readings (as their corner shows them: the processor's last minutes, the chips' rings, the network) or the
+    /// workbench (as its panel does), drawn as the skin draws them, as large as `area` holds, in its middle; in the
+    /// layers `layers` (one each: see `library_layers`).
+    fn component_picture(&mut self, frame: &Frame, part: Part, area: Rect, layers: usize) {
+        let lang = self.lang;
         let app = crate::app();
-        let history = app.controller.history.lock().unwrap();
-        let Some(sample) = history.back() else { return };
-        let figures = [("CPU", sample.cpu), ("GPU", sample.gpus.first().and_then(|gpu| gpu.usage))];
-        let cell = (r.w - 16.0) / figures.len() as f32;
-        for (i, (name, figure)) in figures.into_iter().enumerate() {
-            let x = r.x + 8.0 + i as f32 * cell;
-            text_centred(frame, name, Font::new(Family::Segoe, 10.0, 400.0), palette.text2, x, r.y + 13.0, cell, Align::Start);
-            let shown = figure.map_or("—".to_string(), |f| format!("{f:.0}%"));
-            text_centred(frame, &shown, Font::new(Family::Segoe, 17.0, 600.0), palette.text, x, r.y + 31.0, cell, Align::Start);
-        }
-        // The processor's load, a point a sample, the last minute of it (as much of it as there is).
-        let loads: Vec<f32> = history.iter().rev().take(60).filter_map(|sample| sample.cpu).collect();
-        if loads.len() < 2 {
+        let skin = Skin::named(&self.settings.skin);
+        let prefs = self.prefs.clone().holding(part);
+        let mut history = app.controller.history.lock().unwrap();
+        let samples = history.make_contiguous();
+        if samples.is_empty() {
             return;
         }
-        let (x0, x1, bottom, top) = (r.x + 8.0, r.x + r.w - 8.0, r.y + r.h - 8.0, r.y + 46.0);
-        let step = (x1 - x0) / 59.0;
-        let point = |i: usize, load: f32| Vector2 { X: x1 - i as f32 * step, Y: bottom - (bottom - top) * (load / 100.0).clamp(0.0, 1.0) };
-        let brush = frame.brush(palette.selection);
-        for (i, pair) in loads.windows(2).enumerate() {
-            unsafe { frame.dc.DrawLine(point(i, pair[0]), point(i + 1, pair[1]), brush, 1.4, None) };
-        }
-    }
-
-    /// What the workbench shows, small: the time and the day, and what plays.
-    fn workbench_sample(&self, frame: &Frame, palette: &Palette, r: Rect) {
-        let app = crate::app();
-        let Some(t) = app.controller.history.lock().unwrap().back().map(|sample| sample.t) else { return };
-        let now = super::super::text::Local::at(t);
-        let (figure, unit) = now.time(false, self.lang);
-        let (x, w) = (r.x + 10.0, r.w - 20.0);
-        text_centred(frame, &format!("{figure}{unit}"), Font::new(Family::Segoe, 22.0, 600.0), palette.text, x, r.y + 24.0, w, Align::Start);
-        text_centred(frame, &now.date(self.lang), Font::new(Family::Segoe, 10.5, 400.0), palette.text2, x, r.y + 45.0, w, Align::Start);
-        let playing = crate::playing::now().filter(|heard| !heard.title.is_empty());
-        let title = match &playing {
-            Some(heard) => heard.title.clone(),
-            None => pick(self.lang, "没有正在播放的内容", "Nothing is playing").to_string(),
+        let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
+        let pen = wall - self.settings.interval_ms as f64 - PEN_LAG_MS;
+        let seen = app.controller.seen.lock().unwrap().clone();
+        let (overlay, newer) = (app.controller.overlay_wanted(), update::available().is_some());
+        // Light or dark as the desktop is under the picture (where the skin follows it).
+        let (sw, sh) = self.stage.size;
+        let middle = RECT { left: (sw * 0.3) as i32, top: (sh * 0.3) as i32, right: (sw * 0.7) as i32, bottom: (sh * 0.7) as i32 };
+        let tone = self.stage.desktop.as_ref().map_or((0.5, 0.0), |desktop| desktop.luminance(middle, 1.0));
+        let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
+        let theme = Theme::new(skin, dark);
+        let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
+        let scene = Scene { music_apart: false, info: &app.info, prefs: &prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay, buttons: false, newer };
+        let heights = view::heights(&scene);
+        let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
+        let readings = super::super::forms::count(&scene);
+        let want = match part {
+            Part::Monitor => arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(super::super::forms::Small::Corner), scale: 1.0, extra: (0.0, 0.0) }),
+            _ => arrange::Want::Itself,
         };
-        text_centred(frame, &title, Font::new(Family::Segoe, 10.5, 600.0), palette.text, x, r.y + 68.0, w, Align::Start);
+        let opening = arrange::Opening::new(&theme, Edge::Right, &lanes, readings, (sw, sh), None, 1.0, want, seen.clone());
+        let drawn = (opening.size.0 * opening.zoom, opening.size.1 * opening.zoom);
+        let k = (area.w / drawn.0).min(area.h / drawn.1).min(1.0);
+        let at = (area.x + (area.w - drawn.0 * k) / 2.0, area.y + (area.h - drawn.1 * k) / 2.0);
+        let detail = opening.detail();
+        let shown = view::lanes_at(&scene, |_| detail);
+        let picture = render::Picture { scene: &scene, lanes: &shown, layout: &opening.layout, small: opening.small().map(|small| (small, opening.size)), size: opening.size, at: (0.0, 0.0), edge: None, backdrop: None, frost, rough: false };
+        let zoom = opening.zoom * k;
+        let drew = self.library_layers[layers].draw(frame, &picture, Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(at.0, at.1), self.scale * zoom);
+        if drew.is_err() {
+            self.failed = true;
+        }
     }
 
     /// The screen shown large in the editor, by its name: the one chosen, while it is there; every screen small, else

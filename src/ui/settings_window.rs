@@ -937,8 +937,10 @@ struct Ui {
     /// A component carried in the layout's editor, and its edges as last drawn (where they take it).
     carry: Option<Carry>,
     zones: Vec<Zone>,
-    /// What plays, as the layout's library shows it.
+    /// What plays, as the layout's library shows it; the readings and the workbench, as it shows them (each drawn
+    /// in layers of its own: see `render::PanelLayers`).
     library_music: super::music::Music,
+    library_layers: [PanelLayers; 2],
     /// When the screens were last asked for.
     screens_at: Instant,
     map_art: Vec<MapArt>,
@@ -999,6 +1001,9 @@ impl Lives for Ui {
         }
         self.music.release();
         self.library_music.release();
+        for layers in &mut self.library_layers {
+            layers.release();
+        }
     }
 }
 
@@ -1118,6 +1123,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             carry: None,
             zones: Vec::new(),
             library_music: super::music::Music::default(),
+            library_layers: [PanelLayers::default(), PanelLayers::default()],
             screens_at: Instant::now(),
             map_art: Vec::new(),
             kept_stages: Vec::new(),
