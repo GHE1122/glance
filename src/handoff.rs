@@ -12,7 +12,7 @@ use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Shell::{IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellWindows, ShellWindows, SID_STopLevelBrowser, SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH};
-use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
 
 /// The argument the started Glance is given: it was started so, and never
 /// hands its start over again (were it elevated after all).
@@ -68,6 +68,12 @@ unsafe fn ask_shell(program: &str, arguments: &str) -> Result<(), Refused> {
     // SW_SHOWNORMAL.
     let show = VARIANT::from(1i32);
     unsafe { shell.ShellExecute(&BSTR::from(program), &arguments, &folder, &verb, &show) }.map_err(|e| failed("starting it", e))
+}
+
+/// Whether the desktop's shell runs elevated, as this user in this session (UAC off, or the built-in Administrator's
+/// account): every program the user starts is then elevated too, a double click on Glance among them.
+pub fn shell_elevated() -> bool {
+    check_shell(unsafe { GetShellWindow() }) == Err(Refused::ShellElevated)
 }
 
 /// Whether the shell whose desktop window is `window` runs as this user, in this session, unelevated.

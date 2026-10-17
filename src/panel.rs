@@ -1799,9 +1799,9 @@ impl<'a> Panel<'a> {
             // (What was pressed before it opened is not a press elsewhere.)
             self.presses_seen = PRESSES.load(Ordering::Relaxed);
         }
-        // Not while it gives way to the settings: they are in front of it,
-        // and would be taken as what is behind it.
-        if self.live && self.is_open() && self.capturing.is_none() && !self.window.yielding() {
+        // (Giving way to the settings, it is taken all the same: what is behind it is put together from the windows
+        // under it, and the settings are in front of it, never among them; see `scene`.)
+        if self.live && self.is_open() && self.capturing.is_none() {
             self.refresh_behind(now);
         }
         // A panel the desktop was taken behind, grown or moved past it
@@ -1814,10 +1814,10 @@ impl<'a> Panel<'a> {
                 self.recapture |= !covers(taken, window);
             }
         }
-        // Not while it gives way to the settings: they are in front of it,
-        // and would be taken as what is behind it.
+        // (Taken again while it gives way to the settings too, as after the device was lost: what was taken on the
+        // lost one cannot be drawn on the new one, and till it is taken again the glass has nothing behind it.)
         let rested = self.failed_behind.is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1));
-        if self.recapture && rested && self.capturing.is_none() && !self.window.yielding() {
+        if self.recapture && rested && self.capturing.is_none() {
             self.recapture_behind();
         }
         if now >= self.next_frame {
