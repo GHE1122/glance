@@ -623,7 +623,7 @@ impl Drop for Handle {
 
 /// The body of an HTTPS GET of `url`, if it answered 200 (redirects
 /// followed, never from HTTPS to HTTP).
-fn get(url: &str) -> Option<Vec<u8>> {
+pub(crate) fn get(url: &str) -> Option<Vec<u8>> {
     ask(url, None, RELEASES)
 }
 

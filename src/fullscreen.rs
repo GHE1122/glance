@@ -95,6 +95,8 @@ impl FullMusic {
     /// Over the screen `screen` (physical px) at `scale`, in front with the keyboard; none where its window could
     /// not be made.
     pub fn open(gfx: Rc<Gfx>, screen: RECT, scale: f32) -> Option<Self> {
+        // Its lines' serif face, taken from Glance's site the first time (YaHei till it is had).
+        crate::serif::want();
         let window = Window::activating().ok()?;
         let surface = Surface::new(&gfx, window.hwnd).ok()?;
         let smoke = Smoke::new(&gfx).inspect_err(|error| crate::journal::note(format!("music full screen: the smoke could not be drawn ({error})"))).ok();
@@ -400,7 +402,7 @@ fn draw_lines(frame: &Frame, (w, h): (f32, f32), lines: &[Line], now: Option<usi
     draw_line(frame, (w, h), line, next.map(|line| line.at), index, position, t, music, 0.0, (left, baseline, base));
     // The next line, small under it, coming in a moment after.
     if let Some(next) = next.filter(|next| !next.text.trim().is_empty()) {
-        let font = Font::new(Family::YaHei, (h * 0.029).max(14.0), 700.0);
+        let font = Font::new(crate::serif::family(), (h * 0.029).max(14.0), 700.0);
         let shown = ((position - line.at) as f32 - 0.3).clamp(0.0, 1.0) * 0.5;
         frame.text_moving(&next.text, font, Color::hex(0xFFFFFF, shown), left + 4.0, baseline + h * 0.09, w - 2.0 * left, Align::Start);
     }
@@ -416,7 +418,7 @@ fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>,
     }
     // Each character's size and room, the whole made smaller where it would not fit.
     let mut sizes: Vec<f32> = (0..chars.len()).map(|k| base * SIZES[(k + which * 3) % 8]).collect();
-    let mut rooms: Vec<f32> = chars.iter().zip(&sizes).map(|((ch, ..), size)| if ch.is_whitespace() { size * 0.4 } else { frame.measure(&ch.to_string(), Font::new(Family::YaHei, *size, 700.0)) + base * 0.08 }).collect();
+    let mut rooms: Vec<f32> = chars.iter().zip(&sizes).map(|((ch, ..), size)| if ch.is_whitespace() { size * 0.4 } else { frame.measure(&ch.to_string(), Font::new(crate::serif::family(), *size, 700.0)) + base * 0.08 }).collect();
     let total: f32 = rooms.iter().sum();
     let fit = ((w - 2.0 * left) / total.max(1.0)).min(1.0);
     sizes.iter_mut().for_each(|size| *size *= fit);
@@ -449,7 +451,7 @@ fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>,
         if age < -0.25 {
             continue;
         }
-        let font = Font::new(Family::YaHei, *size, 700.0);
+        let font = Font::new(crate::serif::family(), *size, 700.0);
         let y = baseline + (k as f32 * 0.9 + t * 0.8 + which as f32).sin() * base * 0.18 + (middle - w / 2.0) * sway;
         let came = ease((age + 0.25) / 0.55);
         // How lit it is: up as it is sung, down after.
@@ -510,8 +512,8 @@ fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>,
 fn draw_said(frame: &Frame, (w, h): (f32, f32), title: &str, artist: &str, why: &str) {
     let left = w * 0.081;
     let baseline = h * 0.62;
-    let big = Font::new(Family::YaHei, h * 0.09, 700.0);
-    let small = Font::new(Family::YaHei, (h * 0.029).max(14.0), 700.0);
+    let big = Font::new(crate::serif::family(), h * 0.09, 700.0);
+    let small = Font::new(crate::serif::family(), (h * 0.029).max(14.0), 700.0);
     let (ascent, _) = frame.gfx.baseline(big);
     let room = w - 2.0 * left;
     if !title.is_empty() {
@@ -631,6 +633,10 @@ mod pictures {
     fn draws_the_full_screen() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        // (In the serif face, where its file is named: else in YaHei, as till it is had.)
+        if let Ok(face) = std::env::var("GLANCE_SERIF") {
+            crate::serif::have(std::fs::read(face).unwrap());
         }
         let gfx = crate::ui::gfx::current().unwrap();
         let (w, h) = (1280.0f32, 720.0f32);

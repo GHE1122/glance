@@ -853,6 +853,11 @@ fn held_where_it_says(folder: &Path) -> Option<Held> {
 /// running elevated, reads nothing a link in a user's folder leads to; and
 /// nothing larger than `most` bytes (a file anyone could have filled).
 pub fn read_in_place(folder: &Path, name: &str, most: u64) -> Option<String> {
+    String::from_utf8(read_bytes_in_place(folder, name, most)?).ok()
+}
+
+/// Reads `name` in `folder` as `read_in_place` does, as it is (not text).
+pub fn read_bytes_in_place(folder: &Path, name: &str, most: u64) -> Option<Vec<u8>> {
     use std::io::Read;
     let held = held_where_it_says(folder)?;
     let mut file = Held::open(&folder.join(name))?;
@@ -860,9 +865,9 @@ pub fn read_in_place(folder: &Path, name: &str, most: u64) -> Option<String> {
         return None;
     }
     // Larger than `most`: not one Glance wrote, and not read whole.
-    let mut text = String::new();
-    file.0.by_ref().take(most + 1).read_to_string(&mut text).ok()?;
-    (text.len() as u64 <= most).then_some(text)
+    let mut bytes = Vec::new();
+    file.0.by_ref().take(most + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= most).then_some(bytes)
 }
 
 /// Writes `contents` as `name` in `folder`, for Glance running elevated: the
@@ -929,7 +934,7 @@ pub fn remove_settings() -> bool {
     let remotes = remote.is_none_or(|folder| remove_kept(&folder, &["config.json", "config.json.new", "remote.log"]));
     // And what it fetched and kept (the lyrics found) and its index of the music on this PC, then its local folder.
     let lyrics = crate::lyrics::kept::names();
-    let fetched = remove_kept(&crate::lyrics::kept::folder(), &lyrics.iter().map(String::as_str).collect::<Vec<_>>()) && remove_kept(&crate::settings::local_dir(), &[crate::library::INDEX_FILE]);
+    let fetched = remove_kept(&crate::lyrics::kept::folder(), &lyrics.iter().map(String::as_str).collect::<Vec<_>>()) && remove_kept(&crate::settings::local_dir(), &[crate::library::INDEX_FILE, crate::serif::FILE]);
     own && remotes && fetched
 }
 

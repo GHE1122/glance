@@ -85,6 +85,8 @@ pub struct Gfx {
     /// The shipped faces: their collections and family names.
     archivo: (IDWriteFontCollection, HSTRING),
     inter: (IDWriteFontCollection, HSTRING),
+    /// The serif face, once it is had and first asked for (see `serif`).
+    serif: std::cell::OnceCell<Option<(IDWriteFontCollection, HSTRING)>>,
     icons: PCWSTR,
     /// Each font's format, and when it was last asked for.
     formats: RefCell<HashMap<FontKey, (IDWriteTextFormat3, Instant)>>,
@@ -235,6 +237,7 @@ impl Gfx {
             loader,
             archivo,
             inter,
+            serif: std::cell::OnceCell::new(),
             icons,
             formats: RefCell::new(HashMap::new()),
             made: RefCell::new(HashMap::new()),
@@ -275,6 +278,11 @@ impl Gfx {
             Family::SegoeDisplay => (w!("Segoe UI Variable Display"), None),
             Family::Icons => (self.icons, None),
             Family::YaHei => (w!("Microsoft YaHei UI"), None),
+            // (Asked for only once it is had: see `serif::family`.)
+            Family::Serif => match self.serif.get_or_init(|| crate::serif::face().and_then(|face| face_of(&self.write, &self.loader, face).ok())) {
+                Some((collection, name)) => (PCWSTR(name.as_ptr()), Some(collection)),
+                None => (w!("Microsoft YaHei UI"), None),
+            },
         };
         let format = unsafe {
             self.write
@@ -591,9 +599,17 @@ fn shipped_face(write: &IDWriteFactory6, loader: &IDWriteInMemoryFontFileLoader,
         let size = stream.GetFileSize()?;
         let (mut start, mut context) = (std::ptr::null_mut(), std::ptr::null_mut());
         stream.ReadFileFragment(&mut start, 0, size, &mut context)?;
-        // Without an owner, the loader keeps a copy of the data.
-        let file = loader.CreateInMemoryFontFileReference(write, start, size as u32, None);
+        let face = face_of(write, loader, std::slice::from_raw_parts(start.cast::<u8>(), size as usize));
         stream.ReleaseFileFragment(context);
+        face
+    }
+}
+
+/// A face from its file's bytes (OpenType), as a collection of its own, and the family name it goes by.
+fn face_of(write: &IDWriteFactory6, loader: &IDWriteInMemoryFontFileLoader, bytes: &[u8]) -> Result<(IDWriteFontCollection, HSTRING)> {
+    unsafe {
+        // Without an owner, the loader keeps a copy of the data.
+        let file = loader.CreateInMemoryFontFileReference(write, bytes.as_ptr().cast(), bytes.len() as u32, None);
         let builder = write.CreateFontSetBuilder()?;
         IDWriteFontSetBuilder1::AddFontFile(&builder, &file?)?;
         let collection: IDWriteFontCollection =

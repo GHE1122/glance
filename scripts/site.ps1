@@ -45,6 +45,20 @@ if (-not (Test-Path (Join-Path $served $source))) {
     Invoke-WebRequest 'https://codeberg.org/OpenRGB/OpenRGB/archive/release_1.0.zip' -OutFile (Join-Path $served $source)
 }
 
+# The music full screen's serif face, as Noto's project published it, and its license: Glance takes it from here
+# the first time its full screen opens, and checks it by this digest (src\serif.rs, whose test holds the two alike).
+$noto = 'https://github.com/notofonts/noto-cjk/raw/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Serif'
+$face = Join-Path $served 'NotoSerifSC-Black.otf'
+if (-not (Test-Path $face)) {
+    Invoke-WebRequest "$noto/SubsetOTF/SC/NotoSerifSC-Black.otf" -OutFile $face
+}
+if ((Get-FileHash $face -Algorithm SHA256).Hash -ne '91dde57622845beeb663f300813999febdb7fcd5e451bde199d7c954a9740cb4') {
+    throw 'NotoSerifSC-Black.otf is not the face Glance checks for'
+}
+if (-not (Test-Path (Join-Path $served 'NotoSerifSC-OFL.txt'))) {
+    Invoke-WebRequest "$noto/LICENSE" -OutFile (Join-Path $served 'NotoSerifSC-OFL.txt')
+}
+
 # The latest release, as GitHub has it: its installer served from here too (Glance asks this site first for a
 # newer version, and takes the installer from it: see /api/latest in website\_worker.js), and what Glance is
 # told of it, in the terms GitHub and Gitee answer in. Only an installer signed as the releases are goes up.

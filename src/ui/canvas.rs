@@ -40,6 +40,9 @@ pub enum Family {
     /// Microsoft YaHei UI (the system's, Chinese with Latin): the music full screen's lines, till the serif face
     /// they are drawn in is had.
     YaHei,
+    /// Noto Serif SC Black: the music full screen's lines, once taken from Glance's site (see `serif`). Asked for
+    /// only once it is had.
+    Serif,
 }
 
 /// A text style: face, size in DIPs, weight (100–900), width (% of normal)
