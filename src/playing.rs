@@ -328,6 +328,19 @@ pub fn watch(wanted: impl Fn() -> (bool, bool) + Send + 'static, changed: impl F
     }).expect("a thread started");
 }
 
+/// What is followed for `follow`, shown at once as paused if it played and as playing if it was paused, till its
+/// program says how it is (see `ASKED`).
+#[cfg(windows)]
+fn shown_toggled(follow: Follow) {
+    let f = follow as usize;
+    // (Taken out before it is kept again: the lock held on would be locked again by `keep`.)
+    let now = NOW[f].lock().unwrap().clone();
+    if let Some(now) = now {
+        *ASKED[f].lock().unwrap() = Some((std::time::Instant::now() + SETTLES, !now.playing));
+        keep(follow, Some(Now { playing: !now.playing, ..now }));
+    }
+}
+
 /// Does `act` on whatever plays (see `act_on`).
 #[cfg(windows)]
 pub fn act(act: Act) {
@@ -345,11 +358,7 @@ pub fn act_on(follow: Follow, act: Act) {
                 let _ = crate::media::ask_of(follow, "previous");
             }
             Act::Key(Key::Toggle) => {
-                // Shown as asked for at once.
-                if let Some(now) = NOW[f].lock().unwrap().clone() {
-                    *ASKED[f].lock().unwrap() = Some((std::time::Instant::now() + SETTLES, !now.playing));
-                    keep(follow, Some(Now { playing: !now.playing, ..now }));
-                }
+                shown_toggled(follow);
                 let _ = crate::media::ask_of(follow, "toggle");
             }
             Act::Key(Key::Next) => {
@@ -464,6 +473,22 @@ pub fn pretend(now: Now) {
 
 #[cfg(all(test, windows))]
 mod tests {
+    use super::*;
+
+    /// Pausing shows it paused at once, and returns (it once locked what plays twice, and Glance hung).
+    #[test]
+    #[cfg(windows)]
+    fn pausing_shows_it_paused() {
+        keep(Follow::Music, Some(Now { title: "A song".into(), playing: true, ..Default::default() }));
+        let (done, told) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            shown_toggled(Follow::Music);
+            let _ = done.send(());
+        });
+        assert!(told.recv_timeout(std::time::Duration::from_secs(2)).is_ok(), "pausing did not return");
+        assert_eq!(NOW[Follow::Music as usize].lock().unwrap().as_ref().map(|now| now.playing), Some(false));
+    }
+
     /// On a desktop, something playing: where its player says it is (reckoned on to now from when it said so), ten
     /// times a second for ten seconds, and each step back.
     #[test]
