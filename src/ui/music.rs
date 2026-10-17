@@ -703,7 +703,8 @@ fn stage_record((w, h): (f32, f32)) -> ((f32, f32), f32) {
     let pad = pad(Layout::Stage);
     let above = h - 2.0 * pad - CONTROL - ROW_GAP - STAGE_SPECTRUM - 14.0;
     let side = above.min(w * 0.4).max(0.0);
-    ((pad + side / 2.0, pad + side / 2.0), side)
+    // (In the middle of the room above the rows along the bottom, where it is narrower than that is tall.)
+    ((pad + side / 2.0, pad + above.max(0.0) / 2.0), side)
 }
 
 /// How tall the rows along the bottom are (DIPs): the controls' (or the spectrum's, the controls coming over it), and
@@ -712,15 +713,15 @@ fn rows_tall(shows: &Shows) -> f32 {
     CONTROL + if shows.controls && shows.spectrum { ROW_GAP + SPECTRUM_ROW } else { 0.0 }
 }
 
-/// How much room the player's words have (DIPs) from which it shows the lines round the one sung now.
-const PLAYER_LINES_FROM: f32 = 110.0;
-
 /// Whether the player shows the lines round the one sung now, `size` large, showing `shows` (else the line sung now
 /// and what is under it).
 fn player_shows_lines(size: (f32, f32), shows: &Shows) -> bool {
     let at = placed(Layout::Player, size, shows);
     let bottom = size.1 - pad(Layout::Player) - rows_tall(shows) - 8.0;
-    bottom - at.below >= PLAYER_LINES_FROM
+    // Room for a row of the line sung now and a row of each line next to it, smaller (as the rail draws them), and
+    // the room between them.
+    let line = (at.width / 16.0).clamp(18.0, NOW_FONT.size) * 1.35;
+    bottom - at.below >= line * (1.0 + 2.0 * 0.68) + 2.0 * 10.0
 }
 
 /// Each layout's room inside its edge as `shows` says: its own, or the host's.
@@ -737,7 +738,8 @@ fn pad(layout: Layout) -> f32 {
         Layout::Stage => 30.0,
     }
 }
-const RADIUS: f32 = 14.0;
+/// Its corners' radius, with its own ground.
+pub const RADIUS: f32 = 14.0;
 /// The strip's cover inside another widget, at most (DIPs).
 const HOSTED_COVER: f32 = 44.0;
 /// How tall a line's translation under it is in the lines round the one sung now (DIPs, at the line sung now's size).
@@ -784,12 +786,14 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             Placed { cover, title, below, left: pad, width: (w - 2.0 * pad).max(0.0) }
         }
         // The record drawn as it turns (not on the ground); what plays at the top of the column beside it.
+        // (Level with the record's top: the record and the column beside it together in the middle.)
         Layout::Stage => {
-            let (_, side) = stage_record((w, h));
+            let ((_, cy), side) = stage_record((w, h));
+            let top = cy - side / 2.0;
             let left = pad + side + side * 0.28 + 12.0;
             let width = (w - left - pad).max(0.0);
-            let title = shows.title.then_some((left, pad + 6.0, width, false));
-            Placed { cover: None, title, below: pad + if shows.title { 58.0 } else { 0.0 }, left, width }
+            let title = shows.title.then_some((left, top + 6.0, width, false));
+            Placed { cover: None, title, below: top + if shows.title { 58.0 } else { 0.0 }, left, width }
         }
         Layout::Tall => {
             let wide = (w - 2.0 * pad).max(0.0);
@@ -1629,6 +1633,12 @@ impl Drawing<'_> {
 }
 
 impl Music {
+    /// The colour its own ground shows most: the cover's, darkened as the ground darkens it (for what stands in for
+    /// it, as where it would stick).
+    pub fn ground_colour(&self) -> [f32; 3] {
+        self.tint.map(|c| c * 0.58)
+    }
+
     /// How far the controls have come in over the spectrum (0 to 1), eased.
     fn controls_shown(&self) -> f32 {
         self.controls_in * self.controls_in * (3.0 - 2.0 * self.controls_in)
