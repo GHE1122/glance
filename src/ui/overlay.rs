@@ -424,9 +424,9 @@ pub fn frames<'a>(history: impl DoubleEndedIterator<Item = &'a Sample>, playing:
     if !playing {
         return Vec::new();
     }
-    // The game played now's alone: another's before it is not its own (drawn on, it ran into this one's line).
+    // The game played last's alone: another's before it is not its own (drawn on, it ran into this one's line).
     let latest: Vec<&Sample> = history.rev().take(CHART).collect();
-    let pid = latest.first().and_then(|s| s.game.as_ref()).map(|game| game.pid);
+    let pid = latest.iter().find_map(|s| s.game.as_ref()).map(|game| game.pid);
     let mut frames: Vec<Option<f32>> = latest.iter().map(|s| s.game.as_ref().filter(|game| Some(game.pid) == pid).and_then(|game| game.fps)).collect();
     frames.reverse();
     frames
