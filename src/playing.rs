@@ -419,10 +419,25 @@ pub fn slide_along(slider: Slider, fraction: f32) {
         Slider::Volume => slide((fraction * 100.0).round() as u8),
         Slider::Seek(follow) => {
             let Some(length) = NOW[follow as usize].lock().unwrap().as_ref().and_then(|now| now.timeline).map(|timeline| timeline.length) else { return };
-            *SEEKING[follow as usize].lock().unwrap() = Some((fraction as f64 * length, None));
-            let _ = look(follow);
+            let at = fraction as f64 * length;
+            *SEEKING[follow as usize].lock().unwrap() = Some((at, None));
+            shown_dragged(follow, at);
         }
     }
+}
+
+/// What is followed for `follow` shown `at` that far into its track (seconds) as it is dragged there, from what was
+/// last seen of it (as `look` shows it while it is dragged), its lines following. Its player is not asked: this is
+/// done at each move of the pointer, on the thread that draws, and a player may take long to answer.
+#[cfg(windows)]
+fn shown_dragged(follow: Follow, at: f64) {
+    let f = follow as usize;
+    // (Taken out before it is kept again: the lock held on would be locked again by `keep`.)
+    let now = NOW[f].lock().unwrap().clone();
+    let Some(now) = now else { return };
+    let Some(timeline) = now.timeline else { return };
+    *POSITION[f].lock().unwrap() = Some((at, std::time::Instant::now(), now.playing));
+    keep(follow, Some(Now { timeline: Some(Timeline { at: at.floor(), ..timeline }), ..now }));
 }
 
 /// Where the track of what is followed for `follow` is being dragged to (seconds), while it is (see `slide_along`).
@@ -449,9 +464,12 @@ pub fn slid(slider: Slider, kept: bool) {
             let left_at = SEEKING[follow as usize].lock().unwrap().and_then(|(at, settling)| settling.is_none().then_some(at));
             match left_at.filter(|_| kept) {
                 Some(at) => act_on(follow, Act::Seek(at)),
+                // (Looked at again on a thread of its own: see `shown_dragged`.)
                 None => {
                     *SEEKING[follow as usize].lock().unwrap() = None;
-                    let _ = look(follow);
+                    std::thread::spawn(move || {
+                        let _ = look(follow);
+                    });
                 }
             }
         }
@@ -474,6 +492,21 @@ pub fn pretend(now: Now) {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    /// Dragged along its track, what plays is shown where it is dragged, from what was seen of it, its player not
+    /// asked (that was asked at each move of the pointer, on the thread that draws: a player slow to answer held up
+    /// the panel, the widgets and the full screen; and what was seen went for what the players said instead).
+    #[test]
+    fn dragging_along_shows_where_it_is_dragged_without_asking() {
+        let length = 200.0;
+        keep(Follow::Any, Some(Now { title: "A song".into(), playing: true, timeline: Some(Timeline { at: 10.0, length, seekable: true }), ..Default::default() }));
+        slide_along(Slider::Seek(Follow::Any), 0.25);
+        let shown = now().expect("still what was seen");
+        assert_eq!(shown.title, "A song");
+        assert_eq!(shown.timeline.map(|timeline| timeline.at), Some(50.0));
+        assert!(position(Follow::Any).is_some_and(|at| (50.0..51.0).contains(&at)));
+        *SEEKING[Follow::Any as usize].lock().unwrap() = None;
+    }
 
     /// Pausing shows it paused at once, and returns (it once locked what plays twice, and Glance hung).
     #[test]
