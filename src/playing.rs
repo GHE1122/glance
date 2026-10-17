@@ -174,7 +174,7 @@ static LYRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 
 /// How far into the track it was as last looked at (seconds), when that was, and whether it was playing.
 #[cfg(windows)]
-static POSITION: [Mutex<Option<(f64, std::time::Instant, bool)>>; 2] = [Mutex::new(None), Mutex::new(None)];
+static POSITION: [Mutex<Option<(f64, std::time::Instant, bool, f64)>>; 2] = [Mutex::new(None), Mutex::new(None)];
 
 /// Played from elsewhere along its track: where (seconds), when, and the track (its title).
 #[cfg(windows)]
@@ -189,7 +189,7 @@ static HELD: [Mutex<Option<(f64, std::time::Instant)>>; 2] = [Mutex::new(None), 
 /// since while it plays; none where its player does not say.
 #[cfg(windows)]
 pub fn position(follow: Follow) -> Option<f64> {
-    POSITION[follow as usize].lock().unwrap().map(|(at, when, playing)| if playing { at + when.elapsed().as_secs_f64() } else { at })
+    POSITION[follow as usize].lock().unwrap().map(|(at, when, playing, rate)| if playing { at + when.elapsed().as_secs_f64() * rate } else { at })
 }
 
 /// Looks at how what is followed for `follow` is; how long till the next line of the lyrics is due, where one is
@@ -227,7 +227,7 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
             if !settling && (*title != playing.title || said_at.is_some_and(|said| said > *when)) {
                 *sought = None;
             } else {
-                *position = at + if playing.playing { now.duration_since(*when).as_secs_f64() } else { 0.0 };
+                *position = at + if playing.playing { now.duration_since(*when).as_secs_f64() * playing.rate } else { 0.0 };
             }
         }
     }
@@ -236,13 +236,14 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
         let mut held = HELD[f].lock().unwrap();
         match (playing.playing, playing.timeline.as_mut()) {
             (false, Some((position, _))) if !seeking => {
-                let was_playing = POSITION[f].lock().unwrap().is_some_and(|(_, _, playing)| playing);
+                let was = *POSITION[f].lock().unwrap();
                 match *held {
                     // The same saying as when the pause was seen: where it was held.
                     Some((at, by)) if said_at.is_some_and(|said| said <= by + std::time::Duration::from_millis(50)) => *position = at,
                     // Paused just now: on from what was said, to now.
-                    _ if was_playing => {
-                        let at = *position + playing.said_ago.unwrap_or(0.0);
+                    _ if was.is_some_and(|(_, _, playing, _)| playing) => {
+                        let rate = was.map_or(1.0, |(_, _, _, rate)| rate);
+                        let at = *position + playing.said_ago.unwrap_or(0.0) * rate;
                         *position = at;
                         *held = said_at.map(|said| (at, said));
                     }
@@ -253,7 +254,7 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
             _ => *held = None,
         }
     }
-    *POSITION[f].lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, now, playing.playing)));
+    *POSITION[f].lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, now, playing.playing, playing.rate)));
     let timeline = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, length)| Timeline { at: at.floor(), length, seekable: playing.seekable }));
     let sound = crate::actions::volume();
     let (sung, next) = match playing.as_ref().filter(|playing| follow == Follow::Music && LYRICS.load(Ordering::Relaxed) && !playing.title.is_empty()) {
@@ -287,7 +288,8 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
         crate::lyrics::Known::Found(Some(lines)) => {
             let now = crate::lyrics::sung_at(&lines, position);
             let next = now.map_or(0, |now| now + 1);
-            let due = lines.get(next).filter(|_| playing.playing).map(|line| std::time::Duration::from_secs_f64((line.at - crate::lyrics::EARLY - position).max(0.0)));
+            // (Track seconds, at the rate it plays.)
+            let due = lines.get(next).filter(|_| playing.playing).map(|line| std::time::Duration::from_secs_f64(((line.at - crate::lyrics::EARLY - position) / playing.rate).max(0.0)));
             // The same line as before keeps its time; another is the one from when it became due (from now, if
             // that was longer ago than a glide: come to by a jump in the track, it glides all the same).
             let before = NOW[Follow::Music as usize].lock().unwrap().as_ref().and_then(|kept| match &kept.sung {
@@ -295,7 +297,7 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
                 _ => None,
             });
             let since = before.unwrap_or_else(|| {
-                let late = now.map_or(0.0, |now| (position + crate::lyrics::EARLY - lines[now].at).clamp(0.0, GLIDE.as_secs_f64()));
+                let late = now.map_or(0.0, |now| ((position + crate::lyrics::EARLY - lines[now].at) / playing.rate).clamp(0.0, GLIDE.as_secs_f64()));
                 std::time::Instant::now() - std::time::Duration::from_secs_f64(late)
             });
             if before.is_none() {
@@ -495,7 +497,10 @@ fn shown_dragged(follow: Follow, at: f64) {
     let now = NOW[f].lock().unwrap().clone();
     let Some(now) = now else { return };
     let Some(timeline) = now.timeline else { return };
-    *POSITION[f].lock().unwrap() = Some((at, std::time::Instant::now(), now.playing));
+    let mut position = POSITION[f].lock().unwrap();
+    let rate = position.map_or(1.0, |(_, _, _, rate)| rate);
+    *position = Some((at, std::time::Instant::now(), now.playing, rate));
+    drop(position);
     keep(follow, Some(Now { timeline: Some(Timeline { at: at.floor(), ..timeline }), ..now }));
 }
 
