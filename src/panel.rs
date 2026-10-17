@@ -708,7 +708,7 @@ impl Controller {
                     panel.screens_changed(msg.wParam.0 as u32, now);
                     widgets.screens_changed();
                 }
-                crate::ui::window::SCREENS_CHANGED if widgets.owns(msg.hwnd) => widgets.screens_changed(),
+                crate::ui::window::SCREENS_CHANGED if widgets.owns(msg.hwnd) || widgets.full_owns(msg.hwnd) => widgets.screens_changed(),
                 crate::widget::CAPTURED if widgets.owns(msg.hwnd) => widgets.captured(msg.hwnd),
                 OPEN_SETTINGS => settings_window::open(),
                 TRAY_MENU => {

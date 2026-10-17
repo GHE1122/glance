@@ -1213,6 +1213,9 @@ impl Widgets {
     /// each widget on the screen it is on now, all of it on it once at rest,
     /// the desktop behind it taken again.
     pub fn screens_changed(&mut self) {
+        if let Some(full) = self.full.as_mut() {
+            full.screens_changed();
+        }
         for widget in &mut self.list {
             let r = widget.rect();
             let Some(contact) = monitor_at(POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }).or_else(|| monitor_at(widget.at)) else { continue };

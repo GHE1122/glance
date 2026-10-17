@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 
 use crate::lyrics::Line;
 use crate::playing::{Follow, Sung};
@@ -136,6 +136,21 @@ impl FullMusic {
 
     pub fn owns(&self, hwnd: HWND) -> bool {
         self.window.hwnd == hwnd
+    }
+
+    /// The screens changed (a resolution, a scale, a screen gone): over the whole of its screen as it is now, or of
+    /// the nearest, if it is gone.
+    pub fn screens_changed(&mut self) {
+        let middle = POINT { x: (self.screen.left + self.screen.right) / 2, y: (self.screen.top + self.screen.bottom) / 2 };
+        let Some(contact) = crate::mouse::monitor_at(middle) else { return };
+        if (contact.monitor, contact.scale) == (self.screen, self.scale) {
+            return;
+        }
+        self.screen = contact.monitor;
+        self.scale = contact.scale;
+        self.window.place(self.screen);
+        // (What was laid out at the old size and scale is not hit any more: laid out again at the next frame.)
+        self.hits = Vec::new();
     }
 
     fn size(&self) -> (f32, f32) {
