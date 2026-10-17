@@ -186,11 +186,8 @@ impl Window {
             self.sink();
             return;
         }
-        unsafe {
-            // Above whatever took the top since it was last shown (but the
-            // window it gives way to).
-            let _ = SetWindowPos(self.hwnd, Some(self.under.get().unwrap_or(HWND_TOPMOST)), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-        }
+        // Above whatever took the top since it was last shown (but the window it gives way to).
+        self.stand(HWND_TOPMOST);
     }
 
     /// Placed at `rect`, where it is among the other windows kept; nothing
@@ -220,7 +217,18 @@ impl Window {
         if self.low() {
             return;
         }
-        let after = self.under.get().unwrap_or(HWND_TOP);
+        self.stand(HWND_TOP);
+    }
+
+    /// Placed among the windows above all: just below the window it gives way to, while that one is above all
+    /// too (it is, while it is in front: see `settings_window`), else after `otherwise`. It never leaves the windows
+    /// above all to give way (placed after an ordinary window, it would be one): with a window held over the whole
+    /// screen in front, Windows lets no other window become one of them again, and it stayed under that window, its
+    /// edge opening it unseen.
+    fn stand(&self, otherwise: HWND) {
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
+        let above_all = |window: HWND| unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0 != 0;
+        let after = self.under.get().filter(|under| above_all(*under)).unwrap_or(otherwise);
         unsafe {
             let _ = SetWindowPos(self.hwnd, Some(after), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         }
@@ -239,26 +247,15 @@ impl Window {
         format!("{}{}", if topmost { "above all" } else { "not above all" }, self.under.get().map_or(String::new(), |under| format!(", giving way to {:?}", under.0)))
     }
 
-    /// Gives way to `window` (an ordinary window in front, as the settings
-    /// are), just below it, until it is given way to no more (`None`):
-    /// above all again.
+    /// Gives way to `window` (the settings, above all while they are in front), just below it, until it is given
+    /// way to no more (`None`): at the top of the windows above all again. (Above all throughout: see `stand`.)
     pub fn yield_to(&self, window: Option<HWND>) {
         self.under.set(window);
         // On the desktop, it is under that window already.
         if self.low() {
             return;
         }
-        let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
-        unsafe {
-            if let Some(window) = window {
-                // Out of the topmost windows first: placed after an ordinary
-                // window, it is one.
-                let _ = SetWindowPos(self.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
-                let _ = SetWindowPos(self.hwnd, Some(window), 0, 0, 0, 0, flags);
-            } else {
-                let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
-            }
-        }
+        self.stand(HWND_TOPMOST);
     }
 
     /// Whether it is under every other window now: kept on the desktop, not
