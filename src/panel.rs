@@ -628,7 +628,7 @@ impl Controller {
                     panel.open(cursor, contact, edge, None, now);
                 }
             };
-            if panel.is_shown() {
+            if panel.holds_edges() {
                 pusher.hold();
                 seam_armed = false;
             }
@@ -656,10 +656,10 @@ impl Controller {
                     .min_by_key(|(contact, _)| Some(contact.monitor) != here);
                 let Some((contact, edge)) = found else {
                     seam_rest = None;
-                    seam_armed = !panel.is_shown();
+                    seam_armed = !panel.holds_edges();
                     return;
                 };
-                if !seam_armed || panel.is_open() {
+                if !seam_armed || !panel.watching() {
                     return;
                 }
                 let still = (SEAM_STILL * contact.scale).round() as i32;
@@ -905,7 +905,7 @@ impl Controller {
                 }
                 // A push the sensors' process saw (it watches the edges while
                 // there is one).
-                PUSHED if !panel.is_shown() => {
+                PUSHED if !panel.holds_edges() => {
                     let (edge, cursor) = pushed_from(msg.wParam, msg.lParam);
                     if let Some(contact) = monitor_at(cursor) {
                         open_pushed((cursor, contact, edge), &mut panel);
@@ -919,7 +919,7 @@ impl Controller {
                 // passed on: what touches the PC is listened for here meanwhile too).
                 WM_INPUT => {
                     crate::touches::mouse_input(msg.lParam);
-                    if !panel.is_open() {
+                    if panel.watching() {
                         if let Some(cursor) = cursor_position() {
                             on_seam(cursor, &mut panel);
                         }
@@ -938,14 +938,14 @@ impl Controller {
                         overlay.watch();
                     }
                     let Some(cursor) = cursor_position() else { continue };
-                    if !panel.is_open() {
+                    if panel.watching() {
                         on_seam(cursor, &mut panel);
                     }
                     if own_input {
                         pusher.looked(&self.config.lock().unwrap().edges, cursor, now);
                     }
                 }
-                WM_TIMER if msg.wParam.0 == TRACK_TIMER && !panel.is_open() => {
+                WM_TIMER if msg.wParam.0 == TRACK_TIMER && panel.watching() => {
                     let Some(cursor) = cursor_position() else { continue };
                     on_seam(cursor, &mut panel);
                     if own_input {
@@ -969,7 +969,7 @@ impl Controller {
                     }
                 }
             }
-            let needed = !panel.is_open() && (pusher.resting() || seam_rest.is_some());
+            let needed = panel.watching() && (pusher.resting() || seam_rest.is_some());
             if needed != ticking {
                 ticking = needed;
                 unsafe {
@@ -1409,6 +1409,22 @@ impl<'a> Panel<'a> {
 
     fn is_open(&self) -> bool {
         matches!(self.phase, Phase::Open { .. })
+    }
+
+    /// Whether a push into an edge is still looked for while it is up: pinned at an edge, it gives way to the
+    /// panel asked for at another (see `open`), so the edges are watched as if it were not there.
+    fn gives_way(&self) -> bool {
+        self.is_open() && self.pinned && !self.floating()
+    }
+
+    /// Whether the edges are watched for a push: not open (on its way in or out at most), or what is open gives way.
+    fn watching(&self) -> bool {
+        !self.is_open() || self.gives_way()
+    }
+
+    /// Whether it keeps the edges from opening it again: up (on its way out too), and not giving way.
+    fn holds_edges(&self) -> bool {
+        self.is_shown() && !self.gives_way()
     }
 
     /// The settings changed: what is shown, and how.
