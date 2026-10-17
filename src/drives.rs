@@ -17,9 +17,6 @@ use windows::Win32::System::Ioctl::{
 use windows::Win32::System::IO::DeviceIoControl;
 
 
-/// Physical drives are numbered from zero; a gap this long means no more.
-const MAX_GAP: u32 = 4;
-
 /// Every physical drive: its number, and its model name.
 pub fn models() -> Vec<(u32, String)> {
     let mut found = Vec::new();
@@ -252,32 +249,49 @@ fn bus(handle: HANDLE) -> Option<i32> {
     Some(unsafe { &*(buf.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR) }.BusType.0)
 }
 
-/// Calls `visit` with each physical drive, opened for its properties only.
+/// Calls `visit` with each physical drive (by its number, as `\.\PhysicalDriveN` names it), opened for its
+/// properties only. Each drive Windows lists, by its own number, whatever numbers are free between them (tried one
+/// number after another, those after a gap of four were missed: drives taken out, a card reader's empty slots).
 fn each_drive(mut visit: impl FnMut(u32, HANDLE)) {
-    let mut misses = 0;
-    for index in 0.. {
-        let path: Vec<u16> = format!("\\\\.\\PhysicalDrive{index}").encode_utf16().chain([0]).collect();
-        // Access 0: properties only, never the data.
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(path.as_ptr()),
-                0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
-                None,
-            )
-        };
-        let Ok(handle) = handle else {
-            misses += 1;
-            if misses >= MAX_GAP {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+    };
+    use windows::Win32::System::Ioctl::{GUID_DEVINTERFACE_DISK, IOCTL_STORAGE_GET_DEVICE_NUMBER, STORAGE_DEVICE_NUMBER};
+    let mut drives: Vec<(u32, HANDLE)> = Vec::new();
+    unsafe {
+        let Ok(set) = SetupDiGetClassDevsW(Some(&GUID_DEVINTERFACE_DISK), PCWSTR::null(), None, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE) else { return };
+        for member in 0.. {
+            let mut interface = SP_DEVICE_INTERFACE_DATA { cbSize: size_of::<SP_DEVICE_INTERFACE_DATA>() as u32, ..Default::default() };
+            if SetupDiEnumDeviceInterfaces(set, None, &GUID_DEVINTERFACE_DISK, member, &mut interface).is_err() {
                 break;
             }
-            continue;
-        };
-        misses = 0;
-        visit(index, handle);
+            // Its path, in a buffer as large as Windows says it needs (aligned for the structure it starts with).
+            let mut size = 0u32;
+            let _ = SetupDiGetDeviceInterfaceDetailW(set, &interface, None, 0, Some(&mut size), None);
+            let mut buffer = vec![0u64; (size as usize).div_ceil(8).max(1)];
+            let detail = buffer.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
+            (*detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+            if SetupDiGetDeviceInterfaceDetailW(set, &interface, Some(detail), size, None, None).is_err() {
+                continue;
+            }
+            // Access 0: properties only, never the data.
+            let opened = CreateFileW(PCWSTR((*detail).DevicePath.as_ptr()), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None);
+            let Ok(handle) = opened else { continue };
+            let mut number = STORAGE_DEVICE_NUMBER::default();
+            let mut returned = 0u32;
+            let numbered = DeviceIoControl(handle, IOCTL_STORAGE_GET_DEVICE_NUMBER, None, 0, Some(&mut number as *mut _ as *mut _), size_of::<STORAGE_DEVICE_NUMBER>() as u32, Some(&mut returned), None);
+            if numbered.is_ok() {
+                drives.push((number.DeviceNumber, handle));
+            } else {
+                let _ = CloseHandle(handle);
+            }
+        }
+        let _ = SetupDiDestroyDeviceInfoList(set);
+    }
+    drives.sort_by_key(|(number, _)| *number);
+    for (number, handle) in drives {
+        visit(number, handle);
         let _ = unsafe { CloseHandle(handle) };
     }
 }
@@ -341,6 +355,17 @@ fn model(handle: HANDLE) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// This PC's drives, by their numbers, as Windows lists them:
+    /// `cargo test --lib -- --ignored lists_this_pcs_drives --nocapture`.
+    #[test]
+    #[ignore = "reads this PC's drives"]
+    fn lists_this_pcs_drives() {
+        let drives = super::models();
+        println!("{drives:?}");
+        assert!(!drives.is_empty());
+        assert!(drives.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    }
+
     #[test]
     fn reads_a_temperature_from_smart_attributes() {
         fn put(data: &mut [u8; 512], slot: usize, id: u8, raw: u8) {
