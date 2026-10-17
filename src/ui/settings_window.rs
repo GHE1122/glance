@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::E;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::core::{w, BOOL, HSTRING, PCWSTR};
@@ -39,7 +39,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, LoadCursorW, LoadImageW,
     IsWindowVisible, MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
-    WM_KEYDOWN, WM_SYSKEYDOWN, WM_ACTIVATE, WA_INACTIVE,
+    WM_KEYDOWN, WM_SYSKEYDOWN, WM_ACTIVATE, WA_INACTIVE, WM_APP, WM_DISPLAYCHANGE, WM_QUIT, MSG, PM_REMOVE, QS_ALLINPUT,
+    DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IDC_SIZENWSE, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_CAPTURECHANGED, WM_DESTROY,
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
@@ -186,6 +187,12 @@ const COPIED_FOR: Duration = Duration::from_secs(2);
 
 /// The window, while it is open.
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
+/// Its thread is making it: asked again meanwhile, no second one is made.
+static OPENING: AtomicBool = AtomicBool::new(false);
+/// What other threads tell the window: settings changed elsewhere, to be taken up (see `follow_settings`); the
+/// overlay's page asked for (see `open_at_overlay`).
+const FOLLOW: u32 = WM_APP + 40;
+const TO_OVERLAY: u32 = WM_APP + 41;
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
@@ -219,20 +226,87 @@ pub fn hwnd() -> Option<HWND> {
     (hwnd != 0).then_some(HWND(hwnd as *mut _))
 }
 
-/// calling thread, which then carries it (see `tick`).
+/// thread of its own, which carries it till it is closed (see `run`): moved or sized by hand, the system holds that
+/// thread in a loop of its own till it is let go, and the panel, the widgets and the lyrics go on meanwhile. Open,
+/// it is raised.
 pub fn open() {
-    if WINDOW.load(Ordering::Acquire) != 0 {
+    open_at(false);
+}
+
+/// Opens the window (as `open`) at the overlay's page: from the overlay's menu.
+pub fn open_at_overlay() {
+    open_at(true);
+}
+
+fn open_at(overlay: bool) {
+    if let Some(hwnd) = hwnd() {
+        if overlay {
+            let _ = unsafe { PostMessageW(Some(hwnd), TO_OVERLAY, WPARAM(0), LPARAM(0)) };
+        }
         return show();
     }
-    let Ok(gfx) = gfx::current() else { return };
-    if let Some(hwnd) = make(gfx) {
-        WINDOW.store(hwnd.0 as isize, Ordering::Release);
+    if OPENING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if std::thread::Builder::new().name("settings".into()).spawn(move || run(overlay)).is_err() {
+        OPENING.store(false, Ordering::Release);
     }
 }
 
-/// Takes up settings changed elsewhere (the panel's bar, the overlay's
-/// menu, a drag): an open window shows them, and saves on top of them.
+/// The window's thread: makes it (on a graphics device of its own, given back as the thread ends), and draws it
+/// whenever it is due, between the messages that arrive, till it is gone.
+fn run(overlay: bool) {
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+    }
+    let made = gfx::current().ok().and_then(make);
+    if let Some(hwnd) = made {
+        WINDOW.store(hwnd.0 as isize, Ordering::Release);
+    }
+    OPENING.store(false, Ordering::Release);
+    if made.is_none() {
+        return;
+    }
+    if overlay {
+        to_overlay();
+    }
+    let mut msg = MSG::default();
+    loop {
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if msg.message == WM_QUIT {
+                return;
+            }
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        // Gone (closed): the thread with it.
+        let Some(due) = tick(Instant::now()) else { return };
+        if !due.is_zero() {
+            let ms = due.as_micros().div_ceil(1000).min(u32::MAX as u128) as u32;
+            unsafe { MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT) };
+        }
+    }
+}
+
+/// The overlay's page, turned to.
+fn to_overlay() {
+    with_ui(|ui| {
+        ui.tab = Tab::Overlay;
+        ui.turn_to(Page::Monitor);
+    });
+}
+
+/// Takes up settings changed elsewhere (the panel's bar, the overlay's menu, a drag), from any thread: an open window
+/// shows them, and saves on top of them (told on its own thread).
 pub fn follow_settings() {
+    if let Some(hwnd) = hwnd() {
+        let _ = unsafe { PostMessageW(Some(hwnd), FOLLOW, WPARAM(0), LPARAM(0)) };
+    }
+}
+
+fn take_settings() {
     with_ui(|ui| {
         // Sliding shows its value live through the panel's settings; the
         // window's own are kept as it is let go.
@@ -245,19 +319,9 @@ pub fn follow_settings() {
     });
 }
 
-/// Opens the window (on the calling thread, the panel's, as `open`) at
-/// the overlay's page: from the overlay's menu.
-pub fn open_at_overlay() {
-    open();
-    with_ui(|ui| {
-        ui.tab = Tab::Overlay;
-        ui.turn_to(Page::Monitor);
-    });
-}
-
 /// Draws the window if a frame is due, and says when the next one is; `None`
 /// while there is no window.
-pub fn tick(now: Instant) -> Option<Duration> {
+fn tick(now: Instant) -> Option<Duration> {
     with_ui(|ui| {
         // Minimized, nothing is drawn (it is drawn whole as it is restored: see WM_SIZE); looked at again a while
         // later.
@@ -1168,6 +1232,19 @@ fn point(lparam: LPARAM) -> (i32, i32) {
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
+        FOLLOW => {
+            take_settings();
+            LRESULT(0)
+        }
+        TO_OVERLAY => {
+            to_overlay();
+            LRESULT(0)
+        }
+        // The screens changed: this thread asks for them anew too (see `screens::changed`).
+        WM_DISPLAYCHANGE => {
+            crate::screens::changed();
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_GETMINMAXINFO => {
             let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
             let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };

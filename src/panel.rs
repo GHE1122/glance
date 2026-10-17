@@ -532,9 +532,6 @@ impl Controller {
                         wait = Some(panel.next_frame.saturating_duration_since(now).min(Duration::from_millis(TICK_MS as u64)));
                     }
                 }
-                if let Some(due) = settings_window::tick(now) {
-                    wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
-                }
                 {
                     let kept = self.config.lock().unwrap().widgets.clone();
                     let seen = self.seen.lock().unwrap().clone();
