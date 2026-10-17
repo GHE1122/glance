@@ -171,7 +171,7 @@ impl Sampler {
             format!("CPU sensors: {}", cpu_sensors.as_ref().map_or_else(missing, |cpu| cpu.describe().to_string())),
             format!("Motherboard chip: {}", super_io.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe)),
             format!("Memory sensors: {}", dimms.as_ref().map_or_else(|why| why.describe().to_string(), Dimms::describe)),
-            format!("Laptop fans: {}", laptop_fans.as_ref().map_or_else(missing, LaptopFans::describe)),
+            format!("Laptop fans: {}", laptop_fans.as_ref().map_or_else(Clone::clone, LaptopFans::describe)),
         ];
         if let Some(failed) = crate::pawnio::last_failure() {
             found.push(format!("PawnIO, the last that failed: {failed}"));
@@ -218,7 +218,7 @@ impl Sampler {
             cpu_sensors,
             super_io_awaited: super_io.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now()),
             super_io: super_io.ok().map(crate::superio::Watched::new),
-            laptop_fans,
+            laptop_fans: laptop_fans.ok(),
             dimms: dimms.ok(),
             dimms_awaited,
             mic: Microphone::open(),
@@ -1309,8 +1309,12 @@ enum LaptopFans {
 }
 
 impl LaptopFans {
-    fn open() -> Option<Self> {
-        crate::asus::AsusFans::open().map(LaptopFans::Asus).or_else(|| crate::lenovo::LenovoFans::open().map(LaptopFans::Lenovo))
+    /// The laptop's fans; else what was found of them, for a report.
+    fn open() -> Result<Self, String> {
+        if let Some(fans) = crate::asus::AsusFans::open() {
+            return Ok(LaptopFans::Asus(fans));
+        }
+        crate::lenovo::LenovoFans::open().map(LaptopFans::Lenovo).map_err(|why| why.map_or_else(|| "not found".to_string(), |why| format!("not found ({why})")))
     }
 
     /// Each fan's speed (RPM), by name.
