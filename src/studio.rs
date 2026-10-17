@@ -91,9 +91,9 @@ struct Shot {
     loads: Vec<(f32, f32)>,
     /// The lanes shown, in order; all of this machine's but "system" if absent.
     modules: Option<Vec<String>>,
-    /// The pointer on the row of the drive at this place among those seen (see `view::Hit::Drive`).
+    /// The pointer on the row of the drive of this letter (see `view::Hit::Drive`).
     #[serde(default)]
-    hover_drive: Option<u16>,
+    hover_drive: Option<char>,
     /// A game being played, by its name, if one is.
     game: Option<String>,
     /// When the game starts (from the start, if absent).
@@ -472,7 +472,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     }
 
     // (The media module, where a shot shows it: a track made up.)
-    crate::playing::pretend(crate::playing::Now { timeline: None, players: 1, title: "Clair de lune".into(), artist: "Claude Debussy".into(), app: lang.pick("音乐", "Music").into(), playing: true, volume: Some(40), muted: false, sung: None });
+    crate::playing::pretend(crate::playing::Now { timeline: None, players: 1, title: "Clair de lune".into(), artist: "Claude Debussy".into(), album: "Suite bergamasque".into(), app: lang.pick("音乐", "Music").into(), playing: true, volume: Some(40), muted: false, sung: None });
     let frames = (shot.seconds * script.fps).round() as usize;
     let interval = 1000.0;
     let start_ms = 1_760_000_000_000.0;

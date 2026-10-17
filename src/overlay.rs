@@ -736,36 +736,27 @@ impl Overlay {
 
     /// Its menu, and what was chosen in it (the focus put back where it
     /// was by the menu itself).
-    pub fn menu(&self) -> Option<Choice> {
-        self.choose()
-    }
-
-    fn choose(&self) -> Option<Choice> {
+    /// Its menu, up (see `chose`).
+    pub fn menu(&self) -> Option<crate::ui::menu::Menu> {
         let zh = self.lang == Lang::Zh;
-        const LOCK: usize = 1;
-        const CLOSE: usize = 2;
-        const SETTINGS: usize = 3;
-        const THROUGH: usize = 4;
         use crate::ui::icons::Icon;
-        use crate::ui::menu::{self, Item};
-        let items = [
+        use crate::ui::menu::{Item, Menu};
+        let items = vec![
             Item { label: if zh { "锁定位置" } else { "Lock position" }, icon: Some(Icon::Pin), checked: self.locked, rule_before: false },
             Item { label: if zh { "鼠标穿透" } else { "Let clicks through" }, icon: Some(Icon::Pointer), checked: self.through, rule_before: false },
             Item { label: if zh { "关闭悬浮窗" } else { "Close the overlay" }, icon: Some(Icon::Close), checked: false, rule_before: false },
             Item { label: if zh { "设置…" } else { "Settings…" }, icon: Some(Icon::Settings), checked: false, rule_before: true },
         ];
-        let chosen = match menu::show(&items, crate::os::apps_dark())? {
-            0 => LOCK,
-            1 => THROUGH,
-            2 => CLOSE,
-            _ => SETTINGS,
-        };
-        match chosen {
-            LOCK => Some(Choice::Lock(!self.locked)),
-            THROUGH => Some(Choice::Through(!self.through)),
-            CLOSE => Some(Choice::Close),
-            SETTINGS => Some(Choice::Settings),
-            _ => None,
+        Menu::open(items, crate::os::apps_dark())
+    }
+
+    /// The choice at `row` of its menu made (see `menu`).
+    pub fn chose(&self, row: usize) -> Choice {
+        match row {
+            0 => Choice::Lock(!self.locked),
+            1 => Choice::Through(!self.through),
+            2 => Choice::Close,
+            _ => Choice::Settings,
         }
     }
 

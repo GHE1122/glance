@@ -1480,11 +1480,22 @@ impl Widgets {
         self.full = None;
     }
 
-    /// The menu of the widget at `hwnd` (a right click on it); what to do
-    /// for the panel's side of it.
-    pub fn menu(&mut self, hwnd: HWND, lang: Lang) -> Option<WidgetChoice> {
+    /// The menu of the widget at `hwnd` (a right click on it), up (see `chose`).
+    pub fn menu(&mut self, hwnd: HWND, lang: Lang) -> Option<crate::ui::menu::Menu> {
+        self.list.iter().find(|w| w.window.hwnd == hwnd)?.menu(lang)
+    }
+
+    /// The choice at `row` of the menu of the widget at `hwnd` made (see `menu`); what to do for the panel's side of
+    /// it. (A widget gone meanwhile, nothing.)
+    pub fn chose(&mut self, hwnd: HWND, row: usize) -> Option<WidgetChoice> {
         let index = self.list.iter().position(|w| w.window.hwnd == hwnd)?;
-        let choice = self.list[index].menu(lang)?;
+        let choice = match row {
+            0 => WidgetChoice::Pin,
+            1 => WidgetChoice::ClickThrough,
+            2 => WidgetChoice::AboveOthers,
+            3 => WidgetChoice::Close,
+            _ => WidgetChoice::Settings,
+        };
         self.list[index].next_frame = Instant::now();
         match choice {
             WidgetChoice::Pin => self.list[index].pinned ^= true,
@@ -3188,15 +3199,9 @@ impl Widget {
         frost
     }
 
-    fn menu(&self, lang: Lang) -> Option<WidgetChoice> {
-        // As the apps are, light or dark.
-        match crate::ui::menu::show(&menu_items(lang, self.pinned, self.click_through, !self.on_desktop), crate::os::apps_dark())? {
-            0 => Some(WidgetChoice::Pin),
-            1 => Some(WidgetChoice::ClickThrough),
-            2 => Some(WidgetChoice::AboveOthers),
-            3 => Some(WidgetChoice::Close),
-            _ => Some(WidgetChoice::Settings),
-        }
+    /// Its menu, up (as the apps are, light or dark).
+    fn menu(&self, lang: Lang) -> Option<crate::ui::menu::Menu> {
+        crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop).into(), crate::os::apps_dark())
     }
 }
 

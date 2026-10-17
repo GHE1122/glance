@@ -512,6 +512,8 @@ impl Controller {
         // Pinned open at its edge as Glance last ran: opened so again once
         // there are readings to show.
         let mut pinned_at = self.config.lock().unwrap().panel_pinned;
+        // A menu up, and what it is for: run by this loop, as every other window of this thread is (see `menu::Menu`).
+        let mut menu: Option<(crate::ui::menu::Menu, MenuFor)> = None;
         let mut msg = MSG::default();
         // In motion: when the next frame is due, with the screen's. Messages
         // that come before are taken as they come, not each followed by a
@@ -530,6 +532,10 @@ impl Controller {
                     continue;
                 }
                 frame_at = None;
+                // A menu left for another window come to the front.
+                if menu.as_ref().is_some_and(|(open, _)| open.left()) {
+                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
+                }
                 let mut wait = None;
                 // A capture of the desktop behind the panel come back, up or
                 // not (see `collect_behind`).
@@ -612,7 +618,32 @@ impl Controller {
                 continue;
             }
             if msg.message == WM_QUIT {
+                if let Some((open, _)) = menu.take() {
+                    open.close();
+                }
                 return;
+            }
+            // A menu's own messages; a shortcut leaves it (Esc, the panel's while it is open, is the menu's own: the
+            // panel stays), the rest are taken up as ever.
+            if let Some((open, _)) = menu.as_mut() {
+                use crate::ui::menu::Handled;
+                let handled = if open.owns(msg.hwnd) {
+                    open.handle(&msg)
+                } else if msg.message == WM_HOTKEY {
+                    Handled::Done(None)
+                } else {
+                    Handled::Not
+                };
+                match handled {
+                    Handled::Done(choice) => {
+                        self.end_menu(&mut menu, choice, &mut panel, &mut widgets, &overlay);
+                        if msg.message != WM_HOTKEY || (msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize) {
+                            continue;
+                        }
+                    }
+                    Handled::Taken => continue,
+                    Handled::Not => {}
+                }
             }
             let now = Instant::now();
             let over_fullscreen = self.config.lock().unwrap().over_fullscreen;
@@ -713,9 +744,8 @@ impl Controller {
                 OPEN_SETTINGS => settings_window::open(),
                 TRAY_MENU => {
                     let (x, y) = ((msg.lParam.0 & 0xFFFF) as u16 as i16 as i32, ((msg.lParam.0 >> 16) & 0xFFFF) as u16 as i16 as i32);
-                    // (What comes for this thread while the menu is up waits:
-                    // see `menu::show`.)
-                    crate::tray::show_menu(x, y);
+                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
+                    menu = crate::tray::open_menu(x, y).map(|(open, choices)| (open, MenuFor::Tray(choices)));
                 }
                 RECALL_WIDGET => {
                     widgets.recall();
@@ -816,12 +846,8 @@ impl Controller {
                 WM_MOUSEMOVE if widgets.owns(msg.hwnd) && widgets.held(msg.hwnd) && let_go(&msg) => widgets.release(msg.hwnd, now, false),
                 WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam), panel.lang),
                 WM_RBUTTONUP if widgets.owns(msg.hwnd) => {
-                    // (What comes for this thread while the menu is up waits:
-                    // see `menu::show`.)
-                    let choice = widgets.menu(msg.hwnd, panel.lang);
-                    if let Some(crate::widget::WidgetChoice::Settings) = choice {
-                        crate::show_settings();
-                    }
+                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
+                    menu = widgets.menu(msg.hwnd, panel.lang).map(|open| (open, MenuFor::Widget(msg.hwnd)));
                 }
                 // Let go: the button up, the capture lost, or the pointer moved with the button up (its going up
                 // told to another window).
@@ -895,26 +921,14 @@ impl Controller {
                     overlay.as_mut().unwrap().moved()
                 }
                 WM_MOUSEMOVE if overlay.as_ref().is_some_and(|o| o.owns_bar(msg.hwnd)) => overlay.as_mut().unwrap().bar_hover(),
-                // Its menu, or one of its buttons: the same is done.
-                WM_RBUTTONUP | WM_LBUTTONUP if overlay.as_ref().is_some_and(|o| if msg.message == WM_RBUTTONUP { msg.hwnd == o.window.hwnd } else { o.owns_bar(msg.hwnd) }) => {
-                    // (What comes for this thread while the menu is up waits:
-                    // see `menu::show`.)
-                    let choice = if msg.message == WM_RBUTTONUP { overlay.as_ref().unwrap().menu() } else { overlay.as_mut().unwrap().bar_press() };
-                    match choice {
-                        Some(OverlayChoice::Settings) => {
-                            if !panel.stays() {
-                                panel.dismiss();
-                            }
-                            settings_window::open_at_overlay();
-                        }
-                        Some(OverlayChoice::Lock(locked)) => {
-                            std::thread::spawn(move || crate::app().lock_overlay(locked));
-                        }
-                        Some(OverlayChoice::Through(through)) => {
-                            std::thread::spawn(move || crate::app().overlay_through(through));
-                        }
-                        Some(OverlayChoice::Close) => self.set_overlay(false),
-                        None => {}
+                // Its menu, or one of its buttons: the same is done (see `overlay_chosen`).
+                WM_RBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
+                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &overlay);
+                    menu = overlay.as_ref().unwrap().menu().map(|open| (open, MenuFor::Overlay));
+                }
+                WM_LBUTTONUP if overlay.as_ref().is_some_and(|o| o.owns_bar(msg.hwnd)) => {
+                    if let Some(choice) = overlay.as_mut().unwrap().bar_press() {
+                        self.overlay_chosen(choice, &mut panel);
                     }
                 }
                 WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd => panel.hover_at(lparam_point(msg.lParam)),
@@ -1007,6 +1021,54 @@ impl Controller {
                 }
             }
             unsafe { DispatchMessageW(&msg) };
+        }
+    }
+}
+
+/// What a menu up is for: the tray icon's (with what each of its choices is), the widget's at a window, or the
+/// overlay's.
+enum MenuFor {
+    Tray(Vec<usize>),
+    Widget(HWND),
+    Overlay,
+}
+
+impl Controller {
+    /// The menu up, if one is, gone, `choice` chosen in it (the index of one, or none, left): done.
+    fn end_menu(&self, menu: &mut Option<(crate::ui::menu::Menu, MenuFor)>, choice: Option<usize>, panel: &mut Panel, widgets: &mut crate::widget::Widgets, overlay: &Option<Overlay>) {
+        let Some((open, of)) = menu.take() else { return };
+        open.close();
+        match of {
+            MenuFor::Tray(choices) => crate::tray::chosen(choice, &choices),
+            MenuFor::Widget(hwnd) => {
+                if let Some(crate::widget::WidgetChoice::Settings) = choice.and_then(|row| widgets.chose(hwnd, row)) {
+                    crate::show_settings();
+                }
+            }
+            MenuFor::Overlay => {
+                if let (Some(row), Some(overlay)) = (choice, overlay.as_ref()) {
+                    self.overlay_chosen(overlay.chose(row), panel);
+                }
+            }
+        }
+    }
+
+    /// What was chosen of the overlay, in its menu or by one of its buttons: done.
+    fn overlay_chosen(&self, choice: OverlayChoice, panel: &mut Panel) {
+        match choice {
+            OverlayChoice::Settings => {
+                if !panel.stays() {
+                    panel.dismiss();
+                }
+                settings_window::open_at_overlay();
+            }
+            OverlayChoice::Lock(locked) => {
+                std::thread::spawn(move || crate::app().lock_overlay(locked));
+            }
+            OverlayChoice::Through(through) => {
+                std::thread::spawn(move || crate::app().overlay_through(through));
+            }
+            OverlayChoice::Close => self.set_overlay(false),
         }
     }
 }
@@ -2897,8 +2959,7 @@ pub(crate) fn scene_for<'s>(controller: &'s Controller, prefs: &'s Prefs, theme:
     Scene { buttons: false, ..scene(controller, prefs, theme, lang, 0.0, None, false, history, seen) }
 }
 
-/// The sink's procedure: the input loop takes its messages before they are
-/// dispatched (a menu's loop sets them aside for it: see `menu::show`).
+/// The sink's procedure: the input loop takes its messages before they are dispatched.
 unsafe extern "system" fn sink_procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }

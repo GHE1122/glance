@@ -34,7 +34,7 @@ const HOTKEY_ID: i32 = 1;
 
 /// The tooltip: the readings in brief, kept for when the icon is added again.
 static TIP: Mutex<String> = Mutex::new(String::new());
-/// The icon's menu is up (see `show_menu`).
+/// The icon's menu is up (see `open_menu`).
 static MENU_UP: AtomicBool = AtomicBool::new(false);
 /// The shortcut is wanted but another program has it.
 static HOTKEY_TAKEN: AtomicBool = AtomicBool::new(false);
@@ -210,21 +210,23 @@ fn put(into: &mut [u16], text: &str) {
 }
 
 /// The icon's menu, at `(x, y)` on the screen: shown by the panel's thread,
-/// which draws Glance's menus (see `show_menu`).
+/// which draws Glance's menus (see `open_menu`).
 fn menu(_hwnd: HWND, x: i32, y: i32) {
     crate::app().controller.tray_menu(x, y);
 }
 
-/// The icon's menu, opening up from `(x, y)` on the screen as the
-/// taskbar's do, and what was chosen in it. On the panel's thread.
-pub fn show_menu(x: i32, y: i32) {
+/// What the choices of the icon's menu are (see `open_menu`).
+const OPEN: usize = 1;
+const SETTINGS: usize = 2;
+const CHECK: usize = 3;
+const QUIT: usize = 4;
+const RECALL: usize = 5;
+
+/// The icon's menu, opening up from `(x, y)` on the screen as the taskbar's do, up (see `menu::Menu`), with what each
+/// of its choices is (see `chosen`). On the panel's thread.
+pub fn open_menu(x: i32, y: i32) -> Option<(crate::ui::menu::Menu, Vec<usize>)> {
     use crate::ui::icons::Icon;
-    use crate::ui::menu::{self, Item};
-    const OPEN: usize = 1;
-    const SETTINGS: usize = 2;
-    const CHECK: usize = 3;
-    const QUIT: usize = 4;
-    const RECALL: usize = 5;
+    use crate::ui::menu::{Item, Menu};
     let zh = crate::update::language() == crate::ui::text::Lang::Zh;
     let recall = crate::app().controller.widget_put_away();
     // Each choice, its icon, and whether a rule sets it off; no widget to
@@ -236,13 +238,21 @@ pub fn show_menu(x: i32, y: i32) {
     choices.push((SETTINGS, if zh { "设置" } else { "Settings" }, Icon::Settings, false));
     choices.push((CHECK, if zh { "检查更新" } else { "Check for updates" }, Icon::Update, false));
     choices.push((QUIT, if zh { "退出 Glance" } else { "Quit Glance" }, Icon::Quit, true));
-    let items: Vec<Item> = choices.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
+    let items: Vec<Item<'static>> = choices.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
     MENU_UP.store(true, Ordering::Relaxed);
     show_tip(false);
-    let chosen = menu::show_at(&items, crate::os::apps_dark(), POINT { x, y }, true).map_or(0, |i| choices[i].0);
+    let Some(menu) = Menu::open_at(items, crate::os::apps_dark(), POINT { x, y }, true) else {
+        chosen(None, &[]);
+        return None;
+    };
+    Some((menu, choices.into_iter().map(|(choice, ..)| choice).collect()))
+}
+
+/// The icon's menu gone, `choice` chosen in it (of `choices`, as `open_menu` gave them), if one was: done.
+pub fn chosen(choice: Option<usize>, choices: &[usize]) {
     MENU_UP.store(false, Ordering::Relaxed);
     show_tip(true);
-    match chosen {
+    match choice.map_or(0, |i| choices[i]) {
         OPEN => crate::app().controller.open_from_tray(),
         RECALL => crate::app().controller.recall_widget(),
         SETTINGS => crate::show_settings(),

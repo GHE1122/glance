@@ -1,17 +1,17 @@
 //! A menu as Windows 11 draws its own (File Explorer's): a rounded sheet
 //! with a soft shadow, a row for each choice with its icon, a light
 //! highlight under the pointer, a tick for a choice that is on, thin rules
-//! between groups. Shown at the pointer, it runs until a choice is made or
+//! between groups. Shown at the pointer, it is up until a choice is made or
 //! it is left (a click elsewhere, Esc, Alt, another window to the front),
-//! as a system menu does.
+//! as a system menu is.
 
-use windows::Win32::Foundation::{LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::System::Threading::{GetCurrentThreadId, INFINITE};
+use std::rc::Rc;
+
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetCursorPos, GetForegroundWindow, IsIconic, SC_RESTORE, WM_SYSCOMMAND, MsgWaitForMultipleObjects, PeekMessageW, PostMessageW, PostQuitMessage, PostThreadMessageW, SetForegroundWindow,
-    TranslateMessage, MSG, PM_REMOVE, QS_ALLINPUT, WM_APP, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SYSKEYDOWN,
+    GetCursorPos, GetForegroundWindow, IsIconic, PostMessageW, SetForegroundWindow, MSG, SC_RESTORE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSCOMMAND, WM_SYSKEYDOWN,
 };
 
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
@@ -45,48 +45,177 @@ const SHADOW: f32 = 16.0;
 pub static SHOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const FONT: Font = Font::new(Family::Segoe, 14.0, 400.0);
 
-/// Shows `items` at the pointer, light or `dark`; the index of the one
-/// chosen, if one is.
-pub fn show(items: &[Item], dark: bool) -> Option<usize> {
-    let mut cursor = POINT::default();
-    unsafe { GetCursorPos(&mut cursor) }.ok()?;
-    show_at(items, dark, cursor, false)
+/// What a menu made of a message for its window.
+pub enum Handled {
+    /// None of its own: for the window, as any other message.
+    Not,
+    /// Taken, the menu still up.
+    Taken,
+    /// Done with: the index of the choice made, if one was (none, left).
+    Done(Option<usize>),
 }
 
-/// Shows `items` with a corner at `at` (physical px), its bottom there for
-/// `above` (as a menu from the taskbar opens), light or `dark`.
-pub fn show_at(items: &[Item], dark: bool, at: POINT, above: bool) -> Option<usize> {
-    let cursor = at;
-    let contact = crate::mouse::monitor_at(cursor)?;
-    let gfx = gfx::current().ok()?;
-    // Shown till it returns (see `life`): counted before its surface is made, so that it is let go of after it.
-    let _showing = super::life::Showing::of(&gfx);
-    let window = Window::activating().ok()?;
-    let Ok(mut surface) = Surface::new(&gfx, window.hwnd) else {
-        window.destroy();
-        gfx::lost();
-        return None;
-    };
-    let scale = contact.scale;
-    let sheet = Sheet::new(&gfx, items);
-    let (width, height, tops) = (sheet.width, sheet.height, &sheet.tops);
-    // At the pointer, turned back where it would leave its screen.
-    let (w, h) = (((width + 2.0 * SHADOW) * scale) as i32, ((height + 2.0 * SHADOW) * scale) as i32);
-    let margin = (SHADOW * scale) as i32;
-    let work = contact.work;
-    let mut left = cursor.x - margin;
-    if left + w - margin > work.right {
-        left = cursor.x - w + margin;
+/// A menu up: shown at the pointer, or where it is asked, till a choice is made in it or it is left. Run by the loop
+/// of the thread that showed it, as any other window of it is (its messages handed to `handle`, and `left` asked
+/// after them): what else that thread shows goes on meanwhile. (Run by a loop of its own, it held back every other
+/// window of the thread, the panel's live readings, the widgets' and the music full screen, till it was gone.)
+pub struct Menu {
+    gfx: Rc<gfx::Gfx>,
+    window: Window,
+    surface: Surface,
+    items: Vec<Item<'static>>,
+    sheet: Sheet,
+    dark: bool,
+    scale: f32,
+    /// Its window's size (physical px) and where it is.
+    size: (i32, i32),
+    rect: RECT,
+    lit: Option<usize>,
+    /// What was in front before it, given the front back as it goes.
+    before: HWND,
+    /// Shown till it goes (see `life`): counted before its surface is made, so that it is let go of after it.
+    _showing: super::life::Showing,
+}
+
+impl Menu {
+    /// Shows `items` at the pointer, light or `dark`.
+    pub fn open(items: Vec<Item<'static>>, dark: bool) -> Option<Menu> {
+        let mut cursor = POINT::default();
+        unsafe { GetCursorPos(&mut cursor) }.ok()?;
+        Menu::open_at(items, dark, cursor, false)
     }
-    let mut top = cursor.y - margin;
-    if above || top + h - margin > work.bottom {
-        top = cursor.y - h + margin;
+
+    /// Shows `items` with a corner at `at` (physical px), its bottom there for `above` (as a menu from the taskbar
+    /// opens), light or `dark`. None where it could not be shown, or was not let to the front.
+    pub fn open_at(items: Vec<Item<'static>>, dark: bool, at: POINT, above: bool) -> Option<Menu> {
+        let contact = crate::mouse::monitor_at(at)?;
+        let gfx = gfx::current().ok()?;
+        let showing = super::life::Showing::of(&gfx);
+        let window = Window::activating().ok()?;
+        let Ok(surface) = Surface::new(&gfx, window.hwnd) else {
+            window.destroy();
+            gfx::lost();
+            return None;
+        };
+        let scale = contact.scale;
+        let sheet = Sheet::new(&gfx, &items);
+        // At the pointer, turned back where it would leave its screen.
+        let (w, h) = (((sheet.width + 2.0 * SHADOW) * scale) as i32, ((sheet.height + 2.0 * SHADOW) * scale) as i32);
+        let margin = (SHADOW * scale) as i32;
+        let work = contact.work;
+        let mut left = at.x - margin;
+        if left + w - margin > work.right {
+            left = at.x - w + margin;
+        }
+        let mut top = at.y - margin;
+        if above || top + h - margin > work.bottom {
+            top = at.y - h + margin;
+        }
+        let left = left.clamp(work.left - margin, (work.right - w + margin).max(work.left - margin));
+        let top = top.clamp(work.top - margin, (work.bottom - h + margin).max(work.top - margin));
+        let rect = RECT { left, top, right: left + w, bottom: top + h };
+        let mut menu = Menu { gfx, window, surface, items, sheet, dark, scale, size: (w, h), rect, lit: None, before: HWND::default(), _showing: showing };
+        if !menu.draw() {
+            menu.window.destroy();
+            return None;
+        }
+        menu.window.place(rect);
+        menu.window.show();
+        // Up, and gone: a widget that took the desktop with it there takes it again.
+        crate::widget::own_window_changed(rect);
+        SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // In front, with the keyboard and the mouse, as a system menu is: its keys come to it, not to the program
+        // behind; a click anywhere comes to it too; and it is left as anything else comes to the front.
+        menu.before = unsafe { GetForegroundWindow() };
+        // Not let to the front (Windows keeps it for the program in use): it could neither hear its keys nor know it
+        // was left, so it goes.
+        if !unsafe { SetForegroundWindow(menu.window.hwnd) }.as_bool() {
+            crate::journal::note("menu: not let to the front; not shown");
+            menu.close();
+            return None;
+        }
+        unsafe { SetCapture(menu.window.hwnd) };
+        Some(menu)
     }
-    let left = left.clamp(work.left - margin, (work.right - w + margin).max(work.left - margin));
-    let top = top.clamp(work.top - margin, (work.bottom - h + margin).max(work.top - margin));
-    let rect = RECT { left, top, right: left + w, bottom: top + h };
-    let draw = |surface: &mut Surface, lit: Option<usize>| {
-        let drawn = surface.draw(&gfx, (w as u32, h as u32), scale, |frame| {
+
+    /// Whether `hwnd` is its window.
+    pub fn owns(&self, hwnd: HWND) -> bool {
+        self.window.hwnd == hwnd
+    }
+
+    /// Takes a message for its window, if it is one of its own.
+    pub fn handle(&mut self, msg: &MSG) -> Handled {
+        let (x, y) = ((msg.lParam.0 & 0xFFFF) as i16 as i32, ((msg.lParam.0 >> 16) & 0xFFFF) as i16 as i32);
+        match msg.message {
+            WM_MOUSEMOVE => {
+                let row = self.row_at(x, y);
+                self.light(row)
+            }
+            // A press outside leaves it; inside, the choice is made as the button comes up.
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN if !self.inside(x, y) => Handled::Done(None),
+            WM_LBUTTONUP | WM_RBUTTONUP if self.inside(x, y) => self.row_at(x, y).map_or(Handled::Taken, |row| Handled::Done(Some(row))),
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP => Handled::Taken,
+            WM_KEYDOWN => match VIRTUAL_KEY(msg.wParam.0 as u16) {
+                VK_ESCAPE => Handled::Done(None),
+                key @ (VK_UP | VK_DOWN) => {
+                    let n = self.items.len();
+                    let row = Some(match (self.lit, key == VK_UP) {
+                        (None, true) => n - 1,
+                        (None, false) => 0,
+                        (Some(i), true) => (i + n - 1) % n,
+                        (Some(i), false) => (i + 1) % n,
+                    });
+                    self.light(row)
+                }
+                VK_RETURN if self.lit.is_some() => Handled::Done(self.lit),
+                _ => Handled::Taken,
+            },
+            // Alt, as with a system menu, or the mouse taken from it.
+            WM_SYSKEYDOWN | CAPTURE_LOST => Handled::Done(None),
+            _ => Handled::Not,
+        }
+    }
+
+    /// Whether it has been left by something else coming to the front.
+    pub fn left(&self) -> bool {
+        (unsafe { GetForegroundWindow() }) != self.window.hwnd
+    }
+
+    /// Gone: the front given back where it was, unless something else has taken it.
+    pub fn close(self) {
+        let held = !self.left();
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        self.window.destroy();
+        crate::widget::own_window_changed(self.rect);
+        SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // (A game that went down, a fullscreen one stepping out as the menu came, is restored as a click on its
+        // taskbar button would.)
+        if held && !self.before.is_invalid() {
+            unsafe {
+                let _ = SetForegroundWindow(self.before);
+                if IsIconic(self.before).as_bool() {
+                    let _ = PostMessageW(Some(self.before), WM_SYSCOMMAND, WPARAM(SC_RESTORE as usize), LPARAM(0));
+                }
+            }
+        }
+    }
+
+    /// The choice `row` lit (left, where it could not be drawn so).
+    fn light(&mut self, row: Option<usize>) -> Handled {
+        if row != self.lit {
+            self.lit = row;
+            if !self.draw() {
+                return Handled::Done(None);
+            }
+        }
+        Handled::Taken
+    }
+
+    fn draw(&mut self) -> bool {
+        let (sheet, items, dark, lit) = (&self.sheet, &self.items, self.dark, self.lit);
+        let drawn = self.surface.draw(&self.gfx, (self.size.0 as u32, self.size.1 as u32), self.scale, |frame| {
             frame.origin(SHADOW, SHADOW);
             sheet.paint(frame, items, dark, lit);
         });
@@ -94,149 +223,21 @@ pub fn show_at(items: &[Item], dark: bool, at: POINT, above: bool) -> Option<usi
             gfx::lost();
         }
         drawn.is_ok()
-    };
-    // Which choice a point in the window (physical px) is on.
-    let row_at = |x: i32, y: i32| {
-        let (x, y) = (x as f32 / scale - SHADOW, y as f32 / scale - SHADOW);
-        if x < 0.0 || x > width {
+    }
+
+    /// Which choice a point in the window (physical px) is on.
+    fn row_at(&self, x: i32, y: i32) -> Option<usize> {
+        let (x, y) = (x as f32 / self.scale - SHADOW, y as f32 / self.scale - SHADOW);
+        if x < 0.0 || x > self.sheet.width {
             return None;
         }
-        tops.iter().position(|top| y >= *top && y < top + ROW)
-    };
-    let inside = |x: i32, y: i32| {
-        let (x, y) = (x as f32 / scale - SHADOW, y as f32 / scale - SHADOW);
-        x >= 0.0 && x <= width && y >= 0.0 && y <= height
-    };
-    let mut lit: Option<usize> = None;
-    if !draw(&mut surface, lit) {
-        window.destroy();
-        return None;
+        self.sheet.tops.iter().position(|top| y >= *top && y < top + ROW)
     }
-    window.place(rect);
-    window.show();
-    // Up, and gone: a widget that took the desktop with it there takes it
-    // again.
-    crate::widget::own_window_changed(rect);
-    SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // In front, with the keyboard and the mouse, as a system menu is: its
-    // keys come to it, not to the program behind; a click anywhere comes
-    // to it too; and it is left as anything else comes to the front.
-    let before = unsafe { GetForegroundWindow() };
-    let active = unsafe { SetForegroundWindow(window.hwnd) }.as_bool();
-    // Not let to the front (Windows keeps it for the program in use): it
-    // could neither hear its keys nor know it was left, so it goes.
-    if !active {
-        crate::journal::note("menu: not let to the front; not shown");
-        window.destroy();
-        return None;
+
+    fn inside(&self, x: i32, y: i32) -> bool {
+        let (x, y) = (x as f32 / self.scale - SHADOW, y as f32 / self.scale - SHADOW);
+        x >= 0.0 && x <= self.sheet.width && y >= 0.0 && y <= self.sheet.height
     }
-    unsafe { SetCapture(window.hwnd) };
-    // What comes meanwhile for this thread's other windows, or for the
-    // thread, that only its own loop knows what to do with: posted again,
-    // as it came, once the menu is gone.
-    let mut deferred: Vec<MSG> = Vec::new();
-    let mut quit = None;
-    let chosen = 'menu: loop {
-        if unsafe { GetForegroundWindow() } != window.hwnd {
-            break None;
-        }
-        unsafe { MsgWaitForMultipleObjects(None, false, INFINITE, QS_ALLINPUT) };
-        let mut msg = MSG::default();
-        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
-            if msg.message == WM_QUIT {
-                quit = Some(msg.wParam.0 as i32);
-                break 'menu None;
-            }
-            if msg.hwnd == window.hwnd {
-                let (x, y) = ((msg.lParam.0 & 0xFFFF) as i16 as i32, ((msg.lParam.0 >> 16) & 0xFFFF) as i16 as i32);
-                match msg.message {
-                    WM_MOUSEMOVE => {
-                        let row = row_at(x, y);
-                        if row != lit {
-                            lit = row;
-                            if !draw(&mut surface, lit) {
-                                break 'menu None;
-                            }
-                        }
-                    }
-                    // A press outside leaves it; inside, the choice is made
-                    // as the button comes up.
-                    WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN if !inside(x, y) => break 'menu None,
-                    WM_LBUTTONUP | WM_RBUTTONUP if inside(x, y) => {
-                        if let Some(row) = row_at(x, y) {
-                            break 'menu Some(row);
-                        }
-                    }
-                    WM_KEYDOWN => match VIRTUAL_KEY(msg.wParam.0 as u16) {
-                        VK_ESCAPE => break 'menu None,
-                        VK_UP | VK_DOWN => {
-                            let n = items.len();
-                            lit = Some(match (lit, VIRTUAL_KEY(msg.wParam.0 as u16) == VK_UP) {
-                                (None, true) => n - 1,
-                                (None, false) => 0,
-                                (Some(i), true) => (i + n - 1) % n,
-                                (Some(i), false) => (i + 1) % n,
-                            });
-                            if !draw(&mut surface, lit) {
-                                break 'menu None;
-                            }
-                        }
-                        VK_RETURN if lit.is_some() => break 'menu lit,
-                        _ => {}
-                    },
-                    // Alt, as with a system menu, or the mouse taken from it.
-                    WM_SYSKEYDOWN | CAPTURE_LOST => break 'menu None,
-                    _ => {}
-                }
-                continue;
-            }
-            // A shortcut leaves the menu; Esc (the panel's, while it is open)
-            // is the menu's own, the rest are taken up once it is gone.
-            if msg.message == WM_HOTKEY {
-                let (modifiers, key) = (msg.lParam.0 & 0xFFFF, (msg.lParam.0 >> 16) & 0xFFFF);
-                if !(modifiers == 0 && key == VK_ESCAPE.0 as isize) {
-                    deferred.push(msg);
-                }
-                break 'menu None;
-            }
-            if msg.hwnd.is_invalid() || (WM_APP..0xC000).contains(&msg.message) {
-                deferred.push(msg);
-                continue;
-            }
-            unsafe {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
-    };
-    // The focus back where it was, unless something else has taken it.
-    let held = unsafe { GetForegroundWindow() } == window.hwnd;
-    unsafe {
-        let _ = ReleaseCapture();
-    }
-    window.destroy();
-    crate::widget::own_window_changed(rect);
-    SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // (A game that went down, a fullscreen one stepping out as the menu
-    // came, is restored as a click on its taskbar button would.)
-    if held && !before.is_invalid() {
-        unsafe {
-            let _ = SetForegroundWindow(before);
-            if IsIconic(before).as_bool() {
-                let _ = PostMessageW(Some(before), WM_SYSCOMMAND, WPARAM(SC_RESTORE as usize), LPARAM(0));
-            }
-        }
-    }
-    let thread = unsafe { GetCurrentThreadId() };
-    for msg in deferred {
-        unsafe {
-            let _ = if msg.hwnd.is_invalid() { PostThreadMessageW(thread, msg.message, msg.wParam, msg.lParam) } else { PostMessageW(Some(msg.hwnd), msg.message, msg.wParam, msg.lParam) };
-        }
-    }
-    if let Some(code) = quit {
-        unsafe { PostQuitMessage(code) };
-    }
-    chosen
 }
 
 /// A menu's sheet laid out for its items: its size (DIPs) and where each
