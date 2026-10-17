@@ -73,10 +73,10 @@ LangString OccupiedFolder ${LANG_SIMPCHINESE} "无法安装到所选文件夹。
 LangString OccupiedFolder ${LANG_ENGLISH} "Glance cannot be installed to the selected folder.$\r$\n$\r$\nThe folder already exists and is not an earlier Glance installation that only administrators can modify: other programs may have changed its contents, and writing into it with administrator rights is not safe.$\r$\n$\r$\nChoose a folder that does not exist yet (for example D:\Glance), or delete this folder first."
 LangString IndirectFolder ${LANG_SIMPCHINESE} "无法安装到所选位置。$\r$\n$\r$\n所选位置是磁盘根目录、联接点或符号链接：文件将被写入其他位置，或与磁盘根目录中的其他文件混在一起，卸载时也无法完整清除。$\r$\n$\r$\n请选择一个普通文件夹（例如 D:\Glance）。"
 LangString IndirectFolder ${LANG_ENGLISH} "Glance cannot be installed to the selected location.$\r$\n$\r$\nIt is the root of a drive, a junction or a symbolic link: the files would be written elsewhere, or mixed with other files at the root of the drive, and could not be removed completely when uninstalling.$\r$\n$\r$\nChoose an ordinary folder (for example D:\Glance)."
-LangString InstallFailed ${LANG_SIMPCHINESE} "无法将文件写入安装文件夹，安装已停止。"
-LangString InstallFailed ${LANG_ENGLISH} "The files could not be written to the installation folder; installation has stopped."
-LangString RemoveFailed ${LANG_SIMPCHINESE} "以下文件夹中的部分文件未能删除，请手动删除：$\r$\n$INSTDIR"
-LangString RemoveFailed ${LANG_ENGLISH} "Some files could not be removed from the following folder; please delete them manually:$\r$\n$INSTDIR"
+LangString InstallFailed ${LANG_SIMPCHINESE} "无法将文件写入安装文件夹，安装已停止。已安装的版本保持不变。"
+LangString InstallFailed ${LANG_ENGLISH} "The files could not be written to the installation folder, and installation has stopped. The version installed before is unchanged."
+LangString RemoveFailed ${LANG_SIMPCHINESE} "以下文件夹中的部分文件未能删除。Glance 仍保留在已安装的应用中，关闭占用这些文件的程序后，可再次卸载。$\r$\n$INSTDIR"
+LangString RemoveFailed ${LANG_ENGLISH} "Some files in the following folder could not be removed. Glance remains among the installed apps, and can be uninstalled again once the programs using these files are closed.$\r$\n$INSTDIR"
 LangString BackToDefaultNo ${LANG_SIMPCHINESE} "选择“否”将恢复为默认位置：$PROGRAMFILES64\${NAME}"
 LangString BackToDefaultNo ${LANG_ENGLISH} "Choose No to return to the default location: $PROGRAMFILES64\${NAME}"
 LangString BackToDefaultOk ${LANG_SIMPCHINESE} "点击“确定”后将恢复为默认位置：$PROGRAMFILES64\${NAME}"
@@ -312,12 +312,15 @@ Section "Uninstall"
     MessageBox MB_ICONEXCLAMATION "$(SettingsLeft)" /SD IDOK
   ${EndIf}
 
-  SetShellVarContext all
-  Delete "$SMPROGRAMS\${NAME}.lnk"
   ; Glance's own files, taken out by the helper with the folder pinned.
+  ; Where some could not be, Glance stays in the installed programs, its
+  ; uninstaller and shortcut with it, to be uninstalled again.
   !insertmacro Ask '--uninstall-from "$INSTDIR"'
   ${If} $0 != 0
     MessageBox MB_ICONEXCLAMATION "$(RemoveFailed)" /SD IDOK
+    Abort
   ${EndIf}
+  SetShellVarContext all
+  Delete "$SMPROGRAMS\${NAME}.lnk"
   DeleteRegKey HKLM "${UNINSTALL_KEY}"
 SectionEnd

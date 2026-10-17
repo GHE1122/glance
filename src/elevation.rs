@@ -215,8 +215,16 @@ fn folders_hold(folder: &Path) -> bool {
     })
 }
 
-/// What an install folder may already hold: an earlier Glance.
-const INSTALLED: [&str; 6] = [APP, SENSORS, "glance-remote.exe", "uninstall.exe", "resources", "licenses"];
+/// What an install folder may already hold: an earlier Glance (and what an install of it leaves while it runs, or
+/// if it was cut short).
+const INSTALLED: [&str; 9] = [APP, SENSORS, "glance-remote.exe", "uninstall.exe", "resources", "licenses", INCOMING, REPLACED, TASKS_OFF];
+/// Where an install puts the new files, all of them, before any goes in place.
+const INCOMING: &str = ".incoming";
+/// Where an install moves the files it replaces, till all the new ones are in place (put back if one could not be).
+const REPLACED: &str = ".replaced";
+/// The tasks an install has turned off while it runs, by name, a line each: turned on again after, even if the
+/// install was cut short (see `TasksOff`).
+const TASKS_OFF: &str = ".tasks-off";
 
 /// What a folder chosen to install into is, or why installing failed.
 #[derive(Debug, PartialEq)]
@@ -277,7 +285,9 @@ fn only_ours(folder: &Path) -> bool {
 /// nothing else beside them).
 fn claimable(folder: &Path) -> bool {
     let ours_there = INSTALLED.iter().any(|name| folder.join(name).exists());
-    let earlier = ["glance.exe", "uninstall.exe"].iter().all(|name| folder.join(name).is_file()) && only_ours(folder);
+    // (An install cut short may have moved them aside: see `put_in_place`.)
+    let whole = ["glance.exe", "uninstall.exe"].iter().all(|name| folder.join(name).is_file()) || folder.join(REPLACED).is_dir();
+    let earlier = whole && only_ours(folder);
     !ours_there || earlier
 }
 
@@ -634,11 +644,91 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
     }
     // Nothing of Glance's runs from it while its files are replaced, and nothing starts one meanwhile; its tasks
     // as they were once this is done (or has failed).
-    let _tasks = TasksOff::now();
+    let _tasks = TasksOff::now(&folder).ok_or(InstallFolder::Failed)?;
     if !end_programs_in(&folder) {
         return Err(InstallFolder::Failed);
     }
-    copy_into(payload, &folder).map_err(|_| InstallFolder::Failed)
+    put_in_place(payload, &folder).map_err(|_| InstallFolder::Failed)
+}
+
+/// Puts the files in `payload` in `folder`, all of them or none: each copied in beside them first (`INCOMING`), then
+/// each in place of its earlier one, which is moved aside (`REPLACED`) till all are, and put back if one could not
+/// be. (Copied over one by one, an install that failed halfway, out of room or at a file held, left programs of two
+/// versions, or one copied in part.) What an install cut short left is put back as it was first.
+fn put_in_place(payload: &Path, folder: &Path) -> std::io::Result<()> {
+    let (incoming, replaced) = (folder.join(INCOMING), folder.join(REPLACED));
+    put_back(folder)?;
+    remove(&incoming)?;
+    std::fs::create_dir(&incoming)?;
+    own_as_administrators(&incoming)?;
+    if let Err(error) = copy_into(payload, &incoming) {
+        let _ = remove(&incoming);
+        return Err(error);
+    }
+    std::fs::create_dir(&replaced)?;
+    own_as_administrators(&replaced)?;
+    swap_in(folder)
+}
+
+/// Puts each file in `INCOMING` in its place in `folder`, the earlier one moved aside into `REPLACED` (both there);
+/// all of them, or, one not put in place, none (see `put_in_place`).
+fn swap_in(folder: &Path) -> std::io::Result<()> {
+    let (incoming, replaced) = (folder.join(INCOMING), folder.join(REPLACED));
+    let names: Vec<std::ffi::OsString> = std::fs::read_dir(&incoming)?.map(|entry| entry.map(|entry| entry.file_name())).collect::<std::io::Result<_>>()?;
+    // Those new here (no earlier one to put back), as they are put in place.
+    let mut new = Vec::new();
+    for name in &names {
+        let target = folder.join(name);
+        let earlier = target.symlink_metadata().is_ok();
+        let placed = (|| {
+            if earlier {
+                patiently(|| std::fs::rename(&target, replaced.join(name)))?;
+            }
+            patiently(|| std::fs::rename(incoming.join(name), &target))
+        })();
+        if !earlier && placed.is_ok() {
+            new.push(target);
+        }
+        if let Err(error) = placed {
+            // As it was: what was new taken out, what was moved aside back.
+            for target in &new {
+                let _ = remove(target);
+            }
+            let _ = put_back(folder);
+            let _ = remove(&incoming);
+            return Err(error);
+        }
+    }
+    // (What is left here of the earlier version, were it not taken now, would be by the next install.)
+    let _ = remove(&replaced);
+    let _ = remove(&incoming);
+    Ok(())
+}
+
+/// Puts each file moved aside by an install (in `REPLACED`) back in its place, in place of what took it, if any;
+/// then nothing is left aside.
+fn put_back(folder: &Path) -> std::io::Result<()> {
+    let replaced = folder.join(REPLACED);
+    if !replaced.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&replaced)? {
+        let entry = entry?;
+        let target = folder.join(entry.file_name());
+        remove(&target)?;
+        patiently(|| std::fs::rename(entry.path(), &target))?;
+    }
+    remove(&replaced)
+}
+
+/// Takes `path` away, a folder with all in it (never following a link out of it); none there is taken away already.
+fn remove(path: &Path) -> std::io::Result<()> {
+    match path.symlink_metadata() {
+        Ok(meta) if meta.is_dir() => patiently(|| std::fs::remove_dir_all(path)),
+        Ok(_) => patiently(|| std::fs::remove_file(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// The programs Glance installs that run.
@@ -710,32 +800,70 @@ fn running_from(folder: &Path) -> Vec<HANDLE> {
     found
 }
 
-/// Glance's tasks (every account's) that were on, turned off while Glance's files are replaced (none starts a
-/// Glance meanwhile); on again once this is dropped.
-struct TasksOff(Vec<String>);
+/// Glance's tasks (every account's) that were on, turned off while Glance's files are replaced in `.1` (none starts
+/// a Glance meanwhile); on again once this is dropped. Each is written down in the install folder (`TASKS_OFF`)
+/// before it is turned off, so that an install cut short (Windows restarted, the installer ended) leaves none off for
+/// good: the next install, or the sensors as they start, turn them on again (see `tasks_left_off`).
+struct TasksOff(Vec<String>, PathBuf);
 
 impl TasksOff {
-    fn now() -> Self {
-        let Some(folder) = task_folder() else { return TasksOff(Vec::new()) };
-        let off = glance_tasks()
-            .into_iter()
-            .filter(|name| unsafe {
-                let Ok(task) = folder.GetTask(&BSTR::from(name.as_str())) else { return false };
-                task.Enabled().is_ok_and(|on| on.as_bool()) && task.SetEnabled(windows::Win32::Foundation::VARIANT_FALSE).is_ok()
-            })
-            .collect();
-        TasksOff(off)
+    /// None where what is turned off could not be written down first.
+    fn now(install: &Path) -> Option<Self> {
+        let folder = task_folder()?;
+        let on = |name: &str| unsafe { folder.GetTask(&BSTR::from(name)).is_ok_and(|task| task.Enabled().is_ok_and(|on| on.as_bool())) };
+        // Those an install cut short left off, with those on now.
+        let mut off = left_off(install);
+        let now_on: Vec<String> = glance_tasks().into_iter().filter(|name| on(name) && !off.contains(name)).collect();
+        off.extend(now_on);
+        write_down(install, &off).ok()?;
+        for name in &off {
+            if let Ok(task) = unsafe { folder.GetTask(&BSTR::from(name.as_str())) } {
+                let _ = unsafe { task.SetEnabled(windows::Win32::Foundation::VARIANT_FALSE) };
+            }
+        }
+        Some(TasksOff(off, install.to_path_buf()))
     }
 }
 
 impl Drop for TasksOff {
     fn drop(&mut self) {
-        let Some(folder) = task_folder() else { return };
-        for name in &self.0 {
-            if let Ok(task) = unsafe { folder.GetTask(&BSTR::from(name.as_str())) } {
-                let _ = unsafe { task.SetEnabled(windows::Win32::Foundation::VARIANT_TRUE) };
-            }
+        turn_on(&self.0);
+        let _ = remove(&self.1.join(TASKS_OFF));
+    }
+}
+
+/// The tasks an install of Glance in `install` turned off and has not turned on again.
+fn left_off(install: &Path) -> Vec<String> {
+    read_in_place(install, TASKS_OFF, 64 * 1024).map(|names| names.lines().filter(|name| is_glance_task(name)).map(str::to_string).collect()).unwrap_or_default()
+}
+
+/// Writes down `names` as the tasks an install in `install` turns off, on the disk before anything is.
+fn write_down(install: &Path, names: &[String]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(install.join(TASKS_OFF))?;
+    file.write_all(names.join("\n").as_bytes())?;
+    file.sync_all()
+}
+
+fn turn_on(names: &[String]) {
+    let Some(folder) = task_folder() else { return };
+    for name in names {
+        if let Ok(task) = unsafe { folder.GetTask(&BSTR::from(name.as_str())) } {
+            let _ = unsafe { task.SetEnabled(windows::Win32::Foundation::VARIANT_TRUE) };
         }
+    }
+}
+
+/// Turns on again the tasks an install of this copy turned off and, cut short, left off. Needs elevation.
+fn tasks_left_off() {
+    let Some(install) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) else { return };
+    let off = left_off(&install);
+    if !off.is_empty() {
+        turn_on(&off);
+        crate::journal::note("sensors: the tasks an install cut short had left off are on again");
+    }
+    if install.join(TASKS_OFF).exists() {
+        let _ = remove(&install.join(TASKS_OFF));
     }
 }
 
@@ -782,15 +910,19 @@ fn own_as_administrators(path: &Path) -> std::io::Result<()> {
 const LET_GO_WITHIN: Duration = Duration::from_secs(15);
 const TRIED_EVERY: Duration = Duration::from_millis(100);
 
-/// Copies `from` over `to`. A program ended a moment ago (the Glance being
-/// replaced, its phone remote) holds its own file till Windows has done
-/// with it, which may be a while after it was ended: such a file is waited
-/// for, that long.
+/// Copies `from` over `to` (see `patiently`).
 fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    patiently(|| std::fs::copy(from, to).map(drop))
+}
+
+/// Does `act` to a file, waited for while it is held. A program ended a moment ago (the Glance being replaced, its
+/// phone remote) holds its own file till Windows has done with it, which may be a while after it was ended: such a
+/// file is waited for, that long.
+fn patiently(mut act: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
     let began = Instant::now();
     loop {
-        match std::fs::copy(from, to) {
-            Ok(_) => return Ok(()),
+        match act() {
+            Ok(()) => return Ok(()),
             // (In use by another, mapped as a running program, or refused as a running program's is.)
             Err(error) if matches!(error.raw_os_error(), Some(5 | 32 | 1224)) && began.elapsed() < LET_GO_WITHIN => std::thread::sleep(TRIED_EVERY),
             Err(error) => return Err(error),
@@ -815,16 +947,14 @@ pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
     if !end_programs_in(&folder) {
         return Err(InstallFolder::Failed);
     }
+    // The uninstaller last, and only once all the rest is gone: left, it is there to try again with (as Glance is
+    // left in the installed programs: see the installer).
     let mut removed = true;
-    for name in INSTALLED {
-        let path = folder.join(name);
-        // Removing a folder tree never follows a link out of it.
-        let gone = match path.symlink_metadata() {
-            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
-            Ok(_) => std::fs::remove_file(&path),
-            Err(_) => Ok(()),
-        };
-        removed &= gone.is_ok();
+    for name in INSTALLED.iter().filter(|name| **name != "uninstall.exe") {
+        removed &= remove(&folder.join(name)).is_ok();
+    }
+    if removed {
+        removed = remove(&folder.join("uninstall.exe")).is_ok();
     }
     // Gone, if nothing else is in it: by a handle able to delete it, if it is still the one held (which is let go
     // first: it shares no deletion).
@@ -1162,7 +1292,7 @@ fn runs(task: &str, name: &str) -> bool {
 
 /// A task for the current user: the launch task, which starts the sensors' program `exe` with highest privileges on
 /// demand; or, `at_sign_in`, the one that starts Glance (`exe`) as the user when the user signs in.
-fn task_xml(exe: &Path, at_sign_in: bool) -> String {
+fn task_xml(exe: &Path, at_sign_in: bool, enabled: bool) -> String {
     let user = std::env::var("USERDOMAIN").map(|domain| format!("{domain}\\")).unwrap_or_default()
         + &std::env::var("USERNAME").unwrap_or_default();
     let escape = |text: &str| text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
@@ -1188,6 +1318,7 @@ fn task_xml(exe: &Path, at_sign_in: bool) -> String {
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>7</Priority>
+    <Enabled>{enabled}</Enabled>
   </Settings>
   <Actions Context="Author">
     <Exec><Command>{exe}</Command></Exec>
@@ -1199,9 +1330,15 @@ fn task_xml(exe: &Path, at_sign_in: bool) -> String {
     )
 }
 
-/// Registers a task for this copy's programs (Glance at sign-in, else the sensors), handed to Task Scheduler
-/// directly (no file in between). Needs elevation.
-fn register_task(name: &str, at_sign_in: bool) -> bool {
+/// Whether the task `name` is on: none there is (one made is, unless made off).
+fn task_enabled(name: &str) -> bool {
+    let task = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(name)).ok() });
+    task.is_none_or(|task| unsafe { task.Enabled() }.is_ok_and(|on| on.as_bool()))
+}
+
+/// Registers a task for this copy's programs (Glance at sign-in, else the sensors), on or off, handed to Task
+/// Scheduler directly (no file in between). Needs elevation.
+fn register_task(name: &str, at_sign_in: bool, enabled: bool) -> bool {
     let Some(exe) = program(if at_sign_in { APP } else { SENSORS }) else { return false };
     let Some(folder) = task_folder() else { return false };
     let none = VARIANT::default();
@@ -1209,7 +1346,7 @@ fn register_task(name: &str, at_sign_in: bool) -> bool {
         folder
             .RegisterTask(
                 &BSTR::from(name),
-                &BSTR::from(task_xml(&exe, at_sign_in)),
+                &BSTR::from(task_xml(&exe, at_sign_in, enabled)),
                 TASK_CREATE_OR_UPDATE.0,
                 &none,
                 &none,
@@ -1229,9 +1366,12 @@ fn delete_task(name: &str) {
 /// Keeps the launch task pointing at this copy's sensors, if they may start
 /// unasked; else makes sure no task starts this copy. Needs elevation.
 pub fn register_launch_task() {
+    tasks_left_off();
+    // Each task made anew as the user left it, on or off (made on, one the user had turned off in Task Scheduler
+    // started Glance at every sign-in again).
     if may_start_unasked() {
         // (An earlier version's, which ran `glance.exe` itself, is made anew.)
-        let launches = register_task(&launch_task(), false);
+        let launches = register_task(&launch_task(), false, task_enabled(&launch_task()));
         // Earlier versions' tasks, shared by every account under one name,
         // move to this account's own if they were this account's: starting
         // at sign-in carries over, and each old task goes only once its
@@ -1240,13 +1380,13 @@ pub fn register_launch_task() {
         if launches && mine(LAUNCH_TASK) {
             delete_task(LAUNCH_TASK);
         }
-        if mine(LOGON_TASK) && register_task(&logon_task(), true) {
+        if mine(LOGON_TASK) && register_task(&logon_task(), true, task_enabled(LOGON_TASK)) {
             delete_task(LOGON_TASK);
         }
         // This account's sign-in task, made by an earlier version to start Glance whole and elevated, starts it as
         // the user now.
         if runs(&logon_task(), APP) {
-            register_task(&logon_task(), true);
+            register_task(&logon_task(), true, task_enabled(&logon_task()));
         }
     } else {
         // A copy that may not start unasked keeps no task that starts it,
@@ -1259,16 +1399,16 @@ pub fn register_launch_task() {
     }
 }
 
-/// Whether this account starts this copy of Glance at sign-in.
+/// Whether this account starts this copy of Glance at sign-in (its task there and on).
 pub fn autostart_enabled() -> bool {
-    runs(&logon_task(), APP)
+    runs(&logon_task(), APP) && task_enabled(&logon_task())
 }
 
 /// Turns starting at sign-in on or off; returns whether it is now on. Only
 /// an executable that may start unasked can start at sign-in.
 pub fn set_autostart(enabled: bool) -> bool {
     if enabled && may_start_unasked() {
-        register_task(&logon_task(), true);
+        register_task(&logon_task(), true, true);
     } else if !enabled {
         delete_task(&logon_task());
     }
@@ -1422,6 +1562,68 @@ mod tests {
     }
 
     use super::*;
+
+    /// A folder in the temp folder, of this test alone, holding `files` (name, what is in it; a name with a `/` in a
+    /// folder of its own).
+    fn folder_of(test: &str, files: &[(&str, &str)]) -> PathBuf {
+        let folder = std::env::temp_dir().join(format!("glance-test-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        for (name, text) in files {
+            let path = folder.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    /// The files in `folder`, by name (a `/` before each file in a folder), each with what is in it.
+    fn files_in(folder: &Path) -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(folder).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if entry.path().is_dir() {
+                found.extend(files_in(&entry.path()).into_iter().map(|(inner, text)| (format!("{name}/{inner}"), text)));
+            } else {
+                found.push((name, std::fs::read_to_string(entry.path()).unwrap()));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    fn named(files: &[(&str, &str)]) -> Vec<(String, String)> {
+        files.iter().map(|(name, text)| (name.to_string(), text.to_string())).collect()
+    }
+
+    /// The new files go in place of the earlier ones, and those new here beside them; nothing is left aside.
+    #[test]
+    fn new_files_take_the_earlier_ones_place() {
+        let folder = folder_of(
+            "swap",
+            &[("glance.exe", "old"), ("licenses/a.txt", "old"), ("kept.txt", "kept"), (".incoming/glance.exe", "new"), (".incoming/licenses/a.txt", "new"), (".incoming/new.exe", "new")],
+        );
+        std::fs::create_dir(folder.join(REPLACED)).unwrap();
+        swap_in(&folder).unwrap();
+        assert_eq!(files_in(&folder), named(&[("glance.exe", "new"), ("kept.txt", "kept"), ("licenses/a.txt", "new"), ("new.exe", "new")]));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// An install cut short as it put the new files in place: what it had moved aside goes back, in place of what
+    /// took it, and the version it replaced is whole again.
+    #[test]
+    fn what_an_install_cut_short_moved_aside_goes_back() {
+        let folder = folder_of(
+            "put-back",
+            &[("glance.exe", "new"), ("licenses/a.txt", "old"), (".replaced/glance.exe", "old"), (".replaced/glance-sensors.exe", "old"), (".incoming/glance-sensors.exe", "new")],
+        );
+        put_back(&folder).unwrap();
+        assert_eq!(
+            files_in(&folder),
+            named(&[(".incoming/glance-sensors.exe", "new"), ("glance-sensors.exe", "old"), ("glance.exe", "old"), ("licenses/a.txt", "old")])
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 
     #[test]
     #[ignore = "writes into this user's folders"]
