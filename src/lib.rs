@@ -174,6 +174,16 @@ impl App {
     /// settings window) all stand; keeps them; and only then has the panel,
     /// the settings window and the tray follow, so that they read them as
     /// changed.
+    /// Shows the settings as `change` would make them, without keeping them (a slider while it is slid): under
+    /// their lock as `change` does, so that a change made elsewhere meanwhile is neither undone nor reaches the panel
+    /// out of order.
+    pub fn preview(&self, change: impl FnOnce(&mut Settings)) {
+        let held = self.settings.lock().unwrap();
+        let mut shown = held.clone();
+        change(&mut shown);
+        self.controller.apply(&shown);
+    }
+
     pub fn change(&self, change: impl FnOnce(&mut Settings)) {
         {
             let mut held = self.settings.lock().unwrap();

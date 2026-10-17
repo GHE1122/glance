@@ -2203,10 +2203,7 @@ impl Ui {
             return;
         }
         put_slider(&mut self.settings, field, value);
-        let app = crate::app();
-        let mut live = app.settings.lock().unwrap().clone();
-        put_slider(&mut live, field, value);
-        app.controller.apply(&live);
+        crate::app().preview(|live| put_slider(live, field, value));
         self.next_frame = Instant::now();
     }
 
