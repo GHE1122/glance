@@ -29,6 +29,8 @@ pub struct Now {
     /// What plays, by whom and in which program: each empty where it is not said (all, with nothing playing).
     pub title: String,
     pub artist: String,
+    /// The album it is from, where its player says (a song on two albums has two covers).
+    pub album: String,
     pub app: String,
     pub playing: bool,
     /// How loud the sound is (0 to 100), where it could be read, and whether it is muted.
@@ -261,13 +263,13 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
         Some(playing) => sung(playing),
         None => (None, None),
     };
-    let (title, artist, app, is_playing) = playing.map_or_else(Default::default, |playing| (playing.title, playing.artist, playing.app, playing.playing));
+    let (title, artist, album, app, is_playing) = playing.map_or_else(Default::default, |playing| (playing.title, playing.artist, playing.album, playing.app, playing.playing));
     let is_playing = match *ASKED[f].lock().unwrap() {
         Some((till, asked)) if std::time::Instant::now() < till => asked,
         _ => is_playing,
     };
     let players = crate::media::players().len().min(u8::MAX as usize) as u8;
-    keep(follow, Some(Now { title, artist, app, playing: is_playing, volume: sound.map(|(level, _)| level), muted: sound.is_some_and(|(_, muted)| muted), timeline, players, sung }));
+    keep(follow, Some(Now { title, artist, album, app, playing: is_playing, volume: sound.map(|(level, _)| level), muted: sound.is_some_and(|(_, muted)| muted), timeline, players, sung }));
     next
 }
 

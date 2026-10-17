@@ -47,10 +47,12 @@ enum Known {
 /// The track the cover was asked for (its title and artist), and what is known of it.
 static KNOWN: Mutex<Option<(String, Known)>> = Mutex::new(None);
 
-/// The cover of the music playing, the track `title` by `artist`, as its player gives it; read (on a thread of its
-/// own) the first time it is asked for, and again a while after its player gave none.
-pub fn of(title: &str, artist: &str) -> Option<Arc<Cover>> {
-    let key = format!("{title}\u{1}{artist}");
+/// The cover of the music playing, as its player gives it; read (on a thread of its own) the first time it is asked
+/// for, and again a while after its player gave none. (By its title, artist and album: the same song on another
+/// album has another cover.)
+pub fn of(playing: &crate::playing::Now) -> Option<Arc<Cover>> {
+    let crate::playing::Now { title, artist, album, .. } = playing;
+    let key = format!("{title}\u{1}{artist}\u{1}{album}");
     let mut known = KNOWN.lock().unwrap();
     match known.as_ref() {
         Some((of, Known::Found(cover))) if *of == key => return Some(cover.clone()),

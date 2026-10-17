@@ -364,7 +364,7 @@ fn moment() -> Moment {
         position: crate::playing::position(crate::playing::Follow::Music).unwrap_or(0.0),
         length: heard.as_ref().and_then(|heard| heard.timeline).map(|timeline| (timeline.length, timeline.seekable)),
         dragged_to: crate::playing::dragged_to(crate::playing::Follow::Music),
-        cover: (!title.is_empty()).then(|| crate::cover::of(&title, &artist)).flatten(),
+        cover: heard.as_ref().filter(|heard| !heard.title.is_empty()).and_then(crate::cover::of),
         sound: if playing { crate::sound::heard() } else { crate::sound::Heard::default() },
         title,
         artist,
@@ -500,7 +500,7 @@ impl Music {
     /// merged into it: what each part shows drawn over it (see `Ground::Host`).
     pub fn paint_ground(&mut self, frame: &Frame, size: (f32, f32)) {
         let heard = crate::playing::music();
-        if let Some(cover) = heard.as_ref().filter(|heard| !heard.title.is_empty()).and_then(|heard| crate::cover::of(&heard.title, &heard.artist)) {
+        if let Some(cover) = heard.as_ref().filter(|heard| !heard.title.is_empty()).and_then(crate::cover::of) {
             self.tint = toward(self.tint, readable(cover.base, 0.72), 0.2);
             self.accent = toward(self.accent, readable(cover.accent, 0.62), 0.2);
             self.backdrop(frame, &cover);

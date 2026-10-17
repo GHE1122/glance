@@ -172,7 +172,7 @@ impl FullMusic {
         // What plays, and its cover's colours.
         let heard_now = crate::playing::music();
         if let Some(playing) = heard_now.as_ref().filter(|playing| !playing.title.is_empty()) {
-            if let Some(cover) = crate::cover::of(&playing.title, &playing.artist) {
+            if let Some(cover) = crate::cover::of(playing) {
                 let top = cover.base.iter().fold(0.01f32, |top, c| top.max(*c));
                 let tint = cover.base.map(|c| (c / top * 0.96).min(1.0));
                 let tint2 = tint.map(|c| c + (1.0 - c) * 0.55);
