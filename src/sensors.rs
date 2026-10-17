@@ -175,7 +175,11 @@ impl EnergyCounter {
     /// draws power; a hypervisor may return a constant): no reading. One that
     /// has, standing still, says nothing was drawn (the graphics' plane, idle).
     fn power(&mut self, count: u32) -> Option<f32> {
-        let now = Instant::now();
+        self.power_at(count, Instant::now())
+    }
+
+    /// As `power`, the count taken `now`.
+    fn power_at(&mut self, count: u32, now: Instant) -> Option<f32> {
         let longest = (1u64 << 32) as f64 * self.unit / MOST_WATTS;
         let power = self.last.and_then(|(before, at)| {
             let seconds = now.duration_since(at).as_secs_f64();
@@ -431,23 +435,25 @@ mod tests {
 
     #[test]
     fn turns_energy_counts_into_power() {
+        // (Each count taken at a moment given, not read off the clock: a busy machine moved it between the two.)
         let unit = 1.0 / 16384.0;
+        let second = std::time::Duration::from_secs(1);
+        let start = Instant::now();
         let mut counter = EnergyCounter::new(unit);
-        let start = Instant::now() - std::time::Duration::from_secs(1);
         // Across a wrap: 100 J in one second.
         counter.last = Some((u32::MAX - 16384 * 50 + 1, start));
-        let watts = counter.power(16384 * 50).unwrap();
-        assert!((watts - 100.0).abs() < 0.5, "{watts}");
+        let watts = counter.power_at(16384 * 50, start + second).unwrap();
+        assert!((watts - 100.0).abs() < 0.01, "{watts}");
         // Standing still once it has counted: nothing drawn.
-        counter.last = Some((7, Instant::now() - std::time::Duration::from_secs(1)));
-        assert_eq!(counter.power(7), Some(0.0));
+        counter.last = Some((7, start));
+        assert_eq!(counter.power_at(7, start + second), Some(0.0));
         // A counter that has never moved is not counting.
         let mut still = EnergyCounter::new(unit);
-        still.last = Some((7, Instant::now() - std::time::Duration::from_secs(1)));
-        assert_eq!(still.power(7), None);
+        still.last = Some((7, start));
+        assert_eq!(still.power_at(7, start + second), None);
         // A gap the counter could wrap in more than once gives nothing.
-        counter.last = Some((0, Instant::now() - std::time::Duration::from_secs(400)));
-        assert_eq!(counter.power(5), None);
+        counter.last = Some((0, start));
+        assert_eq!(counter.power_at(5, start + 400 * second), None);
     }
 
     /// Each step of opening this CPU's sensors, and what it gave: for a CPU whose sensors do not open.

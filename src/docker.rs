@@ -397,16 +397,17 @@ mod tests {
     #[test]
     fn cuts_short_an_engine_that_does_not_answer() {
         use std::os::windows::io::AsRawHandle;
-        use windows::core::w;
         use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
         use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT};
         // An engine that takes the request and never answers.
-        let server = unsafe { CreateNamedPipeW(w!(r"\\.\pipe\glance-test-silent"), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, None) };
+        // (A pipe of this test process's own: two test runs at once would meet on one name.)
+        let name = format!("glance-test-silent-{}", std::process::id());
+        let server = unsafe { CreateNamedPipeW(&windows::core::HSTRING::from(format!(r"\\.\pipe\{name}")), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, None) };
         assert!(!server.is_invalid());
         let asking = Arc::new(Mutex::new(None));
         let busy = asking.clone();
         let started = Instant::now();
-        let worker = std::thread::spawn(move || ask::<serde_json::Value>("npipe:////./pipe/glance-test-silent", "/containers/json", &busy));
+        let worker = std::thread::spawn(move || ask::<serde_json::Value>(&format!("npipe:////./pipe/{name}"), "/containers/json", &busy));
         while asking.lock().unwrap().is_none() {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -425,14 +426,14 @@ mod tests {
 
     #[test]
     fn lets_a_pipe_server_identify_glance_and_no_more() {
-        use windows::core::w;
         use windows::Win32::Security::{GetTokenInformation, RevertToSelf, SecurityIdentification, TokenImpersonationLevel, SECURITY_IMPERSONATION_LEVEL, TOKEN_QUERY};
         use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
         use windows::Win32::System::Pipes::{CreateNamedPipeW, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT};
         use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
-        let server = unsafe { CreateNamedPipeW(w!(r"\\.\pipe\glance-test-identify"), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, None) };
+        let name = format!("glance-test-identify-{}", std::process::id());
+        let server = unsafe { CreateNamedPipeW(&windows::core::HSTRING::from(format!(r"\\.\pipe\{name}")), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, None) };
         assert!(!server.is_invalid());
-        let Some(Ok(Connection::Pipe(mut client))) = Connection::open("npipe:////./pipe/glance-test-identify") else { panic!("not opened") };
+        let Some(Ok(Connection::Pipe(mut client))) = Connection::open(&format!("npipe:////./pipe/{name}")) else { panic!("not opened") };
         // A byte from the client, so the server may impersonate it.
         client.write_all(b"x").unwrap();
         let mut byte = [0u8; 1];
