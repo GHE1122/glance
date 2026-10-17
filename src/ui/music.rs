@@ -1465,12 +1465,12 @@ impl Drawing<'_> {
         };
         let gap = 10.0;
         let size = (width / 16.0).clamp(18.0, self.fonts.now.size);
-        // Each line is broken into rows at its full size and drawn smaller as a whole (laid out again at each size, a
-        // line just filling its rows broke now after a character, now before it, as the sizes' rounding went).
+        // Each line is laid out at its full size in as much room as it has at the size it is drawn at (all the room
+        // there is, where it is drawn smaller: a short line in one row), and drawn at that size as a whole.
         let full = Font { size, ..self.fonts.now };
         let height_of = |index: usize, scale: f32| {
             let line = &lines[index];
-            (frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, full, width) + if translated && line.translation.is_some() { TRANSLATION_ROW } else { 0.0 }) * scale
+            (frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, full, width / scale) + if translated && line.translation.is_some() { TRANSLATION_ROW } else { 0.0 }) * scale
         };
         let rail = self.music.rail;
         let base = rail.floor().max(-1.0);
@@ -1554,17 +1554,18 @@ impl Drawing<'_> {
                     interlude(frame, x, y, font.size, done, dim, bright);
                 } else {
                     // (At its full size, drawn smaller as a whole: see `full`.)
-                    let layout = frame.gfx.wrapped(&text, full, width);
+                    let room = width / scale;
+                    let layout = frame.gfx.wrapped(&text, full, room);
                     let sung = sung_to(&parts, self.moment.position);
                     let soft = (font.size * 0.45).clamp(6.0, 16.0) / scale;
                     frame.scaled(x, y, scale, |frame| {
                         // What is sung glows in the cover's colour.
-                        frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, full, x, y, width, sung, bright, soft));
-                        self.filled(&layout, &text, full, x, y, width, sung, dim, bright, soft);
+                        frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, full, x, y, room, sung, bright, soft));
+                        self.filled(&layout, &text, full, x, y, room, sung, dim, bright, soft);
                     });
                 }
                 if let Some(translation) = line.translation.as_ref().filter(|_| translated) {
-                    let under = if text.trim().is_empty() { font.size * 1.4 } else { frame.gfx.wrapped_height(&text, full, width) * scale };
+                    let under = if text.trim().is_empty() { font.size * 1.4 } else { frame.gfx.wrapped_height(&text, full, width / scale) * scale };
                     let small = Font { size: self.fonts.under_font.size * scale, ..self.fonts.under_font };
                     words(frame, &fitted(frame, translation, small, width), small, Color::hex(self.ink, 0.62 * alpha), x, y + under + 2.0 * scale, width, Align::Start, clear);
                 }
@@ -1573,11 +1574,12 @@ impl Drawing<'_> {
                 if line.text.trim().is_empty() {
                     interlude(frame, x, y, font.size, 0.0, shown, shown);
                 } else {
-                    frame.scaled(x, y, scale, |frame| if clear { outlined(frame, &line.text, full, shown, x, y, width) } else { frame.text_wrapped(&line.text, full, shown, x, y, width) });
+                    let room = width / scale;
+                    frame.scaled(x, y, scale, |frame| if clear { outlined(frame, &line.text, full, shown, x, y, room) } else { frame.text_wrapped(&line.text, full, shown, x, y, room) });
                 }
                 // Its translation under it, as the line sung now's is (smaller with it).
                 if let Some(translation) = line.translation.as_ref().filter(|_| translated && !line.text.trim().is_empty()) {
-                    let under = frame.gfx.wrapped_height(&line.text, full, width) * scale;
+                    let under = frame.gfx.wrapped_height(&line.text, full, width / scale) * scale;
                     let small = Font { size: self.fonts.under_font.size * scale, ..self.fonts.under_font };
                     words(frame, &fitted(frame, translation, small, width), small, Color::hex(self.ink, 0.42 * alpha), x, y + under + 2.0 * scale, width, Align::Start, clear);
                 }
