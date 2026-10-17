@@ -274,14 +274,9 @@ pub fn follow_settings() {
 
 fn take_settings() {
     with_ui(|ui| {
-        // Sliding shows its value live through the panel's settings; the
-        // window's own are kept as it is let go.
-        if ui.sliding.is_some() {
-            return;
-        }
-        let settings = crate::app().settings.lock().unwrap().clone();
-        ui.take(settings);
+        ui.follow_owed = true;
         ui.next_frame = Instant::now();
+        ui.follow_when_free();
     });
 }
 
@@ -297,6 +292,7 @@ fn tick(now: Instant) -> Option<Duration> {
         if ui.relabel_at.is_some_and(|at| now >= at) {
             ui.relabel();
         }
+        ui.follow_when_free();
         if now >= ui.next_frame {
             ui.draw(now);
         }
@@ -938,6 +934,8 @@ struct Ui {
     view: Option<String>,
     /// A component carried in the layout's editor, and its edges as last drawn (where they take it).
     carry: Option<Carry>,
+    /// Settings changed elsewhere, to be taken up once nothing is in hand (see `follow_when_free`).
+    follow_owed: bool,
     zones: Vec<Zone>,
     /// What plays, as the layout's library shows it; the readings and the workbench, as it shows them (each drawn
     /// in layers of its own: see `render::PanelLayers`).
@@ -1123,6 +1121,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             shown_edge: None,
             view: None,
             carry: None,
+            follow_owed: false,
             zones: Vec::new(),
             library_music: super::music::Music::default(),
             library_layers: [PanelLayers::default(), PanelLayers::default()],
@@ -2763,6 +2762,19 @@ impl Ui {
 
     /// A slider or a module let go (or the pointer taken away mid-drag, by
     /// another window or the window closing): kept where it was left.
+    /// Settings changed elsewhere, taken up once nothing is in hand: a slider slid shows its value live through
+    /// the panel's settings, a row or a component dragged is kept as it is let go; taken meanwhile, what is in hand
+    /// went back where it was.
+    fn follow_when_free(&mut self) {
+        if !self.follow_owed || self.sliding.is_some() || self.drag.is_some() || self.carry.is_some() {
+            return;
+        }
+        self.follow_owed = false;
+        let settings = crate::app().settings.lock().unwrap().clone();
+        self.take(settings);
+        self.next_frame = Instant::now();
+    }
+
     fn let_go(&mut self) {
         // A component in hand is put down nowhere: where it came from, it stays.
         if self.carry.as_ref().is_some_and(|carry| carry.moved) {
