@@ -41,7 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
     WM_KEYDOWN, WM_SYSKEYDOWN, WM_ACTIVATE, WA_INACTIVE, WM_APP, WM_DISPLAYCHANGE, WM_QUIT, MSG, PM_REMOVE, QS_ALLINPUT,
     DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage,
-    SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IDC_SIZENWSE, IMAGE_ICON, LR_SHARED, MINMAXINFO,
+    SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_CAPTURECHANGED, WM_DESTROY,
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
@@ -127,46 +127,10 @@ const MAP_GAP: f32 = 3.0;
 const SKINS_ROW: f32 = 16.0 + 72.0 + 10.0 + 18.0 + 16.0;
 /// Desktop shown beside the panel in the preview (DIPs of screen).
 const PREVIEW_MARGIN: f32 = 160.0;
-/// The music page's preview: the widget's size as the page opens, room at least as wide round it, the row of sizes
-/// under it, and how often it is drawn while something plays (as a chart's speed: a quarter pixel each thirtieth of a
-/// second, see `draw`).
-const MUSIC_PREVIEW: (f32, f32) = (380.0, 340.0);
+/// The music page's preview: the room at least as wide round what plays, and how often it is drawn while something
+/// plays (as a chart's speed: a quarter pixel each thirtieth of a second, see `draw`).
 const MUSIC_PREVIEW_ROOM: f32 = 24.0;
-const MUSIC_SIZES_ROW: f32 = 56.0;
 const MUSIC_PREVIEW_PACE: f32 = 7.5;
-/// The sizes the preview's row offers, each its layout's (see `music::Layout`): a strip, a player, a card, a stage.
-const MUSIC_SIZES: [(f32, f32); 4] = [(360.0, 64.0), (440.0, 180.0), (380.0, 340.0), (700.0, 380.0)];
-/// The forms the readings' (and the workbench's) preview offers under it, the panel as it slides out first (none): the
-/// lanes in full and compact in a column, the tiles two across, the corner, the strip, the rings alone. (Each as a
-/// widget shows it, at its own size; sized by the grip, it shows the others too, as a widget does.)
-const WIDGET_FORMS: [(Option<arrange::Form>, &str, &str); 7] = [
-    (None, "面板", "Panel"),
-    (Some(arrange::Form::Lanes { detail: view::Detail::Full, columns: 1 }), "完整", "Full"),
-    (Some(arrange::Form::Lanes { detail: view::Detail::Compact, columns: 1 }), "紧凑", "Compact"),
-    (Some(arrange::Form::Small(super::forms::Small::Tiles { across: 2, down: 0 })), "磁贴", "Tiles"),
-    (Some(arrange::Form::Small(super::forms::Small::Corner)), "方块", "Corner"),
-    (Some(arrange::Form::Small(super::forms::Small::Strip { rich: true })), "横条", "Strip"),
-    (Some(arrange::Form::Small(super::forms::Small::Micro)), "迷你", "Micro"),
-];
-/// The room round the readings' preview as a widget (DIPs).
-const WIDGET_PREVIEW_ROOM: f32 = 12.0;
-/// The least the readings' preview is sized to (DIPs; less, the least of its forms shows all the same).
-const WIDGET_LEAST: f32 = 40.0;
-
-/// Whether `shown` is of the kind `offered` is under the preview (the lanes in however many columns, the tiles however
-/// many across, the corner stood on end, the strip without its chart or as a rail).
-fn same_kind(offered: arrange::Form, shown: arrange::Form) -> bool {
-    use super::forms::Small;
-    match (offered, shown) {
-        (arrange::Form::Lanes { detail: a, .. }, arrange::Form::Lanes { detail: b, .. }) => a == b,
-        (arrange::Form::Small(Small::Tiles { .. }), arrange::Form::Small(Small::Tiles { .. })) => true,
-        (arrange::Form::Small(Small::Corner), arrange::Form::Small(Small::Corner | Small::Tall)) => true,
-        (arrange::Form::Small(Small::Strip { .. }), arrange::Form::Small(Small::Strip { .. } | Small::Rail)) => true,
-        (a, b) => a == b,
-    }
-}
-/// The grip at the preview's corner it is sized by: how large it is.
-const MUSIC_GRIP: f32 = 18.0;
 /// How far a wheel notch scrolls the choices, and how quickly they follow.
 const WHEEL: f32 = 100.0;
 const SCROLL_EASE: f32 = 0.06;
@@ -739,13 +703,6 @@ enum Target {
     Tab(Tab),
     /// One of what plays shows (see `Row::Element`).
     Element(&'static str),
-    /// The music preview's grip, which sizes it; one of the sizes under it (by its place in `MUSIC_SIZES`).
-    MusicGrip,
-    MusicSize(usize),
-    /// The readings' (or the workbench's) preview as a widget: its grip, which sizes it; one of the forms under it
-    /// (by its place in `WIDGET_FORMS`, the first the panel as it slides out).
-    WidgetGrip,
-    WidgetForm(usize),
     /// Opens or closes the fold of the modules few want.
     More,
     /// Asks for a newer release now.
@@ -835,8 +792,10 @@ struct MapArt {
     id: String,
     /// Where the screen was as the picture was taken (physical px).
     monitor: RECT,
-    size: (u32, u32),
-    /// None till it has been read (on another thread: see `Ui::read`).
+    /// The size it was last asked for at (physical px): what it holds, or will once it is read.
+    asked: (u32, u32),
+    /// The picture held: none till the first is read (on another thread: see `Ui::read`); the one before while
+    /// another is read.
     desktop: Option<Capture>,
     bitmap: Option<ID2D1Bitmap1>,
 }
@@ -905,22 +864,9 @@ struct Ui {
     /// The players music can be followed from, as the music page offers them (as Windows identifies each, and its
     /// name): those playing music now, and the one chosen, playing or not; taken anew each frame.
     sources: Vec<(String, String)>,
-    /// What plays, as the music page's preview draws it; how large it is drawn there (sized by its grip, or by the row
-    /// of sizes under it), and while it is being sized, where the pointer took it and how large it was then; since
-    /// when the example has played (see `music::paint_example`).
+    /// What plays, as the music page's preview draws it; since when the example has played (see
+    /// `music::paint_example`).
     music: super::music::Music,
-    music_size: (f32, f32),
-    music_sizing: Option<((f32, f32), (f32, f32))>,
-    /// How much smaller than its size the preview draws it (1: as large; less, larger than the room).
-    music_shrunk: f32,
-    /// The readings' (or the workbench's) preview as a widget, of which (none: the panel as it slides out); while it
-    /// is sized, where the pointer took it and how large it was drawn then, and the room it is given now; the form it
-    /// showed as it was sized (see `arrange::Shown`); how much smaller than its size it is drawn.
-    widget: Option<(Part, arrange::Choice)>,
-    widget_sizing: Option<((f32, f32), (f32, f32))>,
-    widget_room: (f32, f32),
-    widget_taken: Option<arrange::Shown>,
-    widget_shrunk: f32,
     example_from: Instant,
     lang: Lang,
     dark: bool,
@@ -1132,14 +1078,6 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             tab: Tab::Look,
             sources: Vec::new(),
             music: super::music::Music::default(),
-            music_size: MUSIC_PREVIEW,
-            music_sizing: None,
-            music_shrunk: 1.0,
-            widget: None,
-            widget_sizing: None,
-            widget_room: (0.0, 0.0),
-            widget_taken: None,
-            widget_shrunk: 1.0,
             example_from: Instant::now(),
             autostart: crate::source::autostart(),
             remote_there: crate::phone::helper().is_some(),
@@ -1353,12 +1291,6 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == 1 => {
             // Over the client area: a hand on what can be dragged.
-            // Over the music preview's grip, or sizing it: the arrows that size a window by its corner.
-            let sizing = with_ui(|ui| ui.music_sizing.is_some() || ui.widget_sizing.is_some() || matches!(ui.hovered(), Some(Target::MusicGrip | Target::WidgetGrip))).unwrap_or(false);
-            if sizing {
-                unsafe { SetCursor(LoadCursorW(None, IDC_SIZENWSE).ok()) };
-                return LRESULT(1);
-            }
             let grip = with_ui(|ui| matches!(ui.hovered(), Some(Target::Grip(_) | Target::Library(_) | Target::Chip(..))) || ui.drag.is_some() || ui.carry.as_ref().is_some_and(|carry| carry.moved)).unwrap_or(false);
             if grip {
                 unsafe { SetCursor(LoadCursorW(None, IDC_HAND).ok()) };
@@ -1818,22 +1750,31 @@ impl Ui {
     /// pixels large, for the layout's editor: taken once, and again when its
     /// size changes.
     fn map_picture(&mut self, frame: &Frame, id: &str, monitor: RECT, size: (u32, u32)) -> Option<ID2D1Bitmap1> {
-        let at = match self.map_art.iter().position(|art| art.id == id) {
-            Some(at) if self.map_art[at].size == size && self.map_art[at].monitor == monitor => at,
-            found => {
-                // (Read on another thread: the map shows the screen without it meanwhile.)
+        // The picture held is drawn smaller or larger to the size wanted. Read again (on another thread, the one held
+        // drawn meanwhile) only where it is smaller than that, or more than twice as large; and not while the window
+        // is sized by hand (each size of it would read the desktop again): once it is let go.
+        let holds = |asked: (u32, u32)| asked.0 >= size.0 && asked.1 >= size.1 && asked.0 <= size.0 * 2 && asked.1 <= size.1 * 2;
+        let found = self.map_art.iter().position(|art| art.id == id && art.monitor == monitor);
+        let at = match found {
+            Some(at) if holds(self.map_art[at].asked) || self.by_hand => at,
+            _ => {
                 let send = self.read.0.clone();
                 let of = id.to_string();
                 std::thread::spawn(move || {
                     let desktop = read_desktop(monitor, size.0, size.1);
                     let _ = send.send(Read::Map { id: of, monitor, size, desktop });
                 });
-                let art = MapArt { id: id.to_string(), monitor, size, desktop: None, bitmap: None };
                 match found {
-                    Some(at) => self.map_art[at] = art,
-                    None => self.map_art.push(art),
+                    Some(at) => {
+                        self.map_art[at].asked = size;
+                        at
+                    }
+                    None => {
+                        self.map_art.retain(|art| art.id != id);
+                        self.map_art.push(MapArt { id: id.to_string(), monitor, asked: size, desktop: None, bitmap: None });
+                        self.map_art.len() - 1
+                    }
                 }
-                found.unwrap_or(self.map_art.len() - 1)
             }
         };
         let art = &mut self.map_art[at];
@@ -2753,15 +2694,6 @@ impl Ui {
             self.reorder();
         }
         self.carry_to(x, y);
-        // (As far as the pointer went, at the size the preview draws it at.)
-        if let Some(((from_x, from_y), (w, h))) = self.music_sizing {
-            let k = self.music_shrunk;
-            self.music_size = ((w + (x - from_x) / k).max(super::music::LEAST.0), (h + (y - from_y) / k).max(super::music::LEAST.1));
-        }
-        if let Some(((from_x, from_y), (w, h))) = self.widget_sizing {
-            let k = self.widget_shrunk;
-            self.widget_room = ((w + (x - from_x) / k).max(WIDGET_LEAST), (h + (y - from_y) / k).max(WIDGET_LEAST));
-        }
         self.next_frame = Instant::now();
     }
 
@@ -2790,19 +2722,6 @@ impl Ui {
                 unsafe { SetCapture(self.hwnd) };
             }
         }
-        if self.pressed == Some(Target::MusicGrip) {
-            self.music_sizing = Some(((x, y), self.music_size));
-            unsafe { SetCapture(self.hwnd) };
-            self.next_frame = Instant::now();
-            return;
-        }
-        if self.pressed == Some(Target::WidgetGrip) {
-            // (From as large as it is drawn: see `widget_room`.)
-            self.widget_sizing = Some(((x, y), self.widget_room));
-            unsafe { SetCapture(self.hwnd) };
-            self.next_frame = Instant::now();
-            return;
-        }
         if let Some(target) = self.pressed.clone() {
             if self.take_up(&target, x, y) {
                 self.next_frame = Instant::now();
@@ -2824,9 +2743,6 @@ impl Ui {
     /// A slider or a module let go (or the pointer taken away mid-drag, by
     /// another window or the window closing): kept where it was left.
     fn let_go(&mut self) {
-        // The music preview being sized: as large as it was left (and the readings' as a widget).
-        self.music_sizing = None;
-        self.widget_sizing = None;
         // A component in hand is put down nowhere: where it came from, it stays.
         if self.carry.as_ref().is_some_and(|carry| carry.moved) {
             self.carry = None;
@@ -2866,14 +2782,6 @@ impl Ui {
             self.next_frame = Instant::now();
             return;
         }
-        if self.music_sizing.take().is_some() || self.widget_sizing.take().is_some() {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
-            self.pressed = None;
-            self.next_frame = Instant::now();
-            return;
-        }
         let pressed = self.pressed.take();
         if pressed.is_none() || pressed != self.hovered() {
             self.next_frame = Instant::now();
@@ -2907,12 +2815,6 @@ impl Ui {
             Target::Shortcut => self.record(!self.recording),
             Target::ClearShortcut => self.clear_shortcut(),
             Target::Nav(item) => self.turn_to(item.page()),
-            Target::MusicSize(at) => self.music_size = MUSIC_SIZES[at],
-            Target::MusicGrip | Target::WidgetGrip => {}
-            Target::WidgetForm(at) => {
-                self.widget = WIDGET_FORMS[at].0.map(|form| (self.previewed(), arrange::Choice { form, scale: 1.0, extra: (0.0, 0.0) }));
-                self.widget_taken = None;
-            }
             Target::Tab(tab) => self.turn_tab(tab),
             Target::Element(name) => {
                 let on = self.item_on("lyrics", name);
@@ -3323,7 +3225,7 @@ impl Ui {
                     }
                 }
                 Read::Map { id, monitor, size, desktop } => {
-                    if let Some(art) = self.map_art.iter_mut().find(|art| art.id == id && art.monitor == monitor && art.size == size) {
+                    if let Some(art) = self.map_art.iter_mut().find(|art| art.id == id && art.monitor == monitor && art.asked == size) {
                         art.desktop = Some(desktop);
                         art.bitmap = None;
                     }
@@ -3893,13 +3795,8 @@ impl Ui {
     /// asks for, filled in the accent; returns where its left edge is.
     #[allow(clippy::too_many_arguments)]
     fn button(&mut self, frame: &Frame, palette: &Palette, text: &str, right: f32, cy: f32, target: Target, kind: Button, hovered: &Option<Target>) -> f32 {
-        self.button_in(frame, palette, text, (Font::new(Family::Segoe, 14.0, 400.0), 32.0), right, cy, target, kind, hovered)
-    }
-
-    /// A button as `button` draws one, its words in `font` with `pad` round them (both sides together).
-    #[allow(clippy::too_many_arguments)]
-    fn button_in(&mut self, frame: &Frame, palette: &Palette, text: &str, (font, pad): (Font, f32), right: f32, cy: f32, target: Target, kind: Button, hovered: &Option<Target>) -> f32 {
-        let w = frame.gfx.measure(text, font) + pad;
+        let font = Font::new(Family::Segoe, 14.0, 400.0);
+        let w = frame.gfx.measure(text, font) + 32.0;
         let rect = Rect { x: right - w, y: cy - 16.0, w, h: 32.0 };
         let hover = kind != Button::Quiet && hovered.as_ref() == Some(&target);
         let ink = match kind {
@@ -3915,7 +3812,7 @@ impl Ui {
                 if kind == Button::Quiet { palette.text2 } else { palette.text }
             }
         };
-        text_centred(frame, text, font, ink, rect.x + pad / 2.0, cy, w, Align::Start);
+        text_centred(frame, text, font, ink, rect.x + 16.0, cy, w, Align::Start);
         if kind != Button::Quiet {
             self.targets.push((rect, target));
         }
@@ -4304,32 +4201,22 @@ impl Ui {
         unsafe { frame.dc.PopAxisAlignedClip() };
     }
 
-    /// What plays, as a music widget shows it with the elements chosen, over the desktop (the whole of it the room
-    /// holds), as large as it was sized there (by its grip, or by the row of sizes under it; larger than the room,
-    /// drawn smaller); the example while no music plays. Returns how soon it is to be drawn again (as the preview's charts' speed: see
-    /// `paint`), while something plays.
-    fn paint_music_preview(&mut self, frame: &Frame, palette: &Palette, area: Rect) -> Option<f32> {
-        // The desktop over the room above the sizes (inside the preview's rounded corners), what plays clipped to it.
+    /// What plays, with the elements chosen, as the panel slides it out from a side edge (as large as it was made
+    /// there: see `MusicRooms`), over the desktop (the whole of it the room holds); larger than the room, drawn smaller;
+    /// the example while no music plays. (Not sized here: how it looks at other sizes is seen sizing it on the screen.)
+    /// Returns how soon it is to be drawn again (as the preview's charts' speed: see `paint`), while something plays.
+    fn paint_music_preview(&mut self, frame: &Frame, area: Rect) -> Option<f32> {
         let (sw, sh) = self.stage.size;
-        let room = Rect { x: area.x, y: area.y, w: area.w, h: area.h - MUSIC_SIZES_ROW };
-        let k = (room.w / sw).max(room.h / sh);
-        let (ox, oy) = (room.x + (room.w - sw * k) / 2.0, room.y + (room.h - sh * k) / 2.0);
-        self.stage_picture(frame, room, (ox, oy), k, 1.0);
-        unsafe { frame.dc.PushAxisAlignedClip(&rect(room.x, room.y, room.w, room.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        let k = (area.w / sw).max(area.h / sh);
+        let (ox, oy) = (area.x + (area.w - sw * k) / 2.0, area.y + (area.h - sh * k) / 2.0);
+        self.stage_picture(frame, area, (ox, oy), k, 1.0);
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         let shows = super::music::Shows::from(&self.settings.view);
-        let most = (room.w - 2.0 * MUSIC_PREVIEW_ROOM, room.h - 2.0 * MUSIC_PREVIEW_ROOM);
-        // At rest, as a widget comes to rest at the size it is let go at; while it is sized, as it is. Where the room
-        // does not hold the largest of the sizes under it (or this one, larger still), all are made smaller alike, as a
-        // whole (laid out at their own size all the same): one size to the next is then larger on the page as it is
-        // on the screen, not only another layout. (While it is sized, at the scale it began at: the corner follows the
-        // hand. Made smaller with it, it would run away from it.)
-        let size = if self.music_sizing.is_some() { self.music_size } else { super::music::rests_at(self.music_size, &shows) };
-        let largest = MUSIC_SIZES.iter().fold(size, |most, at| (most.0.max(at.0), most.1.max(at.1)));
-        let fits = |size: (f32, f32)| (most.0 / size.0).min(most.1 / size.1).min(1.0);
-        let k = if self.music_sizing.is_some() { self.music_shrunk } else { fits(largest) };
-        self.music_shrunk = k;
+        let size = super::music::rests_at(self.settings.music_rooms.at(false), &shows);
+        let most = (area.w - 2.0 * MUSIC_PREVIEW_ROOM, area.h - 2.0 * MUSIC_PREVIEW_ROOM);
+        let k = (most.0 / size.0).min(most.1 / size.1).min(1.0);
         let (w, h) = (size.0 * k, size.1 * k);
-        let at = (room.x + (room.w - w) / 2.0, room.y + (room.h - h) / 2.0);
+        let at = (area.x + (area.w - w) / 2.0, area.y + (area.h - h) / 2.0);
         let pointer = self.pointer.map(|(x, y)| ((x - at.0) / k, (y - at.1) / k)).filter(|(x, y)| *x >= 0.0 && *y >= 0.0 && *x < size.0 && *y < size.1);
         frame.place(Matrix3x2::scale(k, k) * Matrix3x2::translation(at.0, at.1));
         let ground = super::music::Ground::of(&shows);
@@ -4340,32 +4227,7 @@ impl Ui {
             self.music.paint_example(frame, size, &shows, ground, self.scale * k, pointer, now, self.example_from.elapsed().as_secs_f64())
         };
         frame.origin(0.0, 0.0);
-        // The grip at its corner: three short strokes, lit under the pointer and while it is held.
-        let grip = Rect { x: at.0 + w - MUSIC_GRIP, y: at.1 + h - MUSIC_GRIP, w: MUSIC_GRIP, h: MUSIC_GRIP };
-        let lit = self.music_sizing.is_some() || self.hovered() == Some(Target::MusicGrip);
-        let ink = Color::hex(0xFFFFFF, if lit { 0.95 } else { 0.6 });
-        for i in 0..3 {
-            let d = 5.0 + i as f32 * 4.0;
-            let (x0, y0) = (grip.x + grip.w - 4.0, grip.y + grip.h - 4.0 - d);
-            unsafe { frame.dc.DrawLine(Vector2 { X: x0 - d, Y: y0 + d }, Vector2 { X: x0, Y: y0 }, frame.brush(ink), 1.5, None) };
-        }
-        self.targets.push((grip, Target::MusicGrip));
         unsafe { frame.dc.PopAxisAlignedClip() };
-        // The sizes under it, each its layout's, the one it is laid out as lit.
-        let shown = super::music::Layout::for_room(size, &shows, None);
-        let names = [pick(self.lang, "播放条", "Strip"), pick(self.lang, "播放器", "Player"), pick(self.lang, "卡片", "Card"), pick(self.lang, "舞台", "Stage")];
-        let layouts = [super::music::Layout::Strip, super::music::Layout::Player, super::music::Layout::Card, super::music::Layout::Stage];
-        let font = Font::new(Family::Segoe, 14.0, 400.0);
-        let widths: Vec<f32> = names.iter().map(|name| frame.gfx.measure(name, font) + 32.0).collect();
-        let total: f32 = widths.iter().sum::<f32>() + 8.0 * (names.len() - 1) as f32;
-        let mut x = area.x + (area.w - total) / 2.0;
-        let cy = area.y + area.h - MUSIC_SIZES_ROW / 2.0;
-        let hovered = self.hovered();
-        for (at, (name, w)) in names.iter().zip(&widths).enumerate() {
-            let kind = if layouts[at] == shown { Button::Accent } else { Button::Plain };
-            self.button(frame, palette, name, x + w, cy, Target::MusicSize(at), kind, &hovered);
-            x += w + 8.0;
-        }
         (painted.busy || !super::music::heard()).then_some(MUSIC_PREVIEW_PACE)
     }
 
@@ -4396,7 +4258,7 @@ impl Ui {
             return None;
         }
         if self.page == Page::Music {
-            return self.paint_music_preview(frame, palette, area);
+            return self.paint_music_preview(frame, area);
         }
         if self.page == Page::Layout {
             return self.paint_layout(frame, palette, area, Instant::now());
@@ -4408,134 +4270,10 @@ impl Ui {
         }
 
         // The readings (or the workbench), laid out for the screen the window opened on, centred along the edge they
-        // open from; or as a widget, in one of its forms (see `widget_on_stage`). Under them, the forms to choose.
+        // open from.
         let prefs = self.prefs.clone().holding(self.previewed());
         let edge = self.preview_edge();
-        let room = Rect { h: area.h - MUSIC_SIZES_ROW, ..area };
-        let widget = self.widget.filter(|(part, _)| *part == self.previewed()).map(|(_, choice)| choice);
-        let (pace, shown) = match widget {
-            Some(choice) => self.widget_on_stage(frame, room, &prefs, choice),
-            None => (self.panel_on_stage(frame, room, Some(edge), Some(&prefs), false).0, None),
-        };
-        let lit = WIDGET_FORMS.iter().position(|(form, ..)| match (form, shown) {
-            (None, None) => true,
-            (Some(form), Some(shown)) => same_kind(*form, shown),
-            _ => false,
-        });
-        // As wide as the names and the room round them; where the row does not hold that, the room round them less,
-        // and then the names smaller, till it does.
-        let names: Vec<&str> = WIDGET_FORMS.iter().map(|(_, zh, en)| pick(self.lang, zh, en)).collect();
-        let gaps = 6.0 * (names.len() - 1) as f32;
-        let room = area.w - 16.0 - gaps;
-        let named = |size: f32| names.iter().map(|name| frame.gfx.measure(name, Font::new(Family::Segoe, size, 400.0))).sum::<f32>();
-        let size = [14.0, 13.0, 12.0, 11.0].into_iter().find(|size| named(*size) + 12.0 * names.len() as f32 <= room).unwrap_or(11.0);
-        let font = Font::new(Family::Segoe, size, 400.0);
-        let pad = ((room - named(size)) / names.len() as f32).clamp(12.0, 24.0);
-        let widths: Vec<f32> = names.iter().map(|name| frame.gfx.measure(name, font) + pad).collect();
-        let total: f32 = widths.iter().sum::<f32>() + gaps;
-        let mut x = area.x + (area.w - total) / 2.0;
-        let cy = area.y + area.h - MUSIC_SIZES_ROW / 2.0;
-        let hovered = self.hovered();
-        for (at, (name, w)) in names.iter().zip(&widths).enumerate() {
-            let kind = if lit == Some(at) { Button::Accent } else { Button::Plain };
-            self.button_in(frame, palette, name, (font, pad), x + w, cy, Target::WidgetForm(at), kind, &hovered);
-            x += w + 6.0;
-        }
-        pace
-    }
-
-    /// The readings (or the workbench) showing `prefs` as a widget over the desktop (the whole of it the room holds),
-    /// in the form `choice` keeps, or, while it is sized by its grip, in the form its room shows (as a widget's, see
-    /// `arrange::Ladder::choose`); in the middle of `area`, the grip at its corner. Where the room does not hold the
-    /// largest of the forms under it (or this one, larger still), all are drawn smaller alike, as the music's are.
-    /// Returns how fast its charts move (physical pixels a second) and the form it shows.
-    fn widget_on_stage(&mut self, frame: &Frame, area: Rect, prefs: &Prefs, choice: arrange::Choice) -> (Option<f32>, Option<arrange::Form>) {
-        let lang = self.lang;
-        let (sw, sh) = self.stage.size;
-        let app = crate::app();
-        let skin = Skin::named(&self.settings.skin);
-        let interval = self.settings.interval_ms as f64;
-        // Held while the preview is drawn; the sampler waits that long.
-        let mut history = app.controller.history.lock().unwrap();
-        let samples = history.make_contiguous();
-        if samples.is_empty() {
-            return (None, None);
-        }
-        let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
-        let pen = wall - interval - PEN_LAG_MS;
-        let measure = Theme::new(skin, false);
-        let seen = app.controller.seen.lock().unwrap().clone();
-        let overlay = crate::app().controller.overlay_wanted();
-        let newer = update::available().is_some();
-        let probe = Scene { music_apart: false, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay, buttons: false, newer };
-        let heights = view::heights(&probe);
-        let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
-        let readings = super::forms::count(&probe);
-        let work = (sw, sh);
-        // Sized: what its room shows (holding the form it showed, as a widget does); else the form chosen.
-        let want = match self.widget_sizing {
-            Some(_) => arrange::Want::Room(self.widget_room, Some(self.widget_taken.unwrap_or(arrange::Shown { form: choice.form, taken: self.widget_room }))),
-            None => arrange::Want::Kept(choice),
-        };
-        let opening = arrange::Opening::new(&measure, Edge::Right, &lanes, readings, work, None, 1.0, want, seen.clone());
-        let Some(chosen) = opening.choice else { return (None, None) };
-        if self.widget_sizing.is_some() {
-            self.widget_taken = Some(arrange::Shown::after(self.widget_taken, chosen.form, self.widget_room));
-            self.widget = Some((self.previewed(), chosen));
-        }
-        let zoom = opening.zoom;
-        let drawn = (opening.size.0 * zoom, opening.size.1 * zoom);
-        if self.widget_sizing.is_none() {
-            self.widget_room = drawn;
-        }
-        // As large as it is, or as the room holds it. (Not at one scale with its other forms, as what plays is: these
-        // differ too much, the lanes in full several times as tall as the strip, and the strip several times as wide
-        // as the rings; at one scale the small ones could not be read.) While it is sized, at the scale it began at,
-        // so that its corner follows the hand.
-        let most = (area.w - 2.0 * WIDGET_PREVIEW_ROOM, area.h - 2.0 * WIDGET_PREVIEW_ROOM);
-        let k = match self.widget_sizing {
-            Some(_) => self.widget_shrunk,
-            None => (most.0 / drawn.0).min(most.1 / drawn.1).min(1.0),
-        };
-        self.widget_shrunk = k;
-        let (w, h) = (drawn.0 * k, drawn.1 * k);
-        let at = (area.x + (area.w - w) / 2.0, area.y + (area.h - h) / 2.0);
-        // The desktop covering the room; a widget's DIP covers `per` of its pixels, as drawn here.
-        let cover = (area.w / sw).max(area.h / sh);
-        let (ox, oy) = (area.x + (area.w - sw * cover) / 2.0, area.y + (area.h - sh * cover) / 2.0);
-        let per = zoom * k / cover;
-        self.stage_picture(frame, area, (ox, oy), cover, per);
-        let corner = ((at.0 - ox) / cover, (at.1 - oy) / cover);
-        let behind = RECT { left: corner.0 as i32, top: corner.1 as i32, right: (corner.0 + w / cover) as i32, bottom: (corner.1 + h / cover) as i32 };
-        let tone = self.stage.desktop.as_ref().map_or((0.5, 0.0), |desktop| desktop.luminance(behind, 1.0));
-        let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
-        let theme = Theme::new(skin, dark);
-        let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { music_apart: false, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay, buttons: false, newer };
-        let detail = opening.detail();
-        let shown_lanes = view::lanes_at(&scene, |_| detail);
-        let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: corner.0 / per, Y: corner.1 / per }, self.stage.desktop.as_ref().map_or(0, |desktop| desktop.digest), per));
-        let picture = render::Picture { scene: &scene, lanes: &shown_lanes, layout: &opening.layout, small: opening.small().map(|small| (small, opening.size)), size: opening.size, at: (0.0, 0.0), edge: None, backdrop, frost, rough: false };
-        unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-        let local = Matrix3x2::scale(zoom * k, zoom * k) * Matrix3x2::translation(at.0, at.1);
-        let drew = self.layers.draw(frame, &picture, local, self.scale * zoom * k);
-        // The grip at its corner: three short strokes, lit under the pointer and while it is held.
-        let grip = Rect { x: at.0 + w - MUSIC_GRIP, y: at.1 + h - MUSIC_GRIP, w: MUSIC_GRIP, h: MUSIC_GRIP };
-        let lit = self.widget_sizing.is_some() || self.hovered() == Some(Target::WidgetGrip);
-        let ink = if dark { Color::hex(0xFFFFFF, if lit { 0.95 } else { 0.6 }) } else { Color::hex(0x000000, if lit { 0.8 } else { 0.45 }) };
-        for i in 0..3 {
-            let d = 5.0 + i as f32 * 4.0;
-            let (x0, y0) = (grip.x + grip.w - 4.0, grip.y + grip.h - 4.0 - d);
-            unsafe { frame.dc.DrawLine(Vector2 { X: x0 - d, Y: y0 + d }, Vector2 { X: x0, Y: y0 }, frame.brush(ink), 1.5, None) };
-        }
-        self.targets.push((grip, Target::WidgetGrip));
-        unsafe { frame.dc.PopAxisAlignedClip() };
-        match drew {
-            Ok(drew) if drew.grounded => self.gfx.clear_caches(),
-            Ok(_) => {}
-            Err(_) => self.failed = true,
-        }
-        (Some(opening.layout.plot_width(&theme) * self.scale * zoom * k / prefs.chart_seconds as f32), Some(chosen.form))
+        self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false).0
     }
 
     /// The stage's desktop in `area` and, where `edge` is one, the panel showing `prefs` slid out from it, running
