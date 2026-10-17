@@ -285,12 +285,27 @@ fn take_settings() {
     });
 }
 
-/// `settings` as the window takes them, their preferences as it resolved them (`prefs`), which it writes back as
-/// they are: what it changes is then only what was changed in it. (Taken as they were, preferences never yet written
-/// were none, and the first change of any put the window's in place of all of them, over one made elsewhere.)
+/// `settings` as the window takes them, their preferences as it resolved them (`prefs`) and writes them back (see
+/// `prefs::kept`): what it changes is then only what was changed in it. (Taken as they were, preferences never yet
+/// written were none, and the first change of any put the window's in place of all of them, over one made
+/// elsewhere.) With them, what earlier versions kept and the window does not write again (carried over into
+/// `prefs`): as the window writes without it, it goes, and is not carried over again over what was changed since.
 fn taken(settings: &Settings, prefs: &Prefs) -> Settings {
+    fn over(held: &serde_json::Value, written: serde_json::Value) -> serde_json::Value {
+        match (held, written) {
+            (serde_json::Value::Object(held), serde_json::Value::Object(written)) => {
+                let mut both = held.clone();
+                for (key, value) in written {
+                    let under = held.get(&key).cloned().unwrap_or(serde_json::Value::Null);
+                    both.insert(key, over(&under, value));
+                }
+                serde_json::Value::Object(both)
+            }
+            (_, written) => written,
+        }
+    }
     let mut taken = settings.clone();
-    taken.view = serde_json::to_value(prefs).unwrap();
+    taken.view = over(&settings.view, crate::ui::prefs::kept(prefs, &settings.view));
     taken
 }
 
@@ -1093,6 +1108,8 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
         let desktop = screen.as_deref().and_then(|screen| kept_desktop(screen, work, size));
         let stage = Stage { size, screen, work, desktop, bitmap: None };
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
+        // (Taken out first: locked twice in the one statement below, it waited on itself.)
+        let switches_read = SWITCHES_READ.lock().unwrap().unwrap_or((false, false));
         let mut ui = Ui {
             hwnd,
             gfx,
@@ -1110,9 +1127,9 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             sources: Vec::new(),
             music: super::music::Music::default(),
             example_from: Instant::now(),
-            autostart: SWITCHES_READ.lock().unwrap().is_some_and(|(autostart, _)| autostart),
+            autostart: switches_read.0,
             remote_there: crate::phone::helper().is_some(),
-            remote: SWITCHES_READ.lock().unwrap().is_some_and(|(_, remote)| remote),
+            remote: switches_read.1,
             reading_switches: Some(std::thread::spawn(|| (crate::source::autostart(), crate::phone::on()))),
             // (As its helper says, asked as the window opens: see `remote_asked`.)
             remote_lights: false,
@@ -1422,7 +1439,7 @@ impl Ui {
     /// over the settings as they are now (changed elsewhere meanwhile,
     /// perhaps, before this window followed).
     fn save(&mut self) {
-        self.settings.view = serde_json::to_value(&self.prefs).unwrap();
+        self.settings.view = crate::ui::prefs::kept(&self.prefs, &self.settings.view);
         let app = crate::app();
         let mut now = None;
         app.change(|held| {

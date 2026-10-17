@@ -208,7 +208,7 @@ impl App {
         self.change(|settings| {
             let mut prefs = ui::prefs::Prefs::resolve(&settings.view, &known);
             prefs.processes.sort = sort;
-            settings.view = serde_json::to_value(prefs).unwrap();
+            settings.view = ui::prefs::kept(&prefs, &settings.view);
         });
     }
 

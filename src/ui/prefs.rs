@@ -288,6 +288,31 @@ pub fn module_on(stored: &serde_json::Value, id: &str) -> bool {
 
 /// As `module_on`, in the stored list `list` ("modules", the readings'; "workbench", the workbench's, each of its
 /// modules on unless listed off).
+/// `prefs` as they are kept, over the preferences `held` they were resolved from: the modules of what is not on this
+/// machine now (a GPU taken out, an external one unplugged) kept as they were, each after the one it followed. (Left
+/// out, as `resolve` leaves them out of what is shown, a change of any preference lost their switches and their
+/// place, and they came back as new.) What earlier versions kept, carried over into `prefs`, is not written again.
+pub fn kept(prefs: &Prefs, held: &serde_json::Value) -> serde_json::Value {
+    let mut kept = serde_json::to_value(prefs).unwrap();
+    for list in ["modules", "workbench"] {
+        let (Some(held), Some(now)) = (held[list].as_array(), kept[list].as_array_mut()) else { continue };
+        let id = |entry: &serde_json::Value| entry["id"].as_str().map(str::to_string);
+        // Where the next one away goes: after the one held before it, as it is now.
+        let mut at = 0;
+        for entry in held {
+            let Some(this) = id(entry) else { continue };
+            match now.iter().position(|shown| id(shown).as_deref() == Some(this.as_str())) {
+                Some(shown) => at = shown + 1,
+                None => {
+                    now.insert(at, entry.clone());
+                    at += 1;
+                }
+            }
+        }
+    }
+    kept
+}
+
 pub fn module_on_in(stored: &serde_json::Value, list: &str, id: &str) -> bool {
     let entry = stored[list].as_array().and_then(|modules| modules.iter().find(|entry| entry["id"] == id));
     match entry {
@@ -402,6 +427,29 @@ impl Prefs {
 
 #[cfg(test)]
 mod tests {
+    /// A module of what is not here now is kept as it was, where it was, through a change of another preference.
+    #[test]
+    fn a_gpu_away_keeps_its_module() {
+        let known: Vec<String> = ["cpu", "gpu:0", "memory"].map(String::from).to_vec();
+        let held = serde_json::json!({ "modules": [
+            { "id": "cpu", "on": true },
+            { "id": "gpu:1", "on": false, "items": { "temp": false } },
+            { "id": "gpu:0", "on": true },
+            { "id": "memory", "on": true },
+        ] });
+        let mut prefs = super::Prefs::resolve(&held, &known);
+        assert_eq!(prefs.modules.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(), ["cpu", "gpu:0", "memory"]);
+        prefs.processes.sort = super::ProcessSort::Memory;
+        let kept = super::kept(&prefs, &held);
+        let modules = kept["modules"].as_array().unwrap();
+        assert_eq!(modules.iter().map(|entry| entry["id"].as_str().unwrap()).collect::<Vec<_>>(), ["cpu", "gpu:1", "gpu:0", "memory"]);
+        assert_eq!(modules[1], held["modules"][1]);
+        // Back: as it was.
+        let known: Vec<String> = ["cpu", "gpu:0", "gpu:1", "memory"].map(String::from).to_vec();
+        let back = super::Prefs::resolve(&kept, &known);
+        assert!(!back.modules.iter().find(|entry| entry.id == "gpu:1").unwrap().on);
+    }
+
     #[test]
     fn a_panel_shows_what_its_edge_holds() {
         use crate::settings::Part::{Monitor, Workbench};
