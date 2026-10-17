@@ -679,14 +679,19 @@ supported way back (it would leave the newer tasks); going back is
 uninstalling, then installing the older release.
 
 **Now** (built, short of the record above): the helper (`elevation::install_into`)
-writes the names of the enabled tasks to `.tasks-off` in the install folder and
+holds `.installing` in the install folder, sharing nothing and deleted on close,
+for the whole install (a second install finds it held and does nothing);
+writes the names of the enabled tasks to `.tasks-off` in the install folder
+(written beside it and renamed over it, owned by Administrators) and
 then disables them (the next install, or the service as it starts, enables
 those still listed: `tasks_left_off`); ends the programs whose image is in the
 folder, by handle, and waits for each to be gone; copies the payload into
 `.incoming` in the folder; then, for each entry, moves the installed one into
 `.replaced` and the new one into its place, putting everything back if one
-step fails (`put_in_place`). What an install cut short left in `.replaced` is
-put back before the next one starts. A task made again keeps the enabled state
+step fails (`put_in_place`); once all are in place, `.replaced` is renamed to
+`.done-with` as one step and only then deleted. What an install cut short left
+in `.replaced` is put back before the next one starts; `.done-with` is only
+ever deleted. A task made again keeps the enabled state
 it had (`task_enabled`). Uninstalling removes `uninstall.exe` last, and only
 when everything else is gone; otherwise Glance stays registered, to be
 uninstalled again.
