@@ -4178,10 +4178,15 @@ impl Ui {
         let shows = super::music::Shows::from(&self.settings.view);
         let room = Rect { x: area.x, y: area.y, w: area.w, h: area.h - MUSIC_SIZES_ROW };
         let most = (room.w - 2.0 * MUSIC_PREVIEW_ROOM, room.h - 2.0 * MUSIC_PREVIEW_ROOM);
-        // At rest, as a widget comes to rest at the size it is let go at; while it is sized, as it is. Larger than the
-        // room, made smaller as a whole (laid out at its own size all the same).
+        // At rest, as a widget comes to rest at the size it is let go at; while it is sized, as it is. Where the room
+        // does not hold the largest of the sizes under it (or this one, larger still), all are made smaller alike, as a
+        // whole (laid out at their own size all the same): one size to the next is then larger on the page as it is
+        // on the screen, not only another layout. (While it is sized, at the scale it began at: the corner follows the
+        // hand. Made smaller with it, it would run away from it.)
         let size = if self.music_sizing.is_some() { self.music_size } else { super::music::rests_at(self.music_size, &shows) };
-        let k = (most.0 / size.0).min(most.1 / size.1).min(1.0);
+        let largest = MUSIC_SIZES.iter().fold(size, |most, at| (most.0.max(at.0), most.1.max(at.1)));
+        let fits = |size: (f32, f32)| (most.0 / size.0).min(most.1 / size.1).min(1.0);
+        let k = if self.music_sizing.is_some() { self.music_shrunk } else { fits(largest) };
         self.music_shrunk = k;
         let (w, h) = (size.0 * k, size.1 * k);
         let at = (room.x + (room.w - w) / 2.0, room.y + (room.h - h) / 2.0);
