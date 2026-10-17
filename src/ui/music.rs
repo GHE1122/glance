@@ -249,8 +249,8 @@ pub struct Music {
     /// The colours the lyrics are drawn in, easing toward the cover's.
     tint: [f32; 3],
     accent: [f32; 3],
-    /// The mean colour of the cover blurred behind it (see `ground_colour`).
-    ground_mean: [f32; 3],
+    /// The cover blurred behind it, as its pixels (BGRA, `cover::SIDE` square; see `ground_colour`).
+    ground_pixels: Option<Arc<Vec<u8>>>,
     /// Its ground (its shadow, the cover blurred and washed, the cover, what plays), kept and drawn again only as it
     /// changes: what moves at every frame is drawn over it.
     ground: Layer,
@@ -312,8 +312,7 @@ impl Default for Music {
             fading: None,
             tint: [1.0, 0.9, 0.8],
             accent: [1.0, 0.75, 0.6],
-            // (No cover: its ground's own dark.)
-            ground_mean: [0.11, 0.11, 0.13],
+            ground_pixels: None,
             ground: Layer::default(),
             controls_in: 0.0,
             bands: [0.0; crate::sound::BANDS],
@@ -742,6 +741,9 @@ fn pad(layout: Layout) -> f32 {
         Layout::Stage => 30.0,
     }
 }
+/// How much larger than its longer side the cover blurred behind it is laid, and how darkened.
+const BACKDROP_GROWN: f32 = 1.35;
+const BACKDROP_DARKENED: f32 = 0.42;
 /// Its corners' radius, with its own ground.
 pub const RADIUS: f32 = 14.0;
 /// The strip's cover inside another widget, at most (DIPs).
@@ -1646,11 +1648,31 @@ impl Drawing<'_> {
 }
 
 impl Music {
-    /// The colour its own ground shows most: the cover's, darkened as the ground darkens it (for what stands in for
-    /// it, as where it would stick).
-    pub fn ground_colour(&self) -> [f32; 3] {
-        let mean = self.ground_mean;
-        std::array::from_fn(|i| mean[i] * 0.58 + self.accent[i] * 0.06)
+    /// The colour its own ground shows most along its edges, `size` large (for what stands in for it, as where it
+    /// would stick): the mean of the blurred cover where it shows round the edge (it is laid centred, as large as the
+    /// longer side and a third more), darkened and washed as the ground is. With no cover, the ground's own dark.
+    pub fn ground_colour(&self, (w, h): (f32, f32)) -> [f32; 3] {
+        let Some(pixels) = &self.ground_pixels else { return [0.064, 0.064, 0.075] };
+        let side = crate::cover::SIDE as usize;
+        let laid = w.max(h).max(1.0) * BACKDROP_GROWN;
+        // What of it shows (as far each way from its middle, of its side), and how far in from the edge counts.
+        let (half_x, half_y) = (w / 2.0 / laid, h / 2.0 / laid);
+        let band = w.min(h) * 0.15 / laid;
+        let (mut sum, mut count) = ([0.0f32; 3], 0.0f32);
+        for y in 0..side {
+            let v = (y as f32 + 0.5) / side as f32 - 0.5;
+            for x in 0..side {
+                let u = (x as f32 + 0.5) / side as f32 - 0.5;
+                let shows = u.abs() <= half_x && v.abs() <= half_y;
+                if shows && (u.abs() >= half_x - band || v.abs() >= half_y - band) {
+                    let p = &pixels[(y * side + x) * 4..][..3];
+                    sum = [sum[0] + p[2] as f32, sum[1] + p[1] as f32, sum[2] + p[0] as f32];
+                    count += 1.0;
+                }
+            }
+        }
+        let mean = sum.map(|c| c / count.max(1.0) / 255.0);
+        std::array::from_fn(|i| mean[i] * (1.0 - BACKDROP_DARKENED) + self.accent[i] * 0.06)
     }
 
     /// How far the controls have come in over the spectrum (0 to 1), eased.
@@ -1666,10 +1688,6 @@ impl Music {
         }
         let side = crate::cover::SIDE as usize;
         let pixels = blurred(&cover.pixels, side, 9);
-        // (Its mean colour: what its ground shows most, blurred as it is. BGRA, opaque.)
-        let count = (pixels.len() / 4).max(1) as f32;
-        let sum = pixels.chunks(4).fold([0.0f32; 3], |sum, p| [sum[0] + p[2] as f32, sum[1] + p[1] as f32, sum[2] + p[0] as f32]);
-        self.ground_mean = sum.map(|c| c / count / 255.0);
         let properties = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
             dpiX: 96.0,
@@ -1682,6 +1700,7 @@ impl Music {
                 self.fading = Some((before, Instant::now()));
             }
             self.backdrop = Some((key, bitmap));
+            self.ground_pixels = Some(Arc::new(pixels));
         }
     }
 }
@@ -1895,8 +1914,7 @@ impl Backdrop {
         };
         unsafe { frame.dc.PushLayer(&layer, None) };
         frame.fill(Color::hex(0x101014, 1.0), 0.0, 0.0, w, h);
-        let grown = 1.35;
-        let (bw, bh) = (w.max(h) * grown, w.max(h) * grown);
+        let (bw, bh) = (w.max(h) * BACKDROP_GROWN, w.max(h) * BACKDROP_GROWN);
         let place = rect((w - bw) / 2.0, (h - bh) / 2.0, bw, bh);
         if let Some(bitmap) = &self.backdrop {
             if let Some(before) = &self.before {
@@ -1905,7 +1923,7 @@ impl Backdrop {
             unsafe { frame.dc.DrawBitmap(bitmap, Some(&place), self.shown, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
         }
         // Darkened for the words to be read on, the cover's colour washed from a corner.
-        frame.fill(Color::hex(0x000000, 0.42), 0.0, 0.0, w, h);
+        frame.fill(Color::hex(0x000000, BACKDROP_DARKENED), 0.0, 0.0, w, h);
         frame.fill_shape(&[Point { x: 0.0, y: 0.0 }, Point { x: w, y: 0.0 }, Point { x: w, y: h }, Point { x: 0.0, y: h }], Fill::Down { top: 0.0, from: colour(self.accent, 0.12), bottom: h, to: colour(self.tint, 0.0) });
         on(frame);
         unsafe { frame.dc.PopLayer() };

@@ -2764,7 +2764,7 @@ impl Widget {
                 let strength = if firm { 1.0 } else { ((0.25 + 0.5 * (1.0 - (away - STICK) / (HINT_SEEN - STICK))) * 20.0).round() / 20.0 };
                 // (A music widget with its own ground, in its own colour.)
                 let ground = match &self.content {
-                    Content::Music(shown) => Some(shown.music.ground_colour()),
+                    Content::Music(shown) => Some(shown.music.ground_colour(shown.size)),
                     _ => None,
                 };
                 self.show_hint(RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 }, firm, strength, &theme, ground);
