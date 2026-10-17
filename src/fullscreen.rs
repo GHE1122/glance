@@ -246,6 +246,9 @@ impl FullMusic {
         });
         self.hits = hits;
         self.volume_open = volume_open;
+        // What was laid out for lines no longer drawn, let go (with no widget or panel drawing meanwhile, it was kept
+        // for the whole of a playlist).
+        self.gfx.sweep();
         Duration::ZERO
     }
 

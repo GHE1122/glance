@@ -837,7 +837,7 @@ pub(crate) fn read_array(counter: PDH_HCOUNTER, buf: &mut Vec<u64>) -> Option<Ve
         let mut count = 0u32;
         let items = buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
         let status = unsafe {
-            PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut bytes, &mut count, Some(items))
+            PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE_NOCAP100, &mut bytes, &mut count, Some(items))
         };
         if status == PDH_MORE_DATA {
             // The instance set can grow between the sizing call and the read.

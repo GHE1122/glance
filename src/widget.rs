@@ -2148,12 +2148,15 @@ impl Widget {
             return;
         }
         let edges = edges_at(x, y, w, h);
-        // Pinned, it is neither moved nor sized: only its buttons are pressed.
-        if self.pinned && self.button_at(x, y).is_none() {
+        // Pinned, it is neither moved nor sized: only its buttons and what it shows that takes a press (the keys of
+        // what plays, a line of its lyrics, a drive's row) are pressed. (Its buttons alone were, and those did
+        // nothing pinned.)
+        let on_content = self.hits.iter().any(|(hx, hy, w, h, hit)| hit.takes_press() && lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h);
+        if self.pinned && self.button_at(x, y).is_none() && !on_content {
             note("widget: pressed while pinned");
             return;
         }
-        if self.button_at(x, y).is_some() {
+        if self.button_at(x, y).is_some() || self.pinned {
             // A press on a button: acted on as it is let go.
             self.drag = Some(Drag::Move { grab: POINT { x: from.x - self.at.x, y: from.y - self.at.y }, trail: Vec::new(), torn: false, moved: false });
         } else if edges.0 || edges.1 || edges.2 || edges.3 {
@@ -2203,6 +2206,8 @@ impl Widget {
         let Some(cursor) = cursor_position() else { return };
         let scale = self.contact.scale;
         match &mut self.drag {
+            // Pinned: pressed on what it shows, acted on as it is let go; not moved.
+            Some(Drag::Move { .. }) if self.pinned => {}
             Some(Drag::Move { grab, trail, moved, .. }) => {
                 trail.push((now, cursor));
                 trail.retain(|(at, _)| now.duration_since(*at) <= FLING_SPAN * 2);

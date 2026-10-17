@@ -164,6 +164,11 @@ fn linked_to(link: &Link) {
     }
     *WANTED.lock().unwrap() = None;
     *EDGES.lock().unwrap() = None;
+    // A sensors' process started again knows nothing of what the last was asked: the game mode chosen is told it
+    // again (else it said its own, Auto, and the user's choice went with it); a download the last had under way
+    // went with it, and is no longer waited for.
+    ask(&Asked::GameMode(GameModeSent::from(crate::presents::game_mode())));
+    crate::update::link_lost();
     *LINKED_SINCE.lock().unwrap() = Some(Instant::now());
     LINKS.fetch_add(1, Ordering::Relaxed);
     LINKED.store(true, Ordering::Relaxed);

@@ -2776,11 +2776,14 @@ impl Ui {
     }
 
     fn let_go(&mut self) {
-        // A component in hand is put down nowhere: where it came from, it stays.
-        if self.carry.as_ref().is_some_and(|carry| carry.moved) {
-            self.carry = None;
+        // A component in hand is put down nowhere: where it came from, it stays. (Taken up and not yet moved too:
+        // left, it went on following the pointer with no button held, and the next press put it down.)
+        if self.carry.take().is_some() {
             self.pressed = None;
         }
+        // The phone's slider held is let go where it was, nothing sent (left, it followed the pointer, and the
+        // next press anywhere sent its value).
+        self.phone.slid = None;
         // Shown live as it slid.
         if let Some((field, _)) = self.sliding.take() {
             self.pressed = None;
@@ -3322,7 +3325,8 @@ impl Ui {
         } else if std::mem::take(&mut self.was_sized) {
             self.gfx.settle();
         }
-        let moving = self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target || self.drag.is_some();
+        // (A row held still moves only as the pointer does, which asks for a frame itself.)
+        let moving = self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target;
         self.settle_thumbs = false;
         self.next_frame = if moving {
             now

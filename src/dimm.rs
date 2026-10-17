@@ -46,9 +46,14 @@ pub struct Dimms {
     kind: Kind,
     /// The bus address of each module's sensor, by slot.
     sensors: Vec<u64>,
-    /// The latest readings, kept while another program holds the bus.
-    last: Vec<f32>,
+    /// The latest readings and when they were read, kept while another program holds the bus or a module does not
+    /// answer (no longer than `STALE_AFTER`).
+    last: (Vec<f32>, std::time::Instant),
 }
+
+/// How long the last readings stand while they cannot be read again: after, none (a frozen temperature would show
+/// as live).
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Why no module's sensor was found.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -93,7 +98,7 @@ impl Dimms {
             .filter(|&address| byte(address, SPD5118_TEMP_CONFIG).is_some_and(|config| config & 1 == 0))
             .collect();
         if !spd5118.is_empty() {
-            return Ok(Dimms { module, kind: Kind::Spd5118, last: Vec::new(), sensors: spd5118 });
+            return Ok(Dimms { module, kind: Kind::Spd5118, last: (Vec::new(), std::time::Instant::now()), sensors: spd5118 });
         }
         // A DDR4 sensor: as Linux's jc42 checks, reserved bits clear and a
         // manufacturer set.
@@ -111,14 +116,14 @@ impl Dimms {
         if jc42.is_empty() {
             return Err(Missing::None);
         }
-        Ok(Dimms { module, kind: Kind::Jc42, last: Vec::new(), sensors: jc42 })
+        Ok(Dimms { module, kind: Kind::Jc42, last: (Vec::new(), std::time::Instant::now()), sensors: jc42 })
     }
 
     /// Each module's temperature (°C), in slot order. While another program
     /// is using the bus, the previous readings stand.
     pub fn read(&mut self) -> Vec<f32> {
         let Some(_lock) = NamedLock::acquire(SMBUS_LOCK, LOCK_WAIT) else {
-            return self.last.clone();
+            return self.standing();
         };
         let readings: Option<Vec<f32>> = self
             .sensors
@@ -132,10 +137,19 @@ impl Dimms {
                 Kind::Jc42 => transfer(&self.module, address, JC42_TEMP, WORD_DATA).map(|raw| jc42_celsius((raw as u16).swap_bytes())),
             })
             .collect();
-        if let Some(readings) = readings {
-            self.last = readings;
+        match readings {
+            Some(readings) => {
+                self.last = (readings.clone(), std::time::Instant::now());
+                readings
+            }
+            None => self.standing(),
         }
-        self.last.clone()
+    }
+
+    /// The last readings while they stand; none once they are too old.
+    fn standing(&self) -> Vec<f32> {
+        let (last, at) = &self.last;
+        if at.elapsed() < STALE_AFTER { last.clone() } else { Vec::new() }
     }
 }
 
