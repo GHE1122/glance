@@ -32,16 +32,17 @@ pub fn run() {
     let Some(pipes) = link::Sensors::open() else { return };
     // Its lines go to the rest of Glance, which writes the log (two processes writing one file lose lines).
     crate::journal::hold_for_the_app();
-    // Watched from now: starting (the driver's installer, the first look at the hardware) as each reading is, the
-    // rest waiting on it meanwhile.
-    std::thread::Builder::new().name("glance sensors: readings watched".into()).spawn(watch_readings).expect("a thread started");
-    *READING_SINCE.lock().unwrap() = Some(Instant::now());
-    // What an elevated start of Glance has always done: its task kept for later starts, the driver in place.
+    // What an elevated start of Glance has always done: its task kept for later starts, the driver in place (its
+    // installer waited for with a bound of its own: see `ensure_pawnio`; under the watch below, one slower than it
+    // ended the sensors part way through the install).
     crate::elevation::register_launch_task();
     crate::elevation::forget_download();
     if let Ok(exe) = std::env::current_exe() {
         crate::elevation::ensure_pawnio(&exe.with_file_name("resources").join("PawnIO_setup.exe"));
     }
+    // Watched from now: the first look at the hardware as each reading is, the rest waiting on it meanwhile.
+    std::thread::Builder::new().name("glance sensors: readings watched".into()).spawn(watch_readings).expect("a thread started");
+    *READING_SINCE.lock().unwrap() = Some(Instant::now());
     let mut sampler = Sampler::new();
     *READING_SINCE.lock().unwrap() = None;
     crate::presents::start();

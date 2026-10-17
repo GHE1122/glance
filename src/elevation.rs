@@ -1365,17 +1365,33 @@ pub fn ensure_pawnio(setup: &Path) {
     }
     // Run from exactly the place that was checked.
     let Some(setup) = checked(setup) else { return };
-    let installed = Command::new(setup)
-        .args(["-install", "-silent"])
-        .creation_flags(NO_WINDOW)
-        .status()
-        .is_ok_and(|status| status.success());
-    if installed && pawnio_installed() {
-        mark_pawnio_ours();
-    } else {
-        crate::journal::note("the PawnIO driver could not be installed; temperatures, power and fans will be missing");
+    let child = match Command::new(setup).args(["-install", "-silent"]).creation_flags(NO_WINDOW).spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            crate::journal::note("the PawnIO driver's installer could not be started; temperatures, power and fans will be missing");
+            return;
+        }
+    };
+    // Its end waited for on a thread of its own, which marks the driver as Glance's once it is in (whenever that
+    // is: an installer is not ended part way, which could leave the driver half in); this waits for it so long.
+    let (ended, end) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut child = child;
+        let installed = child.wait().is_ok_and(|status| status.success()) && pawnio_installed();
+        if installed {
+            mark_pawnio_ours();
+        } else {
+            crate::journal::note("the PawnIO driver could not be installed; temperatures, power and fans will be missing");
+        }
+        let _ = ended.send(());
+    });
+    if end.recv_timeout(PAWNIO_PATIENCE).is_err() {
+        crate::journal::note(format!("the PawnIO driver's installer has not ended in {} s; going on without it meanwhile", PAWNIO_PATIENCE.as_secs()));
     }
 }
+
+/// How long the PawnIO driver's installer is waited for before what needs it goes on without it.
+const PAWNIO_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn mark_pawnio_ours() {
     let mut key = HKEY::default();
