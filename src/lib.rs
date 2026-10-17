@@ -79,6 +79,8 @@ mod cover;
 mod fullscreen;
 #[cfg(windows)]
 mod serif;
+#[cfg(all(test, windows))]
+mod test_crashes;
 // What plays and how loud, read and changed as the phone remote does: its own code for it.
 #[cfg(windows)]
 #[allow(dead_code)]
