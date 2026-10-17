@@ -92,6 +92,20 @@ pub fn last_failure() -> Option<String> {
     FAILED.lock().unwrap().clone()
 }
 
+/// The driver installed while Glance runs, not yet taken up (see `arrived`).
+static ARRIVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tells that the driver has just been installed: what reads through it is opened again (see `arrived`).
+pub fn installed() {
+    ARRIVED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Whether the driver was installed since this was last asked: what reads through it, opened without it, is to be
+/// opened again.
+pub fn arrived() -> bool {
+    ARRIVED.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
 impl Module {
     /// Loads a compiled module. Fails if the driver is not installed, the
     /// process may not open it, or the module does not support this machine.

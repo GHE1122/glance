@@ -33,8 +33,7 @@ pub fn run() {
     // Its lines go to the rest of Glance, which writes the log (two processes writing one file lose lines).
     crate::journal::hold_for_the_app();
     // What an elevated start of Glance has always done: its task kept for later starts, the driver in place (its
-    // installer waited for with a bound of its own: see `ensure_pawnio`; under the watch below, one slower than it
-    // ended the sensors part way through the install).
+    // installer not waited for: see `ensure_pawnio`).
     crate::elevation::register_launch_task();
     crate::elevation::forget_download();
     if let Ok(exe) = std::env::current_exe() {

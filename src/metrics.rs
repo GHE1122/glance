@@ -389,6 +389,10 @@ impl Sampler {
         // read when it was not.)
         let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100));
 
+        // The driver installed meanwhile: what reads through it, not had without it, opened now.
+        if crate::pawnio::arrived() {
+            self.driver_arrived();
+        }
         // (Read before the GPUs: Intel's graphics built into the CPU take their power from it.)
         let cpu_sensors = self.cpu_sensors.as_mut().map(CpuReader::read);
         self.graphics_power = cpu_sensors.as_ref().and_then(|sensors| sensors.graphics_power);
@@ -1361,20 +1365,47 @@ impl Sampler {
     /// started (and till it is free).
     fn dimms(&mut self) -> Option<&mut Dimms> {
         if self.dimms_awaited.is_some_and(|since| since.elapsed() >= SUPER_IO_AGAIN) {
-            match Dimms::open() {
-                Ok(found) => {
-                    crate::journal::note(format!("memory sensors, looked for again: {}", found.describe()));
-                    self.dimms = Some(found);
-                    self.dimms_awaited = None;
-                }
-                Err(crate::dimm::Missing::BusHeld) => self.dimms_awaited = Some(Instant::now()),
-                Err(why) => {
-                    crate::journal::note(format!("memory sensors, looked for again: {}", why.describe()));
-                    self.dimms_awaited = None;
-                }
-            }
+            self.open_dimms();
         }
         self.dimms.as_mut()
+    }
+
+    /// The modules' sensors looked for again (and again later, while another program has the bus).
+    fn open_dimms(&mut self) {
+        match Dimms::open() {
+            Ok(found) => {
+                crate::journal::note(format!("memory sensors, looked for again: {}", found.describe()));
+                self.dimms = Some(found);
+                self.dimms_awaited = None;
+            }
+            Err(crate::dimm::Missing::BusHeld) => self.dimms_awaited = Some(Instant::now()),
+            Err(why) => {
+                crate::journal::note(format!("memory sensors, looked for again: {}", why.describe()));
+                self.dimms_awaited = None;
+            }
+        }
+    }
+
+    /// The PawnIO driver installed since Glance started: each reader that needs it, not had without it, opened.
+    fn driver_arrived(&mut self) {
+        if self.cpu_sensors.is_none() {
+            self.cpu_sensors = CpuReader::open();
+            crate::journal::note(format!("CPU sensors, with the driver: {}", self.cpu_sensors.as_ref().map_or("not found", |cpu| cpu.describe())));
+        }
+        if self.super_io.is_none() {
+            self.open_board();
+        }
+        if self.dimms.is_none() {
+            self.open_dimms();
+        }
+    }
+
+    /// The board's chip looked for again (and again later, while another program has the bus).
+    fn open_board(&mut self) {
+        let found = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")), &reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")));
+        crate::superio::say_later(found.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe));
+        self.super_io_awaited = found.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now());
+        self.super_io = found.ok().map(crate::superio::Watched::new);
     }
 
     /// The motherboard's sensors, and a laptop's fans its firmware reports.
@@ -1382,10 +1413,7 @@ impl Sampler {
         // Another program had the bus as Glance started: the chip is looked for again, every half minute,
         // till the bus is free (or something else stands in the way, which waiting does not change).
         if self.super_io_awaited.is_some_and(|since| since.elapsed() >= SUPER_IO_AGAIN) {
-            let found = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")), &reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")));
-            crate::superio::say_later(found.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe));
-            self.super_io_awaited = found.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now());
-            self.super_io = found.ok().map(crate::superio::Watched::new);
+            self.open_board();
         }
         let mut board = self.super_io.as_ref().map(crate::superio::Watched::read);
         if let Some(fans) = &self.laptop_fans {
