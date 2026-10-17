@@ -273,8 +273,9 @@ impl FullMusic {
             Some(Hit::Toggle) => crate::playing::act_on(Follow::Music, crate::playing::Act::Key(crate::playing::Key::Toggle)),
             Some(Hit::Next) => crate::playing::act_on(Follow::Music, crate::playing::Act::Key(crate::playing::Key::Next)),
             Some(Hit::Mute) => {
-                let muted = crate::actions::volume().is_some_and(|(_, muted)| muted);
-                let _ = crate::actions::set_volume(None, Some(!muted));
+                if let Some((_, muted)) = crate::playing::sound() {
+                    crate::playing::set_sound(None, Some(!muted));
+                }
             }
             Some(Hit::Leave) => return Asked::Leave,
             Some(dragged @ (Hit::Track | Hit::Volume)) => {
@@ -308,7 +309,7 @@ impl FullMusic {
             Hit::Volume => {
                 let (top, bottom) = volume_bar(area);
                 let fraction = ((bottom - at.1) / (bottom - top).max(1.0)).clamp(0.0, 1.0);
-                let _ = crate::actions::set_volume(Some((fraction * 100.0).round() as u8), Some(false));
+                crate::playing::set_sound(Some((fraction * 100.0).round() as u8), Some(false));
             }
             _ => {}
         }
@@ -316,9 +317,8 @@ impl FullMusic {
 
     /// The sound louder or softer by `step` (of 100), the volume's bar shown a moment saying how loud.
     fn turn_sound(&mut self, step: i32) {
-        if let Some((level, _)) = crate::actions::volume() {
-            let level = (level as i32 + step).clamp(0, 100) as u8;
-            let _ = crate::actions::set_volume(Some(level), Some(false));
+        if let Some((level, _)) = crate::playing::sound() {
+            crate::playing::set_sound(Some((level as i32 + step).clamp(0, 100) as u8), Some(false));
         }
         self.volume_turned = Some(Instant::now());
         self.moved = Some(Instant::now());
@@ -575,7 +575,9 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
     // At the right, the way out, and the sound's icon beside it; over the icon, while the pointer is over it or the
     // bar (or the sound was just turned by the wheel or a key: `flash`), a bar standing up, filled as loud as the sound
     // is, its level said at its top. (Upright, it takes no room along the bottom.)
-    let (level, muted) = crate::actions::volume().unwrap_or((0, false));
+    // (As last seen, not asked of the sound's service at each frame; none where it could not be read: said so.)
+    let sound = crate::playing::sound();
+    let (level, muted) = sound.unwrap_or((0, false));
     let leave_x = w - 30.0 - cell;
     let middle = row + cell / 2.0;
     let lit = under(leave_x, row, cell, cell);
@@ -591,7 +593,10 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
     if *volume_open {
         let fraction = if muted { 0.0 } else { level as f32 / 100.0 };
         frame.fill_rounded(Color::hex(0x000000, 0.45 * shown), pop_x, pop_y, pop_w, pop_h, pop_w / 2.0);
-        let said = format!("{}%", if muted { 0 } else { level });
+        let said = match sound {
+            Some(_) => format!("{}%", if muted { 0 } else { level }),
+            None => "—".to_string(),
+        };
         let small = Font::new(Family::Segoe, 12.0, 600.0);
         let wide = frame.measure(&said, small);
         frame.text(&said, small, Color::hex(0xFFFFFF, 0.9 * shown), pop_x + (pop_w - wide) / 2.0, pop_y + 10.0, pop_w, Align::Start);

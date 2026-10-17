@@ -395,12 +395,45 @@ pub fn act_on(follow: Follow, act: Act) {
 /// `act`).
 #[cfg(windows)]
 pub fn slide(level: u8) {
-    let shown = now().map(|now| Now { volume: Some(level), ..now });
-    if shown.is_none() || shown == now() {
-        return;
+    set_sound(Some(level), None);
+}
+
+/// The sound made as loud as `level` and muted or not as `muted` (each, where it is said): shown so at once in what
+/// is followed (the sound is the whole system's, the same for both), and set on a thread of its own (it waits on the
+/// sound's service, which may take long; this is done on the thread that draws). Nothing done where nothing would
+/// change.
+#[cfg(windows)]
+pub fn set_sound(level: Option<u8>, muted: Option<bool>) {
+    if shown_sound(level, muted) {
+        std::thread::spawn(move || drop(crate::actions::set_volume(level, muted)));
     }
-    keep(Follow::Any, shown);
-    std::thread::spawn(move || drop(crate::actions::set_volume(Some(level), None)));
+}
+
+/// The sound shown as `set_sound` sets it, at once; whether it is to be set (something shown changed, or nothing is
+/// shown to tell).
+#[cfg(windows)]
+fn shown_sound(level: Option<u8>, muted: Option<bool>) -> bool {
+    let mut changed = false;
+    let mut seen = false;
+    for follow in [Follow::Any, Follow::Music] {
+        // (Taken out before it is kept again: the lock held on would be locked again by `keep`.)
+        let now = NOW[follow as usize].lock().unwrap().clone();
+        if let Some(now) = now {
+            seen = true;
+            let shown = Now { volume: level.or(now.volume), muted: muted.unwrap_or(now.muted), ..now.clone() };
+            if shown != now {
+                changed = true;
+                keep(follow, Some(shown));
+            }
+        }
+    }
+    changed || !seen
+}
+
+/// How loud the sound is (0 to 100) and whether it is muted, as last seen; none where it could not be read.
+#[cfg(windows)]
+pub fn sound() -> Option<(u8, bool)> {
+    [Follow::Music, Follow::Any].into_iter().find_map(|follow| NOW[follow as usize].lock().unwrap().as_ref().and_then(|now| now.volume.map(|level| (level, now.muted))))
 }
 
 /// A track dragged along: the sound's, or that of what is followed for its `Follow` (see `Follow`).
@@ -493,11 +526,31 @@ pub fn pretend(now: Now) {
 mod tests {
     use super::*;
 
+    /// What is followed is kept in statics shared by these tests: one at a time.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The sound turned shows at once as turned, in what is followed for either, without waiting on the sound's
+    /// service (it was read and set at every frame and every move on the thread that draws the full screen); turned
+    /// to where it is, it is not set again. (Only what is shown: this PC's sound is not touched.)
+    #[test]
+    fn the_sound_turned_shows_at_once() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        keep(Follow::Any, Some(Now { title: "Sound".into(), volume: Some(30), ..Default::default() }));
+        keep(Follow::Music, Some(Now { title: "Sound".into(), volume: Some(30), ..Default::default() }));
+        assert!(shown_sound(Some(45), Some(false)));
+        assert_eq!(sound(), Some((45, false)));
+        assert_eq!(now().and_then(|now| now.volume), Some(45));
+        assert!(!shown_sound(Some(45), None));
+        assert!(shown_sound(None, Some(true)));
+        assert_eq!(sound(), Some((45, true)));
+    }
+
     /// Dragged along its track, what plays is shown where it is dragged, from what was seen of it, its player not
     /// asked (that was asked at each move of the pointer, on the thread that draws: a player slow to answer held up
     /// the panel, the widgets and the full screen; and what was seen went for what the players said instead).
     #[test]
     fn dragging_along_shows_where_it_is_dragged_without_asking() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let length = 200.0;
         keep(Follow::Any, Some(Now { title: "A song".into(), playing: true, timeline: Some(Timeline { at: 10.0, length, seekable: true }), ..Default::default() }));
         slide_along(Slider::Seek(Follow::Any), 0.25);
@@ -512,6 +565,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn pausing_shows_it_paused() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         keep(Follow::Music, Some(Now { title: "A song".into(), playing: true, ..Default::default() }));
         let (done, told) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
