@@ -274,6 +274,7 @@ impl Gfx {
             Family::Segoe => (w!("Segoe UI Variable Text"), None),
             Family::SegoeDisplay => (w!("Segoe UI Variable Display"), None),
             Family::Icons => (self.icons, None),
+            Family::YaHei => (w!("Microsoft YaHei UI"), None),
         };
         let format = unsafe {
             self.write
@@ -992,6 +993,18 @@ impl<'a> Frame<'a> {
         unsafe { self.dc.GetTransform(&mut was) };
         let about = Matrix3x2::translation(-x, -y) * Matrix3x2 { M11: scale, M12: 0.0, M21: 0.0, M22: scale, M31: 0.0, M32: 0.0 } * Matrix3x2::translation(x, y);
         unsafe { self.dc.SetTransform(&(about * was)) };
+        paint(self);
+        unsafe { self.dc.SetTransform(&was) };
+    }
+
+    /// Draws what `paint` draws turned by `angle` (radians, clockwise) and stretched `sx`, `sy` times about `(x, y)`
+    /// (DIPs), placed as it is now otherwise.
+    pub fn turned(&self, x: f32, y: f32, angle: f32, (sx, sy): (f32, f32), paint: impl FnOnce(&Frame)) {
+        let mut was = Matrix3x2::default();
+        unsafe { self.dc.GetTransform(&mut was) };
+        let (sin, cos) = angle.sin_cos();
+        let turn = Matrix3x2 { M11: sx * cos, M12: sx * sin, M21: -sy * sin, M22: sy * cos, M31: 0.0, M32: 0.0 };
+        unsafe { self.dc.SetTransform(&(Matrix3x2::translation(-x, -y) * turn * Matrix3x2::translation(x, y) * was)) };
         paint(self);
         unsafe { self.dc.SetTransform(&was) };
     }

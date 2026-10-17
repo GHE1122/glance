@@ -615,6 +615,8 @@ impl Overlay {
             Button::Pin => Some(Choice::Lock(!self.locked)),
             Button::Through => Some(Choice::Through(!self.through)),
             Button::Close => Some(Choice::Close),
+            // (Not among its buttons: the music's.)
+            Button::Full => None,
         }
     }
 

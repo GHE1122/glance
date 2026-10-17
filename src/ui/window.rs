@@ -19,6 +19,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// monitor gone; WPARAM 0) or the window's scale did (WPARAM its new DPI,
 /// which the panel's own move to another monitor causes too).
 pub const SCREENS_CHANGED: u32 = WM_APP + 6;
+/// What a window keeps for its pointer's shape where it shows none (no shape's resource number is so low).
+const NO_POINTER: isize = 1;
+
 /// Posted to the window's thread when the mouse capture it held was taken
 /// from it (or let go).
 pub const CAPTURE_LOST: u32 = WM_APP + 8;
@@ -57,6 +60,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // `Window::point`): asked for at every move, before the move itself.
         WM_SETCURSOR => {
             let shape = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+            // (None at all, where it hides the pointer: see `point_none`.)
+            if shape == NO_POINTER {
+                unsafe { SetCursor(None) };
+                return LRESULT(1);
+            }
             let shape = if shape == 0 { IDC_ARROW } else { PCWSTR(shape as *const u16) };
             unsafe { SetCursor(LoadCursorW(None, shape).ok()) };
             LRESULT(1)
@@ -310,6 +318,22 @@ impl Window {
 
     /// The pointer's shape over the window from here on: `shape`, one of
     /// the system's (IDC_*).
+    /// Shows no pointer over it, till `point` is asked again.
+    pub fn point_none(&self) {
+        unsafe {
+            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, NO_POINTER);
+            SetCursor(None);
+        }
+    }
+
+    /// Brings it to the front with the keyboard's focus (one made `activating`, as the user just asked for it).
+    pub fn focus(&self) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(self.hwnd);
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(self.hwnd));
+        }
+    }
+
     pub fn point(&self, shape: PCWSTR) {
         unsafe {
             SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, shape.0 as isize);

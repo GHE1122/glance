@@ -37,6 +37,9 @@ pub enum Family {
     /// The system's icon font: Segoe Fluent Icons on Windows 11, Segoe MDL2
     /// Assets before it; both put the same glyphs at the same code points.
     Icons,
+    /// Microsoft YaHei UI (the system's, Chinese with Latin): the music full screen's lines, till the serif face
+    /// they are drawn in is had.
+    YaHei,
 }
 
 /// A text style: face, size in DIPs, weight (100–900), width (% of normal)

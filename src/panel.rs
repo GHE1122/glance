@@ -31,7 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DispatchMessageW, KillTimer, WaitMessage, MsgWaitForMultipleObjects,
     PeekMessageW, PostMessageW, SetTimer, SystemParametersInfoW, HWND_MESSAGE, MSG, PM_REMOVE,
     QS_ALLINPUT, WM_HOTKEY,
-    SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
+    SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
     WM_TIMER,
 };
 
@@ -752,6 +752,35 @@ impl Controller {
                     }
                     if let Some((size, at, grab)) = panel.tear_music.take() {
                         widgets.tear_music(size, at, grab);
+                    }
+                }
+                // The music full screen: its keys (Esc leaves it), presses (a double click leaves it), the pointer
+                // (bringing its controls) and the wheel (the volume).
+                WM_KEYDOWN if widgets.full_owns(msg.hwnd) => {
+                    if widgets.full().is_some_and(|full| full.key(msg.wParam.0 as u16) == crate::fullscreen::Asked::Leave) {
+                        widgets.leave_full();
+                    }
+                }
+                WM_LBUTTONDOWN if widgets.full_owns(msg.hwnd) => {
+                    let at = lparam_point(msg.lParam);
+                    if widgets.full().is_some_and(|full| full.press((at.x, at.y)) == crate::fullscreen::Asked::Leave) {
+                        widgets.leave_full();
+                    }
+                }
+                WM_LBUTTONUP if widgets.full_owns(msg.hwnd) => {
+                    if let Some(full) = widgets.full() {
+                        full.release();
+                    }
+                }
+                WM_MOUSEMOVE if widgets.full_owns(msg.hwnd) => {
+                    let at = lparam_point(msg.lParam);
+                    if let Some(full) = widgets.full() {
+                        full.moved((at.x, at.y));
+                    }
+                }
+                WM_MOUSEWHEEL if widgets.full_owns(msg.hwnd) => {
+                    if let Some(full) = widgets.full() {
+                        full.wheel((msg.wParam.0 >> 16) as u16 as i16);
                     }
                 }
                 // The desktop widgets: pressed, let go (or found let go as the pointer moves: the button up unheard,
