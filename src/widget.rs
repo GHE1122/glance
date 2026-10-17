@@ -1322,7 +1322,7 @@ impl Widgets {
                     let lit = match button {
                         Button::Pin => widget.pinned,
                         Button::Through => widget.click_through,
-                        Button::Game => crate::ui::view::game_shown(crate::app().controller.history.lock().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
+                        Button::Game => crate::ui::view::game_shown(crate::app().controller.history.read().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
                         _ => false,
                     };
                     crate::ui::tip::show(button.says(lit, lang, false), at, crate::os::apps_dark());
@@ -3252,7 +3252,7 @@ fn clip(r: RECT, bounds: RECT) -> RECT {
 
 /// The game button pressed (a widget's or the panel's): showing a game (found or asked for), off; else on.
 pub(crate) fn press_game() {
-    let history = crate::app().controller.history.lock().unwrap();
+    let history = crate::app().controller.history.read().unwrap();
     let shown = crate::ui::view::game_shown(history.iter().last().map(std::slice::from_ref).unwrap_or_default());
     drop(history);
     crate::source::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });

@@ -162,8 +162,8 @@ impl Ui {
         let app = crate::app();
         let skin = Skin::named(&self.settings.skin);
         let prefs = self.prefs.clone().holding(part);
-        let mut history = app.controller.history.lock().unwrap();
-        let samples = history.make_contiguous();
+        let history = app.controller.history.read().unwrap();
+        let samples = crate::panel::contiguous(&history);
         if samples.is_empty() {
             return;
         }

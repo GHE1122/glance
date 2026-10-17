@@ -59,7 +59,7 @@ pub fn report() -> String {
         lines.extend(remote.lines().map(|line| format!("  {line}")));
     }
     lines.push("Latest readings:".into());
-    match app.controller.history.lock().unwrap().back() {
+    match app.controller.history.read().unwrap().back() {
         Some(sample) => lines.extend(readings(sample, info).into_iter().map(|line| format!("  {line}"))),
         None => lines.push("  none yet".into()),
     }

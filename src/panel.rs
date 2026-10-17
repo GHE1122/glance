@@ -10,7 +10,7 @@ use std::f32::consts::E;
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, SetForegroundWindow, SC_RESTORE, WM_SYSCOMMAND};
@@ -190,7 +190,9 @@ pub struct Controller {
     config: Mutex<Config>,
     playing: Mutex<Playing>,
     /// The samples of the longest chart span, oldest first.
-    pub history: Mutex<VecDeque<Sample>>,
+    /// Read by the threads that draw at once (the panel's and the settings'), each for as long as it draws; written
+    /// by the sampler alone, a sample at a time.
+    pub history: RwLock<VecDeque<Sample>>,
     /// What the machine has shown it can read since Glance started.
     pub seen: Mutex<Seen>,
     /// The overlay, opened by a game, closed by hand for the rest of it.
@@ -211,7 +213,7 @@ impl Controller {
             info,
             config: Mutex::new(config_from(settings)),
             playing: Mutex::new(Playing::default()),
-            history: Mutex::new(VecDeque::new()),
+            history: RwLock::new(VecDeque::new()),
             seen: Mutex::new(Seen::default()),
             overlay_closed: AtomicBool::new(false),
             sink: AtomicIsize::new(0),
@@ -304,11 +306,13 @@ impl Controller {
         }
         let keep = self.config.lock().unwrap().history;
         {
-            let mut history = self.history.lock().unwrap();
+            let mut history = self.history.write().unwrap();
             while history.len() >= keep {
                 history.pop_front();
             }
             history.push_back(sample);
+            // (Kept in one piece, for those that read it: see `contiguous`.)
+            history.make_contiguous();
         }
         // Told once the sample is there to be drawn.
         if started || ended {
@@ -465,7 +469,7 @@ impl Controller {
             }
             let Some(overlay) = overlay else { return };
             let settings = self.config.lock().unwrap().overlay.clone();
-            let history = self.history.lock().unwrap();
+            let history = self.history.read().unwrap();
             let beneath = panel.is_shown().then_some(panel.window.hwnd);
             overlay.show(&history, &settings, panel.lang, playing, wanted, beneath);
         };
@@ -543,8 +547,8 @@ impl Controller {
                 {
                     let kept = self.config.lock().unwrap().widgets.clone();
                     let seen = self.seen.lock().unwrap().clone();
-                    let mut history = self.history.lock().unwrap();
-                    let samples = history.make_contiguous();
+                    let history = self.history.read().unwrap();
+                    let samples = crate::panel::contiguous(&history);
                     if !samples.is_empty() {
                         let look = crate::widget::Look { prefs: &panel.prefs, skin: panel.skin, lang: panel.lang, live: panel.live };
                         if let Some(due) = widgets.tick(now, &look, &kept, samples, &seen, self) {
@@ -563,7 +567,7 @@ impl Controller {
                         }
                     }
                 }
-                if let Some(point) = pinned_at.filter(|_| !self.history.lock().unwrap().is_empty()) {
+                if let Some(point) = pinned_at.filter(|_| !self.history.read().unwrap().is_empty()) {
                     pinned_at = None;
                     let point = POINT { x: point.0, y: point.1 };
                     // On its screen, or the nearest, if it is gone.
@@ -1539,7 +1543,7 @@ impl<'a> Panel<'a> {
     /// Opens the panel on `contact`'s screen: along its `edge` at `cursor`,
     /// or `floating` where it was moved to (see `Placement::floating`).
     fn open(&mut self, cursor: POINT, contact: Contact, edge: Edge, floating: Option<(f32, f32)>, now: Instant) {
-        if self.controller.history.lock().unwrap().is_empty() {
+        if self.controller.history.read().unwrap().is_empty() {
             return;
         }
         if self.is_open() {
@@ -2377,8 +2381,8 @@ impl<'a> Panel<'a> {
     fn arrange_lanes(&mut self) -> (Vec<view::Lane>, Layout) {
         let controller = self.controller;
         let now = controller.seen.lock().unwrap().clone();
-        let mut history = controller.history.lock().unwrap();
-        let samples = history.make_contiguous();
+        let history = controller.history.read().unwrap();
+        let samples = crate::panel::contiguous(&history);
         let contact = self.placement.as_ref().unwrap().contact;
         let work = (
             (contact.work.right - contact.work.left) as f32 / contact.scale,
@@ -2523,9 +2527,9 @@ impl<'a> Panel<'a> {
         }
 
         let controller = self.controller;
-        let mut history = controller.history.lock().unwrap();
+        let history = controller.history.read().unwrap();
         let seen = &self.opening.as_ref().unwrap().seen;
-        let scene = scene(controller, &self.drawn, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous(), seen);
+        let scene = scene(controller, &self.drawn, &self.theme, self.lang, self.scroll, self.hover, self.pinned, crate::panel::contiguous(&history), seen);
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -2819,6 +2823,14 @@ impl<'a> Panel<'a> {
             self.next_frame = Instant::now();
         }
     }
+}
+
+/// The samples read, oldest first, in one piece as the sampler keeps them (see `Controller::record`): read under
+/// the history's read lock, never made so there (that would need it written).
+pub fn contiguous(history: &VecDeque<Sample>) -> &[Sample] {
+    let (samples, rest) = history.as_slices();
+    debug_assert!(rest.is_empty(), "the history is kept in one piece");
+    samples
 }
 
 /// What the readings are drawn with at this moment.

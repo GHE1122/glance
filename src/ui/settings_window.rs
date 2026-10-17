@@ -3918,7 +3918,7 @@ impl Ui {
     /// Whether anything in it moves.
     fn paint_phone(&mut self, frame: &Frame, area: Rect) -> bool {
         let app = crate::app();
-        let reads = app.controller.history.lock().unwrap().back().map_or(serde_json::Value::Null, |sample| crate::remote::figures(sample, &app.info));
+        let reads = app.controller.history.read().unwrap().back().map_or(serde_json::Value::Null, |sample| crate::remote::figures(sample, &app.info));
         // The outline round it; the whole no taller or wider than the room, nor larger than a phone is.
         let (bezel, margin) = (10.0, 24.0);
         let (wide, tall) = super::phone_art::SCREEN;
@@ -4163,7 +4163,7 @@ impl Ui {
     fn paint_overlay_preview(&mut self, frame: &Frame, area: Rect) {
         let overlay = &self.settings.overlay;
         let readings = {
-            let history = crate::app().controller.history.lock().unwrap();
+            let history = crate::app().controller.history.read().unwrap();
             let Some(sample) = history.back() else { return };
             super::overlay::preview(sample, &overlay.chosen(), self.lang)
         };
@@ -4364,8 +4364,8 @@ impl Ui {
         let skin = Skin::named(&self.settings.skin);
         let interval = self.settings.interval_ms as f64;
         // Held while the preview is drawn; the sampler waits that long.
-        let mut history = app.controller.history.lock().unwrap();
-        let samples = history.make_contiguous();
+        let history = app.controller.history.read().unwrap();
+        let samples = crate::panel::contiguous(&history);
         if samples.is_empty() {
             return (None, Rect { x: area.x, y: area.y, w: area.w, h: area.h });
         }
