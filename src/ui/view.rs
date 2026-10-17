@@ -670,7 +670,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let mut facts = Vec::new();
             let adapter = s.network.as_ref();
             if on("adapter") {
-                facts.push((lang.pick("网卡", "Adapter").into(), adapter.map_or(lang.pick("未连接", "Not connected").into(), |a| a.name.clone()), false));
+                facts.push((lang.pick("网卡", "Adapter").into(), adapter.map_or(lang.pick("未连接", "Not connected").into(), |a| a.model.clone()), false));
             }
             if on("wifi") && scene.seen.wifi {
                 facts.push(("Wi-Fi".into(), shown(adapter.and_then(|a| a.wifi.clone()), |name| name), false));
@@ -687,13 +687,16 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 let total = if lang == Lang::Zh { format!("下载 {down}，上传 {up}") } else { format!("{down} down, {up} up") };
                 facts.push((lang.pick("开机以来", "Since boot").into(), total, false));
             }
+            if on("scale") && chart {
+                facts.push((lang.pick("满刻度", "Scale").into(), text::rate(scale, bits), false));
+            }
             if !full {
                 facts.clear();
             }
             vec![
-                // The adapter traffic leaves by now, which may have changed.
-                // The chart's scale goes with the chart.
-                head(lang.pick("网络", "Network"), s.network.as_ref().map(|a| a.model.clone()).unwrap_or_default(), if chart { full_scale_text(lang, scale, bits) } else { String::new() }, false),
+                // The network it is on (the wireless network's name, else the connection's), by the adapter traffic
+                // leaves by now, which may have changed.
+                head(lang.pick("网络", "Network"), adapter.map_or(lang.pick("未连接", "Not connected").into(), |a| a.wifi.clone().unwrap_or_else(|| a.name.clone())), String::new(), false),
                 Block::Rates {
                     rows: vec![
                         (lang.pick("下载", "Down").into(), shown(s.net_down, |rate| text::rate(rate, bits))),
@@ -729,15 +732,12 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if on("active") {
                 facts.push((lang.pick("活动时间", "Active time").into(), shown(s.disk_active, text::percent), false));
             }
-            // The chart's scale goes with the chart.
-            let aside = if drives.is_empty() {
-                if chart { full_scale_text(lang, scale, false) } else { String::new() }
-            } else {
-                if chart {
-                    facts.push((lang.pick("满刻度", "Scale").into(), text::rate(scale, false), false));
-                }
-                shown(hottest, celsius)
-            };
+            // The chart's scale, where it is asked for, among the details.
+            if on("scale") && chart {
+                facts.push((lang.pick("满刻度", "Scale").into(), text::rate(scale, false), false));
+            }
+            // (Its drives' hottest at the corner, where they are shown.)
+            let aside = if drives.is_empty() { String::new() } else { shown(hottest, celsius) };
             if !full {
                 facts.clear();
             }
@@ -1129,11 +1129,6 @@ fn sort_value(p: &ProcessSample, sort: ProcessSort) -> f64 {
         // Not read sorts last.
         ProcessSort::Gpu => p.gpu.map_or(-1.0, f64::from),
     }
-}
-
-fn full_scale_text(lang: Lang, scale: f64, bits: bool) -> String {
-    let value = text::rate(scale, bits);
-    if lang == Lang::Zh { format!("满刻度 {value}") } else { format!("Scale {value}") }
 }
 
 /// Rounds a byte rate up to 1, 2 or 5 times a power of ten of its unit.

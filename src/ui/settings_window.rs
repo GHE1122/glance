@@ -2598,13 +2598,14 @@ impl Ui {
             ("memory", "speed") => (p("内存频率", "Memory speed"), Some(p("内存当前的运行频率；低于内存条的额定频率时一并显示，多半是 XMP 或 EXPO 没打开", "What the memory runs at; below what the modules are rated for, that too (XMP or EXPO off, often)"))),
             (_, "committed") => (p("已提交", "Committed"), None),
             (_, "cached") => (p("缓存", "Cached"), None),
-            (_, "adapter") => (p("网卡名称", "Adapter"), None),
+            (_, "adapter") => (p("网卡型号", "Adapter"), None),
             (_, "wifi") => (p("Wi-Fi 名称", "Wi-Fi name"), Some(p("连接的无线网络；Windows 要求打开“定位服务”才提供", "The wireless network it is on; Windows tells it only with its location service on"))),
             (_, "address") => (p("地址", "Address"), None),
             (_, "link") => (p("链路速度", "Link speed"), None),
             (_, "totals") => (p("开机以来的流量", "Traffic since boot"), None),
             (_, "drives") => (p("各硬盘温度", "Drive temperatures"), None),
             (_, "active") => (p("活动时间", "Active time"), None),
+            (_, "scale") => (p("满刻度", "Chart scale"), Some(p("曲线图顶端代表的速度", "The rate the top of the chart stands for"))),
             _ => (p("其他", "Other"), None),
         }
     }

@@ -71,8 +71,8 @@ const GPU: [Item; 9] = [
     item("engines", false),
 ];
 const MEMORY: [Item; 5] = [item("chart", true), item("speed", true), item("dimms", true), item("committed", false), item("cached", false)];
-const NETWORK: [Item; 6] = [item("chart", true), item("adapter", false), item("wifi", false), item("address", false), item("link", false), item("totals", false)];
-const DISK: [Item; 3] = [item("chart", true), item("drives", true), item("active", false)];
+const NETWORK: [Item; 7] = [item("chart", true), item("adapter", false), item("wifi", false), item("address", false), item("link", false), item("totals", false), item("scale", false)];
+const DISK: [Item; 4] = [item("chart", true), item("drives", true), item("active", false), item("scale", false)];
 const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 /// Each drive the machine has, by its letter ("volumes:C:"), as the group.
 const STORAGE: [Item; 1] = [item("volumes", true)];
