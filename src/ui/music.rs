@@ -249,6 +249,8 @@ pub struct Music {
     /// The colours the lyrics are drawn in, easing toward the cover's.
     tint: [f32; 3],
     accent: [f32; 3],
+    /// The mean colour of the cover blurred behind it (see `ground_colour`).
+    ground_mean: [f32; 3],
     /// Its ground (its shadow, the cover blurred and washed, the cover, what plays), kept and drawn again only as it
     /// changes: what moves at every frame is drawn over it.
     ground: Layer,
@@ -310,6 +312,8 @@ impl Default for Music {
             fading: None,
             tint: [1.0, 0.9, 0.8],
             accent: [1.0, 0.75, 0.6],
+            // (No cover: its ground's own dark.)
+            ground_mean: [0.11, 0.11, 0.13],
             ground: Layer::default(),
             controls_in: 0.0,
             bands: [0.0; crate::sound::BANDS],
@@ -720,7 +724,7 @@ fn player_shows_lines(size: (f32, f32), shows: &Shows) -> bool {
     let bottom = size.1 - pad(Layout::Player) - rows_tall(shows) - 8.0;
     // Room for a row of the line sung now and a row of each line next to it, smaller (as the rail draws them), and
     // the room between them.
-    let line = (at.width / 16.0).clamp(18.0, NOW_FONT.size) * 1.35;
+    let line = PLAYER_LINE.size * 1.35;
     bottom - at.below >= line * (1.0 + 2.0 * 0.68) + 2.0 * 10.0
 }
 
@@ -1054,24 +1058,30 @@ impl Drawing<'_> {
                     // In one row, as large as it fits (down to the least); too long for that, in two rows where the strip
                     // is tall enough, as large as they fit; else one row cut short with an ellipsis. Never cut through.
                     let room = h - 2.0 * pad_of(Layout::Strip, self.shows);
-                    let font = Font { size: (self.fonts.strip.size * (width / frame.measure(&text, self.fonts.strip).max(1.0))).clamp(STRIP_LEAST, self.fonts.strip.size), ..self.fonts.strip };
-                    let one_row = frame.measure(&text, font) <= width;
+                    // The size at which it fills its row (its size goes with the strip's width): whether it is shown in
+                    // one row is told by that size, and that row is the strip's size's laid out and drawn smaller, so the
+                    // sizes' rounding never decides it (measured again at the size, the line went now into one row,
+                    // now into two, as the strip was sized).
+                    let fills = self.fonts.strip.size * width / frame.measure(&text, self.fonts.strip).max(1.0);
+                    let font = Font { size: fills.clamp(STRIP_LEAST, self.fonts.strip.size), ..self.fonts.strip };
+                    let one_row = fills >= STRIP_LEAST;
                     let two_rows = (!one_row)
                         .then(|| (0..).map(|step| self.fonts.strip.size - step as f32).take_while(|size| *size >= STRIP_LEAST).map(|size| Font { size, ..self.fonts.strip }).find(|font| {
                             let tall = frame.gfx.wrapped_height(&text, *font, width);
                             tall <= room && tall <= 2.0 * frame.gfx.wrapped_height("M", *font, width) + 0.5
                         }))
                         .flatten();
-                    let (font, text, wrap) = match two_rows {
-                        Some(font) => (font, text.clone(), width),
-                        None if one_row => (font, text.clone(), 100_000.0),
-                        None => (font, fitted(frame, &text, font, width), 100_000.0),
+                    // (Laid out at `font`, drawn `zoom` times as large.)
+                    let (font, text, wrap, zoom) = match two_rows {
+                        Some(font) => (font, text.clone(), width, 1.0),
+                        None if one_row => (self.fonts.strip, text.clone(), 100_000.0, font.size / self.fonts.strip.size),
+                        None => (font, fitted(frame, &text, font, width), 100_000.0, 1.0),
                     };
-                    let tall = frame.gfx.wrapped_height(&text, font, wrap);
+                    let tall = frame.gfx.wrapped_height(&text, font, wrap) * zoom;
                     let y = (h - tall) / 2.0 + (1.0 - eased) * 8.0;
                     let layout = frame.gfx.wrapped(&text, font, wrap);
                     let sung = sung_to(&parts, self.moment.position);
-                    self.filled(&layout, &text, font, left, y, wrap, sung, dim, bright, 12.0);
+                    frame.scaled(left, y, zoom, |_| self.filled(&layout, &text, font, left, y, wrap, sung, dim, bright, 12.0 / zoom));
                 }
             }
             (Some(lines), None) => {
@@ -1169,7 +1179,9 @@ impl Drawing<'_> {
             let middle = at.cover.map_or((line_top + bottom) / 2.0, |(_, y, side)| y + side / 2.0);
             let row = self.fonts.line.size * 1.6;
             let anchor = middle.clamp(line_top + row * 1.2, (bottom - row * 1.2).max(line_top + row * 1.2));
-            self.rail_of_lines(&lines, left, line_top, bottom, width, Some(anchor));
+            // (At its line's size, as when it shows the line sung now alone: made taller, it shows more lines, not
+            // smaller ones, though its cover grows and the column beside it narrows.)
+            self.rail_of_lines(&lines, left, line_top, bottom, width, Some(anchor), self.fonts.line.size);
             return;
         }
         let frame = self.frame;
@@ -1321,7 +1333,9 @@ impl Drawing<'_> {
             return;
         }
         match self.moment.lines.clone() {
-            Some(lines) => self.rail_of_lines(&lines, at.left, top, bottom, at.width, Some(cy)),
+            // (As large as the stage is tall: made taller, its record grows and the column beside it narrows, and the
+            // lines grow with it, not smaller.)
+            Some(lines) => self.rail_of_lines(&lines, at.left, top, bottom, at.width, Some(cy), (h / 16.0).clamp(18.0, self.fonts.now.size)),
             None => {
                 let said = self.moment.said.clone().unwrap_or_default();
                 let y = (top + bottom) / 2.0 - self.fonts.under_font.size;
@@ -1428,7 +1442,7 @@ impl Drawing<'_> {
             return;
         }
         match self.moment.lines.clone() {
-            Some(lines) => self.rail_of_lines(&lines, x, top, bottom, width, None),
+            Some(lines) => self.rail_of_lines(&lines, x, top, bottom, width, None, (width / 16.0).clamp(18.0, self.fonts.now.size)),
             None => {
                 let said = self.moment.said.clone().unwrap_or_default();
                 let height = self.frame.gfx.wrapped_height(&said, self.fonts.under_font, width);
@@ -1444,8 +1458,8 @@ impl Drawing<'_> {
 
     /// The lines before and after the one aimed at (sung now, or turned to by the wheel), smaller and fainter the
     /// farther they are from it, the rail gliding; the one sung now filled as it is sung, its translation under it;
-    /// the one turned to, its time beside it.
-    fn rail_of_lines(&mut self, lines: &[Line], x: f32, top: f32, bottom: f32, width: f32, anchor: Option<f32>) {
+    /// the one turned to, its time beside it. `size`: the line aimed at's (the others' smaller).
+    fn rail_of_lines(&mut self, lines: &[Line], x: f32, top: f32, bottom: f32, width: f32, anchor: Option<f32>, size: f32) {
         let frame = self.frame;
         // (Short, the line aimed at in its middle, as much shown above as below it; tall, a little above the middle,
         // more of what is to come shown.)
@@ -1468,7 +1482,6 @@ impl Drawing<'_> {
             }
         };
         let gap = 10.0;
-        let size = (width / 16.0).clamp(18.0, self.fonts.now.size);
         // Each line is laid out in all the room it has at the size it is drawn at (a short line drawn smaller in one
         // row), and drawn at that size as a whole. All laid out at one size (the line's full size at its largest), in the room they have at that size, and
         // drawn at theirs: where the size goes with the room (a card made larger), each line's room at that size is
@@ -1636,7 +1649,8 @@ impl Music {
     /// The colour its own ground shows most: the cover's, darkened as the ground darkens it (for what stands in for
     /// it, as where it would stick).
     pub fn ground_colour(&self) -> [f32; 3] {
-        self.tint.map(|c| c * 0.58)
+        let mean = self.ground_mean;
+        std::array::from_fn(|i| mean[i] * 0.58 + self.accent[i] * 0.06)
     }
 
     /// How far the controls have come in over the spectrum (0 to 1), eased.
@@ -1652,6 +1666,10 @@ impl Music {
         }
         let side = crate::cover::SIDE as usize;
         let pixels = blurred(&cover.pixels, side, 9);
+        // (Its mean colour: what its ground shows most, blurred as it is. BGRA, opaque.)
+        let count = (pixels.len() / 4).max(1) as f32;
+        let sum = pixels.chunks(4).fold([0.0f32; 3], |sum, p| [sum[0] + p[2] as f32, sum[1] + p[1] as f32, sum[2] + p[0] as f32]);
+        self.ground_mean = sum.map(|c| c / count / 255.0);
         let properties = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
             dpiX: 96.0,
