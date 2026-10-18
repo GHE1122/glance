@@ -12,7 +12,15 @@
 //! on in them); not the shadows the system draws around windows.
 //!
 //! A frame is taken only when one is wanted, on a thread other than the one
-//! that draws: as it comes, or at once if one has come meanwhile. It stays
+//! that draws: as it comes, or at once if one has come meanwhile.
+//!
+//! While a frame is met as it comes, its pool is held: on Windows 10, closing
+//! a frame of it or making it anew waits till the frame has been met (on 11
+//! neither does). So a frame is met quickly, and read on a thread of its own;
+//! and no frame is closed, nor the pool made anew, while a lock that meeting
+//! a frame takes is held (the thread that draws held one and closed a frame,
+//! a frame met meanwhile waited on that lock, and the panel and the widgets
+//! hung for good). It stays
 //! on the graphics card, copied out of the capture's own (which it takes
 //! back) into a texture that is drawn from as it is; only how light it is,
 //! a value for each square of two by two pixels (the card averages them),
@@ -307,13 +315,9 @@ fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) ->
             if shared.resting.load(Ordering::Acquire) {
                 return Ok(());
             }
-            // Wanted, read now (one of what was there before is not, and the next is wanted still); else
-            // kept, the thread that draws told once.
+            // Wanted, read now, on a thread of its own (see the top); else kept, the thread that draws told once.
             if shared.wanted.swap(false, Ordering::AcqRel) {
-                if !shared.read(&frame) {
-                    shared.wanted.store(true, Ordering::Release);
-                }
-                close(Some(frame));
+                read_apart(&shared, frame);
             } else {
                 let older = shared.latest.lock().unwrap().replace(frame);
                 if older.is_none() {
@@ -350,7 +354,20 @@ pub struct Scene {
     shared: Arc<Shared>,
 }
 
-/// A frame done with, closed: its buffer back in its pool at once, not once the last reference to it goes.
+/// `frame` read on a thread of its own, then closed (one of what was there before is not read, and the next is
+/// wanted still).
+fn read_apart(shared: &Arc<Shared>, frame: Direct3D11CaptureFrame) {
+    let shared = shared.clone();
+    std::thread::spawn(move || {
+        if !shared.read(&frame) {
+            shared.wanted.store(true, Ordering::Release);
+        }
+        close(Some(frame));
+    });
+}
+
+/// A frame done with, closed: its buffer back in its pool at once, not once the last reference to it goes. Never
+/// with a lock held that meeting a frame takes (see the top).
 fn close(frame: Option<Direct3D11CaptureFrame>) {
     if let Some(frame) = frame {
         let _ = frame.Close();
@@ -536,13 +553,15 @@ impl Scene {
         // is being put in place); nor what was read of it before and not taken yet. Cleared and made so under one
         // lock, as what reads a frame looks and hands on under it: one read meanwhile is of before, or kept.
         let from = now_100ns();
-        {
+        let stale = {
             let mut of = self.shared.of.lock().unwrap();
             *self.shared.ready.lock().unwrap() = None;
-            close(self.shared.latest.lock().unwrap().take());
+            let stale = self.shared.latest.lock().unwrap().take();
             *of = (area, from, opaque);
             self.shared.resting.store(false, Ordering::Release);
-        }
+            stale
+        };
+        close(stale);
         true
     }
 
@@ -557,7 +576,8 @@ impl Scene {
         self.shared.resting.store(true, Ordering::Release);
         self.forget();
         self.shared.wanted.store(false, Ordering::Release);
-        close(self.shared.latest.lock().unwrap().take());
+        let stale = self.shared.latest.lock().unwrap().take();
+        close(stale);
         *self.shared.ready.lock().unwrap() = None;
         // (Not while a frame is read through them on another thread, which can wait a while on the card: the
         // thread that draws never waits on it. Let go of at the next rest, or with the scene.)
@@ -599,7 +619,8 @@ impl Scene {
     /// may hold a frame of the pool's (which holds the pool).
     fn unhook(&mut self) {
         let _ = self.pool.RemoveFrameArrived(self.arrived);
-        close(self.shared.latest.lock().unwrap().take());
+        let stale = self.shared.latest.lock().unwrap().take();
+        close(stale);
         *self.shared.ready.lock().unwrap() = None;
         // (Not while a frame is read through them on another thread, which can wait a while on the card: the
         // thread that draws never waits on it. Let go of at the next rest, or with the scene.)
@@ -649,16 +670,9 @@ impl Scene {
         if self.shared.ready.lock().unwrap().is_some() {
             return;
         }
-        match self.shared.latest.lock().unwrap().take() {
-            Some(frame) => {
-                let shared = self.shared.clone();
-                std::thread::spawn(move || {
-                    if !shared.read(&frame) {
-                        shared.wanted.store(true, Ordering::Release);
-                    }
-                    close(Some(frame));
-                });
-            }
+        let come = self.shared.latest.lock().unwrap().take();
+        match come {
+            Some(frame) => read_apart(&self.shared, frame),
             None => self.shared.wanted.store(true, Ordering::Release),
         }
     }
