@@ -106,6 +106,18 @@ pub fn looks(text: &str) -> Vec<(Range<usize>, Look)> {
     looks
 }
 
+/// The to-dos' boxes in `text` (`[ ]`, `[x]`: where each is, in UTF-16 units, and whether it is done).
+pub fn tasks(text: &str) -> Vec<(Range<usize>, bool)> {
+    let units = Units::of(text);
+    Parser::new_ext(text, Options::ENABLE_TASKLISTS)
+        .into_offset_iter()
+        .filter_map(|(event, range)| match event {
+            Event::TaskListMarker(done) => Some((units.range(&range), done)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Where each byte of a text is in UTF-16 units.
 struct Units {
     at: Vec<usize>,
@@ -136,6 +148,18 @@ mod tests {
 
     fn look_of(looks: &[(Range<usize>, Look)], at: usize) -> Vec<Look> {
         looks.iter().filter(|(range, _)| range.contains(&at)).map(|(_, look)| *look).collect()
+    }
+
+    /// Each to-do's box, where it is and whether it is done.
+    #[test]
+    fn finds_the_to_dos() {
+        let text = "清单
+- [ ] 一
+- [x] 二";
+        let found = tasks(text);
+        assert_eq!(found.len(), 2);
+        assert_eq!((&text.encode_utf16().collect::<Vec<_>>()[found[0].0.clone()], found[0].1), (&"[ ]".encode_utf16().collect::<Vec<_>>()[..], false));
+        assert!(found[1].1);
     }
 
     /// A heading: larger and bold, its `#` faint, its words plain; emphasis bold, its marks faint; counted in UTF-16

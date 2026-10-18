@@ -494,7 +494,19 @@ impl Beside {
         if !its {
             return None;
         }
-        let answered = writing.editor.send(message, wparam, lparam);
+        // A to-do's box pressed: ticked, or no longer (as if typed: undo takes it back).
+        let ticked = (message == WM_LBUTTONDOWN).then(|| {
+            let at = writing.editor.at(point);
+            let text = writing.editor.text();
+            crate::notes::markdown::tasks(&text).into_iter().find(|(range, _)| range.start <= at && at < range.end)
+        });
+        let answered = match ticked.flatten() {
+            Some((range, done)) => {
+                writing.editor.replace(range.start, range.end, if done { "[ ]" } else { "[x]" });
+                Some(LRESULT(0))
+            }
+            None => writing.editor.send(message, wparam, lparam),
+        };
         // (Dressed as it is written, not while the input method composes: its words are its till they are written.)
         match message {
             WM_IME_STARTCOMPOSITION => writing.composing = true,

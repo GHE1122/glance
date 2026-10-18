@@ -19,6 +19,10 @@ use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, HIMC};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetCursor, SetForegroundWindow, SetTimer, HCURSOR, SCROLLBAR_CONSTANTS, SCROLL_WINDOW_FLAGS, WS_VSCROLL};
 
+/// The edit control's message asking which character is at a point (winuser.h's `EM_CHARFROMPOS`; the bindings leave it
+/// out): a rich edit box answers with the character's place.
+const EM_CHARFROMPOS: u32 = 0x00D7;
+
 /// What the host keeps for the text services, and what they tell it.
 struct Kept {
     hwnd: HWND,
@@ -183,6 +187,23 @@ impl Editor {
         }
         // (Dressing is no writing.)
         self.kept.changed.set(false);
+    }
+
+    /// Where among its words (in UTF-16 units) the point `point` (in the window) is.
+    pub fn at(&self, point: POINT) -> usize {
+        let mut at = windows::Win32::Foundation::POINTL { x: point.x, y: point.y };
+        self.send(EM_CHARFROMPOS, WPARAM(0), LPARAM(&mut at as *mut _ as isize)).map_or(0, |found| found.0.max(0) as usize)
+    }
+
+    /// The words from `start` to `end` (UTF-16 units) written over with `text`, as if typed (undo takes it back).
+    pub fn replace(&self, start: usize, end: usize, text: &str) {
+        let Ok(document) = self.services.cast::<ITextDocument>() else { return };
+        unsafe {
+            if let Ok(range) = document.Range(start as i32, end as i32) {
+                let _ = range.SetText(&BSTR::from(text));
+            }
+        }
+        self.kept.changed.set(true);
     }
 
     /// Whether `point` (in the window) is where its words are.
@@ -459,6 +480,13 @@ mod tests {
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
             assert_eq!(editor.text().trim_end(), "# Title\nbody");
             assert_eq!(font_at(2).GetBold().unwrap(), tomTrue.0);
+            // A to-do's box ticked as if typed: undo takes it back.
+            editor.set_text("- [ ] 买牛奶");
+            let (range, done) = crate::notes::markdown::tasks(&editor.text()).remove(0);
+            editor.replace(range.start, range.end, if done { "[ ]" } else { "[x]" });
+            assert_eq!(editor.text().trim_end(), "- [x] 买牛奶");
+            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
+            assert_eq!(editor.text().trim_end(), "- [ ] 买牛奶");
             // Chinese and an emoji written and given back as written.
             editor.set_text("你好 😀");
             assert_eq!(editor.text().trim_end(), "你好 😀");
