@@ -848,12 +848,22 @@ struct Placed {
     width: f32,
 }
 
+/// The player's cover, `w` × `h` large showing `shows`: as tall as the room above the rows along the bottom, no wider
+/// than a third.
+fn player_side((w, h): (f32, f32), shows: &Shows) -> f32 {
+    let pad = pad_of(Layout::Player, shows);
+    (h - 2.0 * pad - rows_tall(shows) - 10.0).max(0.0).min(w * 0.36).max(0.0)
+}
+
 fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
     let pad = pad_of(layout, shows);
     match layout {
         Layout::Strip => {
-            // (Inside another widget, no taller than a lane's line of words and what is under it, in its middle.)
-            let side = (h - 2.0 * pad).min(if shows.inset.is_some() { HOSTED_COVER } else { f32::MAX }).max(0.0);
+            // (Inside another widget, no taller than a lane's line of words and what is under it, in its middle.) No
+            // larger than the player's as it begins: made smaller from the player into the strip, the cover grows no
+            // larger on the way (as tall as the strip, it grew as the strip came, and then shrank).
+            let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
+            let side = (h - 2.0 * pad).min(if shows.inset.is_some() { HOSTED_COVER } else { f32::MAX }).min(player_side((w, PLAYER_FROM + more), shows)).max(0.0);
             let cover = shows.cover.then_some((pad, (h - side) / 2.0, side));
             let left = if shows.cover { pad + side + 12.0 } else { pad + 4.0 };
             Placed { cover, title: None, title_zoom: 1.0, below: 0.0, left, width: (w - pad - left).max(0.0) }
@@ -863,7 +873,7 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
         // stand together in the middle of that room.)
         Layout::Player => {
             let room = (h - 2.0 * pad - rows_tall(shows) - 10.0).max(0.0);
-            let side = room.min(w * 0.36).max(0.0);
+            let side = player_side((w, h), shows);
             let top = if shows.cover { pad + (room - side) / 2.0 } else { pad };
             let cover = shows.cover.then_some((pad, top, side));
             let left = if shows.cover { pad + side + 16.0 } else { pad };
@@ -1196,7 +1206,7 @@ impl Drawing<'_> {
         let frame = self.frame;
         let line = &lines[index];
         let text = if line.text.trim().is_empty() { "…".to_string() } else { line.text.clone() };
-        let room = width / zoom;
+        let room = width / settled;
         let colour = Color::hex(self.ink, 0.92);
         let edged = self.edged;
         frame.scaled(x, y, zoom, |frame| {
@@ -1754,8 +1764,8 @@ impl Drawing<'_> {
             }
         };
         let gap = 10.0;
-        // Each line is laid out in all the room it has at the size it is drawn at (a short line drawn smaller in one
-        // row), and drawn at that size as a whole. All laid out at one size (the line's full size at its largest), in the room they have at that size, and
+        // Each line is laid out in the room it has at its largest (see `at_rest` below), and drawn at its size as a
+        // whole. All laid out at one size (the line's full size at its largest), in the room they have at that size, and
         // drawn at theirs: where the size goes with the room (a card made larger), each line's room at that size is
         // the same whatever its size, and so are its rows (laid out at each size, the rounding of the sizes moved
         // where a line just filling its rows broke).
@@ -1769,9 +1779,13 @@ impl Drawing<'_> {
             let chip = frame.measure(&super::text::clock(line.at.max(0.0) as u32), self.fonts.time) + 26.0;
             seekable && turned == Some(index) && chip_at(frame, text, full, width, zoom(scale), zoom(scale_at(0.0)), chip).2
         };
+        // Each line in rows as it is at its largest, the size it comes to rest at as the one aimed at, and drawn smaller
+        // as a whole (laid out again at each size it was drawn at, it broke into other rows as it grew, and the
+        // lyrics moved as they glided).
+        let at_rest = width / zoom(scale_at(0.0));
         let height_of = |index: usize, scale: f32| {
             let line = &lines[index];
-            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, full, width / zoom(scale)) * zoom(scale)
+            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, full, at_rest) * zoom(scale)
                 + if translated && line.translation.is_some() { TRANSLATION_ROW * scale } else { 0.0 }
                 + if chip_under(index, scale) { CHIP_ROW } else { 0.0 }
         };
@@ -1860,7 +1874,7 @@ impl Drawing<'_> {
                     interlude(frame, x, y, font.size, done, dim, bright);
                 } else {
                     // (At its full size, drawn smaller as a whole: see `full`.)
-                    let room = width / zoom(scale);
+                    let room = at_rest;
                     let layout = frame.gfx.wrapped(&text, full, room);
                     let sung = sung_to(&parts, self.moment.position);
                     let soft = (font.size * 0.45).clamp(6.0, 16.0) / zoom(scale);
@@ -1871,7 +1885,7 @@ impl Drawing<'_> {
                     });
                 }
                 if let Some(translation) = line.translation.as_ref().filter(|_| translated) {
-                    let under = if text.trim().is_empty() { font.size * 1.4 } else { frame.gfx.wrapped_height(&text, full, width / zoom(scale)) * zoom(scale) };
+                    let under = if text.trim().is_empty() { font.size * 1.4 } else { frame.gfx.wrapped_height(&text, full, at_rest) * zoom(scale) };
                     let small = Font { size: self.fonts.under_font.size * scale, ..self.fonts.under_font };
                     words(frame, &fitted(frame, translation, small, width), small, Color::hex(self.ink, 0.62 * alpha), x, y + under + 2.0 * scale, width, Align::Start, clear);
                 }
@@ -1880,12 +1894,12 @@ impl Drawing<'_> {
                 if line.text.trim().is_empty() {
                     interlude(frame, x, y, font.size, 0.0, shown, shown);
                 } else {
-                    let room = width / zoom(scale);
+                    let room = at_rest;
                     frame.scaled(x, y, zoom(scale), |frame| if clear { outlined(frame, &line.text, full, shown, x, y, room) } else { frame.text_wrapped(&line.text, full, shown, x, y, room) });
                 }
                 // Its translation under it, as the line sung now's is (smaller with it).
                 if let Some(translation) = line.translation.as_ref().filter(|_| translated && !line.text.trim().is_empty()) {
-                    let under = frame.gfx.wrapped_height(&line.text, full, width / zoom(scale)) * zoom(scale);
+                    let under = frame.gfx.wrapped_height(&line.text, full, at_rest) * zoom(scale);
                     let small = Font { size: self.fonts.under_font.size * scale, ..self.fonts.under_font };
                     words(frame, &fitted(frame, translation, small, width), small, Color::hex(self.ink, 0.42 * alpha), x, y + under + 2.0 * scale, width, Align::Start, clear);
                 }
@@ -2013,8 +2027,9 @@ fn turned_to(now: Option<usize>, turned: i32, count: usize) -> Option<usize> {
 /// to it as the rail glides to it, and judged at each zoom on the way, what plays it went under it only as it came
 /// there), else under the line. From the line's corner; and whether under it (a row more for the line).
 fn chip_at(frame: &Frame, text: &str, full: Font, width: f32, zoom: f32, settled: f32, chip: f32) -> (f32, f32, bool) {
-    let room = width / zoom;
-    let (end, _) = frame.gfx.wrapped_end(text, full, width / settled);
+    // (In rows as at rest, at every size: see `rail_of_lines`.)
+    let room = width / settled;
+    let (end, _) = frame.gfx.wrapped_end(text, full, room);
     if end * settled + 10.0 + chip <= width {
         let (end, row_top) = frame.gfx.wrapped_end(text, full, room);
         (end * zoom + 10.0, (row_top + full.size * 0.66) * zoom - 9.0, false)
@@ -2404,6 +2419,24 @@ mod tests {
             }
         })
         .expect("drawn");
+    }
+
+    /// Made taller from the strip into the player, at any width, the cover never grows smaller on the way (as tall as
+    /// the strip, it was larger near the player than the player's as it began).
+    #[test]
+    fn the_cover_grows_from_the_strip_into_the_player() {
+        let shows = Shows::from(&serde_json::Value::Null);
+        for w in [240.0f32, 300.0, 420.0, 600.0] {
+            let mut was = 0.0f32;
+            let mut h = LEAST.1;
+            while h < CARD_FROM {
+                let layout = Layout::for_room((w, h), &shows, None);
+                let side = placed(layout, (w, h), &shows).cover.map_or(0.0, |(_, _, side)| side);
+                assert!(side + 1e-3 >= was, "at {w} x {h} ({}): {side}, before {was}", layout.key());
+                was = side;
+                h += 2.0;
+            }
+        }
     }
 
     /// Turned by the wheel with no line sung yet, the first notch is the first line, the line the rail goes to and the
