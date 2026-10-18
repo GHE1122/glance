@@ -2997,10 +2997,13 @@ impl Widget {
         }
         self.shown();
         let px = self.contact.scale * self.zoom;
-        let margin = self.margin;
         let size = self.surface_size;
+        // Its margin as whole pixels, as its window and what the pointer is over reckon it (see `margin_px`): what it
+        // shows drawn from there, not from the margin in DIPs, put on the pixel nearest that (a pixel off from where
+        // presses were looked for, at some scales).
+        let m = self.margin_px();
+        let margin = m as f32 / px;
         let window = {
-            let m = (margin * px).ceil() as i32;
             let r = self.rect();
             RECT { left: r.left - m, top: r.top - m, right: r.right + m, bottom: r.bottom + m }
         };
@@ -3104,7 +3107,7 @@ impl Widget {
             frame.place(Matrix3x2::translation(margin, margin));
             if let Some(beside) = drop_target {
                 let ring = theme.text.alpha(0.85);
-                frame.stroke_rounded(Fill::Solid(ring), -4.0, -4.0, size.0 + 8.0, size.1 + 8.0, 18.0, 2.5);
+                frame.stroke_rounded(Fill::Solid(ring), -5.25, -5.25, size.0 + 10.5, size.1 + 10.5, 19.25, 2.5);
                 if beside {
                     frame.fill_rounded(ring.alpha(0.5), size.0 - 10.0, 10.0, 5.0, size.1 - 20.0, 2.5);
                 } else {
@@ -3204,7 +3207,7 @@ pub(crate) fn paint_hint(canvas: &dyn Canvas, theme: &Theme, (w, h): (f32, f32),
         let (fill, rim) = (Color { r, g, b, a: (if firm { 0.85 } else { 0.5 }) * strength }, Color::hex(0xFFFFFF, (if firm { 0.3 } else { 0.18 }) * strength));
         let radius = crate::ui::music::RADIUS;
         canvas.fill_rounded(fill, 0.5, 0.5, w - 1.0, h - 1.0, radius);
-        canvas.stroke_rounded(Fill::Solid(rim), 0.5, 0.5, w - 1.0, h - 1.0, radius, 1.0);
+        canvas.stroke_rounded(Fill::Solid(rim), 0.0, 0.0, w, h, radius + 0.5, 1.0);
         return;
     }
     let (fill, line, width, dashed) = match theme.skin {
@@ -3228,7 +3231,7 @@ pub(crate) fn paint_hint(canvas: &dyn Canvas, theme: &Theme, (w, h): (f32, f32),
     if dashed {
         canvas.stroke_dashed(&rounded(inset, inset, w - width, h - width, radius), line, width);
     } else {
-        canvas.stroke_rounded(Fill::Solid(line), inset, inset, w - width, h - width, radius, width);
+        canvas.stroke_rounded(Fill::Solid(line), 0.0, 0.0, w, h, radius + width / 2.0, width);
     }
 }
 

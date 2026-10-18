@@ -694,7 +694,7 @@ impl Gfx {
             dc.SetTransform(&Matrix3x2::identity());
             dc.Clear(Some(&D2D1_COLOR_F::default()));
             let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
-            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Matrix3x2::identity(), atlas: None });
+            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Matrix3x2::identity(), atlas: None, moving: Cell::new(false) });
             dc.EndDraw(None, None)?;
             let read = dc.CreateBitmap(pixels, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
             read.CopyFromBitmap(None, &target, None)?;
@@ -748,6 +748,18 @@ impl Gfx {
     }
 }
 
+/// Drawing what moves (see `Frame::moving_while`), till this goes.
+pub struct Moving<'f, 'a> {
+    frame: &'f Frame<'a>,
+    was: bool,
+}
+
+impl Drop for Moving<'_, '_> {
+    fn drop(&mut self) {
+        self.frame.set_moving(self.was);
+    }
+}
+
 /// One frame being drawn onto a surface.
 pub struct Frame<'a> {
     pub gfx: &'a Gfx,
@@ -758,6 +770,8 @@ pub struct Frame<'a> {
     /// Handed a region of the atlas: the atlas, the bitmap drawn on meanwhile, and the region's corner and size
     /// (physical pixels; see `begun`).
     atlas: Option<(ID2D1Image, ID2D1Bitmap1, POINT, (u32, u32))>,
+    /// Drawing what moves (see `set_moving`): nothing put on whole pixels meanwhile.
+    moving: Cell<bool>,
 }
 
 impl Canvas for Frame<'_> {
@@ -795,6 +809,10 @@ impl Canvas for Frame<'_> {
         // fill unclipped, and what was under showed there.)
         let (x, y, width, height) = self.on_pixels(x, y, width, height);
         unsafe { self.dc.PushAxisAlignedClip(&rect(x, y, width, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+    }
+
+    fn on_pixels(&self, x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
+        Frame::on_pixels(self, x, y, width, height)
     }
 
     fn unclip(&self) {
@@ -847,6 +865,9 @@ impl Canvas for Frame<'_> {
 
     fn arc(&self, centre: Point, radius: f32, from: f32, sweep: f32, color: Color, width: f32) {
         let brush = self.brush(color);
+        // (About its centre put as a circle's is: see `fill_circle`.)
+        let (x, y) = self.on_pixel(centre.x, centre.y);
+        let centre = Point { x, y };
         if sweep >= std::f32::consts::TAU {
             let circle = D2D1_ELLIPSE { point: Vector2 { X: centre.x, Y: centre.y }, radiusX: radius, radiusY: radius };
             unsafe { self.dc.DrawEllipse(&circle, brush, width, None) };
@@ -880,9 +901,19 @@ impl Canvas for Frame<'_> {
 
     fn icon(&self, icon: Icon, centre: Point, size: f32, color: Color) {
         let Some(path) = self.gfx.icon_path(icon) else { return };
+        // Its middle where a circle's is put (on a whole pixel: a button's plate, its ring and its glyph one about
+        // another), and as many pixels across as that leaves its box's corner on a whole pixel too (an even number:
+        // drawn between two, every stroke of it was spread over both, and blurred).
+        let (cx, cy) = self.on_pixel(centre.x, centre.y);
+        let size = match self.grid() {
+            Some((t, device)) => {
+                let per = t.M11 * device;
+                (2.0 * whole_pixel(size * per / 2.0)).max(2.0) / per
+            }
+            None => size,
+        };
         let scale = size / 24.0;
-        // (Its box's corner on a whole pixel: drawn between two, every stroke of it was spread over both, and blurred.)
-        let (left, top) = self.on_pixel(centre.x - size / 2.0, centre.y - size / 2.0);
+        let (left, top) = (cx - size / 2.0, cy - size / 2.0);
         let mut parent = Matrix3x2::default();
         unsafe {
             self.dc.GetTransform(&mut parent);
@@ -895,8 +926,8 @@ impl Canvas for Frame<'_> {
 
     fn picture(&self, picture: &super::canvas::Picture, x: f32, y: f32, size: f32, radius: f32, opacity: f32) {
         let Some(bitmap) = self.gfx.picture_bitmap(&self.dc, picture) else { return };
-        // (On whole pixels, its edges sharp; its size kept, so as not to scale it a second time.)
-        let (x, y) = self.on_pixel(x, y);
+        // (Its box on whole pixels, as a rectangle's: its edges sharp, all four.)
+        let (x, y, size, _) = self.on_pixels(x, y, size, size);
         let scale = size / picture.side.max(1) as f32;
         unsafe {
             let properties = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_BRUSH_PROPERTIES1 {
@@ -912,35 +943,44 @@ impl Canvas for Frame<'_> {
     }
 
     fn stroke_rounded(&self, fill: Fill, x: f32, y: f32, width: f32, height: f32, radius: f32, line: f32) {
-        let (x, y, width, height) = self.stroked(x, y, width, height, line);
-        let radius = radius.max(0.0).min(width / 2.0).min(height / 2.0);
-        let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius };
-        if let Some(brush) = self.paint_with(fill) {
-            unsafe { self.dc.DrawRoundedRectangle(&shape, &brush, line, None) };
+        let Some(brush) = self.paint_with(fill) else { return };
+        let line = self.line(line);
+        // A circle (a button's ring): about its centre, put as a circle's is, so as to be one with the plate in it.
+        if (width - height).abs() < 1e-3 && radius >= width / 2.0 - 1e-3 {
+            let (cx, cy) = self.on_pixel(x + width / 2.0, y + height / 2.0);
+            let r = (width - line) / 2.0;
+            let ring = D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: r, radiusY: r };
+            unsafe { self.dc.DrawEllipse(&ring, &brush, line, None) };
+            return;
         }
+        let (x, y, width, height) = self.stroked(x, y, width, height, line);
+        let radius = (radius - line / 2.0).max(0.0).min(width / 2.0).min(height / 2.0);
+        let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius };
+        unsafe { self.dc.DrawRoundedRectangle(&shape, &brush, line, None) };
     }
 
     fn shadow(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32, blur: f32, drop: f32) {
         use windows::Win32::Graphics::Direct2D::{CLSID_D2D1Composite, D2D1_COMPOSITE_PROP_MODE, D2D1_PROPERTY_TYPE_ENUM};
         use windows::Win32::Graphics::Direct2D::Common::D2D1_COMPOSITE_MODE_SOURCE_OUT;
         let dc = &self.dc;
-        // The rectangle as a picture of its own, recorded in the frame's
-        // DIPs (drawn back through the frame's transform), where `down`
-        // below its place.
+        let mut transform = Matrix3x2::default();
+        unsafe { dc.GetTransform(&mut transform) };
+        // The rectangle as a picture of its own, recorded through the frame's transform (so put on the pixels it is
+        // drawn on, as the fill it shades is: recorded untransformed and drawn back through it, its edge fell between
+        // pixels, a fringe of shadow showing along the fill's), drawn back untransformed; where `down` below its place.
         let shape = |down: f32| -> Result<ID2D1Image> {
             unsafe {
                 let list = dc.CreateCommandList()?;
-                let (target, mut transform) = (dc.GetTarget()?, Matrix3x2::default());
-                dc.GetTransform(&mut transform);
+                let target = dc.GetTarget()?;
                 dc.SetTarget(&list);
-                dc.SetTransform(&Matrix3x2::identity());
                 Canvas::fill_rounded(self, Color::hex(0, 1.0), x, y + down, width, height, radius);
                 dc.SetTarget(&target);
-                dc.SetTransform(&transform);
                 list.Close()?;
                 list.cast()
             }
         };
+        // (Its blur as large as it was through the transform.)
+        let blur = blur * transform.M11.abs().max(1e-3);
         // Without its pictures (the device going, which the frame's end
         // tells), no shadow this time.
         let _ = (|| -> Result<()> {
@@ -956,10 +996,13 @@ impl Canvas for Frame<'_> {
                 outside.SetInput(0, &shape(0.0)?, true);
                 outside.SetInput(1, &cast.GetOutput()?, true);
                 outside.SetValue(D2D1_COMPOSITE_PROP_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_COMPOSITE_MODE_SOURCE_OUT.0 as u32).to_ne_bytes())?;
+                dc.SetTransform(&Matrix3x2::identity());
                 dc.DrawImage(&outside.GetOutput()?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                dc.SetTransform(&transform);
             }
             Ok(())
         })();
+        unsafe { dc.SetTransform(&transform) };
     }
 }
 
@@ -1009,7 +1052,7 @@ impl<'a> Frame<'a> {
             dc.Clear(Some(&D2D1_COLOR_F::default()));
         }
         let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)? };
-        Ok(Frame { gfx, dc, brush, base, atlas })
+        Ok(Frame { gfx, dc, brush, base, atlas, moving: Cell::new(false) })
     }
 
     /// What was drawn put in the region of the atlas the frame was handed (see `begun`), pixel for pixel: its
@@ -1105,6 +1148,9 @@ impl<'a> Frame<'a> {
     /// The transform drawn through now and how many of the target's pixels a DIP is, where the transform keeps axes
     /// as they are (no turn, skew or mirror): what whole pixels are reckoned by.
     fn grid(&self) -> Option<(Matrix3x2, f32)> {
+        if self.moving.get() {
+            return None;
+        }
         let mut t = Matrix3x2::default();
         let mut dpi = (0.0f32, 0.0f32);
         unsafe {
@@ -1128,30 +1174,23 @@ impl<'a> Frame<'a> {
         (whole(x, t.M11, t.M31), whole(y, t.M22, t.M32))
     }
 
-    /// The path `(x, y, width, height)` (DIPs) a line `line` wide is drawn along (its middle), put where the line
-    /// covers whole pixels (see `grid`): a line an odd number of pixels wide on the middles of pixels, one given on
-    /// their edges half a pixel in (a hairline on an edge was drawn across two pixels, at half strength); one even, on
-    /// their edges. Given on the middles already (as the menus give theirs), it stays there.
+    /// The path a line `line` wide (as `line` makes it) is drawn along, round the box `(x, y, width, height)` (DIPs)
+    /// whose outer edge it is: the box put on whole pixels as a fill of it is (see `on_pixels`), so an outline and
+    /// the fill it rings come out as one, and two outlines as large as large wherever they are; the path half the
+    /// line in from it, so the line covers whole pixels inside it (one drawn on the box's edge itself was spread over
+    /// two pixels, at half strength).
     pub fn stroked(&self, x: f32, y: f32, width: f32, height: f32, line: f32) -> (f32, f32, f32, f32) {
-        let Some((t, device)) = self.grid() else { return (x, y, width, height) };
-        let odd = ((line * t.M11 * device).round() as i32) % 2 == 1;
-        // (In the target's pixels and back.)
-        let put = |v: f32, scale: f32, offset: f32, far: bool| {
-            if !v.is_finite() || v.abs() > 1.0e6 {
-                return v;
-            }
-            // (Taken to a 64th of a pixel first, as `whole_pixel` takes it: the same wherever in the atlas.)
-            let at = ((v * scale + offset) * device * 64.0).round() / 64.0;
-            let at = match (odd, far) {
-                (true, false) => at.floor() + 0.5,
-                (true, true) => at.ceil() - 0.5,
-                (false, _) => whole_pixel(at),
-            };
-            (at / device - offset) / scale
-        };
-        let (left, right) = (put(x, t.M11, t.M31, false), put(x + width, t.M11, t.M31, true));
-        let (top, bottom) = (put(y, t.M22, t.M32, false), put(y + height, t.M22, t.M32, true));
-        (left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+        let (x, y, width, height) = self.on_pixels(x, y, width, height);
+        let half = line / 2.0;
+        (x + half, y + half, (width - line).max(0.0), (height - line).max(0.0))
+    }
+
+    /// A line `line` (DIPs) wide made whole pixels wide, one at least (one 1.25 pixels wide was a pixel and a soft
+    /// quarter of one).
+    pub fn line(&self, line: f32) -> f32 {
+        let Some((t, device)) = self.grid() else { return line };
+        let per = t.M11 * device;
+        whole_pixel(line * per).max(1.0) / per
     }
 
     /// The rectangle `(x, y, width, height)` (DIPs) with its edges on whole pixels (see `on_pixel`), none shrunk away:
@@ -1172,6 +1211,24 @@ impl<'a> Frame<'a> {
             pixels / (scale * device)
         };
         (left, top, whole(width, t.M11), whole(height, t.M22))
+    }
+
+    /// Draws from here on (`on`) what moves by less than a pixel a frame (a lyric gliding along its rail) where it
+    /// falls, nothing put on whole pixels, its text's glyphs and baselines neither (put on whole pixels, it stood
+    /// still, then jumped a pixel at a time); or no longer. What it was before, to be put back. At rest, what is drawn
+    /// is put on pixels as everything else is.
+    pub fn set_moving(&self, on: bool) -> bool {
+        self.moving.replace(on)
+    }
+
+    /// As `set_moving`, while what it gives is kept (`on`: what is drawn moves), then as it was.
+    pub fn moving_while(&self, on: bool) -> Moving<'_, 'a> {
+        Moving { frame: self, was: self.set_moving(on || self.moving.get()) }
+    }
+
+    /// How text is drawn: put on whole pixels, or where it falls while what is drawn moves (see `set_moving`).
+    fn text_snap(&self) -> windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS {
+        if self.moving.get() { windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NO_SNAP } else { D2D1_DRAW_TEXT_OPTIONS_NONE }
     }
 
     /// Draws from here on with `(x, y)`, in DIPs from the surface's corner, as the origin.
@@ -1217,31 +1274,37 @@ impl<'a> Frame<'a> {
         let dc = &self.dc;
         let _ = (|| -> Result<()> {
             unsafe {
-                // What is drawn as a picture of its own, in the frame's DIPs (drawn back through its transform).
+                // What is drawn as a picture of its own, recorded through the frame's transform (put on the pixels
+                // it is drawn on, as what it glows under is: recorded untransformed and drawn back through it, the glow
+                // fell a fraction of a pixel off the words it rings), drawn back untransformed, its blur as large.
                 let list = dc.CreateCommandList()?;
                 let (target, mut transform) = (dc.GetTarget()?, Matrix3x2::default());
                 dc.GetTransform(&mut transform);
                 dc.SetTarget(&list);
-                dc.SetTransform(&Matrix3x2::identity());
                 paint(self);
                 dc.SetTarget(&target);
                 dc.SetTransform(&transform);
                 list.Close()?;
+                let blur = blur * transform.M11.abs().max(1e-3);
                 let cast = dc.CreateEffect(&CLSID_D2D1Shadow)?;
                 cast.SetInput(0, &list.cast::<ID2D1Image>()?, true);
                 cast.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &blur.to_ne_bytes())?;
                 let rgba = [color.r, color.g, color.b, color.a];
                 cast.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+                dc.SetTransform(&Matrix3x2::identity());
                 dc.DrawImage(&cast.GetOutput()?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                dc.SetTransform(&transform);
             }
             Ok(())
         })();
     }
 
-    /// The outline of the rounded rectangle, dashed, a line `width` DIPs wide centred on it.
+    /// The outline of the rounded rectangle, dashed, a line `width` DIPs wide inside its edge (see `stroked`).
     #[allow(clippy::too_many_arguments)]
     pub fn stroke_rounded_dashed(&self, color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32, width: f32) {
+        let width = self.line(width);
         let (x, y, w, h) = self.stroked(x, y, w, h, width);
+        let radius = (radius - width / 2.0).max(0.0);
         let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: radius, radiusY: radius };
         unsafe { self.dc.DrawRoundedRectangle(&shape, self.brush(color), width, &self.gfx.dashed) };
     }
@@ -1250,7 +1313,7 @@ impl<'a> Frame<'a> {
     pub fn text_wrapped(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32) {
         let (x, y) = self.on_pixel(x, y);
         let layout = self.gfx.wrapped(text, font, width);
-        unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: x, Y: y }, &layout, self.brush(color), D2D1_DRAW_TEXT_OPTIONS_NONE) };
+        unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: x, Y: y }, &layout, self.brush(color), self.text_snap()) };
     }
 
     /// Draws `text` with its first baseline-box at `(x, y)`, in a box `width` wide.
@@ -1278,7 +1341,7 @@ impl<'a> Frame<'a> {
                 windows_numerics::Vector2 { X: x, Y: y },
                 &layout,
                 self.brush(color),
-                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NONE,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP | self.text_snap(),
             )
         };
     }
@@ -1592,6 +1655,8 @@ impl Layer {
                         let painted = paint(frame);
                         list.Close()?;
                         dc.SetTarget(&bitmap);
+                        // (Recorded through the layer's own place already: drawn back as it is, not moved by it again.)
+                        dc.SetTransform(&Matrix3x2::identity());
                         dc.DrawImage(&glow(dc, &list, color)?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
                         dc.DrawImage(&list, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
                         painted
@@ -1614,16 +1679,17 @@ impl Layer {
         unsafe { dc.GetTransform(&mut parent) };
         unsafe {
             let mut placed = local * parent;
-            // Drawn pixel for pixel (moved only, at the scale it was kept at), it is put on whole pixels: a bitmap put
+            // Drawn pixel for pixel (its pixels as many to a DIP where it lands as it was kept at: moved only, or made
+            // smaller or larger as it was kept, as the settings' previews are), it is put on whole pixels: a bitmap put
             // between them is resampled, and what is in it (its text) blurred. (A widget sized by its left or top
             // edge keeps what it shows to its right and bottom ones: rarely on a whole pixel.)
             let mut dpi = (0.0, 0.0);
             dc.GetDpi(&mut dpi.0, &mut dpi.1);
             let device = dpi.0 / 96.0;
-            let moved_only = (placed.M11 - 1.0).abs() < 1e-4 && (placed.M22 - 1.0).abs() < 1e-4 && placed.M12 == 0.0 && placed.M21 == 0.0;
-            if moved_only && (device - scale).abs() < 1e-4 {
-                placed.M31 = whole_pixel((left + placed.M31) * device) / device - left;
-                placed.M32 = whole_pixel((top + placed.M32) * device) / device - top;
+            let pixel_for_pixel = placed.M12 == 0.0 && placed.M21 == 0.0 && (placed.M11 * device - scale).abs() < 1e-4 && (placed.M22 * device - scale).abs() < 1e-4;
+            if pixel_for_pixel {
+                placed.M31 = whole_pixel((left * placed.M11 + placed.M31) * device) / device - left * placed.M11;
+                placed.M32 = whole_pixel((top * placed.M22 + placed.M32) * device) / device - top * placed.M22;
             }
             dc.SetTransform(&placed);
             dc.DrawImage(&image, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
@@ -1712,19 +1778,25 @@ mod tests {
         pixels.chunks(size as usize * 4).map(|row| row.chunks(4).map(|pixel| pixel[3]).collect()).collect()
     }
 
-    /// A hairline round a box covers one whole pixel at each edge, inside the box, whether it is given at the box's
-    /// edge or half a pixel in (as the menus give theirs); not two pixels at half strength, nor a pixel further in.
+    /// An outline's line covers whole pixels inside the box given as its outer edge, as a fill of that box does: not
+    /// two pixels at half strength; and lines as wide come out as wide at any scale (a 1-DIP line at 125% was a pixel
+    /// and a soft quarter).
     #[test]
     #[cfg(feature = "studio")]
-    fn a_hairline_covers_whole_pixels() {
+    fn an_outline_covers_whole_pixels_inside_its_box() {
         use super::super::canvas::{Canvas, Color, Fill};
-        for (x, side) in [(2.0, 10.0), (2.5, 9.0)] {
-            let seen = alphas(16, |frame| frame.stroke_rounded(Fill::Solid(Color::hex(0xffffff, 1.0)), x, x, side, side, 0.0, 1.0));
-            assert_eq!(seen[6][2], 255, "given at {x}: its left edge's pixel");
-            assert_eq!(seen[6][1], 0, "given at {x}: the pixel outside it");
-            assert_eq!(seen[6][3], 0, "given at {x}: the pixel inside it");
-            assert_eq!(seen[11][6], 255, "given at {x}: its bottom edge's pixel");
-            assert_eq!(seen[12][6], 0, "given at {x}: the pixel below it");
+        for scale in [1.0f32, 1.25, 1.5] {
+            let seen = alphas_at(32, scale, |frame| frame.stroke_rounded(Fill::Solid(Color::hex(0xffffff, 1.0)), 2.0, 2.0, 16.0, 16.0, 0.0, 1.0));
+            let fill = alphas_at(32, scale, |frame| frame.fill(Color::hex(0xffffff, 1.0), 2.0, 2.0, 16.0, 16.0));
+            let row = 10usize;
+            let first = fill[row].iter().position(|a| *a > 0).unwrap();
+            let last = fill[row].iter().rposition(|a| *a > 0).unwrap();
+            let lit: Vec<usize> = (0..32).filter(|x| seen[row][*x] > 0).collect();
+            // (A DIP's line, as many whole pixels as it rounds to: one at 100% and 125%, two at 150%.)
+            let wide = super::whole_pixel(scale) as usize;
+            let want: Vec<usize> = (first..first + wide).chain(last + 1 - wide..=last).collect();
+            assert_eq!(lit, want, "at {scale}: the line's pixels {lit:?}, the fill's edges {first}, {last}");
+            assert!(lit.iter().all(|x| seen[row][*x] == 255), "at {scale}: the line at full strength");
         }
     }
 
@@ -1770,6 +1842,40 @@ mod tests {
                 })
                 .collect();
             assert_eq!(tall.len(), 1, "at {scale}, bars 4 DIPs tall came out {tall:?} pixels tall");
+        }
+    }
+
+    /// A button's plate, its ring and its glyph, drawn about one centre, come out about one centre, wherever that is
+    /// and at any scale (the ring and glyph were put on pixels by their boxes and the plate by its centre, and moved
+    /// apart by up to a pixel).
+    #[test]
+    #[cfg(feature = "studio")]
+    fn a_plate_its_ring_and_its_glyph_are_one_about_another() {
+        use super::super::canvas::{Canvas, Color, Fill, Point};
+        use super::super::icons::Icon;
+        let middle = |seen: &[Vec<u8>]| {
+            let (mut sx, mut sy, mut n) = (0.0f32, 0.0f32, 0.0f32);
+            for (y, row) in seen.iter().enumerate() {
+                for (x, a) in row.iter().enumerate() {
+                    let a = *a as f32;
+                    sx += x as f32 * a;
+                    sy += y as f32 * a;
+                    n += a;
+                }
+            }
+            (sx / n, sy / n)
+        };
+        for scale in [1.0f32, 1.25, 1.5, 1.35] {
+            for c in [20.0f32, 20.2, 20.4, 20.5, 20.75] {
+                let centre = Point { x: c, y: c + 0.3 };
+                let white = Color::hex(0xffffff, 1.0);
+                let plate = middle(&alphas_at(64, scale, |frame| frame.fill_circle(white, centre, 11.0)));
+                let ring = middle(&alphas_at(64, scale, |frame| frame.stroke_rounded(Fill::Solid(white), c - 11.0, c + 0.3 - 11.0, 22.0, 22.0, 11.0, 1.0)));
+                let glyph = middle(&alphas_at(64, scale, |frame| frame.icon(Icon::Close, centre, 13.0, white)));
+                for (name, at) in [("ring", ring), ("glyph", glyph)] {
+                    assert!((at.0 - plate.0).abs() < 0.15 && (at.1 - plate.1).abs() < 0.15, "at {scale}, centre {c}: the {name}'s middle {at:?}, the plate's {plate:?}");
+                }
+            }
         }
     }
 

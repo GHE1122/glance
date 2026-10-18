@@ -743,7 +743,7 @@ pub fn say(frame: &dyn Canvas, (name, figure, unit): (&str, &str, &str), size: (
     let (x, y) = ((size.0 - w) / 2.0, (size.1 - h) / 2.0);
     frame.fill_rounded(Color::hex(palette.tint, 0.92), x, y, w, h, h / 2.0);
     let rim = Fill::Down { top: y, from: palette.rim.0, bottom: y + h, to: palette.rim.1 };
-    frame.stroke_rounded(rim, x + 0.5, y + 0.5, w - 1.0, h - 1.0, h / 2.0 - 0.5, 1.0);
+    frame.stroke_rounded(rim, x, y, w, h, h / 2.0, 1.0);
     // On one baseline, the figure's.
     let baseline = y + (h - ascent - descent) / 2.0 + ascent;
     let mut at = x + (w - width) / 2.0;
@@ -794,7 +794,7 @@ pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], s
     // The rim: one pixel inside the glass's edge, lit from above.
     let line = 1.0 / px;
     let rim = Fill::Down { top: y0, from: palette.rim.0.alpha(glass.presence), bottom: y0 + height, to: palette.rim.1.alpha(glass.presence) };
-    frame.stroke_rounded(rim, x0 + line / 2.0, y0 + line / 2.0, width - line, height - line, radius - line / 2.0, line);
+    frame.stroke_rounded(rim, x0, y0, width, height, radius, line);
 }
 
 /// The frame rate's recent course, in `color`, filling the box at (`x`,

@@ -136,6 +136,12 @@ pub trait Canvas {
     /// Draws only inside the rectangle until `unclip`; clips nest.
     fn clip(&self, x: f32, y: f32, width: f32, height: f32);
     fn unclip(&self);
+    /// The rectangle as a fill of it comes out on whole pixels (see `Frame::on_pixels`): for a control drawn in parts
+    /// (a track and what fills it, a bar standing on a floor) to cut its parts out of one box, not each put on pixels
+    /// alone, which left them a pixel apart. As it is, where nothing is put on pixels.
+    fn on_pixels(&self, x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
+        (x, y, width, height)
+    }
     fn fill(&self, color: Color, x: f32, y: f32, width: f32, height: f32);
     fn fill_rounded(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32);
     fn fill_circle(&self, color: Color, centre: Point, radius: f32);

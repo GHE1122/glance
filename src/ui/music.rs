@@ -1239,6 +1239,8 @@ impl Drawing<'_> {
                 let next = lines.get(now + 1).map(|line| line.at);
                 let (text, parts) = parts(line, next);
                 let eased = self.came();
+                // (Rising in, drawn where it falls: see `Frame::set_moving`.)
+                let _moving = frame.moving_while(eased < 1.0);
                 let (dim, bright) = self.line_colours(eased);
                 if text.trim().is_empty() {
                     let y = h / 2.0 - self.fonts.strip.size * 0.7 + (1.0 - eased) * 8.0;
@@ -1318,6 +1320,7 @@ impl Drawing<'_> {
         let next = lines.get(now + 1).map(|line| line.at);
         let (text, parts) = parts(line, next);
         let eased = self.came();
+        let _moving = self.frame.moving_while(eased < 1.0);
         let y = top + (1.0 - eased) * 14.0;
         let (accent, tint) = (self.accent, self.tint);
         let (dim, bright) = (Color::hex(0xFFFFFF, 0.6 * eased), colour(tint, eased));
@@ -1392,6 +1395,7 @@ impl Drawing<'_> {
                 let next = lines.get(now + 1).map(|line| line.at);
                 let (text, parts) = parts(line, next);
                 let eased = self.came();
+                let _moving = frame.moving_while(eased < 1.0);
                 let under = self.under(lines, now);
                 // A line's size: too long for a row, wrapped, at the largest size (down to that of what is under it) at
                 // which all its rows fit with what is under it; else all its rows alone; else one row at the least, cut
@@ -1560,10 +1564,10 @@ impl Drawing<'_> {
         let mut ring = label + 3.0;
         while ring < r - 3.0 {
             let shade = 0.035 + 0.05 * (ring - label) / (r - label);
-            frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, shade)), cx - ring, cy - ring, 2.0 * ring, 2.0 * ring, ring, 0.8);
+            frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, shade)), cx - ring - 0.4, cy - ring - 0.4, 2.0 * ring + 0.8, 2.0 * ring + 0.8, ring + 0.4, 0.8);
             ring += 4.0;
         }
-        frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, 0.12)), cx - r + 0.5, cy - r + 0.5, side - 1.0, side - 1.0, r, 1.0);
+        frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, 0.12)), cx - r, cy - r, side, side, r, 1.0);
         // The cover in its middle, turned with it.
         let mut parent = windows_numerics::Matrix3x2::default();
         unsafe { frame.dc.GetTransform(&mut parent) };
@@ -1578,10 +1582,10 @@ impl Drawing<'_> {
         }
         unsafe { frame.dc.SetTransform(&parent) };
         // Round the cover, a ring of the cover's colour; over the record, a sheen of it catching the light.
-        frame.stroke_rounded(Fill::Solid(colour(self.accent, 0.9)), cx - label - 2.0, cy - label - 2.0, 2.0 * label + 4.0, 2.0 * label + 4.0, label + 2.0, 2.5);
+        frame.stroke_rounded(Fill::Solid(colour(self.accent, 0.9)), cx - label - 3.25, cy - label - 3.25, 2.0 * label + 6.5, 2.0 * label + 6.5, label + 3.25, 2.5);
         let mut sheen = r - 6.0;
         while sheen > label + 8.0 {
-            frame.stroke_rounded(Fill::Solid(colour(self.accent, 0.05 * (sheen - label) / (r - label))), cx - sheen, cy - sheen, 2.0 * sheen, 2.0 * sheen, sheen, 1.5);
+            frame.stroke_rounded(Fill::Solid(colour(self.accent, 0.05 * (sheen - label) / (r - label))), cx - sheen - 0.75, cy - sheen - 0.75, 2.0 * sheen + 1.5, 2.0 * sheen + 1.5, sheen + 0.75, 1.5);
             sheen -= 11.0;
         }
         // Its hole.
@@ -1749,6 +1753,9 @@ impl Drawing<'_> {
         self.music.anchor = Some(state);
         let anchor = top + state.shown;
         let (tint, clear) = (self.tint, self.edged);
+        // While the rail glides, its lines drawn where they fall (see `Frame::set_moving`): put on whole pixels, a line
+        // easing the last of the way stood still, then stepped a pixel.
+        let _moving = frame.moving_while(rail != rail.round() || self.music.anchoring);
         frame.clip(x - 8.0, top, width + 16.0, bottom - top + 12.0);
         #[cfg(test)]
         self.music.drawn_lines.clear();
@@ -2106,7 +2113,11 @@ fn spectrum(frame: &Frame, moment: &Moment, (accent, tint): ([f32; 3], [f32; 3])
         let value = moment.sound.bands[low] * (1.0 - frac) + moment.sound.bands[(low + 1).min(crate::sound::BANDS - 1)] * frac;
         let height = 2.0 + value.powf(1.6) * (tall - 2.0);
         let shade = toward(accent, tint, index as f32 / bars as f32);
-        frame.fill_rounded(colour(shade, (0.3 + 0.45 * value) * alpha), x + index as f32 * bar + bar * 0.2, floor - height, bar * 0.6, height, bar * 0.3);
+        // Standing on the floor: its column put on whole pixels once, the bar as tall as it is from the column's
+        // bottom (put on pixels alone, a bar's bottom moved by a pixel as its height did).
+        let column = frame.on_pixels(x + index as f32 * bar + bar * 0.2, floor - tall, bar * 0.6, tall);
+        let (bx, by, bw, bh) = super::view::filled_part(frame, column, height / tall, true);
+        frame.fill_rounded(colour(shade, (0.3 + 0.45 * value) * alpha), bx, by, bw, bh, bar * 0.3);
     }
 }
 

@@ -18,7 +18,7 @@ use windows::core::{w, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_GRADIENT_STOP;
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1Bitmap1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
+    ID2D1Bitmap1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_GAMMA_2_2, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_ROUNDED_RECT,
 };
@@ -3890,8 +3890,7 @@ impl Ui {
             fill(frame, palette.hover, grip.x, grip.y, grip.w, grip.h, 4.0);
         }
         for (dx, dy) in [(-2.0, -5.0), (2.0, -5.0), (-2.0, 0.0), (2.0, 0.0), (-2.0, 5.0), (2.0, 5.0)].into_iter().filter(|_| draggable) {
-            let dot = D2D1_ELLIPSE { point: Vector2 { X: grip.x + 10.0 + dx, Y: grip.y + 16.0 + dy }, radiusX: 1.2, radiusY: 1.2 };
-            unsafe { frame.dc.FillEllipse(&dot, frame.brush(palette.text3)) };
+            Canvas::fill_circle(frame, palette.text3, Point { x: grip.x + 10.0 + dx, y: grip.y + 16.0 + dy }, 1.2);
         }
         let text_left = left + ITEM_INSET;
         // The switch, and right of it, if the module has a card to open, a
@@ -4585,14 +4584,17 @@ fn rounded(r: Rect, radius: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT { rect: rect(r.x, r.y, r.w, r.h), radiusX: radius, radiusY: radius }
 }
 
+/// (Through the frame's own fill, put on whole pixels as everything Glance draws is: drawn straight, the settings'
+/// rails and cards were spread over pixels, softer than the rest, and a slider's knob stood half a pixel off its rail.)
 fn fill(frame: &Frame, color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32) {
-    let radius = radius.min(w / 2.0).min(h / 2.0);
-    unsafe { frame.dc.FillRoundedRectangle(&rounded(Rect { x, y, w, h }, radius), frame.brush(color)) };
+    Canvas::fill_rounded(frame, color, x, y, w, h, radius.min(w / 2.0).min(h / 2.0));
 }
 
 /// The picture `bitmap` filling the box `r`, its corners rounded, as
 /// opaque as `opacity`.
 fn picture_rounded(frame: &Frame, bitmap: &ID2D1Bitmap1, r: Rect, radius: f32, opacity: f32) {
+    let (x, y, w, h) = frame.on_pixels(r.x, r.y, r.w, r.h);
+    let r = Rect { x, y, w, h };
     let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(r, radius)) }) else { return };
     let layer = D2D1_LAYER_PARAMETERS1 {
         contentBounds: rect(r.x, r.y, r.w, r.h),
@@ -4612,14 +4614,12 @@ fn picture_rounded(frame: &Frame, bitmap: &ID2D1Bitmap1, r: Rect, radius: f32, o
 
 /// A one-DIP border drawn inside the box, as CSS's `border`.
 fn stroke_inside(frame: &Frame, r: Rect, radius: f32, color: Color) {
-    let inner = Rect { x: r.x + 0.5, y: r.y + 0.5, w: r.w - 1.0, h: r.h - 1.0 };
-    unsafe { frame.dc.DrawRoundedRectangle(&rounded(inner, (radius - 0.5).max(0.0)), frame.brush(color), 1.0, None) };
+    Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(color), r.x, r.y, r.w, r.h, radius, 1.0);
 }
 
 /// A ring `width` DIPs wide just outside the box, as CSS's `box-shadow: 0 0 0 width`.
 fn stroke_outside(frame: &Frame, r: Rect, radius: f32, color: Color, width: f32) {
-    let ring = Rect { x: r.x - width / 2.0, y: r.y - width / 2.0, w: r.w + width, h: r.h + width };
-    unsafe { frame.dc.DrawRoundedRectangle(&rounded(ring, radius + width / 2.0), frame.brush(color), width, None) };
+    Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(color), r.x - width, r.y - width, r.w + 2.0 * width, r.h + 2.0 * width, radius + width, width);
 }
 
 /// A row's card: filled, with a hairline border.
@@ -4735,7 +4735,8 @@ fn skin_miniature(frame: &Frame, skin: Skin, r: Rect) {
                         endPoint: Vector2 { X: cx + span, Y: my + span },
                     };
                     if let Ok(brush) = dc.CreateLinearGradientBrush(&line, None, &stops) {
-                        dc.FillRoundedRectangle(&rounded(r, 6.0), &brush);
+                        let (x, y, w, h) = frame.on_pixels(r.x, r.y, r.w, r.h);
+                        dc.FillRoundedRectangle(&rounded(Rect { x, y, w, h }, 6.0), &brush);
                     }
                 }
             }

@@ -827,7 +827,7 @@ impl Dialog {
     /// The ring round what the keyboard is on, once the keyboard has moved it.
     fn ring(&self, frame: &Frame, c: &Colours, r: Rect, radius: f32, hit: Hit) {
         if self.keyboard && self.focus == hit {
-            frame.stroke_rounded(Fill::Solid(c.ring), r.x - 3.0, r.y - 3.0, r.w + 6.0, r.h + 6.0, radius + 3.0, 2.0);
+            frame.stroke_rounded(Fill::Solid(c.ring), r.x - 4.0, r.y - 4.0, r.w + 8.0, r.h + 8.0, radius + 4.0, 2.0);
         }
     }
 
@@ -847,7 +847,7 @@ impl Dialog {
             Self::centred(frame, text, BODY, Color::hex(0xFFFFFF, 1.0), r);
         } else {
             frame.fill_rounded(if hover { c.button_hover } else { c.button }, r.x, r.y, r.w, r.h, 6.0);
-            frame.stroke_rounded(Fill::Solid(c.button_stroke), r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, 5.5, 1.0);
+            frame.stroke_rounded(Fill::Solid(c.button_stroke), r.x, r.y, r.w, r.h, 6.0, 1.0);
             Self::centred(frame, text, BODY, if !enabled { c.text3 } else if down { c.text2 } else { c.text }, r);
         }
         self.ring(frame, c, r, 6.0, hit);
@@ -859,7 +859,7 @@ impl Dialog {
     fn paint_words(&mut self, frame: &Frame, c: &Colours, r: Rect, hint: &str) {
         let focused = self.focus == Hit::Words;
         frame.fill_rounded(c.field, r.x, r.y, r.w, r.h, 4.0);
-        frame.stroke_rounded(Fill::Solid(c.field_stroke), r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, 3.5, 1.0);
+        frame.stroke_rounded(Fill::Solid(c.field_stroke), r.x, r.y, r.w, r.h, 4.0, 1.0);
         // Its lower edge, in the accent and thicker while words are written in it.
         if focused {
             frame.fill(c.accent, r.x + 2.0, r.y + r.h - 2.0, r.w - 4.0, 2.0);
@@ -918,7 +918,7 @@ impl Dialog {
             let tile = Rect { x, y: top, w: TILE.0, h: TILE.1 };
             frame.fill_rounded(c.sent, tile.x, tile.y, tile.w, tile.h, 6.0);
             covering(frame, picture, tile, 6.0, self.scale);
-            frame.stroke_rounded(Fill::Solid(c.field_stroke), tile.x + 0.5, tile.y + 0.5, tile.w - 1.0, tile.h - 1.0, 5.5, 1.0);
+            frame.stroke_rounded(Fill::Solid(c.field_stroke), tile.x, tile.y, tile.w, tile.h, 6.0, 1.0);
             self.drawn.push((tile, Hit::Picture(index)));
             let keyed = self.keyboard && self.focus == Hit::Remove(index);
             if keyed || matches!(hovered, Some(Hit::Picture(at) | Hit::Remove(at)) if at == index) {
@@ -943,7 +943,7 @@ impl Dialog {
         let zone = Rect { x, y: top, w: left + width - x, h: TILE.1 };
         let over = hovered == Some(Hit::Add);
         frame.fill_rounded(if over { c.button_hover } else { c.field }, zone.x, zone.y, zone.w, zone.h, 6.0);
-        frame.stroke_rounded_dashed(if over { c.accent } else { c.field_bottom.alpha(0.6) }, zone.x + 0.5, zone.y + 0.5, zone.w - 1.0, zone.h - 1.0, 5.5, 1.0);
+        frame.stroke_rounded_dashed(if over { c.accent } else { c.field_bottom.alpha(0.6) }, zone.x, zone.y, zone.w, zone.h, 6.0, 1.0);
         self.ring(frame, c, zone, 6.0, Hit::Add);
         self.drawn.push((zone, Hit::Add));
         let middle = zone.y + zone.h / 2.0;
@@ -964,7 +964,7 @@ impl Dialog {
 
     fn paint_sent(&mut self, frame: &Frame, c: &Colours, r: Rect, sent: &str) {
         frame.fill_rounded(c.sent, r.x, r.y, r.w, r.h, 4.0);
-        frame.stroke_rounded(Fill::Solid(c.field_stroke), r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, 3.5, 1.0);
+        frame.stroke_rounded(Fill::Solid(c.field_stroke), r.x, r.y, r.w, r.h, 4.0, 1.0);
         let inside = Rect { x: r.x + INSET.0, y: r.y + INSET.1, w: r.w - 2.0 * INSET.0 - 8.0, h: r.h - 2.0 * INSET.1 };
         let whole = frame.gfx.wrapped_height(sent, SMALL, inside.w);
         self.scroll_most = (whole - inside.h).max(0.0);

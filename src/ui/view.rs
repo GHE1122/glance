@@ -1540,12 +1540,14 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     // Its clock and load, in the CPU's facts, while the pointer is on it.
                     hits.push((cx - gap / 2.0, y, cell + gap, 24.0, Hit::Thread(i as u16)));
                     let track = if scene.hover == Some(Hit::Thread(i as u16)) { theme.text3 } else { theme.track };
-                    frame.fill_rounded(track, cx, cy, cell, 14.0, radius);
-                    let filled = 14.0 * load.clamp(0.0, 1.0);
-                    if filled > 0.0 {
-                        // The load fills from the bottom, inside the cell's rounding.
-                        frame.clip(cx, cy + 14.0 - filled, cell, filled);
-                        frame.fill_rounded(if *hot { theme.signal } else { ink.trace }, cx, cy, cell, 14.0, radius);
+                    let whole = frame.on_pixels(cx, cy, cell, 14.0);
+                    let (bx, by, bw, bh) = whole;
+                    frame.fill_rounded(track, bx, by, bw, bh, radius);
+                    // The load fills from the bottom, inside the cell's rounding, to the cell's own bottom.
+                    let (fx, fy, fw, fh) = filled_part(frame, whole, *load, true);
+                    if fh > 0.0 {
+                        frame.clip(fx, fy, fw, fh);
+                        frame.fill_rounded(if *hot { theme.signal } else { ink.trace }, bx, by, bw, bh, radius);
                         frame.unclip();
                     }
                 }
@@ -1663,12 +1665,15 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 frame.text(value, theme.small, words, left, row_y, width, Align::End);
                 let bar_width = left + width - value_width - LABEL_GAP - plot_left;
                 let bar_y = row_y + (LINE - theme.meter_height) / 2.0;
-                let (height, radius) = (theme.meter_height, theme.meter_radius);
-                frame.fill_rounded(theme.track, plot_left, bar_y, bar_width, height, radius);
-                let filled = bar_width * fraction.clamp(0.0, 1.0);
-                if filled > 0.0 {
-                    frame.clip(plot_left, bar_y, filled, height);
-                    frame.fill_rounded(if *hot { theme.signal } else { ink.trace }, plot_left, bar_y, bar_width, height, radius);
+                let radius = theme.meter_radius;
+                // (Its box on whole pixels once, what is filled cut out of it: see `filled_part`.)
+                let whole = frame.on_pixels(plot_left, bar_y, bar_width, theme.meter_height);
+                let (bx, by, bw, bh) = whole;
+                frame.fill_rounded(theme.track, bx, by, bw, bh, radius);
+                let (fx, fy, fw, fh) = filled_part(frame, whole, *fraction, false);
+                if fw > 0.0 {
+                    frame.clip(fx, fy, fw, fh);
+                    frame.fill_rounded(if *hot { theme.signal } else { ink.trace }, bx, by, bw, bh, radius);
                     frame.unclip();
                 }
             }
@@ -1770,7 +1775,9 @@ fn paint_plot(frame: &dyn Canvas, scene: &Scene, ink: Ink, plot: &Plot, left: f3
     let rule_ms = span / 6.0;
     let mut t = (pen / rule_ms).floor() * rule_ms;
     while x(t) > left {
-        frame.fill(theme.rule, x(t).round(), top, 1.0, height);
+        // (Put on whole pixels where it is drawn, as every fill is: rounded to a whole DIP first, it jumped a pixel at a
+        // time more than it moved where a DIP is not whole pixels.)
+        frame.fill(theme.rule, x(t), top, 1.0, height);
         t -= rule_ms;
     }
     frame.fill(theme.rule, left, bottom, width, 1.0);
@@ -1836,15 +1843,18 @@ fn paint_plot(frame: &dyn Canvas, scene: &Scene, ink: Ink, plot: &Plot, left: f3
 /// two lay over each other, it would show); Windows 11's knob is solid, over both.
 #[allow(clippy::too_many_arguments)]
 fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f32, track: f32, fraction: f32, knob: Option<f32>) {
-    let (tall, radius) = (theme.meter_height, theme.meter_radius);
-    let filled = track * fraction.clamp(0.0, 1.0);
-    let half = tall / 2.0;
+    let radius = theme.meter_radius;
+    // The track's box put on whole pixels once, what is filled and what is not cut out of it (each put on pixels alone,
+    // they met a pixel apart, and the knob's shape stood off the track's edges).
+    let track_box = frame.on_pixels(from, middle - theme.meter_height / 2.0, track, theme.meter_height);
+    let ((from, top, track, tall), (_, _, filled, _)) = (track_box, filled_part(frame, track_box, fraction, false));
+    let (middle, half) = (top + tall / 2.0, tall / 2.0);
     if let (Some(dot), Skin::Fluent) = (knob, theme.skin) {
-        frame.clip(from, middle - half, filled, tall);
-        frame.fill_rounded(colour, from, middle - half, track, tall, radius);
+        frame.clip(from, top, filled, tall);
+        frame.fill_rounded(colour, from, top, track, tall, radius);
         frame.unclip();
-        frame.clip(from + filled, middle - half, track - filled, tall);
-        frame.fill_rounded(theme.track, from, middle - half, track, tall, radius);
+        frame.clip(from + filled, top, track - filled, tall);
+        frame.fill_rounded(theme.track, from, top, track, tall, radius);
         frame.unclip();
         let (face, edge) = if theme.dark { (Color::hex(0x454545, 1.0), Color::hex(0xffffff, 0.09)) } else { (Color::hex(0xffffff, 1.0), Color::hex(0x000000, 0.10)) };
         // (Smaller than Windows' own and the settings': the panel's track is thinner.)
@@ -1852,10 +1862,10 @@ fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f
         return;
     }
     if knob.is_none() {
-        frame.fill_rounded(theme.track, from, middle - half, track, tall, radius);
+        frame.fill_rounded(theme.track, from, top, track, tall, radius);
         if filled > 0.0 {
-            frame.clip(from, middle - half, filled, tall);
-            frame.fill_rounded(colour, from, middle - half, track, tall, radius);
+            frame.clip(from, top, filled, tall);
+            frame.fill_rounded(colour, from, top, track, tall, radius);
             frame.unclip();
         }
         return;
@@ -1885,9 +1895,26 @@ fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f
         frame.fill_circle(colour, centre, knob);
     }
     if track - filled > knob {
-        frame.clip(from + filled + knob, middle - half, track - filled - knob, tall);
-        frame.fill_rounded(theme.track, from, middle - half, track, tall, radius);
+        frame.clip(from + filled + knob, top, track - filled - knob, tall);
+        frame.fill_rounded(theme.track, from, top, track, tall, radius);
         frame.unclip();
+    }
+}
+
+/// The part of `whole` (a box already on whole pixels: see `Canvas::on_pixels`) that `fraction` of it fills, from its
+/// bottom (`up`) or its left: as many whole pixels as that comes to, ending where the box does at the side it fills
+/// from (a part put on pixels alone ended a pixel off the box's own edge, and the box's colour showed there).
+pub(crate) fn filled_part(frame: &dyn Canvas, whole: (f32, f32, f32, f32), fraction: f32, up: bool) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = whole;
+    let fraction = fraction.clamp(0.0, 1.0);
+    if up {
+        let (_, _, _, filled) = frame.on_pixels(x, y, w, h * fraction);
+        let filled = if fraction > 0.0 { filled.min(h) } else { 0.0 };
+        (x, y + h - filled, w, filled)
+    } else {
+        let (_, _, filled, _) = frame.on_pixels(x, y, w * fraction, h);
+        let filled = if fraction > 0.0 { filled.min(w) } else { 0.0 };
+        (x, y, filled, h)
     }
 }
 

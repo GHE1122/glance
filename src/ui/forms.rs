@@ -667,7 +667,7 @@ impl Painter<'_> {
         }
         self.name(reading, "chart");
         for i in 0..=4 {
-            self.frame.fill(theme.rule, (x + w * i as f32 / 4.0).round(), y, 1.0, h);
+            self.frame.fill(theme.rule, x + w * i as f32 / 4.0, y, 1.0, h);
         }
         let ink = theme.ink(reading.module);
         let first = ink.trace;

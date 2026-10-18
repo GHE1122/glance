@@ -103,7 +103,7 @@ pub fn show(text: &str, about: RECT, dark: bool) {
         let (plate, rim, ink) = if dark { (Color::hex(0x2B2B2B, 0.98), Color::hex(0xFFFFFF, 0.16), Color::hex(0xFFFFFF, 0.92)) } else { (Color::hex(0xF9F9F9, 0.98), Color::hex(0x000000, 0.14), Color::hex(0x1A1A1A, 1.0)) };
         let drawn = surface.draw(&gfx, (width as u32, height as u32), scale, |frame| {
             frame.fill_rounded(plate, 0.0, 0.0, wide, tall, 6.0);
-            frame.stroke_rounded(Fill::Solid(rim), 0.5, 0.5, wide - 1.0, tall - 1.0, 5.5, 1.0);
+            frame.stroke_rounded(Fill::Solid(rim), 0.0, 0.0, wide, tall, 6.0, 1.0);
             let (ink_top, ink_bottom) = frame.ink(text, font);
             frame.text(text, font, ink, PAD, tall / 2.0 - (ink_top + ink_bottom) / 2.0, wide - 2.0 * PAD + 2.0, Align::Start);
         });
