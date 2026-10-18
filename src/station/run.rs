@@ -68,6 +68,21 @@ const EXPIRE_EVERY_MS: u32 = 60 * 60 * 1000;
 static ASKS: OnceLock<Mutex<Sender<Ask>>> = OnceLock::new();
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static SHOWN: Mutex<Option<Arc<Shown>>> = Mutex::new(None);
+/// Where each window shows a station, as it was last drawn (screen px): where what is dragged over it may be dropped.
+static AREAS: Mutex<Vec<(isize, windows::Win32::Foundation::RECT)>> = Mutex::new(Vec::new());
+
+/// The window `window` shows a station in `areas` (screen px; none: none), as it was just drawn.
+pub fn shows_at(window: HWND, areas: Vec<windows::Win32::Foundation::RECT>) {
+    let mut held = AREAS.lock().unwrap();
+    held.retain(|(of, _)| *of != window.0 as isize);
+    held.extend(areas.into_iter().map(|area| (window.0 as isize, area)));
+}
+
+/// Whether the window `window` shows a station at `at` (screen px).
+pub fn station_at(window: HWND, at: windows::Win32::Foundation::POINT) -> bool {
+    AREAS.lock().unwrap().iter().any(|(of, area)| *of == window.0 as isize && at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom)
+}
+
 /// Called (on the station's thread) as what it shows changes: to wake what shows it.
 static TOLD: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 

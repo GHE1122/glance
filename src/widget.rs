@@ -1969,6 +1969,29 @@ impl Widget {
         }
     }
 
+    /// Where it shows a station, as it was just drawn, told to the station (see `station::run::shows_at`).
+    fn show_stations(&self) {
+        let mut window = RECT::default();
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(self.window.hwnd, &mut window) }.is_err() {
+            return;
+        }
+        let px = self.contact.scale * self.zoom;
+        let margin = self.margin_px();
+        let screen = |at: f32, from: f32, origin: i32| origin + margin + ((at + from) * px).round() as i32;
+        let areas = self
+            .hits
+            .iter()
+            .filter(|hit| hit.4 == view::Hit::Station)
+            .map(|(x, y, w, h, _)| RECT {
+                left: screen(*x, self.hits_from.0, window.left),
+                top: screen(*y, self.hits_from.1, window.top),
+                right: screen(x + w, self.hits_from.0, window.left),
+                bottom: screen(y + h, self.hits_from.1, window.top),
+            })
+            .collect();
+        crate::station::run::shows_at(self.window.hwnd, areas);
+    }
+
     /// The desktop taken behind it, from `taken` on (`moved`: elsewhere
     /// than the last was).
     fn took(&mut self, capture: Option<Capture>, moved: bool, taken: Instant, px: f32) {
@@ -3151,6 +3174,7 @@ impl Widget {
         self.frame_took = surface.took;
         if let Some((hits, from)) = pressed {
             (self.hits, self.hits_from) = (hits, from);
+            self.show_stations();
         }
         if let Err(error) = &drawn {
             note(format!("widget: its surface not drawn: {error}"));

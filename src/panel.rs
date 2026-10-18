@@ -2879,6 +2879,7 @@ impl<'a> Panel<'a> {
         }
         // (In the window: where it is painted in it, and where in that.)
         self.corner = (x + offset.0 as f32 / px, y + offset.1 as f32 / px);
+        self.show_stations();
         self.bar = layout.bar();
 
         // At rest only the charts move, a plot's width over its span: the
@@ -2994,6 +2995,7 @@ impl<'a> Panel<'a> {
         // (Its buttons over what is under them.)
         self.hits = buttons.into_iter().chain(painted.hits).collect();
         self.corner = (x + offset.0 as f32 / px, y + offset.1 as f32 / px);
+        self.show_stations();
         self.bar = view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         let moving = !self.shift.done(now) || !self.opacity.done(now) || painted.busy;
         self.next_frame = if moving { now } else { now + Duration::from_millis(250) };
@@ -3002,6 +3004,20 @@ impl<'a> Panel<'a> {
     /// Which hit region a point in the window's client area (physical px) is in.
     fn hit_at(&self, client: POINT) -> Option<Hit> {
         self.hits_at(client).next()
+    }
+
+    /// Where it shows a station, as it was just drawn, told to the station (see `station::run::shows_at`).
+    fn show_stations(&self) {
+        let Some(placement) = &self.placement else { return };
+        let (px, window) = (placement.px, placement.window);
+        let screen = |at: f32, from: f32, origin: i32| origin + ((at + from) * px).round() as i32;
+        let areas = self
+            .hits
+            .iter()
+            .filter(|hit| hit.4 == Hit::Station)
+            .map(|(x, y, w, h, _)| RECT { left: screen(*x, self.corner.0, window.left), top: screen(*y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) })
+            .collect();
+        crate::station::run::shows_at(self.window.hwnd, areas);
     }
 
     /// Each hit region a point in the window's client area (physical px) is in, in the order they were drawn.

@@ -179,13 +179,15 @@ pub enum Hit {
     Shelf(u64),
     Copied(u64),
     ShelfClear,
+    /// Where a station is: what is dragged there may be dropped on it (see `station::run::shows_at`).
+    Station,
 }
 
 impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_))
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station)
     }
 
     /// The track it is, where it is one dragged along.
@@ -1962,6 +1964,7 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         frame.stroke_rounded(Fill::Solid(ink.trace.alpha(0.8)), left - 4.0, top - 4.0, width + 8.0, tall + 8.0, 10.0, 1.5);
     }
     if tiles.is_empty() {
+        hits.push((left - 4.0, top - 4.0, width + 8.0, tall + 8.0, Hit::Station));
         // Nothing on it: where to drop, and what.
         if !over {
             frame.stroke_rounded(Fill::Solid(theme.text3.alpha(0.5)), left, top, width, tall, 10.0, 1.0);
@@ -2031,6 +2034,8 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         hits.push((x, y, TILE_W, TILE_H, Hit::Shelf(tile.id)));
     }
     frame.unclip();
+    // Where something dragged may be dropped: all of it (after its things: a press finds a thing first).
+    hits.push((left - 4.0, top - 4.0, width + 8.0, tall + 8.0, Hit::Station));
     // No room left: said over it.
     if let Some(said) = said {
         let wide = (frame.measure(said, theme.small) + 20.0).min(width);
