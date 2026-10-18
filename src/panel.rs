@@ -585,7 +585,7 @@ impl Controller {
                     if let Some((point, edge)) = panel.yielded.take() {
                         if let Some(contact) = monitor_at(point) {
                             let edge = panel.pinned_edge(point, contact, Some(edge));
-                            panel.open(point, contact, edge, None, now);
+                            panel.open(point, contact, edge, None, false, now);
                             panel.pinned = panel.is_open();
                         }
                     }
@@ -596,7 +596,7 @@ impl Controller {
                     // On its screen, or the nearest, if it is gone.
                     if let Some(contact) = monitor_at(point) {
                         let edge = panel.pinned_edge(point, contact, edge);
-                        panel.open(point, contact, edge, None, now);
+                        panel.open(point, contact, edge, None, false, now);
                         panel.pinned = panel.is_open();
                     }
                 }
@@ -687,7 +687,7 @@ impl Controller {
             // then not again till the pointer has left the edge).
             let open_pushed = |(cursor, contact, edge): crate::push::Pushed, panel: &mut Panel| {
                 if may_open(fullscreen_edge) {
-                    panel.open(cursor, contact, edge, None, now);
+                    panel.open(cursor, contact, edge, None, true, now);
                 }
             };
             if panel.holds_edges() {
@@ -732,7 +732,7 @@ impl Controller {
                 if now.duration_since(since) >= SEAM_DWELL {
                     seam_rest = None;
                     if may_open(fullscreen_edge) {
-                        panel.open(cursor, contact, edge, None, now);
+                        panel.open(cursor, contact, edge, None, true, now);
                     } else {
                         seam_armed = false;
                     }
@@ -1163,6 +1163,9 @@ struct Placement {
     floating: Option<(f32, f32)>,
     /// The corner held while it is dragged, wherever that is.
     held: Option<Held>,
+    /// Where the pointer opened it (a push into the edge, a rest on the seam): within its reach till it is moved
+    /// away from the edge (see `place`); none, opened by hand (the shortcut, the tray), from anywhere.
+    came_from: Option<POINT>,
 }
 
 /// A corner of the panel held where it is (physical px): its left or
@@ -1619,7 +1622,7 @@ impl<'a> Panel<'a> {
             let point = POINT { x, y };
             if let Some(contact) = monitor_at(point) {
                 let was_shown = self.is_shown();
-                self.open(point, contact, self.edge_for(point, contact), Some(at), now);
+                self.open(point, contact, self.edge_for(point, contact), Some(at), false, now);
                 // Opened there, pinned there if it was; one picked up on its
                 // way out (opened from the edge) stays as it was.
                 if !was_shown && self.is_open() {
@@ -1627,7 +1630,7 @@ impl<'a> Panel<'a> {
                 }
             }
         } else if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
-            self.open(cursor, contact, self.edge_for(cursor, contact), None, now);
+            self.open(cursor, contact, self.edge_for(cursor, contact), None, false, now);
         }
     }
 
@@ -1654,7 +1657,9 @@ impl<'a> Panel<'a> {
 
     /// Opens the panel on `contact`'s screen: along its `edge` at `cursor`,
     /// or `floating` where it was moved to (see `Placement::floating`).
-    fn open(&mut self, cursor: POINT, contact: Contact, edge: Edge, floating: Option<(f32, f32)>, now: Instant) {
+    /// (`pushed`: opened by the pointer at the edge, a push into it or a rest on its seam; else by hand, the pointer
+    /// anywhere.)
+    fn open(&mut self, cursor: POINT, contact: Contact, edge: Edge, floating: Option<(f32, f32)>, pushed: bool, now: Instant) {
         if self.controller.history.read().unwrap().is_empty() {
             return;
         }
@@ -1698,6 +1703,7 @@ impl<'a> Panel<'a> {
                 px: contact.scale,
                 floating,
                 held: None,
+                came_from: pushed.then_some(cursor),
             });
             self.scroll = 0.0;
             self.scroll_target = 0.0;
@@ -1819,7 +1825,7 @@ impl<'a> Panel<'a> {
             self.pinned = pinned;
         } else if open {
             if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
-                self.open(cursor, contact, self.edge_for(cursor, contact), None, now);
+                self.open(cursor, contact, self.edge_for(cursor, contact), None, false, now);
                 self.pinned = pinned;
                 self.game = game;
             }
@@ -3053,12 +3059,23 @@ fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &T
         right: panel.right + tolerance,
         bottom: panel.bottom + tolerance,
     };
-    // The pointer arrives from the screen edge, if it is against it.
+    // The pointer arrives from the screen edge, if it is against it: from where it pushed into it too, wherever
+    // along it that is. (Opened in the middle of the edge from a push near its end, the pointer was never within
+    // its reach, and the panel took it for one opened from afar, which stays till the pointer comes: moved away from
+    // it, it stayed.)
     if placement.floating.is_none() && placement.held.is_none() {
         match edge {
             Edge::Left => reach.left = monitor.left,
             Edge::Right => reach.right = monitor.right,
             Edge::Top => reach.top = monitor.top,
+        }
+        if let Some(from) = placement.came_from {
+            reach = RECT {
+                left: reach.left.min(from.x - tolerance),
+                top: reach.top.min(from.y - tolerance),
+                right: reach.right.max(from.x + tolerance),
+                bottom: reach.bottom.max(from.y + tolerance),
+            };
         }
     }
     placement.panel = panel;
