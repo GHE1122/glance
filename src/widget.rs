@@ -1024,6 +1024,15 @@ impl Content {
     }
 
     /// How far its lists are scrolled: its readings' (merged, the first readings part's).
+    /// Whether it is, or holds, the single lane `only` (see `Readings::only`): which of its parts, where merged.
+    fn holding(&self, only: &str) -> Option<Option<usize>> {
+        match self {
+            Content::Readings(readings) => (readings.only.as_deref() == Some(only)).then_some(None),
+            Content::Merged(merged) => merged.parts.iter().position(|part| part.holding(only).is_some()).map(Some),
+            Content::Music(_) => None,
+        }
+    }
+
     fn scrolls(&self) -> view::Scrolls {
         match self {
             Content::Readings(readings) => readings.scrolls,
@@ -1230,22 +1239,32 @@ impl Widgets {
         }
     }
 
-    /// The widget the note `name` is stuck on the desktop as taken away (the note deleted): not put away to be
-    /// brought back, gone.
+    /// The note `name` stuck on the desktop taken away (the note deleted): its widget not put away to be brought back,
+    /// gone; merged with another, the other left as it was.
     pub fn unstick_note(&mut self, name: &str) {
         let only = format!("{}{name}", view::STUCK_NOTE);
-        if let Some(index) = self.list.iter().position(|widget| matches!(&widget.content, Content::Readings(readings) if readings.only.as_deref() == Some(only.as_str()))) {
-            let mut widget = self.list.remove(index);
-            widget.gone();
-            widget.window.destroy();
-            self.save();
+        let Some((index, part)) = self.list.iter().enumerate().find_map(|(index, widget)| widget.content.holding(&only).map(|part| (index, part))) else { return };
+        match part {
+            None => {
+                let mut widget = self.list.remove(index);
+                widget.gone();
+                widget.window.destroy();
+            }
+            Some(part) => {
+                let widget = &mut self.list[index];
+                let _ = widget.take_part(part);
+                widget.settle = Some((Instant::now(), widget.surface_size));
+                widget.next_frame = Instant::now();
+            }
         }
+        self.save();
     }
 
-    /// The widget the note `name` is stuck on the desktop as, raised in front; whether there is one.
+    /// The widget the note `name` is stuck on the desktop as (alone, or merged with another), raised in front; whether
+    /// there is one.
     pub fn raise_note(&mut self, name: &str) -> bool {
         let only = format!("{}{name}", view::STUCK_NOTE);
-        let Some(widget) = self.list.iter_mut().find(|widget| matches!(&widget.content, Content::Readings(readings) if readings.only.as_deref() == Some(only.as_str()))) else { return false };
+        let Some(widget) = self.list.iter_mut().find(|widget| widget.content.holding(&only).is_some()) else { return false };
         widget.window.raise();
         widget.next_frame = Instant::now();
         true
@@ -1884,31 +1903,10 @@ impl Widgets {
     /// of its own kind again.
     fn tear_part(&mut self, index: usize, part: usize, grab: (f32, f32)) {
         let Some(widget) = self.list.get_mut(index) else { return };
-        let Content::Merged(merged) = &mut widget.content else { return };
-        if part == 0 || part >= merged.parts.len() {
+        if part == 0 {
             return;
         }
-        let (_, _, pw, ph) = merged.rects.get(part).copied().unwrap_or((0.0, 0.0, music::LEAST.0, music::LEAST.1));
-        let mut content = merged.parts.remove(part);
-        let removed = merged.rects.remove(part);
-        merged.moving = Some((Instant::now(), merged.rects.iter().copied().map(Some).collect()));
-        if let Content::Music(shown) = &mut content {
-            shown.size = (pw.max(music::LEAST.0), ph.max(music::LEAST.1));
-        }
-        // What is left: shorter by the part along the way they went; one part alone, a widget of its kind.
-        if merged.beside {
-            merged.size.0 -= removed.2;
-        } else {
-            merged.size.1 -= removed.3;
-        }
-        if merged.parts.len() == 1 {
-            let rest = merged.rects.first().copied();
-            let mut last = merged.parts.pop().unwrap();
-            if let (Content::Music(shown), Some((_, _, w, h))) = (&mut last, rest) {
-                shown.size = (w.max(music::LEAST.0), h.max(music::LEAST.1));
-            }
-            widget.content = last;
-        }
+        let Some(content) = widget.take_part(part) else { return };
         widget.drag = None;
         widget.settle = Some((Instant::now(), widget.surface_size));
         widget.next_frame = Instant::now();
@@ -2000,6 +1998,36 @@ struct Request {
 pub const CAPTURED: u32 = WM_APP + 12;
 
 impl Widget {
+    /// Its part at `part` (merged) taken out: as large as it was drawn (what plays), the others as they were, shorter
+    /// by it along the way they go; the one left alone a widget of its own kind again. What was taken.
+    fn take_part(&mut self, part: usize) -> Option<Content> {
+        let Content::Merged(merged) = &mut self.content else { return None };
+        if part >= merged.parts.len() {
+            return None;
+        }
+        let (_, _, pw, ph) = merged.rects.get(part).copied().unwrap_or((0.0, 0.0, music::LEAST.0, music::LEAST.1));
+        let mut content = merged.parts.remove(part);
+        let removed = merged.rects.remove(part);
+        merged.moving = Some((Instant::now(), merged.rects.iter().copied().map(Some).collect()));
+        if let Content::Music(shown) = &mut content {
+            shown.size = (pw.max(music::LEAST.0), ph.max(music::LEAST.1));
+        }
+        if merged.beside {
+            merged.size.0 -= removed.2;
+        } else {
+            merged.size.1 -= removed.3;
+        }
+        if merged.parts.len() == 1 {
+            let rest = merged.rects.first().copied();
+            let mut last = merged.parts.pop().unwrap();
+            if let (Content::Music(shown), Some((_, _, w, h))) = (&mut last, rest) {
+                shown.size = (w.max(music::LEAST.0), h.max(music::LEAST.1));
+            }
+            self.content = last;
+        }
+        Some(content)
+    }
+
     /// `page` opened beside it, on the side of its screen with more room, drawn as it is.
     fn open_beside(&self, page: crate::ui::beside::Page) {
         use crate::ui::beside::{Opening, Side};
@@ -2807,6 +2835,7 @@ impl Widget {
             Content::Music(_) => Vec::new(),
         };
         for readings in readings {
+            readings.scrolls.follow(view::lists_show(readings.tab));
             moving |= readings.scrolls.ease(dt / 1000.0, crate::panel::SCROLL_EASE);
         }
         // Settling this frame (its last too): its far edges held.
@@ -3538,6 +3567,18 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A note stuck on the desktop found where it is alone, and where it was merged with what plays (which part); one
+    /// not there not found.
+    #[test]
+    fn finds_a_stuck_note_merged_or_alone() {
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let note = |name: &str| Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE)), ..Readings::new(choice.clone()) });
+        assert_eq!(note("a.md").holding("note:a.md"), Some(None));
+        let merged = Content::Merged(Box::new(Merged::new(vec![Content::Music(MusicShown::new(music::LEAST)), note("a.md")], true, music::LEAST)));
+        assert_eq!(merged.holding("note:a.md"), Some(Some(1)));
+        assert_eq!(merged.holding("note:b.md"), None);
+    }
 
     /// One lane alone kept under a form of its own, read back as that lane and its form; a whole panel's form as it
     /// was; and the form an older Glance reads it as is none it knows (it leaves the widget out).

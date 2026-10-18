@@ -78,12 +78,13 @@ fn read_apps_dark() -> bool {
 /// a dark or a light theme; `None` where the system will not say.
 pub fn accent(dark: bool) -> Option<u32> {
     let shade = if dark { UIColorType::AccentLight2 } else { UIColorType::AccentDark1 };
-    // On a thread of the process's multithreaded apartment, joined here where it is not: asked from threads that
-    // never joined it, many at once (the tests'), the system's colour settings faulted the process now and then,
-    // as their objects came and went (one test process in five, six at a time).
-    unsafe {
-        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
-    }
+    // In the process's multithreaded apartment, kept for as long as the process runs: the system's colour settings'
+    // maker is kept by the bindings for the whole process, and an apartment that came and went with a thread (the
+    // tests', one after another) took its library with it, the next asked faulting the process in it.
+    static KEPT: std::sync::Once = std::sync::Once::new();
+    KEPT.call_once(|| {
+        let _ = unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() };
+    });
     let color = UISettings::new().and_then(|settings| settings.GetColorValue(shade)).ok()?;
     Some(((color.R as u32) << 16) | ((color.G as u32) << 8) | color.B as u32)
 }

@@ -1002,13 +1002,21 @@ impl Beside {
             super::text::Lang::Zh => format!("{count} 字 · 自动保存"),
             super::text::Lang::En => format!("{count} characters · kept as you write"),
         };
-        frame.text(&counted, theme.small, theme.text3, PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * PAD, Align::Start);
-        let place = match (&writing.said, &writing.name) {
-            (Some(said), _) => said.clone(),
-            (None, Some(name)) => name.clone(),
-            (None, None) => String::new(),
-        };
-        frame.text(&place, theme.small, if writing.said.is_some() { theme.signal } else { theme.text3 }, PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * PAD, Align::End);
+        // (What was said of keeping it in the foot's whole width, on two lines where it needs them: in place of the
+        // count, which it would else lie over; the file's name after the count, in the room the count leaves.)
+        match (&writing.said, &writing.name) {
+            (Some(said), _) => {
+                let tall = frame.gfx.wrapped_height(said, theme.small, width - 2.0 * PAD).min(FOOT - 8.0);
+                frame.text_wrapped(said, theme.small, theme.signal, PAD, bottom + (FOOT - tall) / 2.0, width - 2.0 * PAD);
+            }
+            (None, name) => {
+                frame.text(&counted, theme.small, theme.text3, PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * PAD, Align::Start);
+                let room = width - 2.0 * PAD - frame.measure(&counted, theme.small) - 16.0;
+                if let Some(name) = name {
+                    frame.text(name, theme.small, theme.text3, width - PAD - room, bottom + (FOOT - 16.0) / 2.0, room, Align::End);
+                }
+            }
+        }
         self.hits = hits;
     }
 

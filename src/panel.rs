@@ -2926,6 +2926,8 @@ impl<'a> Panel<'a> {
         }
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
+        // (Each list scrolled as far as it was for what it shows: another view, or filter, of it starts at its top.)
+        self.scrolls.follow(view::lists_show(self.tab));
         let lists_moving = self.scrolls.ease(dt, SCROLL_EASE);
 
         if self.part == Part::Music {

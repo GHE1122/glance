@@ -492,6 +492,22 @@ mod tests {
         assert!(zoom.is_finite() && zoom > 0.0);
     }
 
+    /// Quick launch alone, as a rail down a side, or with one short lane beside it: tall enough for its foot and a
+    /// thing over it, within the panel.
+    #[test]
+    fn a_rail_alone_has_room_for_its_foot() {
+        let theme = Theme::new(Skin::Fluent, false);
+        for (heights, rail) in [(vec![120.0], 0), (vec![40.0, 120.0], 1)] {
+            for edge in [Edge::Left, Edge::Right] {
+                let (layout, _) = arrange(&theme, edge, heights.clone(), (1920.0, 1080.0), None, 1.0, Some(rail));
+                let lanes = layout.lanes();
+                let area = lanes[rail];
+                assert!(area.h >= 4.0 * 46.0 + 16.0, "{edge:?} {heights:?}: {area:?}");
+                assert!(area.y + area.h <= layout.height() + 0.01, "{edge:?} {heights:?}: {area:?} past {}", layout.height());
+            }
+        }
+    }
+
     #[test]
     fn keeps_the_columns_chosen_as_far_as_the_screen_is_wide() {
         let theme = Theme::new(Skin::Paper, false);

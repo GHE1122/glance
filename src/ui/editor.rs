@@ -15,6 +15,7 @@ use windows::Win32::Graphics::Direct2D::ID2D1RenderTarget;
 use windows::Win32::Graphics::Gdi::{GetDC, GetSysColor, InvalidateRect, ReleaseDC, ScreenToClient, ClientToScreen, HBITMAP, HDC, HPALETTE, HRGN, SYS_COLOR_INDEX};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::Controls::RichEdit::*;
+use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_UNAWARE};
 use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, HIMC};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetCursor, SetForegroundWindow, SetTimer, HCURSOR, SCROLLBAR_CONSTANTS, SCROLL_WINDOW_FLAGS, WS_VSCROLL};
@@ -97,7 +98,14 @@ impl Editor {
         unsafe {
             let mut made: Option<windows::core::IUnknown> = None;
             let plain: ITextHost = host.cast().ok()?;
-            make(None.into(), (&plain).into(), windows::core::OutRef::from(&mut made)).ok().ok()?;
+            // (Made as a thread unaware of its screen's scale would make them: they take the scale they count in as
+            // they are made, and count in pixels at 96 per inch as the words are drawn (see `draw`). Made at the
+            // window's scale, they would place the caret, and the input method's window, at its multiple of where the
+            // words are.)
+            let was = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE);
+            let made_now = make(None.into(), (&plain).into(), windows::core::OutRef::from(&mut made));
+            SetThreadDpiAwarenessContext(was);
+            made_now.ok().ok()?;
             let made = made?;
             let mut services = std::ptr::null_mut();
             made.query(&iid, &mut services).ok().ok()?;
@@ -454,6 +462,48 @@ mod tests {
     use super::*;
     use crate::notes::markdown::looks;
     use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
+
+    /// The caret where the words drawn end, the window aware of its screen's scale as Glance's are (on a screen scaled
+    /// past 100%: the text services count in the window's pixels whatever the scale, as Glance draws them).
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn puts_the_caret_where_the_words_end() {
+        use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT};
+        use windows::Win32::Graphics::Direct2D::{D2D1CreateFactory, ID2D1Factory, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT};
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+        use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory, WICBitmapCacheOnLoad};
+        unsafe {
+            let _ = windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""), WS_POPUP, 0, 0, 800, 300, None, None, None, None).unwrap();
+            let (wide, tall) = (800u32, 300u32);
+            let editor = Editor::new(hwnd, RECT { left: 20, top: 30, right: 780, bottom: 280 }, "Segoe UI", 22.0, COLORREF(0)).expect("text services");
+            editor.set_text("MMMMMMMMMM second line");
+            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_SETFOCUS, WPARAM(0), LPARAM(0));
+            let document: ITextDocument = editor.services.cast().unwrap();
+            let _ = document.Range(i32::MAX, i32::MAX).unwrap().Select();
+            let wic: IWICImagingFactory = windows::Win32::System::Com::CoCreateInstance(&CLSID_WICImagingFactory, None, windows::Win32::System::Com::CLSCTX_INPROC_SERVER).unwrap();
+            let bitmap = wic.CreateBitmap(wide, tall, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad).unwrap();
+            let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).unwrap();
+            let properties = D2D1_RENDER_TARGET_PROPERTIES { r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT, pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0, ..Default::default() };
+            let target = factory.CreateWicBitmapRenderTarget(&bitmap, &properties).unwrap();
+            target.BeginDraw();
+            target.Clear(Some(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }));
+            editor.draw(&target);
+            target.EndDraw(None, None).unwrap();
+            let mut pixels = vec![0u8; (wide * tall * 4) as usize];
+            bitmap.CopyPixels(std::ptr::null(), wide * 4, &mut pixels).unwrap();
+            let inked = |x: u32, y: u32| pixels[((y * wide + x) * 4) as usize] < 128;
+            // The words' right end, and their lines' top and bottom.
+            let right = (0..wide).rev().find(|&x| (0..tall).any(|y| inked(x, y))).expect("words drawn");
+            let bottom = (0..tall).rev().find(|&y| (0..wide).any(|x| inked(x, y))).unwrap();
+            let caret = editor.caret().expect("a caret");
+            drop(editor);
+            let _ = DestroyWindow(hwnd);
+            assert!((caret.0 - right as i32).abs() <= 6, "caret at x {} where the words end at {right}", caret.0);
+            assert!(caret.1 <= bottom as i32 && caret.1 + caret.3 >= bottom as i32 - 4, "caret at y {}..{} where the words' last line ends at {bottom}", caret.1, caret.1 + caret.3);
+        }
+    }
 
     /// The text services hosted here take keys as written and give the words back; dressed as Markdown, a heading is
     /// bold and larger, its words otherwise as typed; undo takes back what was typed, not the dressing.

@@ -284,6 +284,8 @@ pub enum Tab {
 pub struct Scrolls {
     at: [f32; 6],
     to: [f32; 6],
+    /// What each shows (see `lists_show`), as it was scrolled for it.
+    shows: [u8; 6],
 }
 
 impl Scrolls {
@@ -314,10 +316,31 @@ impl Scrolls {
         *self = Scrolls::default();
     }
 
+    /// What each list shows now (see `lists_show`): one showing its things another way, or other things, back at its
+    /// top (scrolled as far as it was for what it showed before, it would open part way down).
+    pub fn follow(&mut self, shows: [u8; 6]) {
+        for list in 0..shows.len() {
+            if self.shows[list] != shows[list] {
+                (self.at[list], self.to[list]) = (0.0, 0.0);
+            }
+        }
+        self.shows = shows;
+    }
+
     /// As each is scrolled, for what is drawn to tell one drawing from another.
     pub fn bits(&self) -> [u32; 6] {
         self.at.map(f32::to_bits)
     }
+}
+
+/// What each list shows, as far as one is scrolled for it alone (see `Scrolls::follow`): the station's things in their
+/// view, the files come lately under the filter chosen on `tab`, the notes in their view.
+pub fn lists_show(tab: Tab) -> [u8; 6] {
+    let mut shows = [0; 6];
+    shows[List::Shelf as usize] = crate::station::run::shown().view as u8;
+    shows[List::Recent as usize] = if let Tab::Recent(filter) = tab { filter as u8 + 1 } else { 0 };
+    shows[List::Notes as usize] = crate::notes::view() as u8;
+    shows
 }
 
 /// Sliders' knobs all at rest (for what keeps none of its own).
@@ -644,11 +667,18 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
     frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
     match view {
         NotesView::Deck => {
-            // The others' titles as strips, the last written whole under them (as much of them as fits over it).
-            // (Each strip apart, a gap under it: their colours' washes not laid over one another.)
-            let strips = notes.len().saturating_sub(1).min(((tall - NOTE_CARD) / NOTE_STRIP).max(0.0) as usize);
-            for (at, note) in notes.iter().enumerate().skip(1).take(strips) {
-                let y = top + (at - 1) as f32 * NOTE_STRIP;
+            // The others' titles as strips, the last written whole under them: as many strips as leave it a card's
+            // room, the rest scrolled to. (Each strip apart, a gap under it: their colours' washes not laid over one
+            // another.)
+            let others = notes.len() - 1;
+            let room = (others as f32 * NOTE_STRIP).min((tall - NOTE_CARD).max(0.0));
+            let (most, scroll) = notes_scroll(scene, others as f32 * NOTE_STRIP, room);
+            frame.clip(left - 4.0, top - 2.0, width + 8.0, room + 2.0);
+            for (at, note) in notes.iter().enumerate().skip(1) {
+                let y = top + (at - 1) as f32 * NOTE_STRIP - scroll;
+                if y + NOTE_STRIP < top || y > top + room {
+                    continue;
+                }
                 let (mark, ground) = note_colours(theme, note.colour);
                 let strip = NOTE_STRIP - 3.0;
                 frame.fill_rounded(ground, left, y, width, strip, radius.min(strip / 2.0));
@@ -658,9 +688,14 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 note_mark(frame, theme, mark, left, y, strip);
                 frame.text(&fitted(frame, &note.title, theme.body, width - 110.0), theme.body, theme.text, left + 22.0, y + (strip - LINE) / 2.0, width - 110.0, Align::Start);
                 frame.text(&note.when, theme.small, theme.text3, left, y + (strip - LINE) / 2.0 + 1.0, width - 12.0, Align::End);
-                hits.push((left, y, width, NOTE_STRIP, Hit::Note(note.at)));
+                hits.extend(shown_in((left, y, width, NOTE_STRIP, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, room)));
             }
-            let y = top + strips as f32 * NOTE_STRIP;
+            frame.unclip();
+            // (After its strips: a press finds a strip before the list they are on.)
+            if most > 0.0 {
+                hits.push((left, top, width, room, Hit::List(List::Notes, most.to_bits())));
+            }
+            let y = top + room;
             let front = &notes[0];
             let (mark, ground) = note_colours(theme, front.colour);
             let card = tall - (y - top);
@@ -704,7 +739,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                     frame.text(&fitted(frame, line, theme.small, card_w - 20.0), theme.small, theme.text2, x + 10.0, y + 32.0 + line_at as f32 * (LINE + 1.0), card_w - 20.0, Align::Start);
                 }
                 frame.text(&note.when, theme.small, theme.text3, x + 10.0, y + NOTE_CARD - LINE - 6.0, card_w - 20.0, Align::Start);
-                hits.push((x, y, card_w, NOTE_CARD, Hit::Note(note.at)));
+                hits.extend(shown_in((x, y, card_w, NOTE_CARD, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, tall)));
             }
             if most > 0.0 {
                 hits.push((left, top, width, tall, Hit::List(List::Notes, most.to_bits())));
@@ -726,7 +761,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 frame.text(&fitted(frame, &note.title, theme.body, width - 24.0 - when_w), theme.body, theme.text, left + 18.0, y + 4.0, width - 24.0 - when_w, Align::Start);
                 frame.text(&fitted(frame, note.lines.first().map_or("", String::as_str), theme.small, width - 24.0), theme.small, theme.text3, left + 18.0, y + 4.0 + LINE, width - 24.0, Align::Start);
                 frame.text(&note.when, theme.small, theme.text3, left, y + 4.0, width, Align::End);
-                hits.push((left, y, width, NOTE_ROW, Hit::Note(note.at)));
+                hits.extend(shown_in((left, y, width, NOTE_ROW, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, tall)));
             }
             if most > 0.0 {
                 hits.push((left, top, width, tall, Hit::List(List::Notes, most.to_bits())));
@@ -764,11 +799,17 @@ const APP_ROWS: usize = 3;
 
 /// Quick launch's lane: whole (`full`), what is kept at hand under its name, named, in as many rows as they take (up
 /// to `APP_ROWS`, the place to add more after them); else their pictures in one row.
-fn apps_lane(full: bool, lang: Lang) -> Vec<Block> {
+fn apps_lane(full: bool, theme: &Theme, lang: Lang) -> Vec<Block> {
     let apps: Vec<(String, String)> = crate::station::apps::shown().iter().map(|app| (app.name.clone(), app.target.clone())).collect();
-    let across = (((COLUMN_WIDTH - 32.0) / APP_CELL_W) as usize).max(1);
-    let rows = if full { (apps.len() + 1).div_ceil(across).clamp(1, APP_ROWS) } else { 1 };
+    let rows = if full { apps_rows(apps.len(), theme) } else { 1 };
     vec![head(lang.pick("快捷 App", "Quick launch"), "", "", false), Block::Apps { apps, rows, named: full }]
+}
+
+/// The rows a whole quick launch lane takes for `count` things (and the place to add more) across a column's room in
+/// `theme`'s skin, up to `APP_ROWS` (more scrolled to).
+fn apps_rows(count: usize, theme: &Theme) -> usize {
+    let across = (((COLUMN_WIDTH - 2.0 * theme.pad_x) / APP_CELL_W) as usize).max(1);
+    (count + 1).div_ceil(across).clamp(1, APP_ROWS)
 }
 
 /// The picture of what is kept at hand (`target`, what opens it) in the square `side` wide at (`x`, `y`): as Explorer
@@ -801,24 +842,32 @@ fn paint_adder(frame: &dyn Canvas, scene: &Scene, x: f32, y: f32, side: f32, hit
     hits.push((x, y, side, side, Hit::AddApp));
 }
 
-/// What is kept at hand as a lane lays it out (see `Block::Apps`) from (`left`, `top`), `width` across: named cells
-/// spread over the width, or one row of pictures; the place to add more after them. What is dragged there may be
-/// dropped to be kept at hand.
-fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), apps: &[(String, String)], named: bool, hits: &mut Vec<HitBox>) {
+/// What is kept at hand as a lane lays it out (see `Block::Apps`) from (`left`, `top`), `width` across, in its `rows`:
+/// named cells spread over the width, scrolled through where they take more rows; or one row of pictures (as many as
+/// fit); the place to add more after them. What is dragged there may be dropped to be kept at hand.
+#[allow(clippy::too_many_arguments)]
+fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), apps: &[(String, String)], rows: usize, named: bool, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let (cell_w, cell_h) = if named { (APP_CELL_W, APP_CELL_H) } else { (APP_SIDE + APP_GAP, APP_SIDE) };
-    let rows = if named { (apps.len() + 1).div_ceil(((width / cell_w) as usize).max(1)).min(APP_ROWS) } else { 1 };
     let tall = rows as f32 * cell_h + rows.saturating_sub(1) as f32 * APP_GAP;
     let mut placed = Vec::new();
     let across = ((width / cell_w) as usize).max(1);
     let gap = if named && across > 1 { (width - across as f32 * cell_w) / (across - 1) as f32 } else { 0.0 };
-    let most = if named { across * APP_ROWS } else { across };
-    for at in 0..(apps.len() + 1).min(most) {
+    let count = if named { apps.len() + 1 } else { (apps.len() + 1).min(across) };
+    let whole = count.div_ceil(across) as f32 * (cell_h + APP_GAP) - APP_GAP;
+    let most = (whole - tall).max(0.0);
+    let scroll = scene.scrolls.at(List::Apps).clamp(0.0, most);
+    let view = (left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
+    frame.clip(view.0, view.1, view.2, view.3);
+    for at in 0..count {
         let x = left + (at % across) as f32 * (cell_w + gap);
-        let y = top + (at / across) as f32 * (cell_h + APP_GAP);
+        let y = top + (at / across) as f32 * (cell_h + APP_GAP) - scroll;
+        if y + cell_h < top || y > top + tall {
+            continue;
+        }
         let px = if named { x + (cell_w - APP_SIDE) / 2.0 } else { x };
         let Some((name, target)) = apps.get(at) else {
-            paint_adder(frame, scene, px, y, APP_SIDE, hits);
+            paint_adder(frame, scene, px, y, APP_SIDE, &mut placed);
             break;
         };
         let hit = Hit::App(at as u16);
@@ -831,9 +880,14 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         }
         placed.push((x, y, if named { cell_w } else { APP_SIDE }, cell_h, hit));
     }
-    // (Its things first: a press finds a thing before the room round it.)
-    hits.extend(placed);
+    frame.unclip();
+    // (Its things first, as much of them as shows: a press finds a thing before the list, and the room round it.)
+    hits.extend(placed.into_iter().filter_map(|hit| shown_in(hit, view)));
+    if most > 0.0 {
+        hits.push((left, top, width, tall, Hit::List(List::Apps, most.to_bits())));
+    }
     hits.push((left - 4.0, top - SHELF_GAP - HEAD - HEAD_GAP, width + 8.0, tall + SHELF_GAP + HEAD + HEAD_GAP + 4.0, Hit::AppsArea));
+    scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
 }
 
 /// Quick launch's lane as a rail along the panel's edge (`area`, at `side`): what is kept at hand, a picture each,
@@ -878,11 +932,7 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
     }
     frame.unclip();
     // (Only what shows of them is pressed.)
-    hits.extend(placed.into_iter().filter_map(|(x, y, w, h, hit)| {
-        let (left, top) = (x.max(view_x), y.max(view_y));
-        let (right, bottom) = ((x + w).min(view_x + view_w), (y + h).min(view_y + view_h));
-        (right > left && bottom > top).then_some((left, top, right - left, bottom - top, hit))
-    }));
+    hits.extend(placed.into_iter().filter_map(|hit| shown_in(hit, (view_x, view_y, view_w, view_h))));
     if most > 0.0 {
         hits.push((view_x, view_y, view_w, view_h, Hit::List(List::Apps, most.to_bits())));
     }
@@ -963,7 +1013,7 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
         return vec![head(lang.pick("中转站", "Station"), count, "", false), Block::Shelf { tiles, shows: Shows::Row, tall: TILE_H, said, over: shown.over }];
     }
     let copies = shown.history;
-    let tab = if copies { tab } else { Tab::Shelf };
+    let tab = if !copies && tab == Tab::Copies { Tab::Shelf } else { tab };
     let newest = shown.items.iter().filter(|item| item.copied).map(|item| item.id).max().unwrap_or(0);
     // (Their first showing takes all there are for seen.)
     let _ = COPIES_SEEN.compare_exchange(u64::MAX, newest, Ordering::Relaxed, Ordering::Relaxed);
@@ -1846,7 +1896,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             blocks
         }
         "station" => station_lane(full, scene.tab, lang),
-        "apps" => apps_lane(full, lang),
+        "apps" => apps_lane(full, scene.theme, lang),
         "notes" => notes_lane(full, lang),
         id if id.starts_with(STUCK_NOTE) => return stuck_note_lane(&id[STUCK_NOTE.len()..], lang),
         // What plays, in a widget merged with readings: drawn apart (see `Scene::music_apart`), its lane its head and
@@ -1982,6 +2032,9 @@ pub enum RailSide {
 /// A rail's width beside the columns, and its height under them.
 pub const RAIL_W: f32 = 60.0;
 pub const RAIL_ROW: f32 = 56.0;
+/// The least a rail down a side is tall: its foot's buttons, a thing over them, and the room round them (see
+/// `paint_rail`).
+const RAIL_LEAST: f32 = 4.0 * RAIL_CELL + 16.0;
 
 #[derive(Clone)]
 pub struct Layout {
@@ -2052,6 +2105,11 @@ impl Layout {
         self.rail = Some((at, side));
         self.bar_gap = 0.0;
         self.bar_height = 0.0;
+        // (A rail down a side as tall as the columns, and no shorter than its foot and a thing over it: with few
+        // lanes, or none, beside it, the columns are drawn as tall.)
+        if side != RailSide::Bottom {
+            self.lanes_height = self.lanes_height.max(RAIL_LEAST);
+        }
         self
     }
 
@@ -2546,8 +2604,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (Block::Notes { notes, view, tall }, Pass::Content) => {
                 paint_notes(frame, scene, (left, y + SHELF_GAP, width), notes, *view, *tall, hits);
             }
-            (Block::Apps { apps, named, .. }, Pass::Content) => {
-                paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, *named, hits);
+            (Block::Apps { apps, rows, named }, Pass::Content) => {
+                paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, *rows, *named, hits);
             }
             (Block::Recent { rows, filter, tall }, Pass::Content) => {
                 paint_recent(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *filter, *tall, hits);
@@ -2578,16 +2636,32 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
     let mut x = left - pad;
     let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), if count > 0 { count.to_string() } else { String::new() }, false)];
     if let Some(fresh) = copies {
-        pages.push((Tab::Copies, lang.pick("最近复制", "Recently copied"), if fresh > 0 && tab != Tab::Copies { fresh.to_string() } else { String::new() }, true));
+        pages.push((Tab::Copies, lang.pick("最近复制", "Copied"), if fresh > 0 && tab != Tab::Copies { fresh.to_string() } else { String::new() }, true));
     }
     if recent {
         // (Chosen again, with the filter it had.)
         let filter = if let Tab::Recent(filter) = tab { filter } else { Default::default() };
-        pages.push((Tab::Recent(filter), lang.pick("最近文件", "Recent files"), String::new(), false));
+        pages.push((Tab::Recent(filter), lang.pick("最近文件", "Recent"), String::new(), false));
     }
-    for (page, name, aside, badge) in pages {
-        let name_w = frame.measure(name, font);
-        let aside_w = if aside.is_empty() { 0.0 } else if badge { frame.measure(&aside, small) + 10.0 } else { frame.measure(&aside, small) };
+    // (In the room the buttons at the end leave, whichever page shows: names that do not fit there shortened, each
+    // to a like share of it. A tab's room never reaches a button's.)
+    let gap = if theme.skin == Skin::Paper { 16.0 } else { 2.0 };
+    let room = width + pad - (MEDIA_ROW + 2.0 + MEDIA_ROW + 12.0 + 6.0);
+    let measured: Vec<(f32, f32)> = pages.iter().map(|(_, name, aside, badge)| {
+        let aside_w = if aside.is_empty() { 0.0 } else if *badge { frame.measure(aside, small) + 10.0 } else { frame.measure(aside, small) };
+        (frame.measure(name, font), aside_w)
+    }).collect();
+    let whole: f32 = measured.iter().map(|(name_w, aside_w)| 2.0 * pad + name_w + if *aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).sum::<f32>() + gap * (pages.len() - 1) as f32;
+    let share = (room - gap * (pages.len() - 1) as f32) / pages.len() as f32;
+    for ((page, name, aside, badge), (name_w, aside_w)) in pages.into_iter().zip(measured) {
+        let (name, name_w) = if whole > room {
+            let fit = (share - 2.0 * pad - if aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).min(name_w).max(0.0);
+            let name = fitted(frame, name, font, fit);
+            let name_w = frame.measure(&name, font);
+            (name, name_w)
+        } else {
+            (name.into(), name_w)
+        };
         let wide = pad + name_w + if aside_w > 0.0 { 5.0 + aside_w } else { 0.0 } + pad;
         let chosen = page == tab;
         let hovered = scene.hover == Some(Hit::Tab(page));
@@ -2604,7 +2678,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
             }
         }
         let name_top = top + (HEAD - font.size) / 2.0 - 1.0;
-        frame.text(name, font, if chosen || hovered { theme.text } else { theme.text3 }, x + pad, name_top, name_w + 1.0, Align::Start);
+        frame.text(&name, font, if chosen || hovered { theme.text } else { theme.text3 }, x + pad, name_top, name_w + 1.0, Align::Start);
         if aside_w > 0.0 {
             let ax = x + pad + name_w + 5.0;
             if badge {
@@ -2616,7 +2690,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
             }
         }
         hits.push((x, row, wide, TAB_H, Hit::Tab(page)));
-        x += wide + if theme.skin == Skin::Paper { 16.0 } else { 2.0 };
+        x += wide + gap;
     }
     // At the end, the rest's menu; before it, while what is on it shows, how it shows (its view's mark, and a chevron).
     let more = left + width - MEDIA_ROW;
@@ -2796,7 +2870,7 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 }
             }
         }
-        hits.push((x, y, place.w, place.h, Hit::Shelf(tile.id)));
+        hits.extend(shown_in((x, y, place.w, place.h, Hit::Shelf(tile.id)), (left - 4.0, top, width + 8.0, tall)));
     }
     frame.unclip();
     // What the wheel scrolls, and where something dragged may be dropped: all of its lane, its head too (after its
@@ -2822,20 +2896,24 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
     use crate::station::recent::Filter;
     let theme = scene.theme;
     let lang = scene.lang;
-    // The choices.
+    // The choices, all in the row: the room round their names narrowed where they do not fit, then their names
+    // shortened, each to a like share of it.
+    let names = Filter::ALL.map(|choice| match choice {
+        Filter::All => lang.pick("全部", "All"),
+        Filter::Downloads => lang.pick("下载", "Downloads"),
+        Filter::Screenshots => lang.pick("截图", "Screenshots"),
+        Filter::Documents => lang.pick("文档", "Documents"),
+        Filter::Pictures => lang.pick("图片和视频", "Pictures"),
+    });
+    let gaps = 4.0 * (names.len() - 1) as f32;
+    let words: f32 = names.iter().map(|name| frame.measure(name, theme.small)).sum();
+    let pad = ((width - gaps - words) / (2.0 * names.len() as f32)).clamp(4.0, CHIP_PAD);
+    let share = (width - gaps) / names.len() as f32;
+    let shortened = words + 2.0 * pad * names.len() as f32 + gaps > width;
     let mut x = left;
-    for choice in Filter::ALL {
-        let name = match choice {
-            Filter::All => lang.pick("全部", "All"),
-            Filter::Downloads => lang.pick("下载", "Downloads"),
-            Filter::Screenshots => lang.pick("截图", "Screenshots"),
-            Filter::Documents => lang.pick("文档", "Documents"),
-            Filter::Pictures => lang.pick("图片和视频", "Pictures"),
-        };
-        let wide = frame.measure(name, theme.small) + 2.0 * CHIP_PAD;
-        if x + wide > left + width {
-            break;
-        }
+    for (choice, name) in Filter::ALL.into_iter().zip(names) {
+        let name = if shortened { fitted(frame, name, theme.small, share - 2.0 * pad) } else { name.into() };
+        let wide = frame.measure(&name, theme.small) + 2.0 * pad;
         let chosen = choice == filter;
         let hit = Hit::Tab(Tab::Recent(choice));
         let radius = if theme.skin == Skin::Glass { CHIP_H / 2.0 } else { theme.control_radius.min(CHIP_H / 2.0) };
@@ -2847,7 +2925,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
             (false, _) => (theme.track, theme.text2),
         };
         frame.fill_rounded(ground, x, top, wide, CHIP_H, radius);
-        centred(frame, name, theme.small, words, x, top + (CHIP_H - LINE) / 2.0, wide);
+        centred(frame, &name, theme.small, words, x, top + (CHIP_H - LINE) / 2.0, wide);
         hits.push((x, top, wide, CHIP_H, hit));
         x += wide + 4.0;
     }
@@ -2898,7 +2976,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
         frame.text(&row.when, theme.small, theme.text3, left + width - when_w, y + (LIST_ROW - LINE) / 2.0, when_w + 1.0, Align::Start);
-        hits.push((left, y, width, LIST_ROW, Hit::Recent(row.file)));
+        hits.extend(shown_in((left, y, width, LIST_ROW, Hit::Recent(row.file)), (left - 4.0, list_top, width + 8.0, list_tall)));
     }
     frame.unclip();
     // (After its rows: a press finds a row before the list it is on.)
@@ -2912,6 +2990,14 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
 const CHIP_H: f32 = 22.0;
 const CHIP_PAD: f32 = 9.0;
 const DAY_ROW: f32 = 22.0;
+
+/// `hit` as much of it as shows in a list's room (`x`, `y`, `w`, `h`, what it is drawn clipped to): none where none of
+/// it does. (A thing half scrolled out is pressed only where it shows: else under the list's edge, on what lies there.)
+fn shown_in(hit: HitBox, (x, y, w, h): (f32, f32, f32, f32)) -> Option<HitBox> {
+    let (left, top) = (hit.0.max(x), hit.1.max(y));
+    let (right, bottom) = ((hit.0 + hit.2).min(x + w), (hit.1 + hit.3).min(y + h));
+    (right > left && bottom > top).then_some((left, top, right - left, bottom - top, hit.4))
+}
 
 /// A thin thumb beside a list `tall` high, its whole `whole` tall, scrolled `scroll` of `most`: where in it the view is.
 #[allow(clippy::too_many_arguments)]
@@ -2981,7 +3067,7 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         let room = width - LIST_PICTURE - 10.0;
         frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
-        hits.push((left, y, width, LIST_ROW, Hit::Copied(row.id)));
+        hits.extend(shown_in((left, y, width, LIST_ROW, Hit::Copied(row.id)), (left - 4.0, top, width + 8.0, tall)));
     }
     frame.unclip();
     // (After its rows: a press finds a row before the list it is on.)
@@ -3330,7 +3416,7 @@ otepad.exe", "Notepad"),
                 let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::App(1)), thumbs: &RESTING, pinned: true, overlay: false, buttons: true, newer: false };
                 let lanes = vec![
                     Lane { id: "station".into(), blocks: station_lane(true, Tab::Shelf, Lang::Zh), ink: theme.ink("station") },
-                    Lane { id: "apps".into(), blocks: apps_lane(true, Lang::Zh), ink: theme.ink("apps") },
+                    Lane { id: "apps".into(), blocks: apps_lane(true, &theme, Lang::Zh), ink: theme.ink("apps") },
                 ];
                 for (column, side) in sides.iter().enumerate() {
                     let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
@@ -3809,6 +3895,153 @@ six".into()));
         paint_recent(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &rows, Default::default(), STATION_TALL, &mut hits);
         let row = hits.iter().find(|hit| hit.4 == Hit::Recent(crate::station::recent::Key { drive: 'C', file: 1 })).copied().unwrap();
         assert_eq!(first(&hits, row.0 + 5.0, row.1 + 5.0), Some(Hit::Recent(crate::station::recent::Key { drive: 'C', file: 1 })));
+    }
+
+    /// A list scrolled part way, each of its things pressed only where it shows: none reaches past the list's room
+    /// (onto what lies under it), on the station's pages, the notes' views and quick launch.
+    #[test]
+    fn a_thing_half_shown_is_pressed_only_where_it_shows() {
+        let theme = Theme::new(Skin::Fluent, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let mut scrolls = Scrolls::default();
+        for list in [List::Shelf, List::Copies, List::Recent, List::Notes, List::Apps] {
+            scrolls.turn(list, 17.0, 1000.0);
+        }
+        for _ in 0..200 {
+            scrolls.ease(1.0, 0.1);
+        }
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let ink = theme.ink("station");
+        let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false };
+        let many: Vec<Tile> = (1..=40).map(tile).collect();
+        let within = |hits: &[HitBox], top: f32, tall: f32, what: &str| {
+            for hit in hits.iter().filter(|hit| matches!(hit.4, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_) | Hit::Note(_) | Hit::App(_) | Hit::AddApp)) {
+                assert!(hit.1 >= top - 0.01 && hit.1 + hit.3 <= top + tall + 0.01, "{what}: {hit:?} past {top}..{}", top + tall);
+            }
+        };
+        let (top, width) = (100.0, 320.0);
+        for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Pictures)] {
+            let mut hits = Vec::new();
+            paint_shelf(&Nothing, &scene, ink, (0.0, top, width), &many, shows, STATION_TALL, None, false, &mut hits);
+            within(&hits, top, STATION_TALL, &format!("{shows:?}"));
+        }
+        let mut hits = Vec::new();
+        paint_copies(&Nothing, &scene, ink, (0.0, top, width), &many, STATION_TALL, &mut hits);
+        within(&hits, top, STATION_TALL, "copies");
+        let rows: Vec<Lately> = (1..=40).map(|file| Lately { file: crate::station::recent::Key { drive: 'C', file }, day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new() }).collect();
+        let mut hits = Vec::new();
+        paint_recent(&Nothing, &scene, ink, (0.0, top, width), &rows, Default::default(), STATION_TALL, &mut hits);
+        within(&hits, top + CHIP_H + 6.0, STATION_TALL - CHIP_H - 6.0, "recent");
+        let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default() }).collect();
+        for view in [crate::settings::NotesView::Deck, crate::settings::NotesView::Cards, crate::settings::NotesView::List] {
+            let mut hits = Vec::new();
+            paint_notes(&Nothing, &scene, (0.0, top, width), &notes, view, NOTES_TALL, &mut hits);
+            within(&hits, top, NOTES_TALL, &format!("{view:?}"));
+        }
+        let apps: Vec<(String, String)> = (0..14).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
+        let mut hits = Vec::new();
+        paint_apps(&Nothing, &scene, (0.0, top, width), &apps, APP_ROWS, true, &mut hits);
+        within(&hits, top, APP_ROWS as f32 * APP_CELL_H + (APP_ROWS - 1) as f32 * APP_GAP, "apps");
+    }
+
+    /// The deck's strips scroll to every note there is (thirteen: more than fit over the last written's card); the
+    /// first not among them.
+    #[test]
+    fn the_deck_reaches_every_note() {
+        let theme = Theme::new(Skin::Fluent, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default() }).collect();
+        let pressed = |scrolls: Scrolls| {
+            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+            let mut hits = Vec::new();
+            paint_notes(&Nothing, &scene, (0.0, 0.0, 320.0), &notes, crate::settings::NotesView::Deck, NOTES_TALL, &mut hits);
+            hits.iter().filter_map(|hit| if let Hit::Note(at) = hit.4 { Some(at) } else { None }).collect::<Vec<_>>()
+        };
+        let at_top = pressed(Scrolls::default());
+        assert!(at_top.contains(&0) && at_top.contains(&1) && !at_top.contains(&12), "{at_top:?}");
+        let mut scrolls = Scrolls::default();
+        scrolls.turn(List::Notes, 10_000.0, 10_000.0);
+        for _ in 0..200 {
+            scrolls.ease(1.0, 0.1);
+        }
+        let at_end = pressed(scrolls);
+        assert!(at_end.contains(&0) && at_end.contains(&12), "{at_end:?}");
+    }
+
+    /// A list shown another way, or under another filter, starts at its top; shown as before, it stays where it was.
+    #[test]
+    fn a_list_shown_another_way_starts_at_its_top() {
+        let mut scrolls = Scrolls::default();
+        scrolls.follow([0, 0, 0, 0, 0, 1]);
+        scrolls.turn(List::Notes, 80.0, 500.0);
+        scrolls.turn(List::Recent, 40.0, 500.0);
+        for _ in 0..200 {
+            scrolls.ease(1.0, 0.1);
+        }
+        scrolls.follow([0, 0, 0, 0, 0, 1]);
+        assert!(scrolls.at(List::Notes) > 79.0 && scrolls.at(List::Recent) > 39.0);
+        scrolls.follow([0, 0, 0, 0, 0, 2]);
+        assert_eq!(scrolls.at(List::Notes), 0.0);
+        assert!(scrolls.at(List::Recent) > 39.0);
+        scrolls.ease(1.0, 0.1);
+        assert_eq!(scrolls.at(List::Notes), 0.0);
+    }
+
+    /// The station's tabs, in English with counts, all three: none reaches its buttons (the view's, the menu's), in
+    /// each skin; and each of Recent files' five choices is there to press.
+    #[test]
+    fn the_station_head_leaves_its_buttons_their_room() {
+        for skin in [Skin::Fluent, Skin::Glass, Skin::Paper] {
+            let theme = Theme::new(skin, false);
+            let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let seen = Seen::of(history);
+            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+            let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
+            let mut hits = Vec::new();
+            paint_tabs(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, width), Tab::Shelf, 128, Some(57), true, ShelfView::Cards, &mut hits);
+            let buttons: Vec<HitBox> = hits.iter().filter(|hit| matches!(hit.4, Hit::StationView | Hit::StationMore)).copied().collect();
+            assert_eq!(buttons.len(), 2, "{skin:?}");
+            for tab in hits.iter().filter(|hit| matches!(hit.4, Hit::Tab(_))) {
+                for button in &buttons {
+                    assert!(tab.0 + tab.2 <= button.0, "{skin:?}: {tab:?} over {button:?}");
+                }
+            }
+            let mut hits = Vec::new();
+            paint_recent(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, width), &[], Default::default(), STATION_TALL, &mut hits);
+            let chips: Vec<HitBox> = hits.iter().filter(|hit| matches!(hit.4, Hit::Tab(Tab::Recent(_)))).copied().collect();
+            assert_eq!(chips.len(), 5, "{skin:?}");
+            assert!(chips.iter().all(|chip| chip.0 + chip.2 <= width + 0.01), "{skin:?}: {chips:?}");
+        }
+    }
+
+    /// Quick launch whole in a column: its rows as many as its things take across the room its skin leaves (the place
+    /// to add more within them, never under them).
+    #[test]
+    fn quick_launch_takes_the_rows_it_is_laid_out_in() {
+        for skin in [Skin::Fluent, Skin::Glass, Skin::Paper] {
+            let theme = Theme::new(skin, false);
+            let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
+            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let seen = Seen::of(history);
+            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+            let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
+            let across = ((width / APP_CELL_W) as usize).max(1);
+            // As many as fill the first row but the place to add more: it on the same row; one more: on a second.
+            for count in [across - 1, across] {
+                let apps: Vec<(String, String)> = (0..count).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
+                let rows = apps_rows(count, &theme);
+                let block = Block::Apps { apps: apps.clone(), rows, named: true };
+                let mut hits = Vec::new();
+                paint_apps(&Nothing, &scene, (0.0, 0.0, width), &apps, rows, true, &mut hits);
+                let adder = hits.iter().find(|hit| hit.4 == Hit::AddApp).copied().expect("the place to add more");
+                assert!(adder.1 + adder.3 <= block.height() - SHELF_GAP + 0.01, "{skin:?} {count}: {adder:?}");
+            }
+        }
     }
 
     /// The station's places as each view lays them out: cards across the column, spread over it; a list a row each;
