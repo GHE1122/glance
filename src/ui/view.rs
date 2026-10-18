@@ -152,6 +152,8 @@ pub enum Hit {
     /// track, pressed where along it the sound is to be.
     Media(crate::playing::Key, crate::playing::Follow),
     Volume,
+    /// The sound's track standing up (over its key, in what plays): pressed and dragged up and down it.
+    VolumeUp,
     /// The track of what is followed, pressed (and dragged along) where in it it is to play from.
     Seek(crate::playing::Follow),
     /// A drive's row in the storage lane: the drive opened, by its letter (not its place among the drives seen: a
@@ -171,10 +173,15 @@ impl Hit {
     /// The track it is, where it is one dragged along.
     pub fn slider(self) -> Option<crate::playing::Slider> {
         match self {
-            Hit::Volume => Some(crate::playing::Slider::Volume),
+            Hit::Volume | Hit::VolumeUp => Some(crate::playing::Slider::Volume),
             Hit::Seek(follow) => Some(crate::playing::Slider::Seek(follow)),
             _ => None,
         }
+    }
+
+    /// Whether it is a track standing up (dragged along from its bottom).
+    pub fn upright(self) -> bool {
+        self == Hit::VolumeUp
     }
 
     /// How far the process list scrolls, for a hit on it.

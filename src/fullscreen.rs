@@ -632,8 +632,8 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
         hits.push(((x, row, cell, cell), hit));
         x += cell + 18.0;
     }
-    // The track, short, above them; its times at its ends. Under the pointer (or dragged), thicker, its knob on it,
-    // and over the pointer the time it is at: where its player lets it be moved along (QQ Music does not), else only
+    // The track, short, above them; its times at its ends. Under the pointer (or dragged), brighter, and over the
+    // pointer the time it is at: where its player lets it be moved along (QQ Music does not), else only
     // how far it is.
     if let Some((length, seekable)) = length.filter(|(length, _)| *length > 0.0) {
         let time = Font::new(Family::Segoe, 12.0, 500.0);
@@ -648,10 +648,9 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
         if let Some((px, _)) = pointer.filter(|_| lit) {
             let at = ((px - from) / wide).clamp(0.0, 1.0);
             let said = clock(at as f64 * length);
-            let pill = frame.measure(&said, time) + 16.0;
-            let x = (from + wide * at - pill / 2.0).clamp(from - 8.0, from + wide - pill + 8.0);
-            frame.fill_rounded(Color::hex(0x000000, 0.6 * shown), x, y - 36.0, pill, 22.0, 6.0);
-            frame.text(&said, time, Color::hex(0xFFFFFF, 0.95 * shown), x + 8.0, y - 33.0, pill, Align::Start);
+            let pill = frame.measure(&said, time);
+            let x = (from + wide * at - pill / 2.0).clamp(from, from + wide - pill);
+            said_bare(frame, &said, time, x, y - 30.0, shown);
         }
         if seekable {
             hits.push(((from - 8.0, y - 10.0, wide + 16.0, 20.0), Hit::Track));
@@ -676,22 +675,24 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
     frame.icon(if muted || level == 0 { Icon::Muted } else { Icon::Volume }, Point { x: mute_x + cell / 2.0, y: middle }, 20.0, ink(on_icon));
     hits.push(((mute_x, row, cell, cell), Hit::Mute));
     if *volume_open {
+        // On nothing but the picture, as the track is: the line alone, and, the pointer over it, beside the pointer
+        // how loud that place along it is.
         let fraction = if muted { 0.0 } else { level as f32 / 100.0 };
-        frame.fill_rounded(Color::hex(0x000000, 0.45 * shown), pop_x, pop_y, pop_w, pop_h, pop_w / 2.0);
-        let said = match sound {
-            Some(_) => format!("{}%", if muted { 0 } else { level }),
-            None => "—".to_string(),
-        };
         let small = Font::new(Family::Segoe, 12.0, 600.0);
-        let wide = frame.measure(&said, small);
-        frame.text(&said, small, Color::hex(0xFFFFFF, 0.9 * shown), pop_x + (pop_w - wide) / 2.0, pop_y + 10.0, pop_w, Align::Start);
         let (top, bottom) = volume_bar((pop_x, pop_y, pop_w, pop_h));
-        let lit = under(pop_x, pop_y, pop_w, pop_h) || dragging == Some(Hit::Volume);
-        let thick = if lit { 5.0 } else { 3.0 };
+        let over = under(pop_x, pop_y, pop_w, pop_h);
+        let lit = over || dragging == Some(Hit::Volume);
+        let thick = 3.0;
         let x = pop_x + pop_w / 2.0 - thick / 2.0;
         frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 0.3 } else { 0.22 } * shown), x, top, thick, bottom - top, thick / 2.0);
         let filled = (bottom - top) * fraction;
         frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 1.0 } else { 0.85 } * shown), x, bottom - filled, thick, filled, thick / 2.0);
+        if let Some((_, py)) = pointer.filter(|_| over) {
+            let at = ((bottom - py) / (bottom - top)).clamp(0.0, 1.0);
+            let said = format!("{}%", (at * 100.0).round() as u32);
+            let wide = frame.measure(&said, small);
+            said_bare(frame, &said, small, pop_x + pop_w / 2.0 - 12.0 - wide, py.clamp(top, bottom) - 8.0, shown);
+        }
         hits.push(((pop_x, pop_y, pop_w, pop_h), Hit::Volume));
     }
 }
@@ -699,15 +700,22 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
 /// The volume's bar standing up over its icon: how wide and tall it is, round its line.
 const VOLUME_POP: (f32, f32) = (40.0, 156.0);
 
-/// Where the volume's line runs in its bar `(x, y, w, h)`: from its top (under its level said) to its bottom.
+/// Where the volume's line runs in its bar `(x, y, w, h)`: from near its top to near its bottom.
 fn volume_bar((_, y, _, h): (f32, f32, f32, f32)) -> (f32, f32) {
-    (y + 34.0, y + h - 16.0)
+    (y + 16.0, y + h - 16.0)
+}
+
+/// Words said over the picture with nothing under them: white, a soft dark glow round them to be read on any part of
+/// the smoke.
+fn said_bare(frame: &Frame, said: &str, font: Font, x: f32, y: f32, shown: f32) {
+    frame.glow(Color::hex(0x000000, 0.55 * shown), 3.0, |frame| frame.text(said, font, Color::hex(0x000000, 1.0), x, y, 200.0, Align::Start));
+    frame.text(said, font, Color::hex(0xFFFFFF, 0.95 * shown), x, y, 200.0, Align::Start);
 }
 
 /// A slider along `(x, y, wide)` (its middle line), `fraction` of it filled, `shown` of it drawn: a thin line,
-/// thicker and brighter where it is `lit` (the pointer over it, or dragged); no knob (the screen kept spare).
+/// brighter where it is `lit` (the pointer over it, or dragged), never thicker; no knob (the screen kept spare).
 fn slider(frame: &Frame, (x, y, wide): (f32, f32, f32), fraction: f32, lit: bool, shown: f32) {
-    let thick = if lit { 5.0 } else { 3.0 };
+    let thick = 3.0;
     frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 0.3 } else { 0.22 } * shown), x, y - thick / 2.0, wide, thick, thick / 2.0);
     frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 1.0 } else { 0.85 } * shown), x, y - thick / 2.0, wide * fraction, thick, thick / 2.0);
 }
@@ -741,7 +749,7 @@ mod pictures {
                 smoke.paint(frame, rect(0.0, 0.0, w, h));
                 draw_lines(frame, (w, h), &lines, Some(0), None, 12.6, 3.0, &music);
                 let mut hits = Vec::new();
-                draw_controls(frame, (w, h), 1.0, Some((w / 2.0, h - 88.0)), None, &mut true, true, true, 80.0, Some(226.0), &mut hits);
+                draw_controls(frame, (w, h), 1.0, Some((w / 2.0, h - 88.0)), None, &mut true, true, true, 80.0, Some((226.0, true)), &mut hits);
             })
             .unwrap();
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));

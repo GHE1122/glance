@@ -304,7 +304,8 @@ enum Drag {
     Size { edges: (bool, bool, bool, bool), from: POINT, room: (f32, f32), corner: POINT },
     /// A track slid along (the sound's, or that of what plays): which, where it begins and how wide it is (from the
     /// widget's corner, its own DIPs).
-    Slide { slider: crate::playing::Slider, from: f32, wide: f32 },
+    /// A track pressed: where it begins and how long it is (DIPs, its own; a track standing up begins at its bottom).
+    Slide { slider: crate::playing::Slider, from: f32, wide: f32, upright: bool },
 }
 
 /// What the widgets are drawn with, as the panel has them now.
@@ -2157,8 +2158,11 @@ impl Widget {
         self.anchor = None;
         // On the sound's track: it is slid along till let go (pinned or not: that is not moving it).
         let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
-        if let Some((hx, _, wide, _, hit)) = self.hits.iter().find(|(hx, hy, w, h, hit)| hit.slider().is_some() && lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).copied() {
-            self.drag = Some(Drag::Slide { slider: hit.slider().unwrap(), from: hx + self.hits_from.0, wide });
+        if let Some((hx, hy, wide, tall, hit)) = self.hits.iter().find(|(hx, hy, w, h, hit)| hit.slider().is_some() && lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).copied() {
+            self.drag = Some(match hit.upright() {
+                true => Drag::Slide { slider: hit.slider().unwrap(), from: hy + tall + self.hits_from.1, wide: tall, upright: true },
+                false => Drag::Slide { slider: hit.slider().unwrap(), from: hx + self.hits_from.0, wide, upright: false },
+            });
             unsafe { SetCapture(self.window.hwnd) };
             self.slide();
             return;
@@ -2209,9 +2213,10 @@ impl Widget {
     /// Follows the pointer while it is in hand.
     /// The track slid along as far as where the pointer is along it.
     fn slide(&self) {
-        let (Some(Drag::Slide { slider, from, wide }), Some(cursor)) = (&self.drag, cursor_position()) else { return };
-        let x = (cursor.x - self.at.x) as f32 / (self.contact.scale * self.zoom);
-        crate::playing::slide_along(*slider, (x - from) / wide);
+        let (Some(Drag::Slide { slider, from, wide, upright }), Some(cursor)) = (&self.drag, cursor_position()) else { return };
+        let px = self.contact.scale * self.zoom;
+        let along = if *upright { from - (cursor.y - self.at.y) as f32 / px } else { (cursor.x - self.at.x) as f32 / px - from };
+        crate::playing::slide_along(*slider, along / wide);
     }
 
     fn follow(&mut self, now: Instant) {

@@ -1322,6 +1322,7 @@ impl crate::ui::life::Lives for Panel<'_> {
         }
         self.layers.release();
         self.music.release();
+        self.music_layer.release();
         self.last_layout = None;
         self.turning = None;
         self.turned.clear();
@@ -1351,6 +1352,12 @@ struct Panel<'a> {
     layers: PanelLayers,
     /// What plays, drawn whole where the edge it opened from holds it.
     music: crate::ui::music::Music,
+    /// The layer what plays is drawn in, anew at each frame, and how many frames it has drawn. (Not straight onto the
+    /// surface: text drawn straight onto it comes out a little differently in each place of the compositor's atlas
+    /// the frames go to, and shook by a pixel frame by frame; a layer is drawn in its own place and put on whole
+    /// pixels, as a widget's is.)
+    music_layer: crate::ui::gfx::Layer,
+    music_frames: u64,
     phase: Phase,
     /// 0 at rest on screen, 1 slid out.
     shift: Transition,
@@ -1481,6 +1488,8 @@ impl<'a> Panel<'a> {
             surface,
             layers: PanelLayers::default(),
             music: crate::ui::music::Music::default(),
+            music_layer: crate::ui::gfx::Layer::default(),
+            music_frames: 0,
             showing: None,
             phase: Phase::Hidden,
             shift: Transition::settled(1.0),
@@ -2223,9 +2232,11 @@ impl<'a> Panel<'a> {
     fn slide(&mut self, client: POINT) -> Option<()> {
         let slider = self.sliding?;
         let px = self.placement.as_ref()?.px;
-        let x = client.x as f32 / px - self.corner.0;
-        let (from, wide) = self.hits.iter().find(|hit| hit.4.slider() == Some(slider)).map(|(hx, _, w, ..)| (*hx, *w))?;
-        crate::playing::slide_along(slider, (x - from) / wide);
+        let (x, y) = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
+        let (hx, hy, w, h, hit) = *self.hits.iter().find(|hit| hit.4.slider() == Some(slider))?;
+        // (A track standing up, along from its bottom.)
+        let fraction = if hit.upright() { (hy + h - y) / h } else { (x - hx) / w };
+        crate::playing::slide_along(slider, fraction);
         self.next_frame = Instant::now();
         Some(())
     }
@@ -2299,8 +2310,15 @@ impl<'a> Panel<'a> {
             return;
         }
         let (width, height) = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);
-        let across = (e.left || e.right).then(|| (width + if e.right { dx } else { -dx } as f32) / width);
-        let down = (e.top || e.bottom).then(|| (height + if e.bottom { dy } else { -dy } as f32) / height);
+        // (Centred on its edge, it grows on both sides along it: the side pulled follows the hand, so twice the pull.)
+        let centred = !self.floating() && self.controller.config.lock().unwrap().anchor == crate::settings::Anchor::Center;
+        let (twice_x, twice_y) = match (centred, self.edge) {
+            (true, Edge::Top) => (2, 1),
+            (true, _) => (1, 2),
+            (false, _) => (1, 1),
+        };
+        let across = (e.left || e.right).then(|| (width + (if e.right { dx } else { -dx } * twice_x) as f32) / width);
+        let down = (e.top || e.bottom).then(|| (height + (if e.bottom { dy } else { -dy } * twice_y) as f32) / height);
         let ratio = match (across, down) {
             (Some(a), Some(d)) => a.max(d),
             (Some(a), None) => a,
@@ -2354,9 +2372,14 @@ impl<'a> Panel<'a> {
         let (e, r) = (drag.edges, drag.rect);
         let Some(placement) = &self.placement else { return };
         let (contact, px) = (placement.contact, placement.px);
+        // Centred on its edge (as the settings place it), it grows and shrinks along the edge on both sides at once,
+        // its middle where it was: the side pulled follows the hand, so twice as much is given or taken.
+        let centred = !self.floating() && self.controller.config.lock().unwrap().anchor == crate::settings::Anchor::Center;
+        let (along_x, along_y) = if self.edge == Edge::Top { (2.0, 1.0) } else { (1.0, 2.0) };
+        let (twice_x, twice_y) = if centred { (along_x, along_y) } else { (1.0, 1.0) };
         let grown = (
-            if e.right { dx } else if e.left { -dx } else { 0 } as f32 / px,
-            if e.bottom { dy } else if e.top { -dy } else { 0 } as f32 / px,
+            if e.right { dx } else if e.left { -dx } else { 0 } as f32 / px * twice_x,
+            if e.bottom { dy } else if e.top { -dy } else { 0 } as f32 / px * twice_y,
         );
         let most = self.music_most(contact, px);
         let least = crate::ui::music::LEAST;
@@ -2383,7 +2406,7 @@ impl<'a> Panel<'a> {
                 right: e.left,
                 bottom: e.top,
             });
-        } else {
+        } else if !centred {
             // Against it, centred along it where it is held: the edge across from the one pulled stays.
             match edge {
                 Edge::Left | Edge::Right if e.top => placement.anchor.y = r.bottom - height / 2,
@@ -2825,6 +2848,9 @@ impl<'a> Panel<'a> {
         let pointer = cursor_position().map(|cursor| ((cursor.x - window.left) as f32 / px - x, (cursor.y - window.top) as f32 / px - y)).filter(|(px_x, px_y)| *px_x >= 0.0 && *px_y >= 0.0 && *px_x < size.0 && *px_y < size.1);
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
         let music = &mut self.music;
+        let layer = &mut self.music_layer;
+        self.music_frames += 1;
+        let key = self.music_frames;
         let mut painted = None;
         let pinned = self.pinned;
         // Its settings and its pin (as the readings' bar has them) and the full screen, at its top right while the
@@ -2839,12 +2865,22 @@ impl<'a> Panel<'a> {
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
             frame.origin(x, y);
-            painted = Some(music.paint(frame, size, &shows, crate::ui::music::Ground::of(&shows), px, pointer, now));
+            // (Round it, the room for its shadow.)
+            let area = (-24.0, -24.0, size.0 + 48.0, size.1 + 48.0);
+            let drew = layer.draw(frame, key, windows_numerics::Matrix3x2::identity(), area, px, None, |frame| {
+                painted = Some(music.paint(frame, size, &shows, crate::ui::music::Ground::of(&shows), px, pointer, now));
+                Ok(())
+            });
+            if drew.is_err() {
+                painted = None;
+            }
             if let Some((px_x, px_y)) = pointer {
                 let ground = music.ground_colour(size);
-                let (side, gap, inset) = (crate::ui::buttons::SIZE, crate::ui::buttons::GAP, 12.0);
+                let (side, gap) = (crate::ui::buttons::SIZE, crate::ui::buttons::GAP);
+                // (Lined up with what it shows: their tops with the cover's, their right end with the time left's.)
+                let (top, right) = music.top_right(size, &shows);
                 for (index, (button, hit)) in [(crate::ui::buttons::Button::Pin, Hit::Pin), (crate::ui::buttons::Button::Settings, Hit::Settings), (crate::ui::buttons::Button::Full, Hit::Full)].into_iter().enumerate() {
-                    let (bx, by) = (size.0 - inset - side - index as f32 * (side + gap), inset);
+                    let (bx, by) = (right - side - index as f32 * (side + gap), top);
                     let over = px_x >= bx && px_x < bx + side && px_y >= by && px_y < by + side;
                     let lit = (button == crate::ui::buttons::Button::Pin && pinned) || over;
                     crate::ui::buttons::paint_on(frame, crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 }, button, lit, ground);

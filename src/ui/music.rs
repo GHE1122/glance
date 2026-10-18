@@ -204,11 +204,22 @@ impl Fonts {
     }
 }
 
-/// The three that are pressed (what goes back, pauses or plays, and skips): the side of each.
-const CONTROL: f32 = 28.0;
+/// The three that are pressed (what goes back, pauses or plays, and skips), and the sound's: the side of each, of its
+/// drawing, and of the one that pauses or plays; and the room between them in a row.
+const CONTROL: f32 = 32.0;
+const KEY_ICON: f32 = 18.0;
+const TOGGLE_ICON: f32 = 22.0;
+const KEY_GAP: f32 = 2.0;
+/// How far inside a key's box its drawing begins (its outer stroke, as the icons are drawn on a 24 grid): a row of
+/// them is lined up with what is above it by their drawings, not their boxes.
+const KEY_LEAD: f32 = (CONTROL - KEY_ICON) / 2.0 + KEY_ICON * 4.0 / 24.0;
+/// The sound's drawing reaches nearer its box's right side (to 23 of the 24).
+const SOUND_TRAIL: f32 = (CONTROL - KEY_ICON) / 2.0 + KEY_ICON * 1.0 / 24.0;
+/// How tall the sound's track standing up over its key is, at most (DIPs).
+const SOUND_UP: f32 = 96.0;
 /// The spectrum's row of its own, under kept controls, and the room between rows (DIPs).
 const SPECTRUM_ROW: f32 = 24.0;
-const ROW_GAP: f32 = 6.0;
+const ROW_GAP: f32 = 12.0;
 /// How fast a band of the spectrum falls, at most (of its whole height, a second): from full, in about 0.6 s.
 const SPECTRUM_FALL: f32 = 1.7;
 /// How long the controls take to come in over the spectrum (or go), seconds.
@@ -256,6 +267,9 @@ pub struct Music {
     ground: Layer,
     /// How far the controls have come in over the spectrum (0 to 1: in while the pointer is over it).
     controls_in: f32,
+    /// Whether the sound's track stands over its key (the pointer came onto the key, and has stayed on it or the
+    /// track since).
+    sound_open: bool,
     /// Its spectrum as shown: up at once with the sound, down no faster than `SPECTRUM_FALL`.
     bands: [f32; crate::sound::BANDS],
     /// Where in the rail of lines the line aimed at is drawn (DIPs, from its top), easing toward where it is to be (it
@@ -315,6 +329,7 @@ impl Default for Music {
             ground_pixels: None,
             ground: Layer::default(),
             controls_in: 0.0,
+            sound_open: false,
             bands: [0.0; crate::sound::BANDS],
             anchor: None,
             step: 0.0,
@@ -906,11 +921,11 @@ impl Drawing<'_> {
     /// The rows along the bottom, from `x`, `wide`, up from `edge`: the controls kept showing in a row of their own
     /// with the spectrum's row above them; else the spectrum, the controls coming over it as the pointer does. Where
     /// they leave room down to.
-    fn rows(&mut self, x: f32, edge: f32, wide: f32) -> f32 {
+    fn rows(&mut self, x: f32, edge: f32, wide: f32, beside: Option<(f32, f32)>) -> f32 {
         let row = edge - CONTROL;
         let (accent, tint) = (self.accent, self.tint);
         if self.shows.controls {
-            self.keys(x - (CONTROL - 16.0) / 2.0, row, 1.0).map(|end| self.progress(end + 10.0, x + wide, row, 1.0));
+            self.bottom_row(x, x + wide, row, 1.0, beside);
             if !self.shows.spectrum {
                 return row;
             }
@@ -923,21 +938,94 @@ impl Drawing<'_> {
             spectrum(self.frame, self.moment, (accent, tint), (x, edge - 2.0, wide, CONTROL - 4.0), 1.0 - shown_in);
         }
         if shown_in > 0.0 {
-            self.keys(x - (CONTROL - 16.0) / 2.0, row, shown_in).map(|end| self.progress(end + 10.0, x + wide, row, shown_in));
+            self.bottom_row(x, x + wide, row, shown_in, beside);
         }
         row
     }
 
-    /// What goes back, pauses or plays, and skips, in a row from `x` at `row`, `fade` of them shown (each lit under
-    /// the pointer, pressed only once they are half come); where the row ends.
-    fn keys(&mut self, mut x: f32, row: f32, fade: f32) -> Option<f32> {
+    /// The row along the bottom, from `x` to `right` (where the drawings at its ends begin and end) on `row`, `fade`
+    /// of it shown: the keys first, spread across under the cover where the cover stands over them (`beside`: the
+    /// cover's right edge, and where the words beside it begin); the track from where those words begin (else after
+    /// the keys); the sound's key last.
+    fn bottom_row(&mut self, x: f32, right: f32, row: f32, fade: f32, beside: Option<(f32, f32)>) {
+        let gap = beside.map_or(KEY_GAP, |(cover_right, _)| ((cover_right - x + 2.0 * KEY_LEAD - 3.0 * CONTROL) / 2.0).max(KEY_GAP));
+        let end = self.keys(x - KEY_LEAD, gap, row, fade);
+        let from = beside.map_or(end + 10.0, |(_, words)| words.max(end + 6.0));
+        let sound = right + SOUND_TRAIL - CONTROL;
+        self.sound_key(from, sound, row, fade);
+    }
+
+    /// The sound's key, its box at `x` on `row`, the track before it from `from`: its icon (pressed, the sound muted or
+    /// not); with the pointer on it (or on what comes), a thin track of how loud the sound is standing up over it, on
+    /// nothing but what is behind, and with the pointer on that, beside the pointer how loud that place is.
+    fn sound_key(&mut self, from: f32, x: f32, row: f32, fade: f32) {
+        self.progress(from, x - 4.0, row, fade);
+        let frame = self.frame;
+        let sound = crate::playing::sound();
+        let (level, muted) = sound.unwrap_or((0, false));
+        let inside = |(px, py): (f32, f32), x: f32, y: f32, w: f32, h: f32| px >= x && px < x + w && py >= y && py < y + h;
+        let on = self.pointer.is_some_and(|p| inside(p, x, row, CONTROL, CONTROL));
+        // The track standing up: over the key, its line along the key's middle.
+        let (up_x, up_bottom) = (x, row - 2.0);
+        let up_top = (up_bottom - SOUND_UP).max(4.0);
+        let over_up = self.pointer.is_some_and(|p| inside(p, up_x, up_top, CONTROL, row + CONTROL - up_top));
+        self.music.sound_open = sound.is_some() && fade > 0.0 && (on || crate::playing::volume_held() || (self.music.sound_open && over_up));
+        if on {
+            frame.fill_rounded(Color::hex(self.ink, 0.14 * fade), x, row, CONTROL, CONTROL, CONTROL / 2.0);
+        }
+        let ink = Color::hex(self.ink, (if on || self.music.sound_open { 1.0 } else { 0.85 }) * fade);
+        let centre = Point { x: x + CONTROL / 2.0, y: row + CONTROL / 2.0 };
+        let icon = if muted || level == 0 { Icon::Muted } else { Icon::Volume };
+        if self.edged {
+            frame.icon(icon, Point { x: centre.x + 0.6, y: centre.y + 1.0 }, KEY_ICON, Color::hex(0x000000, 0.45 * ink.a));
+        }
+        frame.icon(icon, centre, KEY_ICON, ink);
+        if self.music.controls_in >= 0.5 {
+            self.hits.push((x, row, CONTROL, CONTROL, Hit::Media(Key::Mute, crate::playing::Follow::Any)));
+        }
+        if !self.music.sound_open {
+            return;
+        }
+        let (top, bottom) = (up_top + 6.0, up_bottom - 6.0);
+        if bottom - top < 24.0 {
+            return;
+        }
+        let fraction = if muted { 0.0 } else { level as f32 / 100.0 };
+        let line = centre.x - 1.5;
+        frame.fill_rounded(Color::hex(self.ink, 0.25 * fade), line, top, 3.0, bottom - top, 1.5);
+        let filled = (bottom - top) * fraction;
+        frame.fill_rounded(colour(self.accent, 0.95 * fade), line, bottom - filled, 3.0, filled, 1.5);
+        if let Some((_, py)) = self.pointer.filter(|&p| inside(p, up_x, up_top, CONTROL, up_bottom - up_top)) {
+            let at = ((bottom - py) / (bottom - top)).clamp(0.0, 1.0);
+            let said = format!("{}%", (at * 100.0).round() as u32);
+            let wide = frame.measure(&said, self.fonts.time) + 2.0;
+            let y = py.clamp(top, bottom) - self.fonts.time.size * 0.7;
+            words(frame, &said, self.fonts.time, Color::hex(self.ink, 0.95), line - 8.0 - wide, y, wide, Align::End, true);
+        }
+        if self.music.controls_in >= 0.5 {
+            self.hits.push((up_x, top, CONTROL, bottom - top, Hit::VolumeUp));
+        }
+    }
+
+    /// The time at a place along the track, `said` over `row` (its middle at `x`, kept between `lo` and `hi`): on
+    /// nothing but what is behind, with the dark edge words have there.
+    fn pill(&self, said: &str, x: f32, lo: f32, hi: f32, row: f32) {
+        let frame = self.frame;
+        let wide = frame.measure(said, self.fonts.time) + 2.0;
+        let left = (x - wide / 2.0).clamp(lo - 4.0, hi - wide + 4.0);
+        words(frame, said, self.fonts.time, Color::hex(self.ink, 0.95), left, row - 14.0, wide, Align::Start, true);
+    }
+
+    /// What goes back, pauses or plays, and skips, their boxes in a row from `x`, `gap` apart, at `row`, `fade` of
+    /// them shown (each lit under the pointer, pressed only once they are half come); where the row ends.
+    fn keys(&mut self, mut x: f32, gap: f32, row: f32, fade: f32) -> f32 {
         let frame = self.frame;
         for (key, icon) in [(Key::Previous, Icon::SkipBack), (Key::Toggle, if self.moment.playing { Icon::Pause } else { Icon::Play }), (Key::Next, Icon::SkipForward)] {
             let on = self.pointer.is_some_and(|(px, py)| px >= x && px < x + CONTROL && py >= row && py < row + CONTROL);
             if on {
                 frame.fill_rounded(Color::hex(self.ink, 0.14 * fade), x, row, CONTROL, CONTROL, CONTROL / 2.0);
             }
-            let side = if key == Key::Toggle { 18.0 } else { 16.0 };
+            let side = if key == Key::Toggle { TOGGLE_ICON } else { KEY_ICON };
             let colour = Color::hex(self.ink, (if on { 1.0 } else { 0.85 }) * fade);
             let centre = Point { x: x + CONTROL / 2.0, y: row + CONTROL / 2.0 };
             // (With no ground, a dark edge under it, as its words have.)
@@ -948,13 +1036,13 @@ impl Drawing<'_> {
             if self.music.controls_in >= 0.5 {
                 self.hits.push((x, row, CONTROL, CONTROL, Hit::Media(key, crate::playing::Follow::Music)));
             }
-            x += CONTROL + 2.0;
+            x += CONTROL + gap;
         }
-        Some(x)
+        x - gap
     }
 
-    /// What plays's track, from `from` to `to` on `row`, with how long is left at its end, `fade` of it shown
-    /// (thicker under the pointer, or dragged; dragged, the time it is dragged to over the place it is at). Pressed and
+    /// What plays's track, from `from` to `to` on `row`, with how long is left at its end, `fade` of it shown (never
+    /// thicker: under the pointer, the time at the pointer over it; dragged, the time it is dragged to). Pressed and
     /// dragged along it (see `Hit::Seek`), what plays is shown that far in, and played from there once let go.
     fn progress(&mut self, from: f32, to: f32, row: f32, fade: f32) {
         let Some((length, seekable)) = self.moment.length.filter(|(length, _)| *length > 0.0) else { return };
@@ -970,21 +1058,15 @@ impl Drawing<'_> {
         let dragged = self.moment.dragged_to.is_some();
         let middle = row + CONTROL / 2.0;
         let fraction = (position / length).clamp(0.0, 1.0) as f32;
-        let thick = if seekable && (lit || dragged) { 5.0 } else { 3.0 };
-        frame.fill_rounded(Color::hex(self.ink, 0.2 * fade), from, middle - thick / 2.0, track, thick, thick / 2.0);
-        frame.fill_rounded(colour(self.accent, 0.95 * fade), from, middle - thick / 2.0, track * fraction, thick, thick / 2.0);
-        if seekable && (lit || dragged) {
-            frame.fill_circle(Color::hex(self.ink, fade), Point { x: from + track * fraction, y: middle }, 6.0);
-        }
+        frame.fill_rounded(Color::hex(self.ink, 0.2 * fade), from, middle - 1.5, track, 3.0, 1.5);
+        frame.fill_rounded(colour(self.accent, 0.95 * fade), from, middle - 1.5, track * fraction, 3.0, 1.5);
         words(frame, &left_over, self.fonts.time, Color::hex(self.ink, 0.6 * fade), to - time_wide, middle - self.fonts.time.size * 0.7, time_wide, Align::End, self.edged);
-        // Dragged: the time it is dragged to, over where it is.
+        // Dragged, the time it is dragged to, over where it is; else, under the pointer, the time there.
         if dragged {
-            let said = super::text::clock(position.max(0.0).round() as u32);
-            let wide = frame.measure(&said, self.fonts.time) + 12.0;
-            let x = (from + track * fraction - wide / 2.0).clamp(from - 4.0, from + track - wide + 4.0);
-            let y = row - 18.0;
-            frame.fill_rounded(Color::hex(0x000000, 0.7), x, y, wide, 17.0, 5.0);
-            frame.text(&said, self.fonts.time, Color::hex(0xFFFFFF, 0.95), x + 6.0, y + 1.5, wide, Align::Start);
+            self.pill(&super::text::clock(position.max(0.0).round() as u32), from + track * fraction, from, from + track, row);
+        } else if let Some((px, _)) = self.pointer.filter(|_| seekable && lit) {
+            let at = ((px - from) / track).clamp(0.0, 1.0) as f64;
+            self.pill(&super::text::clock((at * length).round() as u32), px, from, from + track, row);
         }
         if seekable && self.music.controls_in >= 0.5 {
             self.hits.push((from, row, track, CONTROL, Hit::Seek(crate::playing::Follow::Music)));
@@ -1032,13 +1114,13 @@ impl Drawing<'_> {
         let pad = pad_of(Layout::Strip, self.shows);
         let at = self.placed(Layout::Strip);
         let (accent, tint) = (self.accent, self.tint);
-        let keys_wide = 3.0 * CONTROL + 4.0;
+        let keys_wide = 3.0 * CONTROL + 2.0 * KEY_GAP;
         let row = (h - CONTROL) / 2.0;
         let centred = self.edged && !self.shows.cover;
         let shown_in = self.music.controls_shown();
         let mut end = w - pad;
         if self.shows.controls {
-            self.keys(end - keys_wide, row, 1.0);
+            self.keys(end + KEY_LEAD - keys_wide, KEY_GAP, row, 1.0);
             end -= keys_wide + 10.0;
             if self.shows.spectrum && !centred {
                 spectrum(self.frame, self.moment, (accent, tint), (end - 70.0, h / 2.0 + 10.0, 70.0, 20.0), 0.85);
@@ -1046,7 +1128,7 @@ impl Drawing<'_> {
             }
         } else if centred {
             if shown_in > 0.0 {
-                self.keys(pad, row, shown_in);
+                self.keys(pad - KEY_LEAD, KEY_GAP, row, shown_in);
             }
         } else {
             let wide = keys_wide.max(84.0);
@@ -1054,7 +1136,7 @@ impl Drawing<'_> {
                 spectrum(self.frame, self.moment, (accent, tint), (end - wide, h / 2.0 + 10.0, wide, 20.0), 1.0 - shown_in);
             }
             if shown_in > 0.0 {
-                self.keys(end - keys_wide, row, shown_in);
+                self.keys(end + KEY_LEAD - keys_wide, KEY_GAP, row, shown_in);
             }
             end -= wide + 12.0;
         }
@@ -1194,7 +1276,8 @@ impl Drawing<'_> {
         let pad = pad_of(Layout::Player, self.shows);
         let at = self.placed(Layout::Player);
         let (left, width) = (at.left, at.width);
-        let free = self.rows(pad, h - pad, self.size.0 - 2.0 * pad);
+        // (The keys spread across under the cover, the track from where the words beside it begin.)
+        let free = self.rows(pad, h - pad, self.size.0 - 2.0 * pad, at.cover.map(|(x, _, side)| (x + side, at.left)));
         let line_top = at.below;
         let bottom = free - 8.0;
         let under_tall = self.fonts.under.size * 1.35;
@@ -1350,7 +1433,7 @@ impl Drawing<'_> {
         self.record(cx, cy, side);
         // Along the bottom, all across: the controls and the track, and the spectrum over them.
         let row = h - pad - CONTROL;
-        self.keys(pad - (CONTROL - 16.0) / 2.0, row, 1.0).map(|end| self.progress(end + 12.0, w - pad, row, 1.0));
+        self.bottom_row(pad, w - pad, row, 1.0, None);
         if self.shows.spectrum {
             spectrum(self.frame, self.moment, (self.accent, self.tint), (pad, row - ROW_GAP, w - 2.0 * pad, STAGE_SPECTRUM), 0.85);
         }
@@ -1465,7 +1548,7 @@ impl Drawing<'_> {
         let pad = pad_of(layout, self.shows);
         let at = self.placed(layout);
         let (x, width) = (at.left, at.width);
-        let free = self.rows(x, h - pad, width);
+        let free = self.rows(x, h - pad, width, None);
         let (top, bottom) = (at.below, free - 10.0);
         if bottom <= top + 20.0 {
             return;
@@ -1673,6 +1756,21 @@ impl Drawing<'_> {
 }
 
 impl Music {
+    /// Where buttons set at its top right go, `size` large showing `shows` (as last laid out): their tops level with
+    /// the top of what it shows there (the cover, else what plays), their right ends on its edge's room, as the time
+    /// left and the sound's key end below them.
+    pub fn top_right(&self, size: (f32, f32), shows: &Shows) -> (f32, f32) {
+        let layout = self.layout.unwrap_or(Layout::Player);
+        let pad = pad_of(layout, shows);
+        let at = placed(layout, size, shows);
+        let top = match (at.cover, at.title) {
+            (Some((_, y, _)), _) => y,
+            (None, Some((_, y, _, _))) => y + 2.0,
+            (None, None) => pad,
+        };
+        (top, size.0 - pad)
+    }
+
     /// The colour its own ground shows most along its edges, `size` large (for what stands in for it, as where it
     /// would stick): the mean of the blurred cover where it shows round the edge (it is laid centred, as large as the
     /// longer side and a third more), darkened and washed as the ground is. With no cover, the ground's own dark.

@@ -468,6 +468,12 @@ pub fn slide(level: u8) {
 #[cfg(windows)]
 static SLID_TO: Mutex<Option<u8>> = Mutex::new(None);
 
+/// Whether the volume's slider is held now (dragged, not yet let go).
+#[cfg(windows)]
+pub fn volume_held() -> bool {
+    SLID_TO.lock().unwrap().is_some()
+}
+
 /// The sound made as loud as `level` and muted or not as `muted` (each, where it is said): shown so at once in what
 /// is followed (the sound is the whole system's, the same for both), and set on a thread of its own (it waits on the
 /// sound's service, which may take long; this is done on the thread that draws). Nothing done where nothing would
