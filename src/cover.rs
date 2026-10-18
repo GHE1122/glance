@@ -6,11 +6,14 @@
 use std::sync::{Arc, Mutex};
 
 use windows::core::Interface;
+use windows::Win32::Graphics::Gdi::DeleteObject;
 use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapInterpolationModeFant, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICBitmapSource, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapIgnoreAlpha, WICBitmapInterpolationModeFant,
+    WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
 };
 use windows::Win32::System::Com::{CoCreateInstance, IStream, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::WinRT::CreateStreamOverRandomAccessStream;
+use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SHCreateMemStream, SIIGBF_BIGGERSIZEOK, SIIGBF_THUMBNAILONLY};
 
 /// The side of the copy kept (pixels, square).
 pub const SIDE: u32 = 192;
@@ -62,7 +65,7 @@ pub fn of(playing: &crate::playing::Now) -> Option<Arc<Cover>> {
             let cover = cover.clone();
             if *again && first.elapsed() >= AGAIN_AFTER {
                 *again = false;
-                read_on(key, title.to_string(), Some(cover.clone()));
+                read_on(key, track_of(playing), Some(cover.clone()));
             }
             return Some(cover);
         }
@@ -72,18 +75,27 @@ pub fn of(playing: &crate::playing::Now) -> Option<Arc<Cover>> {
         _ => std::time::Instant::now(),
     };
     *known = Some((key.clone(), first, Known::Reading));
-    read_on(key, title.to_string(), None);
+    read_on(key, track_of(playing), None);
     None
 }
 
-/// Reads the cover of the track `title` (known by `key`) on a thread of its own, and keeps it while that is still the
-/// track asked about; `had`, the one read before, if this is it read once more (kept, where none is read now).
-fn read_on(key: String, title: String, had: Option<Arc<Cover>>) {
+/// What plays, as the music on this PC is matched against (see `library::file_of`): its first artist, as its lyrics
+/// are asked for by.
+fn track_of(playing: &crate::playing::Now) -> crate::lyrics::Track {
+    let crate::playing::Now { title, artist, album, timeline, .. } = playing;
+    let artist = artist.split(" / ").next().unwrap_or_default().to_string();
+    let seconds = timeline.map_or(0, |timeline| timeline.length.round() as u32);
+    crate::lyrics::Track { netease: None, title: title.clone(), artist, album: album.clone(), seconds, qq_music: false }
+}
+
+/// Reads the cover of `track` (known by `key`) on a thread of its own, and keeps it while that is still the track
+/// asked about; `had`, the one read before, if this is it read once more (kept, where none is read now).
+fn read_on(key: String, track: crate::lyrics::Track, had: Option<Arc<Cover>>) {
     std::thread::spawn(move || {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let read = read(&title).map(Arc::new);
+        let read = read(&track).map(Arc::new);
         let mut known = KNOWN.lock().unwrap();
         // (Kept only if the track is still the one asked about.)
         if let Some((of, first, state)) = known.as_mut() {
@@ -99,27 +111,66 @@ fn read_on(key: String, title: String, had: Option<Arc<Cover>>) {
     });
 }
 
-/// The cover of the music playing (as the player followed for music gives it), if it is the track `title`'s (a
-/// player changing tracks tells the new title a moment before the new cover).
-pub(crate) fn read(title: &str) -> Option<Cover> {
+/// The cover of the music playing, if it is `track` (a player changing tracks tells the new title a moment before the
+/// new cover): as the player followed for music gives it; else, where it gives none (Windows' Media Player, of a file
+/// whose cover is in its tags), the file's own, where it is among the music on this PC.
+fn read(track: &crate::lyrics::Track) -> Option<Cover> {
     let session = crate::media::session_of(crate::media::Follow::Music).ok()?;
     let properties = session.TryGetMediaPropertiesAsync().ok()?.join().ok()?;
-    if properties.Title().ok()?.to_string() != title {
+    if properties.Title().ok()?.to_string() != track.title {
         return None;
     }
-    let thumbnail = properties.Thumbnail().ok()?;
-    let stream = thumbnail.OpenReadAsync().ok()?.join().ok()?;
-    unsafe {
+    let factory: IWICImagingFactory = unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()? };
+    let given = (|| unsafe {
+        let stream = properties.Thumbnail().ok()?.OpenReadAsync().ok()?.join().ok()?;
         let stream: IStream = CreateStreamOverRandomAccessStream(&stream.cast::<windows::core::IUnknown>().ok()?).ok()?;
-        let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
         let decoder = factory.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
-        let frame = decoder.GetFrame(0).ok()?;
-        // Squared about its middle (most covers are square already), at `SIDE`.
+        decoder.GetFrame(0).ok()?.cast::<IWICBitmapSource>().ok()
+    })();
+    let picture = match given {
+        Some(picture) => picture,
+        None => {
+            let path = crate::library::file_of(track)?;
+            match crate::library::cover_of(&path).and_then(|bytes| decoded(&factory, &bytes)) {
+                Some(picture) => picture,
+                None => of_file(&factory, &path)?,
+            }
+        }
+    };
+    squared(&factory, &picture)
+}
+
+/// A picture as a file keeps it (a JPEG, a PNG), read.
+fn decoded(factory: &IWICImagingFactory, bytes: &[u8]) -> Option<IWICBitmapSource> {
+    unsafe {
+        let stream = SHCreateMemStream(Some(bytes))?;
+        let decoder = factory.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
+        decoder.GetFrame(0).ok()?.cast().ok()
+    }
+}
+
+/// The picture Windows shows for the file at `path` where it has one of its own (a file of music: the cover in its
+/// tags as Windows reads them, which is not all of them, or a picture of its album in its folder), never the icon of
+/// its kind.
+fn of_file(factory: &IWICImagingFactory, path: &std::path::Path) -> Option<IWICBitmapSource> {
+    unsafe {
+        let item: IShellItemImageFactory = SHCreateItemFromParsingName(&windows::core::HSTRING::from(path.as_os_str()), None).ok()?;
+        let bitmap = item.GetImage(windows::Win32::Foundation::SIZE { cx: SIDE as i32, cy: SIDE as i32 }, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK).ok()?;
+        let picture = factory.CreateBitmapFromHBITMAP(bitmap, windows::Win32::Graphics::Gdi::HPALETTE::default(), WICBitmapIgnoreAlpha);
+        let _ = DeleteObject(bitmap.into());
+        picture.ok()?.cast().ok()
+    }
+}
+
+/// `picture` as a cover: squared about its middle (most covers are square already), at `SIDE`, opaque, and its
+/// colours.
+fn squared(factory: &IWICImagingFactory, frame: &IWICBitmapSource) -> Option<Cover> {
+    unsafe {
         let (mut width, mut height) = (0, 0);
         frame.GetSize(&mut width, &mut height).ok()?;
         let side = width.min(height);
         let clipper = factory.CreateBitmapClipper().ok()?;
-        clipper.Initialize(&frame, &windows::Win32::Graphics::Imaging::WICRect { X: ((width - side) / 2) as i32, Y: ((height - side) / 2) as i32, Width: side as i32, Height: side as i32 }).ok()?;
+        clipper.Initialize(frame, &windows::Win32::Graphics::Imaging::WICRect { X: ((width - side) / 2) as i32, Y: ((height - side) / 2) as i32, Width: side as i32, Height: side as i32 }).ok()?;
         let scaler = factory.CreateBitmapScaler().ok()?;
         scaler.Initialize(&clipper, SIDE, SIDE, WICBitmapInterpolationModeFant).ok()?;
         let converter = factory.CreateFormatConverter().ok()?;
@@ -255,9 +306,26 @@ mod tests {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         let session = crate::media::session_of(crate::media::Follow::Music).expect("music playing");
-        let title = session.TryGetMediaPropertiesAsync().unwrap().join().unwrap().Title().unwrap().to_string();
-        let cover = read(&title).expect("a cover");
+        let properties = session.TryGetMediaPropertiesAsync().unwrap().join().unwrap();
+        let (title, artist, album) = (properties.Title().unwrap().to_string(), properties.Artist().unwrap().to_string(), properties.AlbumTitle().unwrap().to_string());
+        let seconds = (session.GetTimelineProperties().unwrap().EndTime().unwrap().Duration as f64 / 1e7).round() as u32;
+        let track = crate::lyrics::Track { netease: None, title: title.clone(), artist, album, seconds, qq_music: false };
+        let cover = read(&track).expect("a cover");
         println!("{title}");
         println!("base {:?}, accent {:?}, {} bytes", cover.base, cover.accent, cover.pixels.len());
+    }
+
+    /// Reads the cover in a file's tags (`GLANCE_COVER_FILE` names it): `cargo test -- --ignored reads_a_files_cover
+    /// --nocapture`.
+    #[test]
+    #[ignore = "reads a file named by GLANCE_COVER_FILE"]
+    fn reads_a_files_cover() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let path = std::path::PathBuf::from(std::env::var("GLANCE_COVER_FILE").expect("GLANCE_COVER_FILE"));
+        let factory: IWICImagingFactory = unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap() };
+        let cover = squared(&factory, &of_file(&factory, &path).expect("its picture")).expect("a cover");
+        println!("base {:?}, accent {:?}", cover.base, cover.accent);
     }
 }
