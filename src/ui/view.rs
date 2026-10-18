@@ -183,6 +183,12 @@ pub enum Hit {
     Copied(u64),
     /// A file come lately, by its number on its drive (see `station::recent`).
     Recent(u128),
+    /// What is kept at hand, by its place (see `station::apps`); the place to add more; where something dragged may
+    /// be dropped to be kept at hand; the grip the panel is torn off whole by.
+    App(u16),
+    AddApp,
+    AppsArea,
+    Grip,
     /// One of the station's pages chosen (see `Tab`; Recent files', with which of them it shows); the menu of how what
     /// is on it shows; its menu of the rest.
     Tab(Tab),
@@ -196,7 +202,7 @@ impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station)
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Grip)
     }
 
     /// The track it is, where it is one dragged along.
@@ -204,6 +210,15 @@ impl Hit {
         match self {
             Hit::Volume | Hit::VolumeUp => Some(crate::playing::Slider::Volume),
             Hit::Seek(follow) => Some(crate::playing::Slider::Seek(follow)),
+            _ => None,
+        }
+    }
+
+    /// Where what is dropped on it goes, where something dragged may be dropped on it.
+    pub fn lands(self) -> Option<crate::station::run::Lands> {
+        match self {
+            Hit::Station => Some(crate::station::run::Lands::Station),
+            Hit::AppsArea => Some(crate::station::run::Lands::Apps),
             _ => None,
         }
     }
@@ -242,10 +257,11 @@ impl Hit {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum List {
     Processes,
-    /// What is on the station, what was copied lately, and the files come lately.
+    /// What is on the station, what was copied lately, the files come lately, and quick launch's rail.
     Shelf,
     Copies,
     Recent,
+    Apps,
 }
 
 /// Which of its pages the station's lane shows: what is on it, what was copied lately, or the files come lately (those
@@ -261,8 +277,8 @@ pub enum Tab {
 /// How far each list is scrolled (DIPs), and how far it is going (each frame a little nearer: see `ease`).
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Scrolls {
-    at: [f32; 4],
-    to: [f32; 4],
+    at: [f32; 5],
+    to: [f32; 5],
 }
 
 impl Scrolls {
@@ -294,7 +310,7 @@ impl Scrolls {
     }
 
     /// As each is scrolled, for what is drawn to tell one drawing from another.
-    pub fn bits(&self) -> [u32; 4] {
+    pub fn bits(&self) -> [u32; 5] {
         self.at.map(f32::to_bits)
     }
 }
@@ -414,6 +430,9 @@ enum Block {
     Shelf { tiles: Vec<Tile>, shows: Shows, tall: f32, said: Option<String>, over: bool },
     /// What was copied lately, the newest first, a row each, in room `tall` high, scrolled through past it.
     Copies { rows: Vec<Tile>, tall: f32 },
+    /// What is kept at hand (quick launch's), each by its name and what opens it, in `rows` rows (named, as a whole
+    /// lane shows them; else one row of their pictures alone), and the place to add more.
+    Apps { apps: Vec<(String, String)>, rows: usize, named: bool },
     /// The files come lately that `filter` takes, the newest first, under the day each came, a row each, in room
     /// `tall` high under the filter's choices, scrolled through past it.
     Recent { rows: Vec<Lately>, filter: crate::station::recent::Filter, tall: f32 },
@@ -505,6 +524,164 @@ impl Tile {
         };
         let about = format!("{kind} · {}", text::since(item.added_ms, now, lang));
         Tile { id: item.id, label, about, face, pinned: item.pinned }
+    }
+}
+
+/// What is kept at hand: its cell (a picture and its name under it) as a whole lane lays it out, the picture's side,
+/// and the gap between rows; a rail's cell, and its picture's side.
+const APP_CELL_W: f32 = 64.0;
+const APP_CELL_H: f32 = 62.0;
+const APP_SIDE: f32 = 36.0;
+const APP_GAP: f32 = 6.0;
+const RAIL_CELL: f32 = 46.0;
+const RAIL_SIDE: f32 = 32.0;
+/// The most rows of what is kept at hand a whole lane shows.
+const APP_ROWS: usize = 3;
+
+/// Quick launch's lane: whole (`full`), what is kept at hand under its name, named, in as many rows as they take (up
+/// to `APP_ROWS`, the place to add more after them); else their pictures in one row.
+fn apps_lane(full: bool, lang: Lang) -> Vec<Block> {
+    let apps: Vec<(String, String)> = crate::station::apps::shown().iter().map(|app| (app.name.clone(), app.target.clone())).collect();
+    let across = (((COLUMN_WIDTH - 32.0) / APP_CELL_W) as usize).max(1);
+    let rows = if full { (apps.len() + 1).div_ceil(across).clamp(1, APP_ROWS) } else { 1 };
+    vec![head(lang.pick("快捷 App", "Quick launch"), "", "", false), Block::Apps { apps, rows, named: full }]
+}
+
+/// The picture of what is kept at hand (`target`, what opens it) in the square `side` wide at (`x`, `y`): as Explorer
+/// shows it; a web address, by its site's first letter.
+#[allow(clippy::too_many_arguments)]
+fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &str, x: f32, y: f32, side: f32) {
+    let web = target.starts_with("https://") || target.starts_with("http://");
+    match crate::station::thumbs::of(std::path::Path::new(target), TILE_PIXELS).filter(|_| !web) {
+        Some(picture) => frame.picture(&picture, x, y, side, side / 5.0, 1.0),
+        None => {
+            frame.fill_rounded(theme.track, x, y, side, side, side / 5.0);
+            let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+            let font = Font { size: side * 0.45, weight: 650.0, ..theme.body };
+            centred(frame, &letter, font, theme.text2, x, y + (side - font.size * 1.3) / 2.0, side);
+        }
+    }
+}
+
+/// The place to add to what is kept at hand: a plus in a dashed round, `side` wide at (`x`, `y`), lit under the pointer.
+fn paint_adder(frame: &dyn Canvas, scene: &Scene, x: f32, y: f32, side: f32, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    let lit = scene.hover == Some(Hit::AddApp);
+    let centre = Point { x: x + side / 2.0, y: y + side / 2.0 };
+    let points: Vec<Point> = (0..=24).map(|i| {
+        let angle = i as f32 / 24.0 * std::f32::consts::TAU;
+        Point { x: centre.x + side / 2.0 * 0.86 * angle.cos(), y: centre.y + side / 2.0 * 0.86 * angle.sin() }
+    }).collect();
+    frame.stroke_dashed(&points, if lit { theme.text2 } else { theme.text3 }, 1.2);
+    frame.icon(Icon::Add, centre, side * 0.45, if lit { theme.text } else { theme.text2 });
+    hits.push((x, y, side, side, Hit::AddApp));
+}
+
+/// What is kept at hand as a lane lays it out (see `Block::Apps`) from (`left`, `top`), `width` across: named cells
+/// spread over the width, or one row of pictures; the place to add more after them. What is dragged there may be
+/// dropped to be kept at hand.
+fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), apps: &[(String, String)], named: bool, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    let (cell_w, cell_h) = if named { (APP_CELL_W, APP_CELL_H) } else { (APP_SIDE + APP_GAP, APP_SIDE) };
+    let rows = if named { (apps.len() + 1).div_ceil(((width / cell_w) as usize).max(1)).min(APP_ROWS) } else { 1 };
+    let tall = rows as f32 * cell_h + rows.saturating_sub(1) as f32 * APP_GAP;
+    let mut placed = Vec::new();
+    let across = ((width / cell_w) as usize).max(1);
+    let gap = if named && across > 1 { (width - across as f32 * cell_w) / (across - 1) as f32 } else { 0.0 };
+    let most = if named { across * APP_ROWS } else { across };
+    for at in 0..(apps.len() + 1).min(most) {
+        let x = left + (at % across) as f32 * (cell_w + gap);
+        let y = top + (at / across) as f32 * (cell_h + APP_GAP);
+        let px = if named { x + (cell_w - APP_SIDE) / 2.0 } else { x };
+        let Some((name, target)) = apps.get(at) else {
+            paint_adder(frame, scene, px, y, APP_SIDE, hits);
+            break;
+        };
+        let hit = Hit::App(at as u16);
+        if scene.hover == Some(hit) {
+            frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, (if named { cell_w } else { APP_SIDE }) + 4.0, cell_h + 4.0, theme.control_radius.max(6.0));
+        }
+        paint_app(frame, theme, name, target, px, y, APP_SIDE);
+        if named {
+            centred(frame, &fitted(frame, name, theme.small, cell_w), theme.small, theme.text2, x, y + APP_SIDE + 4.0, cell_w);
+        }
+        placed.push((x, y, if named { cell_w } else { APP_SIDE }, cell_h, hit));
+    }
+    // (Its things first: a press finds a thing before the room round it.)
+    hits.extend(placed);
+    hits.push((left - 4.0, top - SHELF_GAP - HEAD - HEAD_GAP, width + 8.0, tall + SHELF_GAP + HEAD + HEAD_GAP + 4.0, Hit::AppsArea));
+}
+
+/// Quick launch's lane as a rail along the panel's edge (`area`, at `side`): what is kept at hand, a picture each,
+/// down it (across it, under the columns), the place to add more after them, and at its foot the panel's buttons:
+/// the grip it is torn off whole by, the pin, the settings.
+fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: RailSide, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    let apps: &[(String, String)] = lane.blocks.iter().find_map(|block| if let Block::Apps { apps, .. } = block { Some(apps.as_slice()) } else { None }).unwrap_or(&[]);
+    let across = side == RailSide::Bottom;
+    let foot = 3.0 * RAIL_CELL;
+    // (Along the rail: down it, or across it under the columns.)
+    let (start, length) = if across { (area.x + 6.0, area.w - 12.0 - foot) } else { (area.y + 8.0, area.h - 16.0 - foot) };
+    let cell = |at: usize| -> (f32, f32) {
+        let along = start + at as f32 * RAIL_CELL;
+        if across { (along, area.y + (area.h - RAIL_CELL) / 2.0) } else { (area.x + (area.w - RAIL_CELL) / 2.0, along) }
+    };
+    let lit_on = |hit: Hit| scene.hover == Some(hit);
+    // Its things, and the place to add more after them, scrolled along by the wheel where they are more than fit.
+    let whole = (apps.len() + 1) as f32 * RAIL_CELL;
+    let most = (whole - length).max(0.0);
+    let scroll = scene.scrolls.at(List::Apps).clamp(0.0, most);
+    let (view_x, view_y, view_w, view_h) = if across { (start, area.y, length, area.h) } else { (area.x, start, area.w, length) };
+    frame.clip(view_x, view_y, view_w, view_h);
+    let mut placed = Vec::new();
+    for at in 0..=apps.len() {
+        let (x, y) = cell(at);
+        let (x, y) = if across { (x - scroll, y) } else { (x, y - scroll) };
+        if (if across { x + RAIL_CELL < view_x || x > view_x + view_w } else { y + RAIL_CELL < view_y || y > view_y + view_h }) {
+            continue;
+        }
+        let inset = (RAIL_CELL - RAIL_SIDE) / 2.0;
+        let Some((name, target)) = apps.get(at) else {
+            paint_adder(frame, scene, x + inset, y + inset, RAIL_SIDE, &mut placed);
+            continue;
+        };
+        let hit = Hit::App(at as u16);
+        if lit_on(hit) {
+            frame.fill_rounded(theme.hover, x + 2.0, y + 2.0, RAIL_CELL - 4.0, RAIL_CELL - 4.0, theme.control_radius.max(8.0));
+        }
+        paint_app(frame, theme, name, target, x + inset, y + inset, RAIL_SIDE);
+        placed.push((x, y, RAIL_CELL, RAIL_CELL, hit));
+    }
+    frame.unclip();
+    // (Only what shows of them is pressed.)
+    hits.extend(placed.into_iter().filter_map(|(x, y, w, h, hit)| {
+        let (left, top) = (x.max(view_x), y.max(view_y));
+        let (right, bottom) = ((x + w).min(view_x + view_w), (y + h).min(view_y + view_h));
+        (right > left && bottom > top).then_some((left, top, right - left, bottom - top, hit))
+    }));
+    if most > 0.0 {
+        hits.push((view_x, view_y, view_w, view_h, Hit::List(List::Apps, most.to_bits())));
+    }
+    // Where something dragged may be dropped to be kept at hand: all of the rail (after its things).
+    hits.push((area.x, area.y, area.w, area.h, Hit::AppsArea));
+    // The foot: the grip, the pin (lit while pinned), the settings.
+    for (at, (hit, icon, lit)) in [(Hit::Grip, Icon::Grip, false), (Hit::Pin, Icon::Pin, scene.pinned), (Hit::Settings, Icon::Settings, false)].into_iter().enumerate() {
+        let along = at as f32 * RAIL_CELL;
+        let (x, y) = if across { (area.x + area.w - 6.0 - foot + along, area.y + (area.h - RAIL_CELL) / 2.0) } else { (area.x + (area.w - RAIL_CELL) / 2.0, area.y + area.h - 8.0 - foot + along) };
+        let inset = (RAIL_CELL - MEDIA_ROW - 6.0) / 2.0;
+        if lit_on(hit) || lit {
+            frame.fill_rounded(theme.hover, x + inset, y + inset, MEDIA_ROW + 6.0, MEDIA_ROW + 6.0, theme.control_radius.min((MEDIA_ROW + 6.0) / 2.0));
+        }
+        frame.icon(icon, Point { x: x + RAIL_CELL / 2.0, y: y + RAIL_CELL / 2.0 }, 17.0, if lit_on(hit) || lit { theme.text } else { theme.text2 });
+        hits.insert(0, (x + inset, y + inset, MEDIA_ROW + 6.0, MEDIA_ROW + 6.0, hit));
+    }
+    // Chart paper sets the rail off from the columns by a rule.
+    if theme.ruled {
+        match side {
+            RailSide::Start => frame.fill(theme.rule, area.x + area.w, area.y, 1.0, area.h),
+            RailSide::End => frame.fill(theme.rule, area.x - 1.0, area.y, 1.0, area.h),
+            RailSide::Bottom => frame.fill(theme.rule, area.x, area.y - 1.0, area.w, 1.0),
+        }
     }
 }
 
@@ -605,6 +782,7 @@ impl Block {
             Block::Room(tall) => *tall,
             Block::Tabs { .. } => HEAD + HEAD_GAP,
             Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } => SHELF_GAP + tall,
+            Block::Apps { rows, named, .. } => SHELF_GAP + *rows as f32 * if *named { APP_CELL_H } else { APP_SIDE } + rows.saturating_sub(1) as f32 * APP_GAP,
         }
     }
 }
@@ -632,6 +810,10 @@ impl Hash for Block {
                 (sort.map(|sort| sort as u8), rows, visible, scrolls, widths.map(f32::to_bits)).hash(state);
             }
             Block::Tabs { tab, count, copies, recent, view } => (tab, count, copies, recent, view).hash(state),
+            Block::Apps { apps, rows, named } => {
+                (apps, rows, named).hash(state);
+                apps.iter().for_each(|(_, target)| crate::station::thumbs::of(std::path::Path::new(target), TILE_PIXELS).map(|picture| picture.key).hash(state));
+            }
             Block::Recent { rows, filter, tall } => {
                 (rows, filter, tall.to_bits()).hash(state);
                 rows.iter().for_each(|row| crate::station::thumbs::of(&row.path, TILE_PIXELS).map(|picture| picture.key).hash(state));
@@ -1439,6 +1621,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             blocks
         }
         "station" => station_lane(full, on("copies"), scene.tab, lang),
+        "apps" => apps_lane(full, lang),
         // What plays, in a widget merged with readings: drawn apart (see `Scene::music_apart`), its lane its head and
         // room under it (a player's, full; a strip's, compact).
         "lyrics" if scene.music_apart => {
@@ -1560,6 +1743,19 @@ pub struct Rect {
 }
 
 /// The panel laid out: lanes dealt into columns, and the bar below them.
+/// Where a panel's rail goes (see `Layout::with_rail`): along its start (the screen's left edge), its end (the right),
+/// or under its columns (the top edge's panel).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum RailSide {
+    Start,
+    End,
+    Bottom,
+}
+
+/// A rail's width beside the columns, and its height under them.
+pub const RAIL_W: f32 = 60.0;
+pub const RAIL_ROW: f32 = 56.0;
+
 #[derive(Clone)]
 pub struct Layout {
     pub columns: usize,
@@ -1577,6 +1773,9 @@ pub struct Layout {
     /// How much taller than its lanes need each column was made, for their
     /// charts to grow into (see `stretched`).
     grow: f32,
+    /// The lane drawn as a rail instead of in a column (its place among the lanes; `heights` leaves it out), and
+    /// where; the panel's bar's buttons are at the rail's foot then, and the bar goes.
+    rail: Option<(usize, RailSide)>,
 }
 
 impl Layout {
@@ -1617,6 +1816,36 @@ impl Layout {
             bar_height: theme.bar_height,
             column_width: COLUMN_WIDTH,
             grow: 0.0,
+            rail: None,
+        }
+    }
+
+    /// The same with the lane at `at` among the lanes (its height left out of the columns') drawn as a rail at `side`.
+    pub fn with_rail(mut self, at: usize, side: RailSide) -> Self {
+        self.rail = Some((at, side));
+        self.bar_gap = 0.0;
+        self.bar_height = 0.0;
+        self
+    }
+
+    /// The rail's lane and where it goes, if it has one.
+    pub fn rail(&self) -> Option<(usize, RailSide)> {
+        self.rail
+    }
+
+    /// The room the rail takes beside the columns.
+    fn rail_across(&self) -> f32 {
+        match self.rail {
+            Some((_, RailSide::Start | RailSide::End)) => RAIL_W + self.column_gap,
+            _ => 0.0,
+        }
+    }
+
+    /// The room the rail takes under the columns.
+    fn rail_down(&self) -> f32 {
+        match self.rail {
+            Some((_, RailSide::Bottom)) => RAIL_ROW + self.lane_gap,
+            _ => 0.0,
         }
     }
 
@@ -1633,47 +1862,69 @@ impl Layout {
     /// How much each lane's charts may grow, in order of the lanes: its
     /// column's share of what the layout was stretched by.
     pub fn grows(&self) -> Vec<f32> {
-        (0..self.columns)
+        let mut grows: Vec<f32> = (0..self.columns)
             .flat_map(|column| {
                 let start = self.cuts[column];
                 let end = self.cuts.get(column + 1).copied().unwrap_or(self.heights.len());
                 std::iter::repeat_n(self.grow / (end - start).max(1) as f32, end - start)
             })
-            .collect()
+            .collect();
+        if let Some((at, _)) = self.rail {
+            grows.insert(at.min(grows.len()), 0.0);
+        }
+        grows
     }
 
     pub fn width(&self) -> f32 {
-        self.columns as f32 * self.column_width + (self.columns - 1) as f32 * self.column_gap
+        self.columns as f32 * self.column_width + (self.columns - 1) as f32 * self.column_gap + self.rail_across()
     }
 
     pub fn height(&self) -> f32 {
-        self.outer.0 + self.lanes_height + self.outer.2 + self.bar_gap + self.bar_height
+        self.outer.0 + self.lanes_height + self.rail_down() + self.outer.2 + self.bar_gap + self.bar_height
+    }
+
+    /// Where a column starts across.
+    fn column_x(&self, column: usize) -> f32 {
+        let (_, side, _) = self.outer;
+        let column_width = (self.width() - self.rail_across() - 2.0 * side - (self.columns - 1) as f32 * self.column_gap) / self.columns as f32;
+        let start = if matches!(self.rail, Some((_, RailSide::Start))) { side + self.rail_across() } else { side };
+        start + column as f32 * (column_width + self.column_gap)
     }
 
     /// Each lane's box, in order. A shorter column's lanes share what is
     /// left over, so every column ends at the same line.
+    /// (The rail's lane, where there is one, is its rail's box, in its place among them.)
     pub fn lanes(&self) -> Vec<Rect> {
         let (top, side, _) = self.outer;
-        let column_width = (self.width() - 2.0 * side - (self.columns - 1) as f32 * self.column_gap) / self.columns as f32;
-        let mut boxes = Vec::with_capacity(self.heights.len());
+        let column_width = (self.width() - self.rail_across() - 2.0 * side - (self.columns - 1) as f32 * self.column_gap) / self.columns as f32;
+        let mut boxes = Vec::with_capacity(self.heights.len() + 1);
         for column in 0..self.columns {
             let start = self.cuts[column];
             let end = self.cuts.get(column + 1).copied().unwrap_or(self.heights.len());
             let count = (end - start) as f32;
             let natural = self.heights[start..end].iter().sum::<f32>() + (count - 1.0).max(0.0) * self.lane_gap;
             let extra = if end > start { (self.lanes_height - natural) / count } else { 0.0 };
-            let x = side + column as f32 * (column_width + self.column_gap);
+            let x = self.column_x(column);
             let mut y = top;
             for height in &self.heights[start..end] {
                 boxes.push(Rect { x, y, w: column_width, h: height + extra });
                 y += height + extra + self.lane_gap;
             }
         }
+        if let Some((at, rail)) = self.rail {
+            let width = self.width();
+            let rail = match rail {
+                RailSide::Start => Rect { x: side, y: top, w: RAIL_W, h: self.lanes_height },
+                RailSide::End => Rect { x: width - side - RAIL_W, y: top, w: RAIL_W, h: self.lanes_height },
+                RailSide::Bottom => Rect { x: side, y: top + self.lanes_height + self.lane_gap, w: width - 2.0 * side, h: RAIL_ROW },
+            };
+            boxes.insert(at.min(boxes.len()), rail);
+        }
         boxes
     }
 
     pub fn bar(&self) -> Rect {
-        let y = self.outer.0 + self.lanes_height + self.outer.2 + self.bar_gap;
+        let y = self.outer.0 + self.lanes_height + self.rail_down() + self.outer.2 + self.bar_gap;
         Rect { x: 0.0, y, w: self.width(), h: self.bar_height }
     }
 
@@ -1689,7 +1940,15 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
     let theme = scene.theme;
     let mut hits = Vec::new();
     let boxes = layout.lanes();
-    for ((lane, area), grow) in lanes.iter().zip(&boxes).zip(layout.grows()) {
+    let rail = layout.rail();
+    for (at, ((lane, area), grow)) in lanes.iter().zip(&boxes).zip(layout.grows()).enumerate() {
+        // The rail's lane (quick launch's) along the edge, its own way.
+        if let Some((_, side)) = rail.filter(|(rail, _)| *rail == at) {
+            if pass == Pass::Content {
+                paint_rail(frame, scene, lane, *area, side, &mut hits);
+            }
+            continue;
+        }
         paint_lane(frame, scene, lane, *area, grow, pass, &mut hits);
         // Chart paper rules each lane off below; the last rule in a column
         // also sets off the bar.
@@ -1700,11 +1959,13 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
     if pass == Pass::Content {
         if theme.ruled {
             for column in 1..layout.columns {
-                let x = boxes[layout.cuts[column]].x;
+                let x = layout.column_x(column);
                 frame.fill(theme.rule, x, 0.0, 1.0, layout.lanes_height);
             }
         }
-        paint_bar(frame, scene, layout, &mut hits);
+        if rail.is_none() {
+            paint_bar(frame, scene, layout, &mut hits);
+        }
     }
     hits
 }
@@ -1767,6 +2028,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Shelf { .. } => "shelf",
             Block::Copies { .. } => "copies",
             Block::Recent { .. } => "recent",
+            Block::Apps { .. } => "apps",
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
         kinds.push(kind);
@@ -2043,6 +2305,9 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             }
             (Block::Tabs { tab, count, copies, recent, view }, Pass::Content) => {
                 paint_tabs(frame, scene, ink, (left, y, width), *tab, *count, *copies, *recent, *view, hits);
+            }
+            (Block::Apps { apps, named, .. }, Pass::Content) => {
+                paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, *named, hits);
             }
             (Block::Recent { rows, filter, tall }, Pass::Content) => {
                 paint_recent(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *filter, *tall, hits);
@@ -2785,6 +3050,67 @@ mod tests {
             })
             .expect("drawn");
         crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/glass-sliders.png", env!("CARGO_MANIFEST_DIR"))), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+    }
+
+    /// The workbench's panel with quick launch as its rail, at the left, right and top edges (the columns), in each
+    /// skin, light and dark (the rows): `cargo test --features studio --lib -- --ignored workbench_rails` writes
+    /// `target/rails/<row>-<column>.png`.
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    #[cfg(feature = "studio")]
+    fn workbench_rails() {
+        use super::*;
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        crate::station::thumbs::start(|| {});
+        let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into() };
+        crate::station::apps::pretend(vec![
+            app(r"C:\Windows\System32
+otepad.exe", "Notepad"),
+            app(r"C:\Windows\explorer.exe", "Explorer"),
+            app(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "Calculator"),
+            app("https://github.com/lulu-loopp/glance", "github.com"),
+            app(r"C:\Windows\System32\cmd.exe", "Command"),
+        ]);
+        crate::station::run::pretend(Vec::new(), ShelfView::Cards);
+        let sides = [RailSide::Start, RailSide::End, RailSide::Bottom];
+        let rows = [(Skin::Glass, false), (Skin::Fluent, false), (Skin::Fluent, true), (Skin::Paper, false), (Skin::Paper, true)];
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{}/target/rails", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        for pass in 0..2 {
+            for (row, (skin, dark)) in rows.iter().enumerate() {
+                let theme = Theme::new(*skin, *dark);
+                let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+                let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+                let seen = Seen::of(history);
+                let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::App(1)), thumbs: &RESTING, pinned: true, overlay: false, buttons: true, newer: false };
+                let lanes = vec![
+                    Lane { id: "station".into(), blocks: station_lane(true, false, Tab::Shelf, Lang::Zh), ink: theme.ink("station") },
+                    Lane { id: "apps".into(), blocks: apps_lane(true, Lang::Zh), ink: theme.ink("apps") },
+                ];
+                for (column, side) in sides.iter().enumerate() {
+                    let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
+                    let layout = Layout::with_columns(vec![heights[0]], 1, &theme).with_rail(1, *side);
+                    let (w, h) = (layout.width(), layout.height());
+                    let ground = match skin {
+                        Skin::Paper => theme.paper,
+                        Skin::Fluent => if *dark { Color::hex(0x24262A, 1.0) } else { Color::hex(0xF3F5F8, 1.0) },
+                        Skin::Glass => Color::hex(0xE4EAF2, 1.0),
+                    };
+                    let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| {
+                        frame.fill(ground, 0.0, 0.0, w, h);
+                        paint(frame, &scene, &lanes, &layout, Pass::Content);
+                    }).expect("drawn");
+                    if pass == 1 {
+                        crate::studio::save_png(&out.join(format!("{row}-{column}.png")), (w * 1.5) as u32, (h * 1.5) as u32, &pixels).unwrap();
+                    }
+                }
+            }
+            // (The pictures made meanwhile, on the station's own thread: drawn again with them.)
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
     }
 
     /// The station's lane in each skin, light and dark (the rows), as cards, a list, pictures, what was copied lately,

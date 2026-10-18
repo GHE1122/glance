@@ -710,6 +710,9 @@ pub struct Settings {
     /// Folders whose files Recent files does not list (see `station::recent`).
     #[serde(default)]
     pub recent_hidden: Vec<PathBuf>,
+    /// What is kept at hand on the workbench, in its order (see `station::apps`).
+    #[serde(default)]
+    pub apps: Vec<crate::station::apps::App>,
     pub view: serde_json::Value,
 }
 
@@ -792,6 +795,7 @@ impl Default for Settings {
             music_source: None,
             station: StationSettings::default(),
             recent_hidden: Vec::new(),
+            apps: Vec::new(),
             view: serde_json::Value::Null,
         }
     }

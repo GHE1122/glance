@@ -8,6 +8,7 @@
 //! (`CLIPBRDWNDCLASS`), not a window moved or text selected.
 
 use super::drop::{Dragged, Target};
+use super::run::Lands;
 use crate::settings::{Edge, Part};
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -17,11 +18,13 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 /// How thick a strip along a screen's edge is (physical px).
 const STRIP: i32 = 6;
 
-/// A window catching drops: where it is, its window, what it is for (an edge's strip opens the station there).
+/// A window catching drops: where it is, its window, what it is for (an edge's strip opens the station there), and
+/// where what is dropped on it goes.
 struct Catcher {
     rect: RECT,
     window: HWND,
     edge: Option<Edge>,
+    lands: Lands,
     _target: IDropTarget,
 }
 
@@ -47,10 +50,10 @@ pub fn dragging() -> bool {
     }
 }
 
-/// Where drops are caught now: each station shown, and each edge of each screen that holds the workbench while it
-/// shows a station, as a strip.
-fn wanted() -> Vec<(RECT, Option<Edge>)> {
-    let mut wanted: Vec<(RECT, Option<Edge>)> = super::run::areas().into_iter().map(|area| (area, None)).collect();
+/// Where drops are caught now: each station and quick launch shown, and each edge of each screen that holds the
+/// workbench while it shows a station, as a strip.
+fn wanted() -> Vec<(RECT, Option<Edge>, Lands)> {
+    let mut wanted: Vec<(RECT, Option<Edge>, Lands)> = super::run::areas().into_iter().map(|(area, lands)| (area, None, lands)).collect();
     let (places, station) = {
         let settings = crate::app().settings.lock().unwrap();
         (settings.places().clone(), crate::ui::prefs::module_on_in(&settings.view, "workbench", "station"))
@@ -69,7 +72,7 @@ fn wanted() -> Vec<(RECT, Option<Edge>)> {
                 Edge::Right => RECT { left: monitor.right - STRIP, ..monitor },
                 Edge::Top => RECT { bottom: monitor.top + STRIP, ..monitor },
             };
-            wanted.push((strip, Some(edge)));
+            wanted.push((strip, Some(edge), Lands::Station));
         }
     }
     wanted
@@ -83,13 +86,13 @@ impl Catchers {
     /// Up where drops are wanted while something is dragged; none else. What each sees goes to `run::caught`.
     pub fn follow(&mut self) {
         let wanted = if dragging() { wanted() } else { Vec::new() };
-        let same = wanted.len() == self.up.len() && wanted.iter().zip(&self.up).all(|((rect, edge), up)| *rect == up.rect && *edge == up.edge);
+        let same = wanted.len() == self.up.len() && wanted.iter().zip(&self.up).all(|((rect, edge, lands), up)| *rect == up.rect && *edge == up.edge && *lands == up.lands);
         if same {
             return;
         }
         self.clear();
-        for (rect, edge) in wanted {
-            if let Some(catcher) = make(rect, edge) {
+        for (rect, edge, lands) in wanted {
+            if let Some(catcher) = make(rect, edge, lands) {
                 self.up.push(catcher);
             }
         }
@@ -108,7 +111,7 @@ impl Catchers {
 
 /// A window catching drops over `rect` (screen px; along `edge`, where it is a strip there), above all, all but
 /// invisible (hit by the pointer: a window wholly clear is passed over), telling `run::caught` what it sees.
-fn make(rect: RECT, edge: Option<Edge>) -> Option<Catcher> {
+fn make(rect: RECT, edge: Option<Edge>, lands: Lands) -> Option<Catcher> {
     unsafe {
         let class = WNDCLASSW { lpfnWndProc: Some(procedure), lpszClassName: w!("GlanceStationCatcher"), ..Default::default() };
         RegisterClassW(&class);
@@ -130,11 +133,11 @@ fn make(rect: RECT, edge: Option<Edge>) -> Option<Catcher> {
         let _ = SetLayeredWindowAttributes(window, COLORREF(0), 1, LWA_ALPHA);
         let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
         let _ = SetWindowPos(window, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-        let target = Target::new(move |dragged: Dragged| super::run::caught(dragged, edge));
+        let target = Target::new(move |dragged: Dragged| super::run::caught(dragged, edge, lands));
         if RegisterDragDrop(window, &target).is_err() {
             let _ = DestroyWindow(window);
             return None;
         }
-        Some(Catcher { rect, window, edge, _target: target })
+        Some(Catcher { rect, window, edge, lands, _target: target })
     }
 }

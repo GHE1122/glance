@@ -1,6 +1,7 @@
 //! The station: a shelf to put things on for a while (files, pictures, text, links) and take them off again into
 //! another program, and what was copied lately (see docs/station-and-notes.md).
 
+pub mod apps;
 pub mod catch;
 pub mod clipboard;
 pub mod drag;
@@ -30,6 +31,12 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
             run::ask(if again { run::Ask::Open(id) } else { run::Ask::Copy(id) });
         }
         Hit::Copied(id) => run::ask(run::Ask::Copy(id)),
+        // What is kept at hand: opened.
+        Hit::App(at) => {
+            if let Some(app) = apps::shown().get(usize::from(at)) {
+                run::ask(run::Ask::Launch(app.target.clone()));
+            }
+        }
         // A file come lately: put on the clipboard as a file (pressed again within a double click's time, opened).
         Hit::Recent(file) => {
             let double = std::time::Duration::from_millis(u64::from(unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }));
@@ -156,6 +163,45 @@ pub fn recent_chose(file: u128, choice: RecentChoice) {
                 std::thread::spawn(move || crate::app().change(|settings| if !settings.recent_hidden.contains(&folder) { settings.recent_hidden.push(folder) }));
             }
         }
+    }
+}
+
+/// What the menu of a thing kept at hand does: opens it, shows where it is in Explorer, takes it off.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppChoice {
+    Open,
+    Show,
+    Remove,
+}
+
+/// The menu of the thing kept at hand at `at` among them (a right click on it), at `point` on the screen: up, with
+/// what its rows do (where it is is shown only for what is on the disk).
+pub fn app_menu(at: u16, point: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<AppChoice>)> {
+    use crate::ui::icons::Icon;
+    use crate::ui::menu::{Item, Menu};
+    let app = apps::shown().get(usize::from(at))?.clone();
+    let lang = crate::update::language();
+    let mut rows = vec![(AppChoice::Open, lang.pick("打开", "Open"), Icon::File, false)];
+    if app.location().is_some() {
+        rows.push((AppChoice::Show, lang.pick("打开文件所在的位置", "Open its location"), Icon::Panel, false));
+    }
+    rows.push((AppChoice::Remove, lang.pick("从快捷栏移除", "Take off quick launch"), Icon::Close, true));
+    let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
+    let menu = Menu::open_at(items, crate::os::apps_dark(), point, false, over_the_panel)?;
+    Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
+}
+
+/// `choice` made in the menu of the thing kept at hand at `at` (see `app_menu`): done.
+pub fn app_chose(at: u16, choice: AppChoice) {
+    let Some(app) = apps::shown().get(usize::from(at)).cloned() else { return };
+    match choice {
+        AppChoice::Open => run::ask(run::Ask::Launch(app.target)),
+        AppChoice::Show => {
+            if let Some(path) = app.location() {
+                run::ask(run::Ask::Files(vec![path], run::FilesAct::Show));
+            }
+        }
+        AppChoice::Remove => apps::change(move |apps| apps.retain(|kept| *kept != app)),
     }
 }
 

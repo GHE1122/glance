@@ -51,6 +51,8 @@ pub enum Ask {
     DragFiles(Vec<std::path::PathBuf>, u32),
     /// Text put on the clipboard (a file's path).
     CopyText(String),
+    /// What is kept at hand opened, as the shell opens it (see `apps`).
+    Launch(String),
 }
 
 /// What is done with files not on the station (see `Ask::Files`).
@@ -99,25 +101,50 @@ static ASKS: OnceLock<Mutex<Sender<Ask>>> = OnceLock::new();
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static SHOWN: Mutex<Option<Arc<Shown>>> = Mutex::new(None);
 /// Where each window shows a station, as it was last drawn (screen px): where what is dragged over it may be dropped.
-static AREAS: Mutex<Vec<(isize, windows::Win32::Foundation::RECT)>> = Mutex::new(Vec::new());
+static AREAS: Mutex<Vec<(isize, windows::Win32::Foundation::RECT, Lands)>> = Mutex::new(Vec::new());
 
-/// The window `window` shows a station in `areas` (screen px; none: none), as it was just drawn.
-pub fn shows_at(window: HWND, areas: Vec<windows::Win32::Foundation::RECT>) {
+/// The window `window` shows a station, or quick launch, in `areas` (screen px, each with where what is dropped there
+/// goes; none: none), as it was just drawn.
+pub fn shows_at(window: HWND, areas: Vec<(windows::Win32::Foundation::RECT, Lands)>) {
     let mut held = AREAS.lock().unwrap();
-    held.retain(|(of, _)| *of != window.0 as isize);
-    held.extend(areas.into_iter().map(|area| (window.0 as isize, area)));
+    held.retain(|(of, ..)| *of != window.0 as isize);
+    held.extend(areas.into_iter().map(|(area, lands)| (window.0 as isize, area, lands)));
 }
 
-/// Where stations are shown (screen px), each window's, of windows still shown.
-pub fn areas() -> Vec<windows::Win32::Foundation::RECT> {
+/// Where stations and quick launch are shown (screen px), each window's, of windows still shown.
+pub fn areas() -> Vec<(windows::Win32::Foundation::RECT, Lands)> {
     let mut held = AREAS.lock().unwrap();
-    held.retain(|(of, _)| unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(HWND(*of as *mut _)) }.as_bool());
-    held.iter().map(|(_, area)| *area).collect()
+    held.retain(|(of, ..)| unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(HWND(*of as *mut _)) }.as_bool());
+    held.iter().map(|(_, area, lands)| (*area, *lands)).collect()
+}
+
+/// Where what is dropped goes: onto the station, or into what is kept at hand (see `apps`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lands {
+    Station,
+    Apps,
 }
 
 /// What a window catching drops saw (see `catch`; on the station's thread, perhaps as it does something already: so
 /// told it by message): a drag over a strip along `edge` opens the station there, as a push into the edge does.
-pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>) {
+pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Lands) {
+    if lands == Lands::Apps {
+        // Files, folders and shortcuts dropped, and web addresses, kept at hand after what is there.
+        if let Dragged::Dropped(given) = dragged {
+            let added: Vec<super::apps::App> = given
+                .iter()
+                .flat_map(|content| match content {
+                    Content::Files(paths) => paths.iter().filter_map(|path| super::apps::App::of_path(path)).collect(),
+                    Content::Text(text) => super::apps::App::of_url(text.trim()).into_iter().collect(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            if !added.is_empty() {
+                super::apps::change(move |apps| apps.extend(added.into_iter().filter(|app| !apps.contains(app)).collect::<Vec<_>>()));
+            }
+        }
+        return;
+    }
     match dragged {
         Dragged::Over(at) => {
             if let Some(edge) = edge {
@@ -392,6 +419,9 @@ impl Station {
                     }
                     FilesAct::Open => open(&Content::Files(paths)),
                     FilesAct::Show => show_in_explorer(&paths),
+                },
+                Ask::Launch(target) => unsafe {
+                    windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(target.as_str()), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
                 },
                 Ask::CopyText(text) => {
                     if let Some(sequence) = clipboard::put(self.window, &Content::Text(text), false) {

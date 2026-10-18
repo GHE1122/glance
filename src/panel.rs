@@ -892,6 +892,7 @@ impl Controller {
                     menu = match widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
                         Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Station(id, choices))),
                         Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
+                        Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel.is_shown())).map(|(open, choices)| (open, MenuFor::App(at, choices))),
                         _ => widgets.menu(msg.hwnd, panel.lang, panel.is_shown()).map(|open| (open, MenuFor::Widget(msg.hwnd))),
                     };
                     keep_menu_above(&menu, &mut overlay);
@@ -902,6 +903,11 @@ impl Controller {
                         Some(Hit::Shelf(id)) => {
                             self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
                             menu = cursor_position().and_then(|at| crate::station::menu(id, at, true)).map(|(open, choices)| (open, MenuFor::Station(id, choices)));
+                            keep_menu_above(&menu, &mut overlay);
+                        }
+                        Some(Hit::App(at)) => {
+                            self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
+                            menu = cursor_position().and_then(|point| crate::station::app_menu(at, point, true)).map(|(open, choices)| (open, MenuFor::App(at, choices)));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         Some(Hit::Recent(file)) => {
@@ -1096,7 +1102,7 @@ impl Controller {
             }
             // Ctrl+V taken while the pointer is over a station (the panel's or a widget's), and only then: else it is
             // every program's.
-            let over_station = cursor_position().is_some_and(|at| crate::station::run::areas().iter().any(|area| at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom));
+            let over_station = cursor_position().is_some_and(|at| crate::station::run::areas().iter().filter(|(_, lands)| *lands == crate::station::run::Lands::Station).map(|(area, _)| area).any(|area| at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom));
             if over_station != paste {
                 paste = over_station;
                 unsafe {
@@ -1142,6 +1148,8 @@ enum MenuFor {
     StationHead(Vec<crate::station::HeadChoice>),
     /// A file come lately, by its number, and what each row does (see `station::recent_menu`).
     Recent(u128, Vec<crate::station::RecentChoice>),
+    /// A thing kept at hand, by its place, and what each row does (see `station::app_menu`).
+    App(u16, Vec<crate::station::AppChoice>),
 }
 
 impl Controller {
@@ -1167,6 +1175,11 @@ impl Controller {
             MenuFor::Station(id, choices) => {
                 if let Some(choice) = choice.and_then(|row| choices.get(row)) {
                     crate::station::chose(id, *choice);
+                }
+            }
+            MenuFor::App(at, choices) => {
+                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
+                    crate::station::app_chose(at, *choice);
                 }
             }
             MenuFor::Recent(file, choices) => {
@@ -2296,10 +2309,12 @@ impl<'a> Panel<'a> {
         let (placement, opening) = (self.placement.as_ref()?, self.opening.as_ref()?);
         let (x, y) = (client.x as f32 / placement.px - self.corner.0, client.y as f32 / placement.px - self.corner.1);
         let lanes = opening.layout.lanes();
-        if lanes.len() < 2 {
+        if lanes.len() < 2 || self.hit_at(client) == Some(Hit::Grip) {
             return None;
         }
-        lanes.iter().position(|lane| x >= lane.x && x < lane.x + lane.w && y >= lane.y && y < lane.y + self.theme.pad_top + view::HEAD_BAND)
+        // (The rail, quick launch's, taken anywhere it is free: it has no head.)
+        let rail = opening.layout.rail().map(|(at, _)| at);
+        lanes.iter().enumerate().position(|(at, lane)| x >= lane.x && x < lane.x + lane.w && y >= lane.y && y < lane.y + if Some(at) == rail { lane.h } else { self.theme.pad_top + view::HEAD_BAND })
     }
 
     /// Whether the press in hand is a tap so far: neither moved nor sized since.
@@ -2762,7 +2777,8 @@ impl<'a> Panel<'a> {
                 let scene = scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
                 let heights = view::heights(&scene);
                 let tall: Vec<f32> = heights.iter().map(|(_, height)| height[0]).collect();
-                self.largest = arrange::largest(theme, self.edge, &tall, work, self.columns, SIZES.1);
+                let rail = heights.iter().position(|(id, _)| id == "apps");
+                self.largest = arrange::largest(theme, self.edge, &tall, work, self.columns, SIZES.1, rail);
                 let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
                 self.opening.insert(arrange::Opening::new(theme, self.edge, &lanes, 0, work, self.columns, self.size, arrange::Want::Itself, now.clone()))
             }
@@ -3125,8 +3141,7 @@ impl<'a> Panel<'a> {
         let areas = self
             .hits
             .iter()
-            .filter(|hit| hit.4 == Hit::Station)
-            .map(|(x, y, w, h, _)| RECT { left: screen(*x, self.corner.0, window.left), top: screen(*y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) })
+            .filter_map(|(x, y, w, h, hit)| Some((RECT { left: screen(*x, self.corner.0, window.left), top: screen(*y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) }, hit.lands()?)))
             .collect();
         crate::station::run::shows_at(self.window.hwnd, areas);
     }

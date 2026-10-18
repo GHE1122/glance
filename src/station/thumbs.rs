@@ -101,9 +101,13 @@ fn make(asks: Receiver<Key>) {
 }
 
 /// `thumb` made no larger than `side` square, its shape kept: each pixel of the smaller the mean of those of the larger
-/// in its box (the shell, asked for one size, may give a larger).
+/// in its box (the shell, asked for one size, may give a larger); one less than half as large made as large as fits
+/// (a Store app's icon comes small), each pixel between the four nearest.
 fn fitted(thumb: &Thumb, side: u32) -> std::borrow::Cow<'_, Thumb> {
     let (w, h) = thumb.size;
+    if w.max(h) * 2 < side && w > 0 && h > 0 {
+        return std::borrow::Cow::Owned(enlarged(thumb, side));
+    }
     if w <= side && h <= side {
         return std::borrow::Cow::Borrowed(thumb);
     }
@@ -133,10 +137,55 @@ fn fitted(thumb: &Thumb, side: u32) -> std::borrow::Cow<'_, Thumb> {
     std::borrow::Cow::Owned(Thumb { pixels, size: (to_w, to_h) })
 }
 
+/// `thumb` made as large as fits `side` square, its shape kept, each pixel blended from the four nearest of it.
+fn enlarged(thumb: &Thumb, side: u32) -> Thumb {
+    let (w, h) = thumb.size;
+    let k = side as f64 / w.max(h) as f64;
+    let (to_w, to_h) = (((w as f64 * k).round() as u32).clamp(1, side), ((h as f64 * k).round() as u32).clamp(1, side));
+    let mut pixels = vec![0u8; (to_w * to_h * 4) as usize];
+    let at = |x: u32, y: u32, channel: usize| f64::from(thumb.pixels[((y * w + x) * 4) as usize + channel]);
+    for ty in 0..to_h {
+        let sy = ((ty as f64 + 0.5) / k - 0.5).clamp(0.0, (h - 1) as f64);
+        let (y0, fy) = (sy.floor() as u32, sy.fract());
+        let y1 = (y0 + 1).min(h - 1);
+        for tx in 0..to_w {
+            let sx = ((tx as f64 + 0.5) / k - 0.5).clamp(0.0, (w - 1) as f64);
+            let (x0, fx) = (sx.floor() as u32, sx.fract());
+            let x1 = (x0 + 1).min(w - 1);
+            let to = ((ty * to_w + tx) * 4) as usize;
+            for channel in 0..4 {
+                let top = at(x0, y0, channel) * (1.0 - fx) + at(x1, y0, channel) * fx;
+                let bottom = at(x0, y1, channel) * (1.0 - fx) + at(x1, y1, channel) * fx;
+                pixels[to + channel] = (top * (1.0 - fy) + bottom * fy).round() as u8;
+            }
+        }
+    }
+    Thumb { pixels, size: (to_w, to_h) }
+}
+
+/// `thumb` without the clear rows and columns round what it shows (an icon is drawn within room round it, a Store app's
+/// in much room): what it shows made as large as the tile, as every picture's is.
+fn trimmed(thumb: &Thumb) -> std::borrow::Cow<'_, Thumb> {
+    let (w, h) = thumb.size;
+    let seen = |x: u32, y: u32| thumb.pixels[((y * w + x) * 4 + 3) as usize] > 0;
+    let rows: Vec<u32> = (0..h).filter(|y| (0..w).any(|x| seen(x, *y))).collect();
+    let columns: Vec<u32> = (0..w).filter(|x| (0..h).any(|y| seen(*x, y))).collect();
+    let (Some(&top), Some(&bottom), Some(&left), Some(&right)) = (rows.first(), rows.last(), columns.first(), columns.last()) else {
+        return std::borrow::Cow::Borrowed(thumb);
+    };
+    if (top, left, bottom, right) == (0, 0, h - 1, w - 1) {
+        return std::borrow::Cow::Borrowed(thumb);
+    }
+    let (to_w, to_h) = (right - left + 1, bottom - top + 1);
+    let pixels = (top..=bottom).flat_map(|y| thumb.pixels[((y * w + left) * 4) as usize..((y * w + right + 1) * 4) as usize].iter().copied()).collect();
+    std::borrow::Cow::Owned(Thumb { pixels, size: (to_w, to_h) })
+}
+
 /// `thumb` in the middle of a square `side` across (made smaller to fit where it is larger), clear round it, as a
 /// picture known by `key`.
 fn squared(thumb: &Thumb, side: u32, key: u64) -> Picture {
-    let thumb = fitted(thumb, side);
+    let thumb = trimmed(thumb);
+    let thumb = fitted(&thumb, side);
     let (w, h) = thumb.size;
     let (left, top) = ((side - w) / 2, (side - h) / 2);
     let mut pixels = vec![0u8; (side * side * 4) as usize];
@@ -203,6 +252,27 @@ mod made {
         assert_eq!(at(10, 64), [0, 0, 255, 255]);
         assert_eq!(at(120, 64), [255, 0, 0, 255]);
         assert_eq!(at(120, 120), [0, 0, 0, 0]);
+    }
+
+    /// An icon drawn small in much clear room is made as large as the tile: the clear room taken off first.
+    #[test]
+    fn an_icon_in_much_room_fills_the_tile() {
+        // 128 × 128, clear but for 16 × 16 red in its middle.
+        let pixels = (0..128u32).flat_map(|y| (0..128u32).flat_map(move |x| if (56..72).contains(&x) && (56..72).contains(&y) { [0, 0, 255, 255] } else { [0, 0, 0, 0] })).collect();
+        let picture = squared(&Thumb { pixels, size: (128, 128) }, 128, 7);
+        assert_eq!(&picture.pixels[((4 * 128 + 4) * 4) as usize..((4 * 128 + 4) * 4 + 4) as usize], [0, 0, 255, 255]);
+    }
+
+    /// A thumbnail less than half as large as the side asked for is made as large as fits, its colours kept.
+    #[test]
+    fn a_small_thumbnail_is_made_larger() {
+        let pixels = (0..16).flat_map(|_| (0..32).flat_map(|x| if x < 16 { [0, 0, 255, 255] } else { [255, 0, 0, 255] })).collect();
+        let picture = squared(&Thumb { pixels, size: (32, 16) }, 128, 7);
+        let at = |x: u32, y: u32| &picture.pixels[((y * 128 + x) * 4) as usize..((y * 128 + x) * 4 + 4) as usize];
+        // 128 × 64 in the middle.
+        assert_eq!(at(10, 10), [0, 0, 0, 0]);
+        assert_eq!(at(10, 64), [0, 0, 255, 255]);
+        assert_eq!(at(120, 64), [255, 0, 0, 255]);
     }
 }
 

@@ -4,6 +4,7 @@
 use super::seen::Seen;
 use super::theme::Theme;
 use super::forms::Small;
+use super::view::{RailSide, RAIL_ROW, RAIL_W};
 use super::view::{Detail, Layout, COLUMN_WIDTH};
 use crate::reading::StaticInfo;
 use crate::settings::Edge;
@@ -27,17 +28,22 @@ const TOP_SHARE: f32 = 0.6;
 /// `columns`, when given (chosen in the settings), is kept instead, as far
 /// as the screen's width allows it: chosen, it may be more than a panel
 /// along a side takes by itself.
-pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, size: f32) -> (Layout, f32) {
-    let (layout, zoom) = fitted(theme, edge, heights.clone(), work, columns, size);
-    let (_, at_one) = fitted(theme, edge, heights, work, columns, 1.0);
+///
+/// `rail`: the lane drawn as a rail along the screen's edge instead of in a column (quick launch's), where there is
+/// one (see `Layout::with_rail`).
+#[allow(clippy::too_many_arguments)]
+pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, size: f32, rail: Option<usize>) -> (Layout, f32) {
+    let (layout, zoom) = fitted(theme, edge, heights.clone(), work, columns, size, rail);
+    let (_, at_one) = fitted(theme, edge, heights, work, columns, 1.0, rail);
     (layout, zoom.min(size * at_one))
 }
 
 /// The panel laid out at `size` and the zoom that fits it on the screen:
 /// laid out for the screen as the panel's own DIPs at that size measure
 /// it, the gaps from the screen's ends staying as they are on the screen.
-fn fitted(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, size: f32) -> (Layout, f32) {
-    let (layout, zoom) = arrange_designed(theme, edge, heights, (work.0 / size, work.1 / size), columns, GAP / size);
+#[allow(clippy::too_many_arguments)]
+fn fitted(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, size: f32, rail: Option<usize>) -> (Layout, f32) {
+    let (layout, zoom) = arrange_designed(theme, edge, heights, (work.0 / size, work.1 / size), columns, GAP / size, rail);
     (layout, zoom * size)
 }
 
@@ -47,9 +53,10 @@ fn fitted(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), column
 /// The largest size, up to `most`, at which the panel still grows: past it
 /// the screen holds no more of it (see `arrange`). In hundredths, as sizes
 /// are chosen.
-pub fn largest(theme: &Theme, edge: Edge, heights: &[f32], work: (f32, f32), columns: Option<usize>, most: f32) -> f32 {
-    let (_, at_one) = fitted(theme, edge, heights.to_vec(), work, columns, 1.0);
-    let grows = |size: f32| size * at_one <= fitted(theme, edge, heights.to_vec(), work, columns, size).1 + 1e-4;
+#[allow(clippy::too_many_arguments)]
+pub fn largest(theme: &Theme, edge: Edge, heights: &[f32], work: (f32, f32), columns: Option<usize>, most: f32, rail: Option<usize>) -> f32 {
+    let (_, at_one) = fitted(theme, edge, heights.to_vec(), work, columns, 1.0, rail);
+    let grows = |size: f32| size * at_one <= fitted(theme, edge, heights.to_vec(), work, columns, size, rail).1 + 1e-4;
     let mut size = (most * 100.0).round() as i32;
     while size > 100 && !grows(size as f32 / 100.0) {
         size -= 1;
@@ -66,8 +73,24 @@ fn room(theme: &Theme, edge: Edge, work: (f32, f32), gap: f32) -> (f32, f32) {
     }
 }
 
-fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, gap: f32) -> (Layout, f32) {
+fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, gap: f32, rail: Option<usize>) -> (Layout, f32) {
     let (room_width, room) = room(theme, edge, work, gap);
+    // The rail's lane out of the columns, the room it takes out of theirs.
+    let side = match edge {
+        Edge::Left => RailSide::Start,
+        Edge::Right => RailSide::End,
+        Edge::Top => RailSide::Bottom,
+    };
+    let mut heights = heights;
+    let rail = rail.filter(|at| *at < heights.len()).map(|at| {
+        heights.remove(at);
+        (at, side)
+    });
+    let (room_width, room) = match rail.map(|(_, side)| side) {
+        Some(RailSide::Start | RailSide::End) => (room_width - RAIL_W - theme.column_gap, room + theme.bar_gap + theme.bar_height),
+        Some(RailSide::Bottom) => (room_width, room + theme.bar_gap + theme.bar_height - RAIL_ROW - theme.lane_gap),
+        None => (room_width, room),
+    };
     // As many columns as fit across, and along a side no more than a few.
     let fit = (((room_width + theme.column_gap) / (COLUMN_WIDTH + theme.column_gap)) as usize).max(1);
     let max_columns = if edge == Edge::Top { fit } else { fit.min(MAX_COLUMNS) };
@@ -75,8 +98,18 @@ fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f3
         Some(columns) => Layout::with_columns(heights, columns.min(fit), theme),
         None => Layout::new(heights, room, max_columns, theme),
     };
-    // Zoomed out only if even the most columns are too tall, or one is too wide.
-    let zoom = (room / layout.height()).min(room_width / layout.width()).min(1.0);
+    let layout = match rail {
+        Some((at, side)) => layout.with_rail(at, side),
+        None => layout,
+    };
+    // Zoomed out only if even the most columns are too tall, or one is too wide (the rail's room given back to
+    // measure the whole).
+    let (whole_width, whole_height) = match rail.map(|(_, side)| side) {
+        Some(RailSide::Start | RailSide::End) => (room_width + RAIL_W + theme.column_gap, room - theme.bar_gap - theme.bar_height),
+        Some(RailSide::Bottom) => (room_width, room - theme.bar_gap - theme.bar_height + RAIL_ROW + theme.lane_gap),
+        None => (room_width, room),
+    };
+    let zoom = (whole_height / layout.height()).min(whole_width / layout.width()).min(1.0);
     (layout, zoom)
 }
 
@@ -374,11 +407,13 @@ impl Opening {
         seen: Seen,
     ) -> Self {
         let heights: Vec<Heights> = lanes.iter().map(|(_, heights)| *heights).collect();
-        let ids = lanes.iter().map(|(id, _)| id.to_string()).collect();
+        let ids: Vec<String> = lanes.iter().map(|(id, _)| id.to_string()).collect();
         let ladder = Ladder::new(theme, &heights, readings);
         let kept = match want {
             Want::Itself => {
-                let (layout, zoom) = arrange(theme, edge, heights.iter().map(|heights| heights[0]).collect(), work, columns, size);
+                // (Quick launch, at the panel's edge, as its rail.)
+                let rail = ids.iter().position(|id| id == "apps");
+                let (layout, zoom) = arrange(theme, edge, heights.iter().map(|heights| heights[0]).collect(), work, columns, size, rail);
                 return Opening { size: (layout.width(), layout.height()), layout, zoom, choice: None, lanes: ids, seen };
             }
             Want::Kept(choice) => ladder.keep(choice),
@@ -448,11 +483,11 @@ mod tests {
     fn fits_narrow_and_short_screens() {
         let theme = Theme::new(Skin::Paper, false);
         // A portrait screen 600 DIPs wide holds one column, not three.
-        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], (600.0, 1000.0), None, 1.0);
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], (600.0, 1000.0), None, 1.0, None);
         assert_eq!(layout.columns, 1);
         assert!(zoom < 1.0 && layout.height() * zoom <= 1000.0 - 2.0 * GAP + 0.01);
         // Narrower than a column: the column is zoomed to fit across.
-        let (layout, zoom) = arrange(&theme, Edge::Top, vec![100.0], (300.0, 1000.0), None, 1.0);
+        let (layout, zoom) = arrange(&theme, Edge::Top, vec![100.0], (300.0, 1000.0), None, 1.0, None);
         assert!(layout.width() * zoom <= 300.0 - 2.0 * GAP + 0.01);
         assert!(zoom.is_finite() && zoom > 0.0);
     }
@@ -462,14 +497,14 @@ mod tests {
         let theme = Theme::new(Skin::Paper, false);
         // Lanes that fit one column on a tall screen: four chosen, four taken,
         // more than a side takes by itself.
-        let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (3000.0, 2000.0), Some(4), 1.0);
+        let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (3000.0, 2000.0), Some(4), 1.0, None);
         assert_eq!(layout.columns, 4);
         // On a screen that holds two across, two.
         let two = 2.0 * COLUMN_WIDTH + theme.column_gap + GAP + theme.inset + 1.0;
-        let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two, 2000.0), Some(4), 1.0);
+        let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two, 2000.0), Some(4), 1.0, None);
         assert_eq!(layout.columns, 2);
         // One chosen and too tall for the screen: one, zoomed out.
-        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], (3000.0, 1000.0), Some(1), 1.0);
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], (3000.0, 1000.0), Some(1), 1.0, None);
         assert_eq!(layout.columns, 1);
         assert!(zoom < 1.0);
     }
@@ -481,9 +516,9 @@ mod tests {
         for skin in [Skin::Paper, Skin::Fluent, Skin::Glass] {
             let theme = Theme::new(skin, false);
             let two = 2.0 * COLUMN_WIDTH + theme.column_gap + GAP + theme.inset;
-            let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two + 0.5, 2000.0), Some(4), 1.0);
+            let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two + 0.5, 2000.0), Some(4), 1.0, None);
             assert_eq!(layout.columns, 2, "{skin:?}");
-            let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two - 2.0, 2000.0), Some(4), 1.0);
+            let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two - 2.0, 2000.0), Some(4), 1.0, None);
             assert_eq!(layout.columns, 1, "{skin:?}");
         }
     }
@@ -492,10 +527,10 @@ mod tests {
     fn grows_to_the_size_chosen_as_far_as_the_screen_allows() {
         let theme = Theme::new(Skin::Paper, false);
         // Half again as large, with room for it.
-        let (layout, zoom) = arrange(&theme, Edge::Right, vec![300.0], (3000.0, 2000.0), None, 1.5);
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![300.0], (3000.0, 2000.0), None, 1.5, None);
         assert_eq!((layout.columns, zoom), (1, 1.5));
         // Twice as large on a screen with room for less: as large as fits.
-        let (layout, zoom) = arrange(&theme, Edge::Right, vec![600.0], (400.0, 1000.0), Some(1), 2.0);
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![600.0], (400.0, 1000.0), Some(1), 2.0, None);
         assert!(zoom < 2.0 && layout.height() * zoom <= 1000.0 - 2.0 * GAP + 0.01);
     }
 
@@ -505,8 +540,8 @@ mod tests {
         // One column too tall for the screen: zoomed to fit at 1, and three
         // quarters of that at three quarters, not zoomed back to fit.
         let lanes = || vec![400.0; 6];
-        let (_, one) = arrange(&theme, Edge::Right, lanes(), (3000.0, 1000.0), Some(1), 1.0);
-        let (_, less) = arrange(&theme, Edge::Right, lanes(), (3000.0, 1000.0), Some(1), 0.75);
+        let (_, one) = arrange(&theme, Edge::Right, lanes(), (3000.0, 1000.0), Some(1), 1.0, None);
+        let (_, less) = arrange(&theme, Edge::Right, lanes(), (3000.0, 1000.0), Some(1), 0.75, None);
         assert!(one < 1.0);
         assert!((less - 0.75 * one).abs() < 1e-4);
     }

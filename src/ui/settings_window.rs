@@ -4539,10 +4539,13 @@ impl Ui {
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
         let probe = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
-        let heights: Vec<f32> = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
-        self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), self.settings.columns, SIZES.1);
+        let lanes = view::lanes(&probe);
+        let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&measure)).collect();
+        // (Quick launch as its rail, as the panel lays it out.)
+        let rail = lanes.iter().position(|lane| lane.id() == "apps");
+        self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), self.settings.columns, SIZES.1, rail);
         let size = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
-        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns, size);
+        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns, size, rail);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);

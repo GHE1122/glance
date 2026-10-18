@@ -254,7 +254,7 @@ impl Default for ProcessPrefs {
 }
 
 /// The workbench's modules, in default order (each on until chosen otherwise).
-pub const WORKBENCH: [&str; 2] = ["time", "station"];
+pub const WORKBENCH: [&str; 3] = ["time", "station", "apps"];
 
 /// Whether module `id` among `entries` shows its item `name` (whether or not the module itself is on).
 pub fn shows_in(entries: &[ModuleEntry], id: &str, name: &str) -> bool {

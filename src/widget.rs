@@ -2083,13 +2083,12 @@ impl Widget {
         let areas = self
             .hits
             .iter()
-            .filter(|hit| hit.4 == view::Hit::Station)
-            .map(|(x, y, w, h, _)| RECT {
+            .filter_map(|(x, y, w, h, hit)| Some((RECT {
                 left: screen(*x, self.hits_from.0, window.left),
                 top: screen(*y, self.hits_from.1, window.top),
                 right: screen(x + w, self.hits_from.0, window.left),
                 bottom: screen(y + h, self.hits_from.1, window.top),
-            })
+            }, hit.lands()?)))
             .collect();
         crate::station::run::shows_at(self.window.hwnd, areas);
     }
