@@ -127,6 +127,9 @@ pub struct Gfx {
     /// What a frame handed out a region of the compositor's atlas is drawn on first (see `Frame::begun`), as large
     /// as the largest such frame yet.
     scratch: RefCell<Option<(ID2D1Bitmap1, (u32, u32))>>,
+    /// The context that draws on it: Glance's own, made once (the compositor's, its target changed to the bitmap and
+    /// back, failed now and then, and the window showed nothing for a frame, or another window's drawing).
+    scratch_context: RefCell<Option<ID2D1DeviceContext>>,
 }
 
 /// How much contrast grayscale text's edges are given by `crisp_text` (the
@@ -232,6 +235,7 @@ impl Gfx {
         };
         Ok(Gfx {
             scratch: RefCell::new(None),
+            scratch_context: RefCell::new(None),
             guarded,
             factory,
             device,
@@ -438,6 +442,7 @@ impl Gfx {
     pub fn trim(&self) {
         self.trimmed.set(true);
         self.scratch.borrow_mut().take();
+        self.scratch_context.borrow_mut().take();
         self.pictures.borrow_mut().clear();
         self.layouts.borrow_mut().clear();
         self.made.borrow_mut().clear();
@@ -767,9 +772,9 @@ pub struct Frame<'a> {
     brush: ID2D1SolidColorBrush,
     /// Where the surface's region starts (DIPs).
     base: Matrix3x2,
-    /// Handed a region of the atlas: the atlas, the bitmap drawn on meanwhile, and the region's corner and size
-    /// (physical pixels; see `begun`).
-    atlas: Option<(ID2D1Image, ID2D1Bitmap1, POINT, (u32, u32))>,
+    /// Handed a region of the atlas: the compositor's context (`dc` is then Glance's own, drawing on the bitmap), the
+    /// bitmap drawn on meanwhile, and the region's corner and size (physical pixels; see `begun`).
+    atlas: Option<(ID2D1DeviceContext, ID2D1Bitmap1, POINT, (u32, u32))>,
     /// Drawing what moves (see `set_moving`): nothing put on whole pixels meanwhile.
     moving: Cell<bool>,
 }
@@ -1017,8 +1022,7 @@ impl<'a> Frame<'a> {
     /// which DirectWrite puts on whole pixels, and its glyphs' places along the line went to one pixel or step or the
     /// other as the region did from frame to frame: the overlay's words shook by a pixel as its readings changed.
     pub(super) fn begun(gfx: &'a Gfx, dc: ID2D1DeviceContext, offset: POINT, size: (u32, u32), scale: f32) -> Result<Self> {
-        let atlas = if offset.x != 0 || offset.y != 0 {
-            let target = unsafe { dc.GetTarget()? };
+        let (dc, atlas) = if offset.x != 0 || offset.y != 0 {
             let mut kept = gfx.scratch.borrow_mut();
             let fits = kept.as_ref().is_some_and(|(_, has)| has.0 >= size.0 && has.1 >= size.1);
             if !fits {
@@ -1035,10 +1039,21 @@ impl<'a> Frame<'a> {
                 *kept = Some((bitmap, made));
             }
             let scratch = kept.as_ref().unwrap().0.clone();
-            unsafe { dc.SetTarget(&scratch) };
-            Some((target, scratch, offset, size))
+            // Drawn on through Glance's own context (the compositor's is left as it was handed out, to copy into).
+            let own = {
+                let mut own = gfx.scratch_context.borrow_mut();
+                if own.is_none() {
+                    *own = Some(unsafe { gfx.device.CreateDeviceContext(windows::Win32::Graphics::Direct2D::D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? });
+                }
+                own.clone().unwrap()
+            };
+            unsafe {
+                own.SetTarget(&scratch);
+                own.BeginDraw();
+            }
+            (own, Some((dc, scratch, offset, size)))
         } else {
-            None
+            (dc, None)
         };
         let base = Matrix3x2::identity();
         unsafe {
@@ -1058,18 +1073,25 @@ impl<'a> Frame<'a> {
     /// What was drawn put in the region of the atlas the frame was handed (see `begun`), pixel for pixel: its
     /// place given in pixels, no DIPs between.
     pub(super) fn finish(&self) -> Result<()> {
-        let Some((target, scratch, offset, size)) = &self.atlas else { return Ok(()) };
+        let Some((dc, scratch, offset, size)) = &self.atlas else { return Ok(()) };
         use windows::Win32::Graphics::Direct2D::Common::D2D1_COMPOSITE_MODE_SOURCE_COPY;
         use windows::Win32::Graphics::Direct2D::{D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_UNIT_MODE_DIPS, D2D1_UNIT_MODE_PIXELS};
         unsafe {
-            let dc = &self.dc;
-            dc.SetTarget(target);
+            // What was drawn on the bitmap done (handed to the card), then copied by the compositor's context.
+            self.dc.EndDraw(None, None)?;
+            self.dc.SetTarget(None);
+            let mut was = Matrix3x2::default();
+            dc.GetTransform(&mut was);
             dc.SetUnitMode(D2D1_UNIT_MODE_PIXELS);
             dc.SetTransform(&Matrix3x2::identity());
             let from = D2D_RECT_F { left: 0.0, top: 0.0, right: size.0 as f32, bottom: size.1 as f32 };
             let image: ID2D1Image = scratch.cast()?;
             dc.DrawImage(&image, Some(&Vector2 { X: offset.x as f32, Y: offset.y as f32 }), Some(&from), D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
             dc.SetUnitMode(D2D1_UNIT_MODE_DIPS);
+            dc.SetTransform(&was);
+            // Handed to the card now, before the next frame (another window's, on the same bitmap) draws on it: else
+            // the compositor's context may keep the copying a while, and the next window's drawing be done first.
+            dc.Flush(None, None)?;
         }
         Ok(())
     }
