@@ -15,7 +15,8 @@ pub enum Op {
     /// larger than its font it is drawn (moving between two sizes, it is
     /// drawn larger or smaller rather than set in a font for each).
     Text { text: String, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align, inked: f32, scale: f32 },
-    Clip { x: f32, y: f32, w: f32, h: f32 },
+    /// To a box, or (`part`) the part of it a fraction fills, from its bottom or its left (see `Canvas::clip_part`).
+    Clip { x: f32, y: f32, w: f32, h: f32, part: Option<(f32, bool)> },
     Unclip,
     Fill { color: Color, x: f32, y: f32, w: f32, h: f32 },
     Rounded { color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32 },
@@ -122,7 +123,7 @@ impl Op {
                 let left = if *align == Align::End { x + width - inked } else { *x };
                 Bounds { x: left, y: *y, w: *inked, h: font.size * scale * 1.25 }
             }
-            Op::Clip { x, y, w, h } | Op::Fill { x, y, w, h, .. } | Op::Rounded { x, y, w, h, .. } | Op::Outline { x, y, w, h, .. } | Op::Shadow { x, y, w, h, .. } => {
+            Op::Clip { x, y, w, h, .. } | Op::Fill { x, y, w, h, .. } | Op::Rounded { x, y, w, h, .. } | Op::Outline { x, y, w, h, .. } | Op::Shadow { x, y, w, h, .. } => {
                 Bounds { x: *x, y: *y, w: *w, h: *h }
             }
             Op::Circle { centre, radius, .. } | Op::Arc { centre, radius, .. } => Bounds { x: centre.x - radius, y: centre.y - radius, w: 2.0 * radius, h: 2.0 * radius },
@@ -185,9 +186,9 @@ impl Op {
                 let x = if align == Align::End { start.x + inked - width } else { start.x };
                 Op::Text { text, font, color, x, y: start.y, width, align, inked, scale: map.length(scale) }
             }
-            Op::Clip { x, y, w, h } => {
+            Op::Clip { x, y, w, h, part } => {
                 let (x, y, w, h) = rect(x, y, w, h);
-                Op::Clip { x, y, w, h }
+                Op::Clip { x, y, w, h, part }
             }
             Op::Unclip => Op::Unclip,
             Op::Fill { color, x, y, w, h } => {
@@ -249,8 +250,13 @@ impl Op {
                     vec![old.faded(1.0 - t), new.faded(t)]
                 }
             }
-            (Op::Clip { x: ax, y: ay, w: aw, h: ah }, Op::Clip { x: bx, y: by, w: bw, h: bh }) => {
-                vec![Op::Clip { x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t) }]
+            (Op::Clip { x: ax, y: ay, w: aw, h: ah, part: ap }, Op::Clip { x: bx, y: by, w: bw, h: bh, part: bp }) => {
+                // (A part of the same kind each way, filled between; else as it comes to be.)
+                let part = match (ap, bp) {
+                    (Some((af, aup)), Some((bf, bup))) if aup == bup => Some((lerp(*af, *bf, t), *bup)),
+                    _ => *bp,
+                };
+                vec![Op::Clip { x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t), part }]
             }
             (Op::Unclip, Op::Unclip) => vec![Op::Unclip],
             (Op::Fill { color: ac, x: ax, y: ay, w: aw, h: ah }, Op::Fill { color: bc, x: bx, y: by, w: bw, h: bh }) => {
@@ -325,7 +331,8 @@ impl Op {
         match self {
             Op::Text { text, font, color, x, y, width, align, scale, .. } if (scale - 1.0).abs() < 1e-3 => canvas.text(text, *font, *color, *x, *y, *width, *align),
             Op::Text { text, font, color, x, y, width, align, scale, .. } => canvas.text_scaled(text, *font, *color, *x, *y, *width, *align, *scale),
-            Op::Clip { x, y, w, h } => canvas.clip(*x, *y, *w, *h),
+            Op::Clip { x, y, w, h, part: None } => canvas.clip(*x, *y, *w, *h),
+            Op::Clip { x, y, w, h, part: Some((fraction, up)) } => canvas.clip_part(*x, *y, *w, *h, *fraction, *up),
             Op::Unclip => canvas.unclip(),
             Op::Fill { color, x, y, w, h } => canvas.fill(*color, *x, *y, *w, *h),
             Op::Rounded { color, x, y, w, h, radius } => canvas.fill_rounded(*color, *x, *y, *w, *h, *radius),
@@ -493,7 +500,11 @@ impl Canvas for Recorder<'_> {
     }
 
     fn clip(&self, x: f32, y: f32, w: f32, h: f32) {
-        self.push(Op::Clip { x, y, w, h });
+        self.push(Op::Clip { x, y, w, h, part: None });
+    }
+
+    fn clip_part(&self, x: f32, y: f32, w: f32, h: f32, fraction: f32, up: bool) {
+        self.push(Op::Clip { x, y, w, h, part: Some((fraction, up)) });
     }
 
     fn unclip(&self) {

@@ -3199,7 +3199,7 @@ fn tag(frame: &gfx::Frame, theme: &Theme, text: &str, centre: (f32, f32), heed: 
     let (edge, ink) = if heed { (theme.signal, theme.signal) } else { (edge, theme.text) };
     frame.fill_rounded(ground, x, y, width, height, radius);
     let line = 1.0;
-    frame.stroke_rounded(Fill::Solid(edge), x, y, width, height, radius + line / 2.0, line);
+    frame.stroke_rounded(Fill::Solid(edge), x, y, width, height, radius, line);
     Canvas::text(frame, text, font, ink, x + pad_x, y + pad_y, width, Align::Start);
 }
 

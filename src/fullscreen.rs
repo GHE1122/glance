@@ -684,9 +684,14 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
         let lit = over || dragging == Some(Hit::Volume);
         let thick = 3.0;
         let x = pop_x + pop_w / 2.0 - thick / 2.0;
-        frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 0.3 } else { 0.22 } * shown), x, top, thick, bottom - top, thick / 2.0);
-        let filled = (bottom - top) * fraction;
-        frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 1.0 } else { 0.85 } * shown), x, bottom - filled, thick, filled, thick / 2.0);
+        // The track's box put on whole pixels once, the level standing in it from its bottom (put on pixels alone,
+        // the level's foot moved by a pixel as it rose).
+        let whole = frame.on_pixels(x, top, thick, bottom - top);
+        frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 0.3 } else { 0.22 } * shown), whole.0, whole.1, whole.2, whole.3, thick / 2.0);
+        let (lx, ly, lw, lh) = crate::ui::view::filled_part(frame, whole, fraction, true);
+        if lh > 0.0 {
+            frame.fill_rounded(Color::hex(0xFFFFFF, if lit { 1.0 } else { 0.85 } * shown), lx, ly, lw, lh, thick / 2.0);
+        }
         if let Some((_, py)) = pointer.filter(|_| over) {
             let at = ((bottom - py) / (bottom - top)).clamp(0.0, 1.0);
             let said = format!("{}%", (at * 100.0).round() as u32);

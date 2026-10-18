@@ -833,6 +833,11 @@ impl Canvas for Frame<'_> {
         if radius == 0.0 {
             return Canvas::fill(self, color, x, y, width, height);
         }
+        // Round (a key's plate under the pointer): placed by its centre, as a circle is, so as to be one with the glyph
+        // on it (placed by its box, it stood half a pixel off the glyph).
+        if (width - height).abs() < 1e-3 && radius >= width / 2.0 - 1e-3 {
+            return Canvas::fill_circle(self, color, Point { x: x + width / 2.0, y: y + height / 2.0 }, width / 2.0);
+        }
         let (x, y, width, height) = self.on_pixels(x, y, width, height);
         let radius = radius.min(width / 2.0).min(height / 2.0);
         let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius };
@@ -985,7 +990,7 @@ impl Canvas for Frame<'_> {
             }
         };
         // (Its blur as large as it was through the transform.)
-        let blur = blur * transform.M11.abs().max(1e-3);
+        let blur = blur * stretch(&transform);
         // Without its pictures (the device going, which the frame's end
         // tells), no shadow this time.
         let _ = (|| -> Result<()> {
@@ -1307,7 +1312,7 @@ impl<'a> Frame<'a> {
                 dc.SetTarget(&target);
                 dc.SetTransform(&transform);
                 list.Close()?;
-                let blur = blur * transform.M11.abs().max(1e-3);
+                let blur = blur * stretch(&transform);
                 let cast = dc.CreateEffect(&CLSID_D2D1Shadow)?;
                 cast.SetInput(0, &list.cast::<ID2D1Image>()?, true);
                 cast.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &blur.to_ne_bytes())?;
@@ -1575,6 +1580,12 @@ fn whole_pixel(at: f32) -> f32 {
     ((at * 64.0).round() / 64.0 + 0.5).floor()
 }
 
+/// How much larger `transform` makes what it draws, on average each way (turned or not: its first entry alone shrank a
+/// turned shadow's blur to nothing as the record's arm swung).
+fn stretch(transform: &Matrix3x2) -> f32 {
+    (transform.M11 * transform.M22 - transform.M12 * transform.M21).abs().sqrt().max(1e-3)
+}
+
 /// The faint one-unit glow `halo` rings what `drawn` draws with (as CSS's `text-shadow: 0 0 1px`; see `Layer::draw`).
 unsafe fn glow(dc: &ID2D1DeviceContext, drawn: &windows::Win32::Graphics::Direct2D::ID2D1CommandList, halo: Color) -> Result<ID2D1Image> {
     let glow = dc.CreateEffect(&CLSID_D2D1Shadow)?;
@@ -1744,16 +1755,19 @@ impl Layer {
                 dc.GetDpi(&mut dpi.0, &mut dpi.1);
                 dc.SetTarget(&list);
                 dc.SetDpi(dpi.0, dpi.1);
-                dc.SetTransform(&Matrix3x2::identity());
+                // (Recorded through where it is drawn, so put on the pixels it lands on, as what is drawn straight is;
+                // drawn back as it is.)
+                dc.SetTransform(&placed);
                 dc.PushAxisAlignedClip(&rect(left, top, width, height), D2D1_ANTIALIAS_MODE_ALIASED);
                 let painted = paint(frame);
                 dc.PopAxisAlignedClip();
                 list.Close()?;
                 dc.SetTarget(&target);
                 dc.SetDpi(dpi.0, dpi.1);
-                dc.SetTransform(&placed);
+                dc.SetTransform(&Matrix3x2::identity());
                 dc.DrawImage(&glow(dc, &list, color)?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
                 dc.DrawImage(&list, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                dc.SetTransform(&placed);
                 painted
             }
         };

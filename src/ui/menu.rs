@@ -286,7 +286,7 @@ impl Sheet {
         let colours = Colours::new(dark);
         frame.shadow(colours.shadow, 0.0, 0.0, width, height, RADIUS, 12.0, 6.0);
         frame.fill_rounded(colours.sheet, 0.0, 0.0, width, height, RADIUS);
-        frame.stroke_rounded(Fill::Solid(colours.stroke), 0.0, 0.0, width, height, RADIUS + 0.5, 1.0);
+        frame.stroke_rounded(Fill::Solid(colours.stroke), 0.0, 0.0, width, height, RADIUS, 1.0);
         for (i, (item, top)) in items.iter().zip(&self.tops).enumerate() {
             if item.rule_before {
                 frame.fill(colours.rule, 0.0, top - RULE / 2.0 - 0.5, width, 1.0);

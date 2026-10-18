@@ -23,7 +23,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::{Matrix3x2, Vector2};
 
-use super::canvas::Color;
+use super::canvas::{Canvas, Color, Fill};
 use super::gfx::{effect_input, Frame};
 use super::theme::{Shadow, Skin, Theme};
 use super::view::Rect;
@@ -471,11 +471,10 @@ fn paper(frame: &Frame, ground: &Ground) -> Result<()> {
         None => Rect { x: 0.0, y: 0.0, w, h },
     };
     shadows(frame, &[(slab, radius)], &theme.shadows)?;
-    unsafe {
-        // The rule rings the slab just outside it.
-        frame.dc.FillRoundedRectangle(&rounded(grow(slab, 1.0), radius + 1.0), frame.brush(theme.stroke));
-        frame.dc.FillRoundedRectangle(&rounded(slab, radius), frame.brush(theme.paper));
-    }
+    // The rule rings the slab just outside it. (Through the frame's fills, on whole pixels as everything is.)
+    let ring = grow(slab, 1.0);
+    Canvas::fill_rounded(frame, theme.stroke, ring.x, ring.y, ring.w, ring.h, radius + 1.0);
+    Canvas::fill_rounded(frame, theme.paper, slab.x, slab.y, slab.w, slab.h, radius);
     Ok(())
 }
 
@@ -490,7 +489,8 @@ fn fluent(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
     match part {
         Part::Under => {
             shadows(frame, &[(sheet, theme.radius)], &theme.shadows)?;
-            unsafe { frame.dc.FillRoundedRectangle(&rounded(grow(sheet, 1.0), theme.radius + 1.0), frame.brush(theme.stroke)) };
+            let ring = grow(sheet, 1.0);
+            Canvas::fill_rounded(frame, theme.stroke, ring.x, ring.y, ring.w, ring.h, theme.radius + 1.0);
             Ok(())
         }
         Part::Desktop => within(frame, sheet, theme.radius, || match ground.backdrop.map(|backdrop| acrylic(frame, backdrop, sheet, theme.luminosity)) {
@@ -515,11 +515,10 @@ fn fluent(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
             // is its card).
             if theme.card.a > 0.0 {
                 for lane in ground.lanes.iter().filter(|lane| lane.w < sheet.w || lane.h < sheet.h) {
-                    let card = rounded(*lane, CARD_RADIUS);
-                    unsafe {
-                        frame.dc.FillRoundedRectangle(&card, frame.brush(theme.card));
-                        frame.dc.DrawRoundedRectangle(&rounded(grow(*lane, -0.5), CARD_RADIUS), frame.brush(theme.card_stroke), 1.0, None);
-                    }
+                    // (Through the frame's fill and outline, put on whole pixels as everything is: drawn straight,
+                    // a card's border on a pixel's edge was spread over two at a fractional scale.)
+                    Canvas::fill_rounded(frame, theme.card, lane.x, lane.y, lane.w, lane.h, CARD_RADIUS);
+                    Canvas::stroke_rounded(frame, Fill::Solid(theme.card_stroke), lane.x, lane.y, lane.w, lane.h, CARD_RADIUS, 1.0);
                 }
             }
         }),

@@ -97,6 +97,22 @@ pub enum Fill {
     Down { top: f32, from: Color, bottom: f32, to: Color },
 }
 
+/// The part of `whole` (a box already on whole pixels, as `on_pixels` puts it) that `fraction` of it fills, from its
+/// bottom (`up`) or its left: as many whole pixels as that comes to (as `on_pixels` makes it), ending where the box
+/// does at the side it fills from (a part put on pixels alone ended a pixel off the box's own edge, and the box's
+/// colour showed there). None of it for a fraction of nothing (or not a number).
+pub fn filled_part(whole: (f32, f32, f32, f32), fraction: f32, up: bool, on_pixels: impl Fn(f32, f32, f32, f32) -> (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = whole;
+    let fraction = if fraction.is_nan() { 0.0 } else { fraction.clamp(0.0, 1.0) };
+    if up {
+        let filled = if fraction > 0.0 { on_pixels(x, y, w, h * fraction).3.min(h) } else { 0.0 };
+        (x, y + h - filled, w, filled)
+    } else {
+        let filled = if fraction > 0.0 { on_pixels(x, y, w * fraction, h).2.min(w) } else { 0.0 };
+        (x, y, filled, h)
+    }
+}
+
 /// A picture to draw (a track's cover): its pixels, premultiplied BGRA rows, `side` square and opaque; known by
 /// `key` (the same pixels, the same key: what is made of them on the card is made once).
 #[derive(Clone, Debug)]
@@ -141,6 +157,15 @@ pub trait Canvas {
     /// alone, which left them a pixel apart. As it is, where nothing is put on pixels.
     fn on_pixels(&self, x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
         (x, y, width, height)
+    }
+    /// Clips to the part of the box `(x, y, width, height)` that `fraction` of it fills, from its bottom (`up`) or its
+    /// left: the box put on whole pixels once, the part as many whole pixels as that comes to, ending where the box
+    /// does (see `filled_part`). (One call, not the box worked out by the caller: a recording of it, played back as a
+    /// layout turns into another, works it out on the pixels it is played on.)
+    fn clip_part(&self, x: f32, y: f32, width: f32, height: f32, fraction: f32, up: bool) {
+        let whole = self.on_pixels(x, y, width, height);
+        let part = filled_part(whole, fraction, up, |x, y, w, h| self.on_pixels(x, y, w, h));
+        self.clip(part.0, part.1, part.2, part.3);
     }
     fn fill(&self, color: Color, x: f32, y: f32, width: f32, height: f32);
     fn fill_rounded(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32);
