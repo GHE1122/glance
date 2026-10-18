@@ -463,17 +463,44 @@ fn draw_lines(frame: &Frame, (w, h): (f32, f32), lines: &[Line], now: Option<usi
     }
 }
 
-/// One line, each character its size and tilt along a slowly drifting wave, coming up out of a blur as it is sung,
+/// A line's characters (see `timed`) as they move together: each of Chinese, Japanese and Korean script on its own,
+/// and of the others each word whole (its letters one, as they are read: moved each its own way, a word in English
+/// came apart into letters strewn along the wave); each with when it is sung and for how long, and spaces as they
+/// are.
+fn units(chars: Vec<(char, f64, f64)>) -> Vec<(String, f64, f64)> {
+    let alone = |ch: char| ch.is_whitespace() || is_cjk(ch);
+    let mut units: Vec<(String, f64, f64)> = Vec::new();
+    let mut joining = false;
+    for (ch, at, each) in chars {
+        match units.last_mut() {
+            Some((said, _, lasts)) if joining && !alone(ch) => {
+                said.push(ch);
+                *lasts += each;
+            }
+            _ => units.push((ch.to_string(), at, each)),
+        }
+        joining = !alone(ch);
+    }
+    units
+}
+
+/// Whether `ch` is of a script whose characters stand each on its own as they are read (Chinese, Japanese, Korean,
+/// and their marks and full-width forms).
+fn is_cjk(ch: char) -> bool {
+    matches!(ch as u32, 0x1100..=0x11FF | 0x2E80..=0x2FDF | 0x3000..=0x303F | 0x3040..=0x30FF | 0x3100..=0x31FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFFEF | 0x20000..=0x2FFFF)
+}
+
+/// One line, each character (each word, of a script that writes words) its size and tilt along a slowly drifting wave, coming up out of a blur as it is sung,
 /// lit and swelling with the music while it is; `out` of the way left (rising and fading).
 #[allow(clippy::too_many_arguments)]
 fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>, which: usize, position: f64, t: f32, music: &Music, out: f32, (left, baseline, base): (f32, f32, f32)) {
-    let chars = timed(line, next);
-    if chars.iter().all(|(ch, ..)| ch.is_whitespace()) {
+    let chars = units(timed(line, next));
+    if chars.iter().all(|(said, ..)| said.trim().is_empty()) {
         return;
     }
     // Each character's size and room, the whole made smaller where it would not fit.
     let mut sizes: Vec<f32> = (0..chars.len()).map(|k| base * SIZES[(k + which * 3) % 8]).collect();
-    let mut rooms: Vec<f32> = chars.iter().zip(&sizes).map(|((ch, ..), size)| if ch.is_whitespace() { size * 0.4 } else { frame.measure(&ch.to_string(), Font::new(crate::serif::family(), *size, 700.0)) + base * 0.08 }).collect();
+    let mut rooms: Vec<f32> = chars.iter().zip(&sizes).map(|((said, ..), size)| if said.trim().is_empty() { size * 0.4 } else { frame.measure(said, Font::new(crate::serif::family(), *size, 700.0)) + base * 0.08 }).collect();
     let total: f32 = rooms.iter().sum();
     let fit = ((w - 2.0 * left) / total.max(1.0)).min(1.0);
     sizes.iter_mut().for_each(|size| *size *= fit);
@@ -496,10 +523,10 @@ fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>,
     }
     let mut glyphs = Vec::new();
     let mut x = left;
-    for (k, ((ch, at, each), (size, room))) in chars.iter().zip(sizes.iter().zip(&rooms)).enumerate() {
+    for (k, ((said, at, each), (size, room))) in chars.iter().zip(sizes.iter().zip(&rooms)).enumerate() {
         let middle = x + room / 2.0;
         x += room;
-        if ch.is_whitespace() {
+        if said.trim().is_empty() {
             continue;
         }
         let age = (position - at) as f32;
@@ -515,7 +542,7 @@ fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>,
         let rise = (1.0 - came) * 26.0 - out * 60.0 - music.beat * 3.0;
         let (ascent, _) = frame.gfx.baseline(font);
         glyphs.push(Glyph {
-            said: ch.to_string(),
+            said: said.clone(),
             font,
             middle,
             top: y - ascent + rise,
@@ -717,5 +744,20 @@ mod pictures {
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/full.png")), w as u32, h as u32, &pixels).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Chinese moves a character at a time; a word in English whole, its letters' times summed.
+    #[test]
+    fn words_move_whole_and_characters_alone() {
+        let timed = |text: &str| text.chars().enumerate().map(|(k, ch)| (ch, k as f64, 0.5)).collect::<Vec<_>>();
+        let said = |units: Vec<(String, f64, f64)>| units.into_iter().map(|(said, ..)| said).collect::<Vec<_>>();
+        assert_eq!(said(super::units(timed("Come on, rain"))), ["Come", " ", "on,", " ", "rain"]);
+        assert_eq!(said(super::units(timed("明天去找"))), ["明", "天", "去", "找"]);
+        assert_eq!(said(super::units(timed("I love 你"))), ["I", " ", "love", " ", "你"]);
+        let word = super::units(timed("rain")).remove(0);
+        assert_eq!((word.1, word.2), (0.0, 2.0));
     }
 }
