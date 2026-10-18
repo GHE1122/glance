@@ -16,6 +16,20 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 static PRESSED: AtomicBool = AtomicBool::new(false);
 static DRAG_FROM: AtomicIsize = AtomicIsize::new(0);
+/// The station's thread, as Windows numbers it (to see from outside what a drag holds).
+static STATION_THREAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// How a drag under way looks from outside: the window that holds the pointer on the thread dragging (its class),
+/// and whether that thread is moving or sizing a window.
+fn seen_from_outside(thread: u32) -> String {
+    let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+    if unsafe { GetGUIThreadInfo(thread, &mut info) }.is_err() {
+        return "no thread info".into();
+    }
+    let mut class = [0u16; 128];
+    let length = unsafe { GetClassNameW(info.hwndCapture, &mut class) } as usize;
+    format!("capture {:?} of class {:?}, flags {:#x}", info.hwndCapture.0, String::from_utf16_lossy(&class[..length]), info.flags.0)
+}
 
 unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if message == WM_LBUTTONDOWN {
@@ -57,6 +71,7 @@ fn drag_and_drop_across_threads() {
     let (dropped_tx, dropped) = mpsc::channel::<String>();
     let (registered_tx, registered) = mpsc::channel();
     let station = std::thread::spawn(move || unsafe {
+        STATION_THREAD.store(windows::Win32::System::Threading::GetCurrentThreadId(), Ordering::Release);
         windows::Win32::System::Ole::OleInitialize(None).unwrap();
         let target = super::drop::Target::new(move |dragged| {
             if let super::drop::Dragged::Dropped(given) = dragged {
@@ -101,6 +116,11 @@ fn drag_and_drop_across_threads() {
     for step in 1..=20 {
         pointer(POINT { x: a.x + (b.x - a.x) * step / 20, y: a.y + (b.y - a.y) * step / 20 }, Default::default());
         std::thread::sleep(Duration::from_millis(30));
+        if step == 10 {
+            println!("the drag seen from outside: {}", seen_from_outside(STATION_THREAD.load(Ordering::Acquire)));
+            let foreground = unsafe { GetWindowThreadProcessId(GetForegroundWindow(), None) };
+            println!("the foreground thread meanwhile: {}", seen_from_outside(foreground));
+        }
     }
     std::thread::sleep(Duration::from_millis(200));
     pointer(b, MOUSEEVENTF_LEFTUP);
