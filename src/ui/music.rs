@@ -614,11 +614,15 @@ impl Music {
         }
         // Turned no further than the lines go.
         if let (Some(lines), true) = (&moment.lines, self.turned != 0) {
+            // (From the line sung now, or from before the first where none is: to the first line at least, the last at
+            // most; with none sung yet, the last was out of reach.)
             let at = moment.now.map_or(-1, |now| now as i32);
-            self.turned = self.turned.clamp(-at.max(0), lines.len() as i32 - 1 - at.max(0));
+            self.turned = self.turned.clamp(-at.max(0), lines.len() as i32 - 1 - at);
         }
         // The rail, sprung toward the line aimed at (as Apple Music's lyrics move: quick, then settling).
-        let target = moment.now.map_or(-1.0, |now| now as f32) + self.turned as f32;
+        // (The line turned to, as every part that shows it finds it: see `turned_to`.)
+        let count = moment.lines.as_ref().map_or(0, |lines| lines.len());
+        let target = turned_to(moment.now, self.turned, count).map_or(moment.now.map_or(-1.0, |now| now as f32), |index| index as f32);
         let key = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
         if key != self.lyrics {
             self.lyrics = key;
@@ -1197,8 +1201,10 @@ impl Drawing<'_> {
         let centred = self.edged && !self.shows.cover;
         let shown_in = self.music.controls_shown();
         let mut end = w - pad;
+        // (The keys' plates inside its padding, not their glyphs alone: as low as it is, a plate under the pointer
+        // reached its edge, and the keys looked pushed to its end.)
         if self.shows.controls {
-            self.keys(end + KEY_LEAD - keys_wide, KEY_GAP, row, 1.0);
+            self.keys(end - keys_wide, KEY_GAP, row, 1.0);
             end -= keys_wide + 10.0;
             if self.shows.spectrum && !centred {
                 spectrum(self.frame, self.moment, (accent, tint), (end - 70.0, h / 2.0 + 10.0, 70.0, 20.0), 0.85);
@@ -1206,7 +1212,7 @@ impl Drawing<'_> {
             }
         } else if centred {
             if shown_in > 0.0 {
-                self.keys(pad - KEY_LEAD, KEY_GAP, row, shown_in);
+                self.keys(pad, KEY_GAP, row, shown_in);
             }
         } else {
             let wide = keys_wide.max(84.0);
@@ -1214,7 +1220,7 @@ impl Drawing<'_> {
                 spectrum(self.frame, self.moment, (accent, tint), (end - wide, h / 2.0 + 10.0, wide, 20.0), 1.0 - shown_in);
             }
             if shown_in > 0.0 {
-                self.keys(end + KEY_LEAD - keys_wide, KEY_GAP, row, shown_in);
+                self.keys(end - keys_wide, KEY_GAP, row, shown_in);
             }
             end -= wide + 12.0;
         }
@@ -1231,7 +1237,7 @@ impl Drawing<'_> {
         let (lines, now) = (self.moment.lines.clone(), self.moment.now);
         match (&lines, now) {
             (Some(lines), _) if self.music.turned != 0 => {
-                let index = (now.map_or(0, |now| now as i32) + self.music.turned).clamp(0, lines.len() as i32 - 1) as usize;
+                let index = turned_to(now, self.music.turned, lines.len()).unwrap_or(0);
                 self.turned_to(lines, index, left, h / 2.0 - self.fonts.strip.size * 0.7, width, self.fonts.strip);
             }
             (Some(lines), Some(now)) => {
@@ -1309,7 +1315,7 @@ impl Drawing<'_> {
             return;
         };
         if self.music.turned != 0 {
-            let index = (self.moment.now.map_or(0, |now| now as i32) + self.music.turned).clamp(0, lines.len() as i32 - 1) as usize;
+            let index = turned_to(self.moment.now, self.music.turned, lines.len()).unwrap_or(0);
             let text = lines[index].text.clone();
             let wide = (frame.measure(&text, font) + frame.measure("0:00", self.fonts.time) + 36.0).min(room);
             self.turned_to(&lines, index, from + (room - wide) / 2.0, top, wide, font);
@@ -1382,7 +1388,7 @@ impl Drawing<'_> {
         let (lines, now) = (self.moment.lines.clone(), self.moment.now);
         match (&lines, now) {
             (Some(lines), _) if self.music.turned != 0 => {
-                let index = (now.map_or(0, |now| now as i32) + self.music.turned).clamp(0, lines.len() as i32 - 1) as usize;
+                let index = turned_to(now, self.music.turned, lines.len()).unwrap_or(0);
                 self.turned_to(lines, index, left, line_top, width, self.fonts.line);
                 let under = lines[index].translation.clone().filter(|_| self.shows.translation).unwrap_or_default();
                 let under_top = line_top + self.fonts.line.size * 1.4 + 2.0;
@@ -1674,7 +1680,7 @@ impl Drawing<'_> {
         let anchor = anchor.unwrap_or(top + (bottom - top) * if bottom - top < 220.0 { 0.5 } else { 0.38 });
         let (fade_top, fade_bottom) = (((bottom - top) * 0.12).min(28.0), ((bottom - top) * 0.15).min(34.0));
         let current = self.moment.now;
-        let turned = (self.music.turned != 0).then(|| (current.map_or(0, |now| now as i32) + self.music.turned).clamp(0, lines.len() as i32 - 1) as usize);
+        let turned = turned_to(current, self.music.turned, lines.len());
         let translated = self.shows.translation;
         // Each line's size and how it shows, by how far it is from the rail.
         let scale_at = |d: f32| {
@@ -1921,6 +1927,13 @@ impl Music {
 /// How a line is sung, part by part: each part's place in the text drawn (UTF-16, from and to) and its time (from
 /// and to, seconds). Word by word where that is known; else each character of Chinese or Japanese, each word of
 /// other writing (weighed by its length), sharing nine tenths of the line's time.
+/// The line the wheel has turned the lyrics to (`turned` lines on from the one sung now, `now`, or from before the first
+/// where none is, as the rail goes: see `Music::paint_moment`), of `count`; none where they are not turned. (Turned
+/// from the first line where none was sung, the line shown largest, which the rail went to, was the one before it.)
+fn turned_to(now: Option<usize>, turned: i32, count: usize) -> Option<usize> {
+    (turned != 0 && count > 0).then(|| (now.map_or(-1, |now| now as i32) + turned).clamp(0, count as i32 - 1) as usize)
+}
+
 fn parts(line: &Line, next: Option<f64>) -> (String, Vec<(usize, usize, f64, f64)>) {
     if !line.words.is_empty() {
         let mut text = String::new();
@@ -2278,6 +2291,18 @@ mod tests {
     /// How far it is sung, in UTF-16 units (fractional across the part being sung).
     fn units(sung: Filling) -> f32 {
         sung.from as f32 + (sung.to - sung.from) as f32 * sung.part
+    }
+
+    /// Turned by the wheel with no line sung yet, the first notch is the first line, the line the rail goes to and the
+    /// one shown largest alike; the last line is in reach; turned back, none.
+    #[test]
+    fn the_line_turned_to_with_none_sung() {
+        assert_eq!(turned_to(None, 1, 5), Some(0));
+        assert_eq!(turned_to(None, 5, 5), Some(4));
+        assert_eq!(turned_to(None, 0, 5), None);
+        assert_eq!(turned_to(Some(2), -1, 5), Some(1));
+        assert_eq!(turned_to(Some(2), 9, 5), Some(4));
+        assert_eq!(turned_to(None, 1, 0), None);
     }
 
     #[test]
