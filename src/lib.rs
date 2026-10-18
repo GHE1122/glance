@@ -99,6 +99,8 @@ mod source;
 #[cfg(windows)]
 mod update;
 #[cfg(windows)]
+mod station;
+#[cfg(windows)]
 mod watch;
 #[cfg(windows)]
 mod widget;
