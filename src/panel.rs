@@ -884,17 +884,29 @@ impl Controller {
                     // Kept here, in the order things happened (an unpin just
                     // after stands).
                     let tapped = msg.message == WM_LBUTTONUP && panel.tapped();
+                    let held_drag = panel.drag;
                     let kept = panel.let_go(now);
                     // Let go where it was pressed: a tap on what was pressed (a line of what plays).
                     if tapped {
                         panel.click(lparam_point(msg.lParam));
                     }
-                    // What plays, sized: kept as large as it came to rest, for the edge it is at (a side or the top).
-                    if let Some(room) = panel.sized_room.take() {
+                    // What plays, sized: kept as large as it comes to rest, for the edge it is at (a side or the top),
+                    // settling there from as large as the hand made it (see `music_settle`).
+                    if let Some(room) = panel.sized_room {
                         let shows = crate::ui::music::Shows::from(&panel.controller.config.lock().unwrap().view);
                         let top = panel.edge == Edge::Top;
-                        crate::app().change(|settings| settings.music_rooms.set(top, crate::ui::music::rests_at(room, &shows)));
-                        panel.arrange();
+                        let to = crate::ui::music::rests_at(room, &shows);
+                        crate::app().change(|settings| settings.music_rooms.set(top, to));
+                        match held_drag {
+                            Some(drag) if to != room => {
+                                panel.music_settle = Some((now, drag, room, to));
+                                panel.next_frame = now;
+                            }
+                            _ => {
+                                panel.sized_room = None;
+                                panel.arrange();
+                            }
+                        }
                     }
                     if std::mem::take(&mut panel.screens_missed) {
                         panel.screens_changed(0, now);
@@ -1450,6 +1462,9 @@ struct Panel<'a> {
     sizing: Option<(f32, Option<Limit>)>,
     /// What plays, sized by its edges: the room the hand gives it (DIPs, at the panel's size 1), till it is kept.
     sized_room: Option<(f32, f32)>,
+    /// What plays let go after it was sized: settling from the room the hand gave it to the room its layout is right
+    /// in, its edges held as the drag held them (see `music_sized_to`): since when, the drag, from, to.
+    music_settle: Option<(Instant, PanelDrag, (f32, f32), (f32, f32))>,
     /// The sound's track is being slid along.
     sliding: Option<crate::playing::Slider>,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
@@ -1544,6 +1559,7 @@ impl<'a> Panel<'a> {
             largest: SIZES.1,
             sizing: None,
             sized_room: None,
+            music_settle: None,
             sliding: None,
             thumbs: crate::ui::thumb::Dots::new(),
             recapture: false,
@@ -2229,6 +2245,8 @@ impl<'a> Panel<'a> {
         let (Some(from), Some(placement)) = (cursor_position(), &self.placement) else { return };
         let rect = placement.panel;
         let room = self.music_room();
+        // (Settling after a drag before: taken in hand where it is.)
+        self.music_settle = None;
         self.drag = Some(PanelDrag { from, rect, size: self.size, room, edges, sized: false });
         unsafe {
             windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd);
@@ -2383,7 +2401,7 @@ impl<'a> Panel<'a> {
     /// or less as that, as a music widget is (its layout following: a strip, a player, a card, a stage), within its
     /// screen. The edges across from those held stay where they were.
     fn size_music(&mut self, drag: PanelDrag, (dx, dy): (i32, i32), now: Instant) {
-        let (e, r) = (drag.edges, drag.rect);
+        let e = drag.edges;
         let Some(placement) = &self.placement else { return };
         let (contact, px) = (placement.contact, placement.px);
         // Centred on its edge (as the settings place it), it grows and shrinks along the edge on both sides at once,
@@ -2404,12 +2422,23 @@ impl<'a> Panel<'a> {
         if self.sized_room == Some(room) {
             return;
         }
-        self.sized_room = Some(room);
         if let Some(drag) = &mut self.drag {
             drag.sized = true;
         }
-        let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
-        let size = crate::ui::music::rests_at(room, &shows);
+        self.music_sized_to(drag, room, now);
+    }
+
+    /// What plays given `room` by `drag` (as the hand sizes it, or as it settles after: see `music_settle`): as large
+    /// as that, as a widget of what plays follows the hand (held to the range its layout is right in, it followed the
+    /// hand only part of the way, and held back between one layout's range and the next's); placed with the edges the
+    /// drag holds where they were.
+    fn music_sized_to(&mut self, drag: PanelDrag, room: (f32, f32), now: Instant) {
+        let (e, r) = (drag.edges, drag.rect);
+        let Some(placement) = &self.placement else { return };
+        let px = placement.px;
+        let centred = !self.floating() && self.controller.config.lock().unwrap().anchor == crate::settings::Anchor::Center;
+        self.sized_room = Some(room);
+        let size = room;
         let (width, height) = ((size.0 * px).round() as i32, (size.1 * px).round() as i32);
         let (floating, edge) = (self.floating(), self.edge);
         let Some(placement) = &mut self.placement else { return };
@@ -2559,7 +2588,8 @@ impl<'a> Panel<'a> {
         let most = self.music_most(contact, contact.scale);
         let least = crate::ui::music::LEAST;
         let room = (room.0.min(most.0).max(least.0), room.1.min(most.1).max(least.1));
-        let size = crate::ui::music::rests_at(room, &shows);
+        // (As the hand gives it while it is sized or settles after; else within the range its layout is right in.)
+        let size = if self.sized_room.is_some() { room } else { crate::ui::music::rests_at(room, &shows) };
         // As a strip, its buttons in a row outside it, as a widget's are (in its corner they lay over its keys).
         let rack = (self.music.layout_at(size, &shows) == crate::ui::music::Layout::Strip).then_some(RACK);
         let placement = self.placement.as_mut().unwrap();
@@ -2849,6 +2879,21 @@ impl<'a> Panel<'a> {
     /// Draws what plays as it is at `now`, slid out by as much of the way as it has come (its frame's start is
     /// `frame`'s: a closing done is finished there, and the device followed).
     fn frame_music(&mut self, now: Instant) {
+        // Settling after it was sized (see `music_settle`): as a widget settles, from the hand's room to its layout's.
+        if let Some((since, drag, from, to)) = self.music_settle {
+            let t = (now.saturating_duration_since(since).as_secs_f32() / crate::widget::SETTLE.as_secs_f32()).min(1.0);
+            let eased = crate::ui::morph::ease(t);
+            let room = (from.0 + (to.0 - from.0) * eased, from.1 + (to.1 - from.1) * eased);
+            self.music_sized_to(drag, room, now);
+            if t >= 1.0 {
+                self.music_settle = None;
+                self.sized_room = None;
+                if let Some(placement) = &mut self.placement {
+                    placement.held = None;
+                }
+                self.arrange();
+            }
+        }
         let size = self.music_size();
         let placement = self.placement.as_ref().unwrap();
         let px = placement.px;
