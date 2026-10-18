@@ -1024,7 +1024,7 @@ impl<'a> Frame<'a> {
             if !v.is_finite() || v.abs() > 1.0e6 {
                 return v;
             }
-            (((v * scale + offset) * device).round() / device - offset) / scale
+            (whole_pixel((v * scale + offset) * device) / device - offset) / scale
         };
         (whole(x, t.M11, t.M31), whole(y, t.M22, t.M32))
     }
@@ -1041,11 +1041,12 @@ impl<'a> Frame<'a> {
             if !v.is_finite() || v.abs() > 1.0e6 {
                 return v;
             }
-            let at = (v * scale + offset) * device;
+            // (Taken to a 64th of a pixel first, as `whole_pixel` takes it: the same wherever in the atlas.)
+            let at = ((v * scale + offset) * device * 64.0).round() / 64.0;
             let at = match (odd, far) {
-                (true, false) => (at + 1.0e-3).floor() + 0.5,
-                (true, true) => (at - 1.0e-3).ceil() - 0.5,
-                (false, _) => at.round(),
+                (true, false) => at.floor() + 0.5,
+                (true, true) => at.ceil() - 0.5,
+                (false, _) => whole_pixel(at),
             };
             (at / device - offset) / scale
         };
@@ -1616,6 +1617,33 @@ mod tests {
             assert_eq!(seen[6][3], 0, "given at {x}: the pixel inside it");
             assert_eq!(seen[11][6], 255, "given at {x}: its bottom edge's pixel");
             assert_eq!(seen[12][6], 0, "given at {x}: the pixel below it");
+        }
+    }
+
+    /// What is put on a whole pixel comes to the same pixel of its surface wherever in the compositor's atlas the
+    /// surface's region is (its place there, in DIPs, rarely exact: 355 px at 1.5 is 236.666…): a place half way
+    /// between two pixels went to one or the other as the frames went, and the overlay's words shook by a pixel.
+    #[test]
+    #[cfg(feature = "studio")]
+    fn whole_pixels_do_not_follow_the_atlas() {
+        let gfx = super::Gfx::new().expect("graphics");
+        for scale in [1.25f32, 1.5, 1.75] {
+            gfx.draw_offscreen((4, 4), scale, |frame| {
+                // Places half way between two pixels of the surface, and others.
+                for local in [1.0 / (2.0 * scale), 7.0 / (2.0 * scale), 0.3, 13.37] {
+                    let landed: std::collections::BTreeSet<i64> = (0..800)
+                        .map(|offset| {
+                            let base = offset as f32 / scale;
+                            frame.place(windows_numerics::Matrix3x2::translation(base, base));
+                            let (x, _) = frame.on_pixel(local, local);
+                            // (Which pixel of the surface's own region, in 64ths: the atlas's offset taken off.)
+                            (((x + base) * scale - offset as f32) * 64.0).round() as i64
+                        })
+                        .collect();
+                    assert_eq!(landed.len(), 1, "at {scale}, {local} DIPs went to {landed:?} (64ths of a pixel)");
+                }
+            })
+            .expect("drawn");
         }
     }
 
