@@ -6,6 +6,16 @@
 //! Letting clicks through, it takes none: the pointer staying over it a
 //! while brings the one button that ends that. Drawn by the panel's thread
 //! at every sample.
+//!
+//! What shows (its glass and its shadow) is drawn in a window of its own,
+//! its stage, larger than the glass by as much as it can grow, that every
+//! click passes through; what the pointer does to it, a window as large as
+//! the glass that shows nothing takes. Sized, the glass grows and shrinks
+//! inside its stage, which stays as it is: a window sized as it was drawn
+//! again was cut to its new size a moment before the new drawing showed
+//! (the system sizes the window at once, and shows what is drawn on it at
+//! its next commit), and the glass's end was cut off as it shrank. Moved,
+//! the stage moves with it, what is on it as it was.
 
 use std::rc::Rc;
 use std::time::Instant;
@@ -48,20 +58,16 @@ impl Lives for Overlay {
         &mut self.showing
     }
 
-    /// What its glass, its shadow and its buttons' surfaces hold.
+    /// What its stage's and its buttons' surfaces hold.
     fn let_go_of_shown(&mut self) {
         self.surface.release();
-        if let Some((gfx, surface)) = &mut self.shade_surface {
-            surface.release(gfx);
-        }
         if let Some((gfx, surface)) = &mut self.bar_surface {
             surface.release(gfx);
         }
     }
 
-    /// Its shadow's and its buttons' surfaces.
+    /// Its buttons' surface.
     fn let_go_of_kept(&mut self) {
-        self.shade_surface = None;
         self.bar_surface = None;
     }
 }
@@ -72,14 +78,13 @@ pub struct Overlay {
     showing: Option<Showing>,
     /// Where it was last placed, with its shadow (physical px).
     placed: std::cell::Cell<RECT>,
+    /// What takes the pointer: as large as its glass, showing nothing.
     pub window: Window,
-    /// Its content: the glass and what is on it.
+    /// What shows (see the top): its stage, where it is (physical px), and what is drawn on it, its glass and its
+    /// shadow.
+    stage: Window,
+    stage_at: RECT,
     surface: Frosted,
-    /// Its shadow, in a window of its own just beneath it that every click
-    /// passes through, and that window's content (none after the device
-    /// was lost, until it is made again on the new one).
-    shade: Window,
-    shade_surface: Option<(Rc<Gfx>, Surface)>,
     shown: bool,
     locked: bool,
     /// How clear its glass is (see `OverlaySettings::clear`), and whether
@@ -216,28 +221,28 @@ impl Overlay {
     pub fn new() -> windows::core::Result<Self> {
         let gfx = gfx::current()?;
         let window = Window::see_through()?;
-        let mut shade = match Window::new() {
-            Ok(shade) => shade,
+        let mut stage = match Window::see_through() {
+            Ok(stage) => stage,
             Err(error) => {
                 window.destroy();
                 return Err(error);
             }
         };
-        shade.set_click_through(true);
+        stage.set_click_through(true);
         let bar = match Window::new() {
             Ok(bar) => bar,
             Err(error) => {
                 window.destroy();
-                shade.destroy();
+                stage.destroy();
                 return Err(error);
             }
         };
-        let surface = match Frosted::new(&gfx, window.hwnd) {
+        let surface = match Frosted::new(&gfx, stage.hwnd) {
             Ok(surface) => surface,
             Err(error) => {
                 // Tried again at the next sample, with windows of its own.
                 window.destroy();
-                shade.destroy();
+                stage.destroy();
                 bar.destroy();
                 return Err(error);
             }
@@ -245,9 +250,9 @@ impl Overlay {
         Ok(Overlay {
             gfx,
             window,
+            stage,
+            stage_at: RECT::default(),
             surface,
-            shade,
-            shade_surface: None,
             showing: None,
             shown: false,
             placed: std::cell::Cell::new(RECT::default()),
@@ -374,6 +379,35 @@ impl Overlay {
         (width, height)
     }
 
+    /// Where its stage is to be, for the glass where it is (see the top): its shadow's room round the glass, and room
+    /// for the glass to grow to its largest from whichever corner it is sized by, on its screen.
+    fn stage_for(&self) -> RECT {
+        let scale = self.dpi * crate::panel::SIZES.1;
+        let (readings, _, shape) = &self.drawn;
+        let width = |text: &str, font| self.gfx.measure(text, font);
+        let line = |font| self.gfx.baseline(font);
+        let metrics = Metrics { width: &width, line: &line };
+        let (most_w, most_h) = overlay::size(readings, *shape, scale, &metrics);
+        let (most_w, most_h) = ((most_w * scale).ceil() as i32, (most_h * scale).ceil() as i32);
+        let (r, m, s) = (self.rect, self.margin(), self.screen);
+        let (grow_x, grow_y) = ((most_w - (r.right - r.left)).max(0), (most_h - (r.bottom - r.top)).max(0));
+        // (No further than its screen goes, but always round its shadow.)
+        RECT {
+            left: (r.left - m - grow_x).max(s.left).min(r.left - m),
+            top: (r.top - m - grow_y).max(s.top).min(r.top - m),
+            right: (r.right + m + grow_x).min(s.right).max(r.right + m),
+            bottom: (r.bottom + m + grow_y).min(s.bottom).max(r.bottom + m),
+        }
+    }
+
+    /// Its stage, where it is, kept while the glass and its shadow are inside it (see the top); else placed anew.
+    fn staged(&mut self) {
+        let (r, s) = (self.shadow_rect(), self.stage_at);
+        if !(s.left <= r.left && s.top <= r.top && r.right <= s.right && r.bottom <= s.bottom) {
+            self.stage_at = self.stage_for();
+        }
+    }
+
     /// Looks at the screen around it, and tints the glass for it (see
     /// `overlay::glass`); unseen (the lock screen has the display, or none
     /// of its screen is around it), for anything.
@@ -387,12 +421,12 @@ impl Overlay {
         self.glass = Some(overlay::glass(&mut behind, self.glass));
     }
 
-    /// Places its windows: the glass's where it is, above all but the open
-    /// panel; its shadow's just beneath it.
+    /// Places its windows: the one that takes the pointer where the glass is, above all but the open panel; its stage
+    /// just beneath it.
     fn place(&self) {
         self.window.place_under(self.rect, self.beneath);
         self.menu_above();
-        self.shade.place_under(self.shadow_rect(), Some(self.window.hwnd));
+        self.stage.place_under(self.stage_at, Some(self.window.hwnd));
         // Where it was and where it is: a widget that took the desktop with
         // it there takes it again.
         let now = self.shadow_rect();
@@ -413,6 +447,7 @@ impl Overlay {
             self.gfx = gfx;
         }
         self.shown();
+        self.staged();
         // Placed above all again each time (a game may have taken the top),
         // but for the open panel.
         self.place();
@@ -426,31 +461,21 @@ impl Overlay {
         // the game behind into it every frame, some frames in a hundred of the game's).
         self.surface.set_frost(0.0);
         let said = self.said.map(|clear| (if self.lang == Lang::Zh { "透明度" } else { "Clarity" }, format!("{:.0}", clear * 100.0)));
-        let painted = self.surface.draw(&self.gfx, (width as u32, height as u32), scale, (0.0, 0.0, width as f32, height as f32, radius), |frame| {
+        // The glass where it is on its stage (physical px, and DIPs).
+        let stage = self.stage_at;
+        let (at_x, at_y) = (self.rect.left - stage.left, self.rect.top - stage.top);
+        let size = ((stage.right - stage.left) as u32, (stage.bottom - stage.top) as u32);
+        let pane = (at_x as f32, at_y as f32, width as f32, height as f32, radius);
+        let painted = self.surface.draw(&self.gfx, size, scale, pane, |frame| {
+            frame.origin(at_x as f32 / scale, at_y as f32 / scale);
             frame.crisp_text();
+            overlay::shadow(frame, readings, shape, glass, dragged, scale);
             overlay::paint(frame, readings, frames, shape, glass, hand, scale);
             if let Some((name, figure)) = &said {
                 overlay::say(frame, (name, figure, "%"), (width as f32 / scale, height as f32 / scale), Glass { presence: 1.0, ..glass });
             }
         });
-        // Its shadow, on a surface made on this device.
-        let shade_surface = match self.shade_surface.take() {
-            Some((made_on, surface)) if Rc::ptr_eq(&made_on, &self.gfx) => Ok(surface),
-            _ => Surface::new(&self.gfx, self.shade.hwnd),
-        };
-        let (r, m) = (self.shadow_rect(), self.margin() as f32 / scale);
-        let shaded = match shade_surface {
-            Ok(mut surface) => {
-                let drawn = surface.draw(&self.gfx, ((r.right - r.left) as u32, (r.bottom - r.top) as u32), scale, |frame| {
-                    frame.origin(m, m);
-                    overlay::shadow(frame, readings, shape, glass, dragged, scale);
-                });
-                self.shade_surface = Some((self.gfx.clone(), surface));
-                drawn
-            }
-            Err(error) => Err(error),
-        };
-        if painted.is_err() || shaded.is_err() {
+        if painted.is_err() {
             // Made again on a new device at the next sample.
             gfx::lost();
             return;
@@ -458,7 +483,7 @@ impl Overlay {
         self.gfx.sweep();
         if !self.shown {
             self.window.show();
-            self.shade.show();
+            self.stage.show();
             self.place();
             self.shown = true;
         }
@@ -681,8 +706,11 @@ impl Overlay {
         let g = grab.glass;
         if !grab.edges.any() {
             let rect = RECT { left: g.left + dx, top: g.top + dy, right: g.right + dx, bottom: g.bottom + dy };
-            // Followed at every tick: moved only when the pointer has.
+            // Followed at every tick: moved only when the pointer has; its stage with it, what is on it as it was.
             if rect != self.rect {
+                let (by_x, by_y) = (rect.left - self.rect.left, rect.top - self.rect.top);
+                let s = self.stage_at;
+                self.stage_at = RECT { left: s.left + by_x, top: s.top + by_y, right: s.right + by_x, bottom: s.bottom + by_y };
                 self.rect = rect;
                 self.place();
             }
@@ -792,7 +820,7 @@ impl Overlay {
         }
         self.shown = false;
         self.window.hide();
-        self.shade.hide();
+        self.stage.hide();
         self.bar_shows.clear();
         self.over = None;
         self.draw_bar();
