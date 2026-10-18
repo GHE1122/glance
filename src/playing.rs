@@ -288,7 +288,8 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
     // join them with " / "), as the collections name a track by.
     let netease = playing.genres.iter().find_map(|genre| genre.strip_prefix("NCM-")?.parse().ok());
     let artist = playing.artist.split(" / ").next().unwrap_or_default().to_string();
-    let track = crate::lyrics::Track { netease, title: playing.title.clone(), artist, album: playing.album.clone(), seconds: length.round() as u32 };
+    let qq_music = playing.app_id.eq_ignore_ascii_case("QQMusic.exe");
+    let track = crate::lyrics::Track { netease, title: playing.title.clone(), artist, album: playing.album.clone(), seconds: length.round() as u32, qq_music };
     match crate::lyrics::of(&track) {
         crate::lyrics::Known::Asking => (Some(Sung::Asking), None),
         crate::lyrics::Known::Found(None) => (Some(Sung::Unknown), None),

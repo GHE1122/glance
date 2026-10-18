@@ -553,7 +553,7 @@ mod tests {
         }
         // Found by what plays: its title (but for case and spaces), artist and length.
         let index = looked_at(&[folder]);
-        let track = |title: &str, artist: &str, seconds| Track { netease: None, title: title.into(), artist: artist.into(), album: String::new(), seconds };
+        let track = |title: &str, artist: &str, seconds| Track { netease: None, title: title.into(), artist: artist.into(), album: String::new(), seconds, qq_music: false };
         let found = |track: &Track| matching(&index, track).len();
         assert_eq!(found(&track("旁边的歌词", "测试歌手", 21)), 1);
         assert_eq!(found(&track("oggsong", "Some Artist", 20)), 1);

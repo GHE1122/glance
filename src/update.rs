@@ -638,14 +638,19 @@ pub fn post(url: &str, json: &[u8]) -> Option<Vec<u8>> {
 /// What `url` answered to an HTTPS GET asked for as JSON (any other site's API), whatever its status: its status and body (none, where it
 /// was not reached, or its answer was cut short).
 pub fn answer_json(url: &str) -> Option<(u32, Vec<u8>)> {
-    answered(url, None, "application/json, */*")
+    answered(url, None, "application/json, */*", None)
+}
+
+/// The same, asked as from the page `referer` (a site whose API answers only its own pages).
+pub fn answer_json_from(url: &str, referer: &str) -> Option<(u32, Vec<u8>)> {
+    answered(url, None, "application/json, */*", Some(referer))
 }
 
 fn ask(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<Vec<u8>> {
-    answered(url, sent, accept).filter(|(status, _)| *status == 200).map(|(_, body)| body)
+    answered(url, sent, accept, None).filter(|(status, _)| *status == 200).map(|(_, body)| body)
 }
 
-fn answered(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<(u32, Vec<u8>)> {
+fn answered(url: &str, sent: Option<&[u8]>, accept: &str, referer: Option<&str>) -> Option<(u32, Vec<u8>)> {
     let rest = url.strip_prefix("https://")?;
     let (host, path) = rest.split_at(rest.find('/')?);
     let agent = HSTRING::from(format!("Glance/{}", env!("CARGO_PKG_VERSION")));
@@ -672,7 +677,8 @@ fn answered(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<(u32, Vec<u8
         }
         match sent {
             None => {
-                let headers: Vec<u16> = format!("Accept: {accept}\r\n").encode_utf16().collect();
+                let from = referer.map(|page| format!("Referer: {page}\r\n")).unwrap_or_default();
+                let headers: Vec<u16> = format!("Accept: {accept}\r\n{from}").encode_utf16().collect();
                 WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0).ok()?;
             }
             Some(body) => {

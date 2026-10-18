@@ -47,7 +47,8 @@ pub type Lyrics = Arc<Vec<Line>>;
 
 /// The track whose lyrics are asked for: its number on NetEase Cloud Music
 /// where its player says it, what it is called, by whom, on which album, and
-/// how long it is (seconds).
+/// how long it is (seconds); and whether it plays in QQ Music (whose own lyrics are then the ones shown, where it has
+/// them, as with NetEase's number).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Track {
     pub netease: Option<u64>,
@@ -55,6 +56,8 @@ pub struct Track {
     pub artist: String,
     pub album: String,
     pub seconds: u32,
+    #[serde(default)]
+    pub qq_music: bool,
 }
 
 /// What is known of a track's lyrics: still being asked for, or found (none, where no source has them).
@@ -144,9 +147,10 @@ struct Said {
 
 /// Asks the sources, all at once (one far away, slow or not reached, keeps none waiting for the others): by the
 /// track's NetEase number, the word-timed collection and NetEase itself (the collection's, with NetEase's
-/// translation where it gives none; else NetEase's); by its name, LRCLIB, and the same by the number NetEase finds
-/// it by: of these, lyrics timed word by word first, then LRCLIB's (found by title, artist, album and length, more
-/// surely the track's own than a search's), then NetEase's.
+/// translation where it gives none; else NetEase's); by its name, LRCLIB, QQ Music, and the same by the number
+/// NetEase finds it by: played in QQ Music, its own first (the lyrics it shows itself); then lyrics timed word by
+/// word, then LRCLIB's (found by title, artist, album and length, more surely the track's own than a search's), then
+/// NetEase's, then QQ Music's (a track QQ Music alone has the lyrics of, played there, showed none).
 fn find(track: &Track) -> Said {
     use std::sync::atomic::{AtomicBool, Ordering};
     let sure = AtomicBool::new(true);
@@ -179,10 +183,16 @@ fn find(track: &Track) -> Said {
                 Ok(id) => id.and_then(by_number),
                 Err(Unreached) => answered(Err(Unreached)),
             });
+            let qq = scope.spawn(|| answered(qq_music(track)));
             let named = answered(lrclib(track));
             let searched = searched.join().expect("NetEase asked");
+            let qq = qq.join().expect("QQ Music asked");
             let worded = |lines: &Option<Vec<Line>>| lines.as_ref().is_some_and(|lines| lines.iter().any(|line| !line.words.is_empty()));
-            if worded(&searched) { searched } else { named.or(searched) }
+            match qq {
+                Some(qq) if track.qq_music => Some(qq),
+                qq if worded(&searched) => searched.or(qq),
+                qq => named.or(searched).or(qq),
+            }
         }),
     };
     Said { found, sure: sure.into_inner() }
@@ -426,6 +436,31 @@ fn netease_search(track: &Track) -> Answer<u64> {
         let by = by_artist(artists, &track.artist);
         (same(song["name"].as_str()?, &track.title) && by && (length - track.seconds as f64).abs() <= 2.0).then(|| song["id"].as_u64()).flatten()
     }))
+}
+
+/// QQ Music's timed lyrics of `track`, with their translation: of the tracks it finds by title and artist, the first
+/// of its title, by its artist, and of its length (to two seconds). (Its API answers only as from its own site.)
+fn qq_music(track: &Track) -> Answer<Vec<Line>> {
+    const SITE: &str = "https://y.qq.com/";
+    let asked = |url: &str, ok: &str| -> Answer<serde_json::Value> {
+        match crate::update::answer_json_from(url, SITE) {
+            Some((200, body)) => serde_json::from_slice::<serde_json::Value>(&body).ok().filter(|said| said[ok].as_i64() == Some(0)).map(Some).ok_or(Unreached),
+            Some((404, _)) => Ok(None),
+            _ => Err(Unreached),
+        }
+    };
+    let searched = format!("https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w={}&p=1&n=10&format=json", escaped(&format!("{} {}", track.title, track.artist)));
+    let Some(said) = asked(&searched, "code")? else { return Ok(None) };
+    let found = said["data"]["song"]["list"].as_array().into_iter().flatten().find_map(|song| {
+        let artists = song["singer"].as_array().into_iter().flatten().filter_map(|singer| singer["name"].as_str());
+        let length = song["interval"].as_f64()?;
+        (same(song["songname"].as_str()?, &track.title) && by_artist(artists, &track.artist) && (length - track.seconds as f64).abs() <= 2.0).then(|| song["songmid"].as_str()).flatten()
+    });
+    let Some(mid) = found else { return Ok(None) };
+    let lyric = format!("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={}&format=json&nobase64=1&g_tk=5381", escaped(mid));
+    let Some(said) = asked(&lyric, "retcode")? else { return Ok(None) };
+    let translation = said["trans"].as_str().filter(|trans| !trans.is_empty());
+    Ok(said["lyric"].as_str().map(|lrc| merged(lrc, translation)).filter(|lines| lines.iter().any(|line| !line.text.is_empty())))
 }
 
 /// Whether a track by `artists` (as a collection names them) is by `artist` (as its player does): one of them is,
@@ -830,7 +865,7 @@ mod tests {
     #[test]
     fn keeps_lyrics_while_they_are_fresh() {
         let folder = std::env::temp_dir().join(format!("glance-kept-lyrics-{}", std::process::id())).join("lyrics");
-        let track = Track { netease: Some(7), title: "kept test".into(), artist: "nobody".into(), album: String::new(), seconds: 1 };
+        let track = Track { netease: Some(7), title: "kept test".into(), artist: "nobody".into(), album: String::new(), seconds: 1, qq_music: false };
         let worded = word_timed("[1000,500](1000,500,0)la", None);
         kept::write_in(&folder, &track, Some(&worded), true);
         let read = kept::read_in(&folder, &track).expect("kept");
@@ -855,17 +890,23 @@ mod tests {
     fn finds_lyrics() {
         let worded = amll(1901371647).ok().flatten().expect("the collection's, word by word");
         println!("AMLL: {} lines; {:?}", worded.len(), worded.iter().find(|line| line.words.len() > 2).map(|line| (&line.text, line.words.len(), &line.translation)));
-        let by_id = find(&Track { netease: Some(2124385847), title: String::new(), artist: String::new(), album: String::new(), seconds: 330 }).found.expect("NetEase's, by number");
+        let by_id = find(&Track { netease: Some(2124385847), title: String::new(), artist: String::new(), album: String::new(), seconds: 330, qq_music: false }).found.expect("NetEase's, by number");
         println!("NetEase by number: {} lines, {} timed word by word, the second {:?}", by_id.len(), by_id.iter().filter(|line| !line.words.is_empty()).count(), by_id.get(1));
         let worded = netease(1974443814).ok().flatten().expect("NetEase's, word by word");
         println!("NetEase word by word: {} lines; {:?}", worded.len(), worded.iter().find(|line| line.words.len() > 2).map(|line| (&line.text, &line.words, &line.translation)));
         assert!(worded.iter().any(|line| line.words.len() > 2));
-        let by_name = find(&Track { netease: None, title: "Yellow".into(), artist: "Coldplay".into(), album: "Parachutes".into(), seconds: 267 }).found.expect("LRCLIB's");
+        let by_name = find(&Track { netease: None, title: "Yellow".into(), artist: "Coldplay".into(), album: "Parachutes".into(), seconds: 267, qq_music: false }).found.expect("LRCLIB's");
         println!("by name: {} lines, the first sung {:?}", by_name.len(), by_name.iter().find(|line| !line.text.is_empty()));
-        let searched = netease_search(&Track { netease: None, title: "我爱你中国 (live)".into(), artist: "孙楠".into(), album: String::new(), seconds: 330 });
+        let searched = netease_search(&Track { netease: None, title: "我爱你中国 (live)".into(), artist: "孙楠".into(), album: String::new(), seconds: 330, qq_music: false });
         println!("NetEase by its title: {:?}", searched.as_ref().ok());
         assert!(matches!(searched, Ok(Some(_))));
-        let none = find(&Track { netease: None, title: "zzqqxx no such song".into(), artist: "qqqww".into(), album: String::new(), seconds: 100 });
+        // (NetEase has this one, but without its words; LRCLIB has it not at all.)
+        let qq_only = Track { netease: None, title: "牡丹亭".into(), artist: "浅影阿".into(), album: "牡丹亭".into(), seconds: 181, qq_music: true };
+        let qq = qq_music(&qq_only).ok().flatten().expect("QQ Music's");
+        println!("QQ Music: {} lines, {:?}", qq.len(), qq.iter().find(|line| line.text == "悬明月照屋庭"));
+        assert!(qq.iter().any(|line| line.text == "悬明月照屋庭"));
+        assert!(find(&qq_only).found.is_some_and(|lines| lines.iter().any(|line| line.text == "悬明月照屋庭")));
+        let none = find(&Track { netease: None, title: "zzqqxx no such song".into(), artist: "qqqww".into(), album: String::new(), seconds: 100, qq_music: false });
         assert!(none.sure && none.found.is_none(), "that no source has a track's lyrics is known");
         assert!(matches!(netease(1), Ok(None)), "NetEase says it has none");
     }
