@@ -8,6 +8,7 @@ pub mod backdrop;
 pub mod beside;
 pub mod buttons;
 pub mod canvas;
+pub mod editor;
 #[cfg(windows)]
 pub mod gfx;
 pub mod life;

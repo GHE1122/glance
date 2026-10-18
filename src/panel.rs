@@ -2255,16 +2255,16 @@ impl<'a> Panel<'a> {
         self.pinned || self.floating() || crate::ui::beside::is_up()
     }
 
-    /// Quick launch's choosing of programs, opened beside it on its inner side (under it at the top edge).
-    fn open_picker(&self) {
-        use crate::ui::beside::{Opening, Page, Side};
+    /// `page` opened beside it on its inner side (under it at the top edge): quick launch's choosing, a note.
+    fn open_beside(&self, page: crate::ui::beside::Page) {
+        use crate::ui::beside::{Opening, Side};
         let Some(placement) = &self.placement else { return };
         let side = match self.edge {
             Edge::Left => Side::Right,
             Edge::Right => Side::Left,
             Edge::Top => Side::Below,
         };
-        crate::ui::beside::open(Opening { page: Page::Picker, by: placement.panel, side, skin: self.theme.skin, dark: self.theme.dark });
+        crate::ui::beside::open(Opening { page, by: placement.panel, side, skin: self.theme.skin, dark: self.theme.dark });
     }
 
     /// The edges of the panel a point `(x, y)` from its corner (DIPs) is
@@ -3250,7 +3250,13 @@ impl<'a> Panel<'a> {
             Some(Hit::Drive(letter)) => open_drive(letter),
             Some(hit) if crate::station::pressed(hit) => {}
             Some(Hit::Tab(tab)) => self.tab = tab,
-            Some(Hit::AddApp) => self.open_picker(),
+            Some(Hit::AddApp) => self.open_beside(crate::ui::beside::Page::Picker),
+            Some(Hit::NewNote) => self.open_beside(crate::ui::beside::Page::Note(None)),
+            Some(Hit::Note(at)) => {
+                if let Some(note) = crate::notes::shown().get(usize::from(at)) {
+                    self.open_beside(crate::ui::beside::Page::Note(Some(note.name.clone())));
+                }
+            }
             Some(Hit::Sort(sort)) if sort != self.drawn.processes.sort => {
                 self.prefs.processes.sort = sort;
                 self.drawn.processes.sort = sort;

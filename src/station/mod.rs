@@ -216,12 +216,14 @@ pub enum HeadChoice {
     StopCopies,
     StopRecent,
     Settings,
+    /// How the notes show.
+    Notes(crate::settings::NotesView),
 }
 
 /// The menu a press on the station's head opens (`hit`: the button of how what is on it shows, or of the rest, the
 /// page `tab` shown), at `at` on the screen (`over_the_panel`: as `Menu::open_at` says): up, with what its rows do.
 pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<HeadChoice>)> {
-    use crate::settings::ShelfView;
+    use crate::settings::{NotesView, ShelfView};
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
     use crate::ui::view::{Hit, Tab};
@@ -237,6 +239,10 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
             (HeadChoice::Clear, lang.pick("全部清空（保留固定的项目）", "Clear all but the pinned"), Icon::Close, false, false),
             (HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true),
         ],
+        (Hit::NotesView, _) => [(NotesView::Deck, lang.pick("叠放", "Deck"), Icon::Layers), (NotesView::Cards, lang.pick("小卡片", "Cards"), Icon::LayoutGrid), (NotesView::List, lang.pick("列表", "List"), Icon::List)]
+            .into_iter()
+            .map(|(shows, label, icon)| (HeadChoice::Notes(shows), label, icon, shows == crate::notes::view(), false))
+            .collect(),
         (Hit::StationMore, Tab::Recent(_)) => vec![
             (HeadChoice::StopRecent, lang.pick("不再列出最近文件", "Stop listing recent files"), Icon::Close, false, false),
             (HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true),
@@ -269,6 +275,9 @@ pub fn head_chose(choice: HeadChoice) {
             std::thread::spawn(|| crate::app().change(|settings| settings.station.recent = false));
         }
         HeadChoice::Settings => crate::show_workbench_settings(),
+        HeadChoice::Notes(view) => {
+            std::thread::spawn(move || crate::app().change(|settings| settings.notes_view = view));
+        }
     }
 }
 

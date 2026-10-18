@@ -713,6 +713,12 @@ pub struct Settings {
     /// What is kept at hand on the workbench, in its order (see `station::apps`).
     #[serde(default)]
     pub apps: Vec<crate::station::apps::App>,
+    /// The notes' folder, where another than `Documents\Glance 便签` was chosen (see `notes`).
+    #[serde(default)]
+    pub notes_folder: Option<PathBuf>,
+    /// How the notes show (see `NotesView`).
+    #[serde(default)]
+    pub notes_view: NotesView,
     pub view: serde_json::Value,
 }
 
@@ -725,6 +731,16 @@ pub enum ShelfView {
     Cards,
     List,
     Pictures,
+}
+
+/// How the notes show: as a deck (the last written whole, the others' titles over it), as small cards, or a list.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotesView {
+    #[default]
+    Deck,
+    Cards,
+    List,
 }
 
 /// How the station keeps what is put on it, and what is copied.
@@ -796,6 +812,8 @@ impl Default for Settings {
             station: StationSettings::default(),
             recent_hidden: Vec::new(),
             apps: Vec::new(),
+            notes_folder: None,
+            notes_view: NotesView::Deck,
             view: serde_json::Value::Null,
         }
     }

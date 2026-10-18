@@ -2539,14 +2539,22 @@ impl Widget {
                                     }
                                 }
                                 Some(hit) if hit.opens_menu() => return Released::Menu(hit),
-                                // Quick launch's choosing of programs, beside it on the side with more room.
-                                Some(view::Hit::AddApp) => {
+                                // Quick launch's choosing of programs, a note: beside it on the side with more room.
+                                Some(hit @ (view::Hit::AddApp | view::Hit::NewNote | view::Hit::Note(_))) => {
                                     use crate::ui::beside::{Opening, Page, Side};
+                                    let page = match hit {
+                                        view::Hit::AddApp => Some(Page::Picker),
+                                        view::Hit::NewNote => Some(Page::Note(None)),
+                                        view::Hit::Note(at) => crate::notes::shown().get(usize::from(at)).map(|note| Page::Note(Some(note.name.clone()))),
+                                        _ => None,
+                                    };
                                     let by = self.rect();
                                     let screen = self.contact.monitor;
                                     let side = if (by.left + by.right) / 2 > (screen.left + screen.right) / 2 { Side::Left } else { Side::Right };
                                     let (skin, dark) = self.drawn_look;
-                                    crate::ui::beside::open(Opening { page: Page::Picker, by, side, skin, dark });
+                                    if let Some(page) = page {
+                                        crate::ui::beside::open(Opening { page, by, side, skin, dark });
+                                    }
                                 }
                                 Some(view::Hit::Line(index)) => {
                                     music::play_line(index);

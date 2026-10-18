@@ -1117,6 +1117,26 @@ impl<'a> Frame<'a> {
         Ok(Frame { gfx, dc, brush, base, atlas, moving: Cell::new(false) })
     }
 
+    /// `draw` done on its context counted in physical pixels (as the text services count: see `editor`), at the
+    /// frame's place; its DIPs as they were after.
+    pub fn in_pixels(&self, draw: impl FnOnce(&windows::Win32::Graphics::Direct2D::ID2D1RenderTarget)) {
+        let (mut x, mut y) = (96.0, 96.0);
+        let mut was = Matrix3x2::default();
+        unsafe {
+            self.dc.GetDpi(&mut x, &mut y);
+            self.dc.GetTransform(&mut was);
+            self.dc.SetDpi(96.0, 96.0);
+            self.dc.SetTransform(&Matrix3x2 { M31: was.M31 * x / 96.0, M32: was.M32 * y / 96.0, ..Matrix3x2::identity() });
+        }
+        if let Ok(target) = self.dc.cast() {
+            draw(&target);
+        }
+        unsafe {
+            self.dc.SetDpi(x, y);
+            self.dc.SetTransform(&was);
+        }
+    }
+
     /// What was drawn put in the region of the atlas the frame was handed (see `begun`), pixel for pixel: its
     /// place given in pixels, no DIPs between.
     pub(super) fn finish(&self) -> Result<()> {

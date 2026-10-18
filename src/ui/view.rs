@@ -189,6 +189,10 @@ pub enum Hit {
     AddApp,
     AppsArea,
     Grip,
+    /// A note, by its place among them (see `notes::shown`): opened beside; a new note; the menu of how they show.
+    Note(u16),
+    NewNote,
+    NotesView,
     /// One of the station's pages chosen (see `Tab`; Recent files', with which of them it shows); the menu of how what
     /// is on it shows; its menu of the rest.
     Tab(Tab),
@@ -231,7 +235,7 @@ impl Hit {
 
     /// Whether a press on it opens a menu (the station's head's buttons: see `station::head_menu`).
     pub fn opens_menu(self) -> bool {
-        matches!(self, Hit::StationView | Hit::StationMore)
+        matches!(self, Hit::StationView | Hit::StationMore | Hit::NotesView)
     }
 
     /// Whether it is the sound's: its key, or its slider (the wheel over it turns the sound).
@@ -257,11 +261,12 @@ impl Hit {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum List {
     Processes,
-    /// What is on the station, what was copied lately, the files come lately, and quick launch's rail.
+    /// What is on the station, what was copied lately, the files come lately, quick launch's rail, and the notes.
     Shelf,
     Copies,
     Recent,
     Apps,
+    Notes,
 }
 
 /// Which of its pages the station's lane shows: what is on it, what was copied lately, or the files come lately (those
@@ -277,8 +282,8 @@ pub enum Tab {
 /// How far each list is scrolled (DIPs), and how far it is going (each frame a little nearer: see `ease`).
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Scrolls {
-    at: [f32; 5],
-    to: [f32; 5],
+    at: [f32; 6],
+    to: [f32; 6],
 }
 
 impl Scrolls {
@@ -310,7 +315,7 @@ impl Scrolls {
     }
 
     /// As each is scrolled, for what is drawn to tell one drawing from another.
-    pub fn bits(&self) -> [u32; 5] {
+    pub fn bits(&self) -> [u32; 6] {
         self.at.map(f32::to_bits)
     }
 }
@@ -431,12 +436,24 @@ enum Block {
     Shelf { tiles: Vec<Tile>, shows: Shows, tall: f32, said: Option<String>, over: bool },
     /// What was copied lately, the newest first, a row each, in room `tall` high, scrolled through past it.
     Copies { rows: Vec<Tile>, tall: f32 },
+    /// The notes, the last written first, as `view` shows them, in room `tall` high (scrolled through past it); in a
+    /// small lane, the last written alone.
+    Notes { notes: Vec<NoteCard>, view: crate::settings::NotesView, tall: f32 },
     /// What is kept at hand (quick launch's), each by its name and what opens it, in `rows` rows (named, as a whole
     /// lane shows them; else one row of their pictures alone), and the place to add more.
     Apps { apps: Vec<(String, String)>, rows: usize, named: bool },
     /// The files come lately that `filter` takes, the newest first, under the day each came, a row each, in room
     /// `tall` high under the filter's choices, scrolled through past it.
     Recent { rows: Vec<Lately>, filter: crate::station::recent::Filter, tall: f32 },
+}
+
+/// A note as its card shows it: its title, its first lines, how long ago it was written, its colour.
+#[derive(Clone, Debug, PartialEq, Hash)]
+pub struct NoteCard {
+    title: String,
+    lines: Vec<String>,
+    when: String,
+    colour: crate::notes::Colour,
 }
 
 /// A file come lately as its row shows it: its number, the day it came (as the rows are grouped), its name, where it
@@ -526,6 +543,192 @@ impl Tile {
         };
         let about = format!("{kind} · {}", text::since(item.added_ms, now, lang));
         Tile { id: item.id, label, about, face, pinned: item.pinned }
+    }
+}
+
+/// How tall the room under a whole notes lane's head is, and a small lane's.
+const NOTES_TALL: f32 = 250.0;
+const NOTE_SMALL: f32 = 64.0;
+/// A note's title strip in the deck, a row of the list, a small card.
+const NOTE_STRIP: f32 = 30.0;
+const NOTE_ROW: f32 = 40.0;
+const NOTE_CARD: f32 = 96.0;
+
+/// The notes' lane: whole (`full`), its name and how many there are, the menu of how they show and a new note, over
+/// them as they show; else the last written alone.
+fn notes_lane(full: bool, lang: Lang) -> Vec<Block> {
+    let now = crate::station::now_ms();
+    let notes: Vec<NoteCard> = crate::notes::shown()
+        .iter()
+        .map(|note| NoteCard {
+            title: if note.title().is_empty() { lang.pick("无标题", "Untitled").into() } else { note.title().to_string() },
+            lines: note.text.lines().map(str::trim).filter(|line| !line.is_empty()).skip(1).take(6).map(markdown_plain).collect(),
+            when: text::since(note.stamp.written_ms, now, lang),
+            colour: note.colour,
+        })
+        .collect();
+    let count = match notes.len() {
+        0 => String::new(),
+        n if lang == Lang::Zh => format!("{n} 条"),
+        n => n.to_string(),
+    };
+    let view = crate::notes::view();
+    if full {
+        vec![head(lang.pick("便签", "Notes"), count, "", false), Block::Notes { notes, view, tall: NOTES_TALL }]
+    } else {
+        vec![head(lang.pick("便签", "Notes"), count, "", false), Block::Notes { notes: notes.into_iter().take(1).collect(), view: crate::settings::NotesView::Deck, tall: NOTE_SMALL }]
+    }
+}
+
+/// A line of Markdown as plain words: its marks taken off (a heading's, a list's, a to-do's box, emphasis, code).
+fn markdown_plain(line: &str) -> String {
+    let line = line.trim_start_matches('#').trim_start();
+    let line = line.strip_prefix("- [ ] ").or_else(|| line.strip_prefix("- [x] ")).or_else(|| line.strip_prefix("- [X] ")).map(|rest| rest.to_string()).unwrap_or_else(|| line.to_string());
+    let line = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")).or_else(|| line.strip_prefix("> ")).map(str::to_string).unwrap_or(line);
+    line.replace("**", "").replace('`', "").replace("__", "")
+}
+
+/// A note's colour as its card wears it: the colour's mark, and its card's ground in `theme`.
+pub(crate) fn note_colours(theme: &Theme, colour: crate::notes::Colour) -> (Color, Color) {
+    use crate::notes::Colour;
+    let mark = match colour {
+        Colour::Blue => Color::hex(0x5B8DEF, 1.0),
+        Colour::Yellow => Color::hex(0xE8B64A, 1.0),
+        Colour::Green => Color::hex(0x4FBF82, 1.0),
+        Colour::Pink => Color::hex(0xEF7AA5, 1.0),
+        Colour::Purple => Color::hex(0x9B7BF0, 1.0),
+        Colour::Grey => Color::hex(0x8E949C, 1.0),
+    };
+    // (Chart paper's cards its own paper, marked by a strip of the colour; the others' tinted by it.)
+    let ground = match theme.skin {
+        Skin::Paper => theme.track,
+        _ => mark.alpha(if theme.dark { 0.22 } else { 0.18 }),
+    };
+    (mark, ground)
+}
+
+/// The notes (see `Block::Notes`) from (`left`, `top`), `width` across, in room `tall` high, as `view` lays them out:
+/// pressed, each is opened beside.
+#[allow(clippy::too_many_arguments)]
+fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), notes: &[NoteCard], view: crate::settings::NotesView, tall: f32, hits: &mut Vec<HitBox>) {
+    use crate::settings::NotesView;
+    let theme = scene.theme;
+    let lang = scene.lang;
+    if notes.is_empty() {
+        let middle = top + tall / 2.0;
+        frame.icon(Icon::File, Point { x: left + width / 2.0, y: middle - 12.0 }, 20.0, theme.text3);
+        centred(frame, lang.pick("还没有便签，点加号新建一条", "No notes yet: the plus makes one"), theme.small, theme.text2, left, middle + 4.0, width);
+        return;
+    }
+    let radius = theme.control_radius.max(8.0);
+    let lit = |at: usize| scene.hover == Some(Hit::Note(at as u16));
+    frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
+    match view {
+        NotesView::Deck => {
+            // The others' titles as strips, the last written whole under them (as much of them as fits over it).
+            // (Each strip apart, a gap under it: their colours' washes not laid over one another.)
+            let strips = notes.len().saturating_sub(1).min(((tall - NOTE_CARD) / NOTE_STRIP).max(0.0) as usize);
+            for (at, note) in notes.iter().enumerate().skip(1).take(strips) {
+                let y = top + (at - 1) as f32 * NOTE_STRIP;
+                let (mark, ground) = note_colours(theme, note.colour);
+                let strip = NOTE_STRIP - 3.0;
+                frame.fill_rounded(ground, left, y, width, strip, radius.min(strip / 2.0));
+                if lit(at) {
+                    frame.fill_rounded(theme.hover, left, y, width, strip, radius.min(strip / 2.0));
+                }
+                note_mark(frame, theme, mark, left, y, strip);
+                frame.text(&fitted(frame, &note.title, theme.body, width - 110.0), theme.body, theme.text, left + 22.0, y + (strip - LINE) / 2.0, width - 110.0, Align::Start);
+                frame.text(&note.when, theme.small, theme.text3, left, y + (strip - LINE) / 2.0 + 1.0, width - 12.0, Align::End);
+                hits.push((left, y, width, NOTE_STRIP, Hit::Note(at as u16)));
+            }
+            let y = top + strips as f32 * NOTE_STRIP;
+            let front = &notes[0];
+            let (mark, ground) = note_colours(theme, front.colour);
+            let card = tall - (y - top);
+            frame.fill_rounded(theme.track, left, y, width, card, radius);
+            frame.fill_rounded(ground, left, y, width, card, radius);
+            if lit(0) {
+                frame.stroke_rounded(Fill::Solid(mark.alpha(0.8)), left, y, width, card, radius, 1.5);
+            }
+            note_mark(frame, theme, mark, left, y, card.min(36.0));
+            frame.text(&front.when, theme.small, theme.text3, left + 22.0, y + 10.0, width - 34.0, Align::Start);
+            frame.text(&fitted(frame, &front.title, theme.title, width - 24.0), theme.title, theme.text, left + 12.0, y + 28.0, width - 24.0, Align::Start);
+            for (at, line) in front.lines.iter().enumerate() {
+                let line_y = y + 52.0 + at as f32 * (LINE + 3.0);
+                if line_y + LINE > y + card - 6.0 {
+                    break;
+                }
+                frame.text(&fitted(frame, line, theme.body, width - 24.0), theme.body, theme.text2, left + 12.0, line_y, width - 24.0, Align::Start);
+            }
+            hits.push((left, y, width, card, Hit::Note(0)));
+        }
+        NotesView::Cards => {
+            let across = 2;
+            let gap = 8.0;
+            let card_w = (width - gap) / across as f32;
+            let whole = notes.len().div_ceil(across) as f32 * (NOTE_CARD + gap) - gap;
+            let (most, scroll) = notes_scroll(scene, whole, tall);
+            for (at, note) in notes.iter().enumerate() {
+                let (x, y) = (left + (at % across) as f32 * (card_w + gap), top + (at / across) as f32 * (NOTE_CARD + gap) - scroll);
+                if y + NOTE_CARD < top || y > top + tall {
+                    continue;
+                }
+                let (mark, ground) = note_colours(theme, note.colour);
+                frame.fill_rounded(theme.track, x, y, card_w, NOTE_CARD, radius);
+                frame.fill_rounded(ground, x, y, card_w, NOTE_CARD, radius);
+                if lit(at) {
+                    frame.stroke_rounded(Fill::Solid(mark.alpha(0.8)), x, y, card_w, NOTE_CARD, radius, 1.5);
+                }
+                note_mark(frame, theme, mark, x, y, 30.0);
+                frame.text(&fitted(frame, &note.title, theme.body, card_w - 30.0), Font { weight: 650.0, ..theme.body }, theme.text, x + 22.0, y + 8.0, card_w - 30.0, Align::Start);
+                for (line_at, line) in note.lines.iter().take(2).enumerate() {
+                    frame.text(&fitted(frame, line, theme.small, card_w - 20.0), theme.small, theme.text2, x + 10.0, y + 32.0 + line_at as f32 * (LINE + 1.0), card_w - 20.0, Align::Start);
+                }
+                frame.text(&note.when, theme.small, theme.text3, x + 10.0, y + NOTE_CARD - LINE - 6.0, card_w - 20.0, Align::Start);
+                hits.push((x, y, card_w, NOTE_CARD, Hit::Note(at as u16)));
+            }
+            if most > 0.0 {
+                hits.push((left, top, width, tall, Hit::List(List::Notes, most.to_bits())));
+            }
+        }
+        NotesView::List => {
+            let (most, scroll) = notes_scroll(scene, notes.len() as f32 * NOTE_ROW, tall);
+            for (at, note) in notes.iter().enumerate() {
+                let y = top + at as f32 * NOTE_ROW - scroll;
+                if y + NOTE_ROW < top || y > top + tall {
+                    continue;
+                }
+                if lit(at) {
+                    frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, NOTE_ROW - 2.0, theme.control_radius.max(6.0));
+                }
+                let (mark, _) = note_colours(theme, note.colour);
+                frame.fill_circle(mark, Point { x: left + 5.0, y: y + NOTE_ROW / 2.0 }, 4.0);
+                let when_w = frame.measure(&note.when, theme.small);
+                frame.text(&fitted(frame, &note.title, theme.body, width - 24.0 - when_w), theme.body, theme.text, left + 18.0, y + 4.0, width - 24.0 - when_w, Align::Start);
+                frame.text(&fitted(frame, note.lines.first().map_or("", String::as_str), theme.small, width - 24.0), theme.small, theme.text3, left + 18.0, y + 4.0 + LINE, width - 24.0, Align::Start);
+                frame.text(&note.when, theme.small, theme.text3, left, y + 4.0, width, Align::End);
+                hits.push((left, y, width, NOTE_ROW, Hit::Note(at as u16)));
+            }
+            if most > 0.0 {
+                hits.push((left, top, width, tall, Hit::List(List::Notes, most.to_bits())));
+            }
+        }
+    }
+    frame.unclip();
+}
+
+/// How far the notes scroll at most, their whole `whole` tall in room `tall`, and how far they are scrolled now.
+fn notes_scroll(scene: &Scene, whole: f32, tall: f32) -> (f32, f32) {
+    let most = (whole - tall).max(0.0);
+    (most, scene.scrolls.at(List::Notes).clamp(0.0, most))
+}
+
+/// A note's colour marked on its card at (`x`, `y`), `tall` high: a dot (chart paper: a strip down its edge).
+fn note_mark(frame: &dyn Canvas, theme: &Theme, mark: Color, x: f32, y: f32, tall: f32) {
+    if theme.skin == Skin::Paper {
+        frame.fill(mark, x, y + 4.0, 3.0, tall - 8.0);
+    } else {
+        frame.fill_circle(mark, Point { x: x + 11.0, y: y + tall.min(30.0) / 2.0 }, 4.0);
     }
 }
 
@@ -783,7 +986,7 @@ impl Block {
             Block::Table { visible, .. } => *visible as f32 * TABLE_ROW,
             Block::Room(tall) => *tall,
             Block::Tabs { .. } => HEAD + HEAD_GAP,
-            Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } => SHELF_GAP + tall,
+            Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } => SHELF_GAP + tall,
             Block::Apps { rows, named, .. } => SHELF_GAP + *rows as f32 * if *named { APP_CELL_H } else { APP_SIDE } + rows.saturating_sub(1) as f32 * APP_GAP,
         }
     }
@@ -812,6 +1015,7 @@ impl Hash for Block {
                 (sort.map(|sort| sort as u8), rows, visible, scrolls, widths.map(f32::to_bits)).hash(state);
             }
             Block::Tabs { tab, count, copies, recent, view } => (tab, count, copies, recent, view).hash(state),
+            Block::Notes { notes, view, tall } => (notes, view, tall.to_bits()).hash(state),
             Block::Apps { apps, rows, named } => {
                 (apps, rows, named).hash(state);
                 apps.iter().for_each(|(_, target)| crate::station::thumbs::of(std::path::Path::new(target), TILE_PIXELS).map(|picture| picture.key).hash(state));
@@ -1624,6 +1828,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         }
         "station" => station_lane(full, scene.tab, lang),
         "apps" => apps_lane(full, lang),
+        "notes" => notes_lane(full, lang),
         // What plays, in a widget merged with readings: drawn apart (see `Scene::music_apart`), its lane its head and
         // room under it (a player's, full; a strip's, compact).
         "lyrics" if scene.music_apart => {
@@ -2031,6 +2236,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Copies { .. } => "copies",
             Block::Recent { .. } => "recent",
             Block::Apps { .. } => "apps",
+            Block::Notes { .. } => "notes",
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
         kinds.push(kind);
@@ -2052,6 +2258,15 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 paint_plot(frame, scene, ink, plot, plot_left, y + gap, plot_width, height - gap);
             }
             (_, Pass::Plots) => {}
+            (Block::Head { title, device, .. }, Pass::Content) if lane.id == "notes" => {
+                let title_width = frame.measure(title, theme.title);
+                let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
+                frame.text(title, theme.title, theme.text, left, row, width, Align::Start);
+                frame.text(device, theme.small, theme.text3, left + title_width + 8.0, row + 1.0, width, Align::Start);
+                let button = y + (HEAD - MEDIA_ROW) / 2.0;
+                pressed(frame, scene, hits, Hit::NewNote, Icon::Add, left + width - MEDIA_ROW, button, false);
+                pressed(frame, scene, hits, Hit::NotesView, Icon::LayoutGrid, left + width - 2.0 * MEDIA_ROW - 2.0, button, false);
+            }
             (Block::Head { title, device, aside, aside_hot }, Pass::Content) => {
                 let title_width = frame.measure(title, theme.title);
                 let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
@@ -2307,6 +2522,9 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             }
             (Block::Tabs { tab, count, copies, recent, view }, Pass::Content) => {
                 paint_tabs(frame, scene, ink, (left, y, width), *tab, *count, *copies, *recent, *view, hits);
+            }
+            (Block::Notes { notes, view, tall }, Pass::Content) => {
+                paint_notes(frame, scene, (left, y + SHELF_GAP, width), notes, *view, *tall, hits);
             }
             (Block::Apps { apps, named, .. }, Pass::Content) => {
                 paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, *named, hits);
@@ -3114,6 +3332,66 @@ otepad.exe", "Notepad"),
             }
             // (The pictures made meanwhile, on the station's own thread: drawn again with them.)
             std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    }
+
+    /// The notes' lane as a deck, cards and a list (the columns) in each skin, light and dark (the rows):
+    /// `cargo test --features studio --lib -- --ignored notes_lanes` writes `target/notes/<row>-<column>.png`.
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn notes_lanes() {
+        use super::*;
+        use crate::notes::{Colour, Note};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let now = crate::station::now_ms();
+        let note = |name: &str, text: &str, colour: Colour, ago_min: u64| Note { name: name.into(), text: text.into(), colour, stamp: crate::notes::store::Stamp { bytes: 0, written_ms: now - ago_min * 60_000, digest: 0 } };
+        crate::notes::pretend(vec![
+            note("a.md", "# 本周要做的事
+- [x] 发布 0.3.13，回复 issue 17
+- [ ] 中转站：**三种视图**的设计确认
+- [ ] 便签输入法试验
+周五前合并 `feature/station`", Colour::Blue, 3),
+            note("b.md", "显卡价格记录
+5070 Ti 京东 6299", Colour::Yellow, 60 * 20),
+            note("c.md", "周末开车听的歌
+- 敢爱敢做", Colour::Green, 60 * 50),
+            note("d.md", "家里网络
+路由器管理地址 192.168.31.1", Colour::Pink, 60 * 200),
+            note("e.md", "读书笔记：设计心理学
+好的设计让人一眼看出怎么用", Colour::Purple, 60 * 300),
+        ]);
+        let views = [crate::settings::NotesView::Deck, crate::settings::NotesView::Cards, crate::settings::NotesView::List];
+        let rows = [(Skin::Glass, false), (Skin::Fluent, true), (Skin::Paper, false)];
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{}/target/notes", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        for (row, (skin, dark)) in rows.iter().enumerate() {
+            let theme = Theme::new(*skin, *dark);
+            let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let seen = Seen::of(history);
+            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::Note(2)), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+            for (column, view) in views.iter().enumerate() {
+                let mut blocks = notes_lane(true, Lang::Zh);
+                if let Some(Block::Notes { view: shown, .. }) = blocks.last_mut() {
+                    *shown = *view;
+                }
+                let lane = Lane { id: "notes".into(), blocks, ink: theme.ink("notes") };
+                let (w, h) = (COLUMN_WIDTH, lane.height(&theme));
+                let ground = match skin {
+                    Skin::Paper => theme.paper,
+                    Skin::Fluent => if *dark { Color::hex(0x24262A, 1.0) } else { Color::hex(0xF3F5F8, 1.0) },
+                    Skin::Glass => Color::hex(0xE4EAF2, 1.0),
+                };
+                let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| {
+                    frame.fill(ground, 0.0, 0.0, w, h);
+                    paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w, h }, 0.0, Pass::Content, &mut Vec::new());
+                }).expect("drawn");
+                crate::studio::save_png(&out.join(format!("{row}-{column}.png")), (w * 1.5) as u32, (h * 1.5) as u32, &pixels).unwrap();
+            }
         }
     }
 

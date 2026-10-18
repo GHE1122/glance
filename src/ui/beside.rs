@@ -1,7 +1,11 @@
 //! The page beside the panel or a widget (see docs/station-and-notes.md, section 八): what opens from them and needs
-//! more room than they have, laid out beside them on their inner side, as tall as they are. Now quick launch's
-//! choosing of programs: every program the Start menu lists, searched by name or pinyin, each added or taken off at a
-//! press; what is not listed dropped on it, as on quick launch.
+//! more room than they have, laid out beside them on their inner side, as tall as they are:
+//!
+//! - quick launch's choosing of programs: every program the Start menu lists, searched by name or pinyin, each added
+//!   or taken off at a press; what is not listed dropped on it, as on quick launch;
+//! - a note written: its words in a box the text services write (see `editor`: the keys, the input method, selection,
+//!   undo and the clipboard theirs), kept as they are typed (a moment after the last key), its colour chosen or it
+//!   taken to the Recycle Bin from its menu.
 //!
 //! A window of its own thread (a single-threaded apartment with OLE, for the shell's pictures and what is dropped on
 //! it), drawn as Glance draws, in the skin's colours. It takes the keyboard while it is up (words are typed into its
@@ -32,10 +36,12 @@ use crate::station::apps::App;
 use crate::station::found::{self, Found};
 
 /// What the page shows.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Page {
     /// Quick launch's choosing of programs.
     Picker,
+    /// A note, by its file's name in the notes' folder (none: a new one, named by its title as it is first kept).
+    Note(Option<String>),
 }
 
 /// Where the page goes: beside `by` (screen px: the panel or the widget it opens from), on the side `side` (away from
@@ -82,9 +88,13 @@ static POST: AtomicIsize = AtomicIsize::new(0);
 static UP: AtomicBool = AtomicBool::new(false);
 /// Its message: something asked.
 const ASKED: u32 = WM_APP + 7;
-/// Its timers: the caret's blink, and drawn again while pictures are being made.
+/// Its timers: the caret's blink, drawn again while pictures are being made, and a note kept a moment after it was
+/// last written in (the text services' own timers are numbered past these).
 const BLINK: usize = 1;
 const AGAIN: usize = 2;
+const KEEP: usize = 3;
+/// How long after the last key a note is kept.
+const KEEP_AFTER_MS: u32 = 600;
 
 /// Whether the page is up.
 pub fn is_up() -> bool {
@@ -138,6 +148,32 @@ struct Beside {
     caret_on: bool,
     /// A picture was not ready as it was last drawn: drawn again soon.
     waiting: bool,
+    /// The note written, on a note's page.
+    writing: Option<Writing>,
+}
+
+/// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
+/// colour, its words' box, whether what is written is not yet kept, and what was last said of keeping it.
+struct Writing {
+    name: Option<String>,
+    stamp: Option<crate::notes::store::Stamp>,
+    colour: crate::notes::Colour,
+    written_ms: u64,
+    editor: super::editor::Editor,
+    unkept: bool,
+    said: Option<String>,
+}
+
+/// What a note's menu does: its colour chosen, it taken to the Recycle Bin.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NoteChoice {
+    Colour(crate::notes::Colour),
+    TakeAway,
+}
+
+thread_local! {
+    /// A note's menu up, with what each row does.
+    static MENU: RefCell<Option<(super::menu::Menu, Vec<NoteChoice>)>> = const { RefCell::new(None) };
 }
 
 /// What a point on the page is on.
@@ -145,6 +181,8 @@ struct Beside {
 enum Hit {
     Close,
     Search,
+    /// A note's menu.
+    NoteMenu,
     /// A program found, by what opens it: added, or taken off where it is kept already.
     Program(String, String),
 }
@@ -164,7 +202,7 @@ fn run(asks: Receiver<Ask>) {
         RegisterClassW(&class);
         let Ok(post) = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None) else { return };
         POST.store(post.0 as isize, Ordering::Release);
-        let page = WNDCLASSW { lpfnWndProc: Some(procedure), lpszClassName: w!("GlanceBeside"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
+        let page = WNDCLASSW { style: CS_DBLCLKS, lpfnWndProc: Some(procedure), lpszClassName: w!("GlanceBeside"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
         RegisterClassW(&page);
         // (Asks sent before the window was there.)
         let _ = PostMessageW(Some(post), ASKED, WPARAM(0), LPARAM(0));
@@ -178,6 +216,24 @@ fn run(asks: Receiver<Ask>) {
                     }
                 }
                 continue;
+            }
+            // A note's menu up: its own messages its, then what was chosen done.
+            let handled = MENU.with(|menu| menu.borrow_mut().as_mut().map(|(open, _)| open.handle(&message)));
+            match handled {
+                Some(super::menu::Handled::Taken) => continue,
+                Some(super::menu::Handled::Done(choice)) => {
+                    if let Some((open, choices)) = MENU.with(|menu| menu.borrow_mut().take()) {
+                        open.close();
+                        if let Some(choice) = choice.and_then(|row| choices.get(row).copied()) {
+                            let gone_now = with(|beside| beside.note_chose(choice)).unwrap_or(false);
+                            if gone_now {
+                                gone();
+                            }
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
             }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
@@ -242,8 +298,34 @@ fn show(opening: Opening) {
             caret: None,
             caret_on: true,
             waiting: false,
+            writing: None,
         };
+        let page = beside.page.clone();
+        let theme = beside.theme.clone();
         BESIDE.with(|cell| *cell.borrow_mut() = Some(beside));
+        // A note: its words read, and a box for them where the page writes them.
+        if let Page::Note(name) = page {
+            let folder = crate::notes::folder();
+            let read = name.as_ref().and_then(|name| folder.read(name));
+            let shown = crate::notes::shown();
+            let colour = match &name {
+                Some(name) => shown.iter().find(|note| &note.name == name).map(|note| note.colour).unwrap_or_default(),
+                // (A new note takes the next colour round.)
+                None => crate::notes::Colour::ALL[shown.len() % crate::notes::Colour::ALL.len()],
+            };
+            let rect = RECT { left: (PAD * scale) as i32, top: ((HEAD + 4.0) * scale) as i32, right: wide - (PAD * scale) as i32, bottom: tall - (FOOT * scale) as i32 };
+            let ink = theme.text;
+            let color = windows::Win32::Foundation::COLORREF(((ink.b * 255.0) as u32) << 16 | ((ink.g * 255.0) as u32) << 8 | (ink.r * 255.0) as u32);
+            if let Some(editor) = super::editor::Editor::new(hwnd, rect, "Microsoft YaHei UI", 15.0 * scale, color) {
+                if let Some((text, _)) = &read {
+                    editor.set_text(text);
+                }
+                let _ = editor.send(WM_SETFOCUS, WPARAM(0), LPARAM(0));
+                let written_ms = read.as_ref().map_or_else(crate::station::now_ms, |(_, stamp)| stamp.written_ms);
+                let writing = Writing { name, stamp: read.map(|(_, stamp)| stamp), colour, written_ms, editor, unkept: false, said: None };
+                with(|beside| beside.writing = Some(writing));
+            }
+        }
         UP.store(true, Ordering::Release);
         // The Start menu read (again): drawn once it is.
         let told = HWND(hwnd.0);
@@ -268,8 +350,12 @@ thread_local! {
     static DROP_TARGET: RefCell<Option<windows::Win32::System::Ole::IDropTarget>> = const { RefCell::new(None) };
 }
 
-/// The page up, gone.
+/// The page up, gone (a note on it kept first).
 fn gone() {
+    with(Beside::keep);
+    if let Some((open, _)) = MENU.with(|menu| menu.borrow_mut().take()) {
+        open.close();
+    }
     if let Some(beside) = BESIDE.with(|cell| cell.borrow_mut().take()) {
         unsafe {
             let _ = windows::Win32::System::Ole::RevokeDragDrop(beside.hwnd);
@@ -282,6 +368,10 @@ fn gone() {
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let point = || ((lparam.0 & 0xFFFF) as i16 as f32, ((lparam.0 >> 16) & 0xFFFF) as i16 as f32);
+    // A note's words' box: the keys, the input method's, what the pointer does over it, its own timers.
+    if let Some(answered) = with(|beside| beside.write(message, wparam, lparam)).flatten() {
+        return answered;
+    }
     match message {
         WM_PAINT => {
             with(Beside::draw);
@@ -321,8 +411,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_TIMER => {
             with(|beside| {
-                if wparam.0 == BLINK {
-                    beside.caret_on = !beside.caret_on;
+                match wparam.0 {
+                    BLINK => beside.caret_on = !beside.caret_on,
+                    KEEP => {
+                        let _ = unsafe { KillTimer(Some(hwnd), KEEP) };
+                        beside.keep();
+                    }
+                    _ => {}
                 }
                 beside.redraw();
             });
@@ -331,9 +426,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with(|beside| beside.place_ime());
             return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
         }
-        // Another program's window come in front: the page goes (the panel takes no focus, and leaves it up).
+        // Another program's window come in front: the page goes (the panel takes no focus, and leaves it up; its own
+        // menu leaves it up too).
         WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
-            gone();
+            let coming = HWND(lparam.0 as *mut _);
+            let ours = !coming.is_invalid() && unsafe { GetWindowThreadProcessId(coming, None) } == unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+            if !ours {
+                gone();
+            }
         }
         _ => return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
@@ -343,6 +443,137 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 impl Beside {
     fn redraw(&self) {
         let _ = unsafe { InvalidateRect(Some(self.hwnd), None, false) };
+    }
+
+    /// A message for a note's words' box, given it where it is one of its: what it answers (none: the page's own).
+    fn write(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        let writing = self.writing.as_mut()?;
+        let point = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
+        let its = match message {
+            // (Esc leaves the page; the rest of the keys and the input method's are the box's.)
+            WM_KEYDOWN => wparam.0 != usize::from(VK_ESCAPE.0),
+            WM_KEYUP | WM_CHAR | WM_SYSCHAR | WM_UNICHAR | WM_SETFOCUS | WM_KILLFOCUS => true,
+            WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_NOTIFY | WM_IME_SETCONTEXT | WM_IME_CHAR | WM_IME_REQUEST | WM_IME_COMPOSITIONFULL | WM_IME_SELECT => true,
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN => writing.editor.holds(point),
+            // (A press begun in it is followed till let go, wherever the pointer goes.)
+            WM_LBUTTONUP | WM_MOUSEMOVE => writing.editor.holds(point) || unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == self.hwnd,
+            WM_SETCURSOR => {
+                let mut at = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut at);
+                    let _ = windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut at);
+                }
+                writing.editor.holds(at)
+            }
+            WM_MOUSEWHEEL => true,
+            WM_TIMER => !matches!(wparam.0, BLINK | AGAIN | KEEP),
+            _ => false,
+        };
+        if !its {
+            return None;
+        }
+        let answered = writing.editor.send(message, wparam, lparam);
+        if writing.editor.take_changed() {
+            writing.unkept = true;
+            writing.said = None;
+            unsafe {
+                let _ = SetTimer(Some(self.hwnd), KEEP, KEEP_AFTER_MS, None);
+            }
+        }
+        self.caret_on = true;
+        self.redraw();
+        // (The input method's, unanswered by the box, are the system's as well.)
+        match (answered, message) {
+            (None, WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_NOTIFY | WM_IME_SETCONTEXT | WM_IME_CHAR | WM_IME_REQUEST | WM_SETCURSOR) => None,
+            (answered, _) => Some(answered.unwrap_or(LRESULT(0))),
+        }
+    }
+
+    /// The note written kept in its file, where what is written is not kept yet (see `notes::Folder::write`): a new
+    /// one named by its title as it is first kept (an empty one never), one changed outside meanwhile kept apart.
+    fn keep(&mut self) {
+        let lang = self.lang;
+        let Some(writing) = self.writing.as_mut().filter(|writing| writing.unkept) else { return };
+        let text = writing.editor.text();
+        let folder = crate::notes::folder();
+        let name = match &writing.name {
+            Some(name) => name.clone(),
+            None if text.trim().is_empty() => {
+                writing.unkept = false;
+                return;
+            }
+            None => {
+                let title = crate::notes::Note { name: String::new(), text: text.clone(), colour: writing.colour, stamp: Default::default() }.title().to_string();
+                let today = super::text::Local::at(crate::station::now_ms());
+                let named = folder.name_for(&title, &match lang {
+                    super::text::Lang::Zh => format!("便签 {}月{}日", today.month, today.day),
+                    super::text::Lang::En => format!("Note {}-{}", today.month, today.day),
+                });
+                let _ = folder.colour(&named, writing.colour);
+                named
+            }
+        };
+        match folder.write(&name, &text, writing.stamp) {
+            Ok(crate::notes::Written::Done(stamp)) => {
+                writing.name = Some(name);
+                writing.stamp = Some(stamp);
+                writing.written_ms = stamp.written_ms;
+            }
+            Ok(crate::notes::Written::Apart(apart)) => {
+                writing.said = Some(match lang {
+                    super::text::Lang::Zh => format!("这条便签在别处被改过，你写的已另存为“{apart}”"),
+                    super::text::Lang::En => format!("Changed elsewhere meanwhile: what you wrote is kept as \"{apart}\""),
+                });
+                writing.stamp = folder.stamp(&apart);
+                writing.name = Some(apart);
+            }
+            Err(_) => writing.said = Some(lang.pick("没能保存，请检查便签文件夹", "Not kept: see the notes' folder").to_string()),
+        }
+        writing.unkept = false;
+        crate::notes::read_again();
+    }
+
+    /// The note's menu, at its button.
+    fn note_menu(&self, at: POINT) {
+        use crate::notes::Colour;
+        use super::menu::{Item, Menu};
+        let Some(writing) = &self.writing else { return };
+        let lang = self.lang;
+        let names = [(Colour::Blue, lang.pick("蓝色", "Blue")), (Colour::Yellow, lang.pick("黄色", "Yellow")), (Colour::Green, lang.pick("绿色", "Green")), (Colour::Pink, lang.pick("粉色", "Pink")), (Colour::Purple, lang.pick("紫色", "Purple")), (Colour::Grey, lang.pick("灰色", "Grey"))];
+        let mut rows: Vec<(NoteChoice, &'static str, Icon, bool, bool)> = names.iter().map(|(colour, name)| (NoteChoice::Colour(*colour), *name, Icon::Image, writing.colour == *colour, false)).collect();
+        if writing.name.is_some() {
+            rows.push((NoteChoice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Icon::Close, false, true));
+        }
+        let items = rows.iter().map(|(_, label, icon, checked, rule_before)| Item { label, icon: Some(*icon), checked: *checked, rule_before: *rule_before }).collect();
+        if let Some(menu) = Menu::open_at(items, self.theme.dark, at, false, false) {
+            MENU.with(|held| *held.borrow_mut() = Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect())));
+        }
+    }
+
+    /// `choice` made in the note's menu: done; whether the page is to go.
+    fn note_chose(&mut self, choice: NoteChoice) -> bool {
+        self.keep();
+        let Some(writing) = self.writing.as_mut() else { return false };
+        let folder = crate::notes::folder();
+        match choice {
+            NoteChoice::Colour(colour) => {
+                writing.colour = colour;
+                if let Some(name) = &writing.name {
+                    let _ = folder.colour(name, colour);
+                }
+                crate::notes::read_again();
+                self.redraw();
+                false
+            }
+            NoteChoice::TakeAway => {
+                let taken = writing.name.as_ref().is_some_and(|name| folder.take_away(name));
+                if taken {
+                    writing.unkept = false;
+                    crate::notes::read_again();
+                }
+                taken
+            }
+        }
     }
 
     /// The programs it lists now: those the search asks for, in the Start menu's order; none till it has been read.
@@ -357,6 +588,13 @@ impl Beside {
         match hit {
             Hit::Close => return true,
             Hit::Search => {}
+            Hit::NoteMenu => {
+                let mut at = POINT { x: ((x - 120.0) * self.scale) as i32, y: ((y + 14.0) * self.scale) as i32 };
+                unsafe {
+                    let _ = windows::Win32::Graphics::Gdi::ClientToScreen(self.hwnd, &mut at);
+                }
+                self.note_menu(at);
+            }
             Hit::Program(target, name) => {
                 let app = App { target, name };
                 crate::station::apps::change(move |apps| {
@@ -493,7 +731,67 @@ impl Beside {
     fn paint(&mut self, frame: &Frame, (width, height): (f32, f32)) {
         match self.page {
             Page::Picker => self.paint_picker(frame, (width, height)),
+            Page::Note(_) => self.paint_note(frame, (width, height)),
         }
+    }
+
+    /// A note's page: its colour, when it was written, its menu and its close over its words; under them how many
+    /// there are and where it is kept (or what was said of keeping it).
+    fn paint_note(&mut self, frame: &Frame, (width, height): (f32, f32)) {
+        let theme = self.theme.clone();
+        let lang = self.lang;
+        let mut hits = Vec::new();
+        let lit = |at: (f32, f32, f32, f32), pointer: Option<(f32, f32)>| pointer.is_some_and(|(x, y)| x >= at.0 && x < at.0 + at.2 && y >= at.1 && y < at.1 + at.3);
+        frame.fill(self.ground(), 0.0, 0.0, width, height);
+        let Some(writing) = &self.writing else {
+            frame.text(lang.pick("没能打开编辑器", "The editor could not be opened"), theme.body, theme.text2, PAD, PAD, width - 2.0 * PAD, Align::Start);
+            self.hits = hits;
+            return;
+        };
+        let (mark, _) = super::view::note_colours(&theme, writing.colour);
+        // Its colour over all of it, faintly; its mark by when it was written.
+        frame.fill(mark.alpha(if theme.dark { 0.10 } else { 0.08 }), 0.0, 0.0, width, height);
+        frame.fill_circle(mark, Point { x: PAD + 5.0, y: 26.0 }, 5.0);
+        let when = super::text::since(writing.written_ms, crate::station::now_ms(), lang);
+        let said = match (&writing.name, lang) {
+            (None, super::text::Lang::Zh) => "新便签".to_string(),
+            (None, super::text::Lang::En) => "New note".to_string(),
+            (Some(_), super::text::Lang::Zh) => format!("{when} 修改"),
+            (Some(_), super::text::Lang::En) => format!("Written {when}"),
+        };
+        frame.text(&said, theme.small, theme.text2, PAD + 18.0, 18.0, width - 2.0 * PAD - 80.0, Align::Start);
+        for (at, hit, icon) in [(width - PAD - 28.0, Hit::Close, Icon::Close), (width - PAD - 60.0, Hit::NoteMenu, Icon::Ellipsis)] {
+            let place = (at, 12.0, 28.0, 28.0);
+            if lit(place, self.pointer) {
+                frame.fill_rounded(theme.hover, place.0, place.1, place.2, place.3, theme.control_radius.min(14.0));
+            }
+            frame.icon(icon, Point { x: place.0 + 14.0, y: place.1 + 14.0 }, 16.0, theme.text2);
+            hits.push((place.0, place.1, place.2, place.3, hit));
+        }
+        // Its words, as the text services draw them, and the caret where they say it is.
+        let editor = &writing.editor;
+        frame.in_pixels(|target| editor.draw(target));
+        if let (Some((x, y, w, h)), true) = (editor.caret(), self.caret_on) {
+            let scale = self.scale;
+            frame.fill(theme.text, x as f32 / scale, y as f32 / scale, (w as f32 / scale).max(1.2), h as f32 / scale);
+        }
+        // Its foot: how many characters; kept as it is written, and where (or what was said of it).
+        let bottom = height - FOOT;
+        frame.fill(theme.rule, PAD, bottom, width - 2.0 * PAD, 1.0);
+        let text = editor.text();
+        let count = text.chars().filter(|c| !c.is_whitespace()).count();
+        let counted = match lang {
+            super::text::Lang::Zh => format!("{count} 字 · 自动保存"),
+            super::text::Lang::En => format!("{count} characters · kept as you write"),
+        };
+        frame.text(&counted, theme.small, theme.text3, PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * PAD, Align::Start);
+        let place = match (&writing.said, &writing.name) {
+            (Some(said), _) => said.clone(),
+            (None, Some(name)) => name.clone(),
+            (None, None) => String::new(),
+        };
+        frame.text(&place, theme.small, if writing.said.is_some() { theme.signal } else { theme.text3 }, PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * PAD, Align::End);
+        self.hits = hits;
     }
 
     fn paint_picker(&mut self, frame: &Frame, (width, height): (f32, f32)) {
@@ -674,6 +972,7 @@ otepad.exe"),
                             caret: None,
                             caret_on: true,
                             waiting: false,
+                            writing: None,
                         };
                         beside.search.put(&search.encode_utf16().collect::<Vec<_>>());
                         let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, h))).unwrap();
