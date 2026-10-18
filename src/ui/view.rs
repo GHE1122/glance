@@ -182,7 +182,7 @@ pub enum Hit {
     Shelf(u64),
     Copied(u64),
     /// A file come lately, by its number on its drive (see `station::recent`).
-    Recent(u128),
+    Recent(crate::station::recent::Key),
     /// What is kept at hand, by its place (see `station::apps`); the place to add more; where something dragged may
     /// be dropped to be kept at hand; the grip the panel is torn off whole by.
     App(u16),
@@ -462,7 +462,7 @@ pub struct NoteCard {
 /// came from and how large it is, how long ago, and its picture's file.
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Lately {
-    file: u128,
+    file: crate::station::recent::Key,
     day: &'static str,
     label: String,
     about: String,
@@ -485,7 +485,7 @@ impl Lately {
             Some(site) => format!("{folder} · {} {site}", lang.pick("来自", "from")),
             None => folder,
         };
-        Lately { file: came.file, day: text::day_of(came.came_ms, now, lang), label, about: format!("{from} · {}", text::bytes(came.bytes as f64)), when: text::since(came.came_ms, now, lang), path: came.path.clone() }
+        Lately { file: came.key, day: text::day_of(came.came_ms, now, lang), label, about: format!("{from} · {}", text::bytes(came.bytes as f64)), when: text::since(came.came_ms, now, lang), path: came.path.clone() }
     }
 }
 
@@ -3447,7 +3447,7 @@ otepad.exe", "Notepad"),
         crate::station::thumbs::start(|| {});
         {
             use crate::station::recent::{Came, Kind};
-            let came = |file: u128, name: &str, ago_min: u64, bytes: u64, kind: Kind, site: Option<&str>| Came { file, path: file_at(name), came_ms: now - ago_min * 60_000, bytes, kind, downloaded: site.is_some(), site: site.map(str::to_string) };
+            let came = |file: u128, name: &str, ago_min: u64, bytes: u64, kind: Kind, site: Option<&str>| Came { key: crate::station::recent::Key { drive: 'C', file }, path: file_at(name), came_ms: now - ago_min * 60_000, bytes, kind, downloaded: site.is_some(), site: site.map(str::to_string) };
             crate::station::recent::pretend(vec![
                 came(1, "docs/images/banner-zh.webp", 3, 182_000, Kind::Screenshot, None),
                 came(2, "Cargo.toml", 25, 6_100_000, Kind::Archive, Some("github.com")),
@@ -3484,7 +3484,7 @@ otepad.exe", "Notepad"),
                     let seen = Seen::of(history);
                     let hover = match column {
                         0 => Some(Hit::Shelf(3)),
-                        4 => Some(Hit::Recent(2)),
+                        4 => Some(Hit::Recent(crate::station::recent::Key { drive: 'C', file: 2 })),
                         _ => None,
                     };
                     let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
@@ -3804,11 +3804,11 @@ six".into()));
         let mut hits = Vec::new();
         paint_copies(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, STATION_TALL, &mut hits);
         assert_eq!(first(&hits, 10.0, 10.0), Some(Hit::Copied(1)));
-        let rows: Vec<Lately> = (1..=40).map(|file| Lately { file, day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new() }).collect();
+        let rows: Vec<Lately> = (1..=40).map(|file| Lately { file: crate::station::recent::Key { drive: 'C', file }, day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new() }).collect();
         let mut hits = Vec::new();
         paint_recent(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &rows, Default::default(), STATION_TALL, &mut hits);
-        let row = hits.iter().find(|hit| hit.4 == Hit::Recent(1)).copied().unwrap();
-        assert_eq!(first(&hits, row.0 + 5.0, row.1 + 5.0), Some(Hit::Recent(1)));
+        let row = hits.iter().find(|hit| hit.4 == Hit::Recent(crate::station::recent::Key { drive: 'C', file: 1 })).copied().unwrap();
+        assert_eq!(first(&hits, row.0 + 5.0, row.1 + 5.0), Some(Hit::Recent(crate::station::recent::Key { drive: 'C', file: 1 })));
     }
 
     /// The station's places as each view lays them out: cards across the column, spread over it; a list a row each;

@@ -1208,7 +1208,7 @@ enum MenuFor {
     /// The station's head's (see `station::head_menu`).
     StationHead(Vec<crate::station::HeadChoice>),
     /// A file come lately, by its number, and what each row does (see `station::recent_menu`).
-    Recent(u128, Vec<crate::station::RecentChoice>),
+    Recent(crate::station::recent::Key, Vec<crate::station::RecentChoice>),
     /// A thing kept at hand, by its place, and what each row does (see `station::app_menu`).
     App(u16, Vec<crate::station::AppChoice>),
 }

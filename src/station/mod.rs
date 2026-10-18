@@ -41,7 +41,7 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
         // A file come lately: put on the clipboard as a file (pressed again within a double click's time, opened).
         Hit::Recent(file) => {
             let double = std::time::Duration::from_millis(u64::from(unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }));
-            static LAST_FILE: std::sync::Mutex<Option<(u128, std::time::Instant)>> = std::sync::Mutex::new(None);
+            static LAST_FILE: std::sync::Mutex<Option<(recent::Key, std::time::Instant)>> = std::sync::Mutex::new(None);
             let mut last = LAST_FILE.lock().unwrap();
             let again = last.is_some_and(|(was, at)| was == file && at.elapsed() <= double);
             *last = (!again).then(|| (file, std::time::Instant::now()));
@@ -138,7 +138,7 @@ pub enum RecentChoice {
 
 /// The menu of the file come lately numbered `file` (a right click on it), at `at` on the screen: up, with what its
 /// rows do.
-pub fn recent_menu(file: u128, at: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<RecentChoice>)> {
+pub fn recent_menu(file: recent::Key, at: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<RecentChoice>)> {
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
     recent::path_of(file)?;
@@ -156,7 +156,7 @@ pub fn recent_menu(file: u128, at: windows::Win32::Foundation::POINT, over_the_p
 }
 
 /// `choice` made in the menu of the file come lately numbered `file` (see `recent_menu`): done.
-pub fn recent_chose(file: u128, choice: RecentChoice) {
+pub fn recent_chose(file: recent::Key, choice: RecentChoice) {
     let Some(path) = recent::path_of(file) else { return };
     match choice {
         RecentChoice::Open => run::ask(run::Ask::Files(vec![path], run::FilesAct::Open)),
