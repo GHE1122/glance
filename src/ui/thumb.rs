@@ -1,30 +1,32 @@
 //! A slider's thumb as Windows 11 draws its own: a round face with a faint
-//! edge, and a dot of the accent in it, larger under the pointer and smaller
-//! while it is held, easing between (the settings', and the panel's and the
-//! widgets' in the Windows 11 look).
+//! edge, and a dot of the accent in it, small at rest, larger under the
+//! pointer and smaller while it is held, easing between (the settings', and
+//! the panel's and the widgets' in the Windows 11 look).
 
 use std::time::Instant;
 
 use super::canvas::{Canvas, Color, Point};
 
-/// The face's radius, with its edge (DIPs).
-pub const FACE: f32 = 10.0;
-/// The dot's radius at rest, under the pointer, and held (Windows 11's: 12, 14 and 10 across).
-pub const DOT: f32 = 6.0;
-pub const DOT_OVER: f32 = 7.0;
-pub const DOT_HELD: f32 = 5.0;
-/// How fast the dot grows or shrinks (DIPs a second: a pixel's change in a twelfth of a second, as Windows').
-const EASE: f32 = 12.0;
+/// The dot's radius at rest, of the face's (with its edge): the settings' own, 5 in 11.
+const DOT: f32 = 5.0 / 11.0;
+/// The dot under the pointer and held, of its size at rest.
+pub const OVER: f32 = 1.4;
+pub const HELD: f32 = 0.8;
+/// How fast the dot grows or shrinks (of its size at rest, a second: from rest to under the pointer in about a twelfth
+/// of a second, as Windows').
+const EASE: f32 = 5.0;
 
-/// Draws a thumb at `centre`, its dot `dot` in radius and `accent`, on a face `face` edged `edge`.
-pub fn draw(frame: &dyn Canvas, centre: Point, dot: f32, face: Color, edge: Color, accent: Color) {
-    frame.fill_circle(edge, centre, FACE);
-    frame.fill_circle(face, centre, FACE - 1.0);
-    frame.fill_circle(accent, centre, dot);
+/// Draws a thumb at `centre`, `face` in radius with its edge, its dot `dot` times its size at rest and `accent`, on a
+/// face `colour` edged `edge`. (All about one centre: each circle is put on whole pixels by its centre, so they stay
+/// one in another.)
+pub fn draw(frame: &dyn Canvas, centre: Point, face: f32, dot: f32, colour: Color, edge: Color, accent: Color) {
+    frame.fill_circle(edge, centre, face);
+    frame.fill_circle(colour, centre, face - 1.0);
+    frame.fill_circle(accent, centre, face * DOT * dot);
 }
 
-/// The dots of a host's sliders, each known by `K`, easing toward their size: at rest, under the pointer, or held.
-/// Only those not at rest are kept.
+/// The dots of a host's sliders, each known by `K`, easing toward their size (of their size at rest): at rest, under
+/// the pointer, or held. Only those not at rest are kept.
 #[derive(Clone)]
 pub struct Dots<K> {
     now: Vec<(K, f32)>,
@@ -36,9 +38,9 @@ impl<K: Copy + PartialEq> Dots<K> {
         Dots { now: Vec::new(), at: None }
     }
 
-    /// The radius of `key`'s dot now.
+    /// The size of `key`'s dot now, of its size at rest.
     pub fn of(&self, key: K) -> f32 {
-        self.now.iter().find(|(k, _)| *k == key).map_or(DOT, |(_, dot)| *dot)
+        self.now.iter().find(|(k, _)| *k == key).map_or(1.0, |(_, dot)| *dot)
     }
 
     /// Eased on to `now`, toward each dot's size: `over` the one under the pointer, `held` the one held. Whether any
@@ -49,17 +51,17 @@ impl<K: Copy + PartialEq> Dots<K> {
         self.at = Some(now);
         for key in [over, held].into_iter().flatten() {
             if !self.now.iter().any(|(k, _)| *k == key) {
-                self.now.push((key, DOT));
+                self.now.push((key, 1.0));
             }
         }
-        let to = |key: K| if held == Some(key) { DOT_HELD } else if over == Some(key) { DOT_OVER } else { DOT };
+        let to = |key: K| if held == Some(key) { HELD } else if over == Some(key) { OVER } else { 1.0 };
         let mut moving = false;
         for (key, dot) in &mut self.now {
             let to = to(*key);
             *dot = if to > *dot { (*dot + EASE * step).min(to) } else { (*dot - EASE * step).max(to) };
             moving |= *dot != to;
         }
-        self.now.retain(|(key, dot)| *dot != DOT || over == Some(*key) || held == Some(*key));
+        self.now.retain(|(key, dot)| *dot != 1.0 || over == Some(*key) || held == Some(*key));
         moving
     }
 }
@@ -74,34 +76,67 @@ impl<K: Copy + PartialEq> Default for Dots<K> {
 mod tests {
     use super::*;
 
-    /// Under the pointer the dot grows to its size over a few frames, not at once; held, it shrinks; let go and left,
-    /// it is back at rest and forgotten, and nothing more is wanted.
+    /// At rest the dot is small; under the pointer it grows over a few frames, not at once; held, it shrinks; let go
+    /// and left, it is back at rest and forgotten, and nothing more is wanted.
     #[test]
     fn the_dot_eases_between_its_sizes() {
         let mut dots: Dots<u8> = Dots::new();
+        assert_eq!(dots.of(1), 1.0);
         let start = Instant::now();
         let at = |ms: u64| start + std::time::Duration::from_millis(ms);
         assert!(!dots.step(at(0), None, None));
         assert!(dots.step(at(16), Some(1), None));
         let first = dots.of(1);
-        assert!(first > DOT && first < DOT_OVER, "a step of the way: {first}");
+        assert!(first > 1.0 && first < OVER, "a step of the way: {first}");
         let mut ms = 32;
         while dots.step(at(ms), Some(1), None) {
             ms += 16;
         }
-        assert_eq!(dots.of(1), DOT_OVER);
+        assert_eq!(dots.of(1), OVER);
         assert!(ms <= 160, "there in about a tenth of a second: {ms} ms");
         ms += 16;
         while dots.step(at(ms), Some(1), Some(1)) {
             ms += 16;
         }
-        assert_eq!(dots.of(1), DOT_HELD);
+        assert_eq!(dots.of(1), HELD);
         ms += 16;
         while dots.step(at(ms), None, None) {
             ms += 16;
         }
-        assert_eq!(dots.of(1), DOT);
+        assert_eq!(dots.of(1), 1.0);
         assert!(dots.now.is_empty());
-        assert_eq!(dots.of(2), DOT);
+    }
+
+    /// The face and its dot are one about the other wherever the thumb is, a pixel's fraction off the grid or not.
+    #[test]
+    #[cfg(feature = "studio")]
+    fn the_dot_is_in_the_middle_of_its_face() {
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        for scale in [1.0f32, 1.25, 1.5] {
+            for x in [20.0f32, 20.2, 20.33, 20.5, 20.7] {
+                let pixels = gfx
+                    .draw_offscreen((48, 48), scale, |frame| draw(frame, Point { x, y: 16.4 }, 8.0, 1.0, Color::hex(0xffffff, 1.0), Color::hex(0x000000, 0.1), Color::hex(0x0000ff, 1.0)))
+                    .expect("drawn");
+                let (w, h) = (48usize, 48usize);
+                // The middle of what is blue, and of what is drawn at all, each way: the same.
+                let middle = |inside: &dyn Fn(&[u8]) -> bool| {
+                    let (mut sx, mut sy, mut n) = (0.0, 0.0, 0.0);
+                    for y in 0..h {
+                        for x in 0..w {
+                            let p = &pixels[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                            if inside(p) {
+                                sx += x as f32;
+                                sy += y as f32;
+                                n += 1.0;
+                            }
+                        }
+                    }
+                    (sx / n, sy / n)
+                };
+                let dot = middle(&|p| p[0] > 200 && p[1] < 60);
+                let face = middle(&|p| p[3] > 200);
+                assert!((dot.0 - face.0).abs() < 0.3 && (dot.1 - face.1).abs() < 0.3, "at {scale}, x {x}: the dot's middle {dot:?}, the face's {face:?}");
+            }
+        }
     }
 }

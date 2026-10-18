@@ -1819,7 +1819,8 @@ fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f
         frame.fill_rounded(theme.track, from, middle - half, track, tall, radius);
         frame.unclip();
         let (face, edge) = if theme.dark { (Color::hex(0x454545, 1.0), Color::hex(0xffffff, 0.09)) } else { (Color::hex(0xffffff, 1.0), Color::hex(0x000000, 0.10)) };
-        super::thumb::draw(frame, Point { x: from + filled, y: middle }, dot, face, edge, colour);
+        // (Smaller than Windows' own and the settings': the panel's track is thinner.)
+        super::thumb::draw(frame, Point { x: from + filled, y: middle }, 8.0, dot, face, edge, colour);
         return;
     }
     if knob.is_none() {

@@ -817,10 +817,11 @@ impl Canvas for Frame<'_> {
     }
 
     fn fill_circle(&self, color: Color, centre: Point, radius: f32) {
-        // (Its box on whole pixels, as a rectangle's: drawn with a ring round it or a glyph in it, which are, it kept
-        // its own place between pixels, and they moved apart.)
-        let (x, y, width, height) = self.on_pixels(centre.x - radius, centre.y - radius, 2.0 * radius, 2.0 * radius);
-        let dot = D2D1_ELLIPSE { point: Vector2 { X: x + width / 2.0, Y: y + height / 2.0 }, radiusX: width / 2.0, radiusY: height / 2.0 };
+        // (Its centre on a whole pixel: drawn with a ring round it or a glyph in it, which are put on whole pixels, it
+        // kept its own place between pixels, and they moved apart. By its centre, not its box: circles about one centre,
+        // a thumb's face and dot, stay one in another whatever their radii.)
+        let (x, y) = self.on_pixel(centre.x, centre.y);
+        let dot = D2D1_ELLIPSE { point: Vector2 { X: x, Y: y }, radiusX: radius, radiusY: radius };
         unsafe { self.dc.FillEllipse(&dot, self.brush(color)) };
     }
 
