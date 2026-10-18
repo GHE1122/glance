@@ -1020,6 +1020,42 @@ mod tests {
         names.to_vec()
     }
 
+    /// The overlay, its buttons and a slider's knob come out the same, pixel for pixel, wherever in the compositor's
+    /// atlas their surface is handed a region (its place there, in DIPs, rarely exact): no part of them moves by a
+    /// pixel, nor apart from another, as the frames go (the overlay's words shook, and its buttons' rings moved off
+    /// their plates). Drawn at each of a few hundred places, at the scales screens are set to.
+    #[test]
+    #[cfg(feature = "studio")]
+    fn it_is_drawn_the_same_wherever_in_the_atlas() {
+        use crate::ui::canvas::{Color, Point};
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let mut s = sample(true);
+        s.cpu = Some(49.0);
+        let readings = readings(&s, s.game.as_ref(), false, &items(&["frames", "cpu", "gpu"]), Lang::Zh);
+        let shape = Shape { layout: Layout::Strip, rows: 1, width: f32::INFINITY };
+        let glass = Glass { tone: Tone::Dark, opacity: 0.6, presence: 1.0 };
+        let (w, h) = (240u32, 64u32);
+        for scale in [1.0f32, 1.25, 1.5, 1.75] {
+            let drawn = |offset: i32| -> Vec<u8> {
+                gfx.draw_in_atlas((w, h), (offset, offset), scale, |frame| {
+                    paint(frame, &readings, &[], shape, glass, Hand::Free, scale);
+                    for (place, button) in crate::ui::buttons::ALL.iter().enumerate() {
+                        crate::ui::buttons::paint(frame, Point { x: 14.0 + place as f32 * 31.0, y: 47.0 }, *button, place == 1, true, Color::hex(0xFFFFFF, 0.3));
+                    }
+                    crate::ui::thumb::draw(frame, Point { x: 200.0 + 1.0 / 3.0, y: 47.5 }, 6.5, Color::hex(0x454545, 1.0), Color::hex(0xFFFFFF, 0.09), Color::hex(0x4CC2FF, 1.0));
+                })
+                .expect("drawn")
+            };
+            let first = drawn(0);
+            for offset in 1..300 {
+                let other = drawn(offset);
+                let (at, worst) = first.iter().zip(&other).map(|(a, b)| a.abs_diff(*b)).enumerate().max_by_key(|(_, d)| *d).unwrap();
+                let (x, y) = ((at / 4) % w as usize, at / 4 / w as usize);
+                assert_eq!(worst, 0, "at {scale}, drawn {offset} px further into the atlas, the pixel at {x}, {y} differs by {worst}");
+            }
+        }
+    }
+
     fn plain(readings: Vec<Reading>) -> Vec<(String, String, String, String)> {
         readings.into_iter().map(|r| (r.name, r.figure, r.unit, r.rest)).collect()
     }

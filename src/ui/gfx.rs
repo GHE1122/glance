@@ -124,6 +124,9 @@ pub struct Gfx {
     /// The two colours each gradient fades between, as made for them (a resource of the device, any of its
     /// contexts draws with), and when each was last used.
     stops: RefCell<HashMap<[u32; 8], (windows::Win32::Graphics::Direct2D::ID2D1GradientStopCollection, Instant)>>,
+    /// What a frame handed out a region of the compositor's atlas is drawn on first (see `Frame::begun`), as large
+    /// as the largest such frame yet.
+    scratch: RefCell<Option<(ID2D1Bitmap1, (u32, u32))>>,
 }
 
 /// How much contrast grayscale text's edges are given by `crisp_text` (the
@@ -228,6 +231,7 @@ impl Gfx {
             )?
         };
         Ok(Gfx {
+            scratch: RefCell::new(None),
             guarded,
             factory,
             device,
@@ -366,6 +370,7 @@ impl Gfx {
     /// frame by frame as it was sized is let go, and the graphics driver gives back the memory let go of meanwhile
     /// (a few hundred megabytes, else held a while, or for good).
     pub fn settle(&self) {
+        self.scratch.borrow_mut().take();
         self.made.borrow_mut().clear();
         self.spare.borrow_mut().clear();
         unsafe { self.dxgi.Trim() };
@@ -417,6 +422,7 @@ impl Gfx {
             return;
         }
         self.settled.set(true);
+        self.scratch.borrow_mut().take();
         self.made.borrow_mut().clear();
         self.spare.borrow_mut().clear();
         unsafe {
@@ -431,6 +437,7 @@ impl Gfx {
     /// Gives back what drawing holds on to while nothing is on screen.
     pub fn trim(&self) {
         self.trimmed.set(true);
+        self.scratch.borrow_mut().take();
         self.pictures.borrow_mut().clear();
         self.layouts.borrow_mut().clear();
         self.made.borrow_mut().clear();
@@ -687,7 +694,7 @@ impl Gfx {
             dc.SetTransform(&Matrix3x2::identity());
             dc.Clear(Some(&D2D1_COLOR_F::default()));
             let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
-            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Matrix3x2::identity() });
+            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Matrix3x2::identity(), atlas: None });
             dc.EndDraw(None, None)?;
             let read = dc.CreateBitmap(pixels, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
             read.CopyFromBitmap(None, &target, None)?;
@@ -696,6 +703,43 @@ impl Gfx {
             let mut out = Vec::with_capacity(row * size.1 as usize);
             for y in 0..size.1 as usize {
                 out.extend_from_slice(std::slice::from_raw_parts(mapped.bits.add(y * mapped.pitch as usize), row));
+            }
+            read.Unmap()?;
+            Ok(out)
+        }
+    }
+
+    /// As `draw_offscreen`, the picture drawn as a frame handed a region `size` large at `offset` (physical pixels)
+    /// of a larger atlas is (see `Frame::begun`): that region's pixels, as `draw_offscreen` gives them.
+    pub fn draw_in_atlas(&self, size: (u32, u32), offset: (i32, i32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<Vec<u8>> {
+        use windows::Win32::Graphics::Direct2D::{
+            D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_MAP_OPTIONS_READ,
+        };
+        let properties = |options: D2D1_BITMAP_OPTIONS| D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: options,
+            ..Default::default()
+        };
+        let whole = D2D_SIZE_U { width: size.0 + offset.0 as u32, height: size.1 + offset.1 as u32 };
+        unsafe {
+            let dc = self.device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+            let atlas = dc.CreateBitmap(whole, None, 0, &properties(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
+            dc.SetTarget(&atlas);
+            dc.BeginDraw();
+            let frame = Frame::begun(self, dc.clone(), POINT { x: offset.0, y: offset.1 }, size, scale)?;
+            paint(&frame);
+            frame.finish()?;
+            dc.EndDraw(None, None)?;
+            let read = dc.CreateBitmap(whole, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
+            read.CopyFromBitmap(None, &atlas, None)?;
+            let mapped = read.Map(D2D1_MAP_OPTIONS_READ)?;
+            let row = size.0 as usize * 4;
+            let mut out = Vec::with_capacity(row * size.1 as usize);
+            for y in 0..size.1 as usize {
+                let line = mapped.bits.add((y + offset.1 as usize) * mapped.pitch as usize + offset.0 as usize * 4);
+                out.extend_from_slice(std::slice::from_raw_parts(line, row));
             }
             read.Unmap()?;
             Ok(out)
@@ -710,6 +754,9 @@ pub struct Frame<'a> {
     brush: ID2D1SolidColorBrush,
     /// Where the surface's region starts (DIPs).
     base: Matrix3x2,
+    /// Handed a region of the atlas: the atlas, the bitmap drawn on meanwhile, and the region's corner and size
+    /// (physical pixels; see `begun`).
+    atlas: Option<(ID2D1Image, ID2D1Bitmap1, POINT, (u32, u32))>,
 }
 
 impl Canvas for Frame<'_> {
@@ -769,7 +816,10 @@ impl Canvas for Frame<'_> {
     }
 
     fn fill_circle(&self, color: Color, centre: Point, radius: f32) {
-        let dot = D2D1_ELLIPSE { point: Vector2 { X: centre.x, Y: centre.y }, radiusX: radius, radiusY: radius };
+        // (Its box on whole pixels, as a rectangle's: drawn with a ring round it or a glyph in it, which are, it kept
+        // its own place between pixels, and they moved apart.)
+        let (x, y, width, height) = self.on_pixels(centre.x - radius, centre.y - radius, 2.0 * radius, 2.0 * radius);
+        let dot = D2D1_ELLIPSE { point: Vector2 { X: x + width / 2.0, Y: y + height / 2.0 }, radiusX: width / 2.0, radiusY: height / 2.0 };
         unsafe { self.dc.FillEllipse(&dot, self.brush(color)) };
     }
 
@@ -913,11 +963,39 @@ impl Canvas for Frame<'_> {
 
 impl<'a> Frame<'a> {
     /// A frame on a composition surface's context just handed out for
-    /// drawing, at `offset` (physical pixels) in it: cleared, at `scale`
-    /// physical pixels per DIP.
-    pub(super) fn begun(gfx: &'a Gfx, dc: ID2D1DeviceContext, offset: POINT, scale: f32) -> Result<Self> {
-        // The surface may hand out a region of a larger atlas.
-        let base = Matrix3x2::translation(offset.x as f32 / scale, offset.y as f32 / scale);
+    /// drawing, at `offset` (physical pixels) in it, `size` (physical pixels) large: cleared, at `scale`
+    /// physical pixels per DIP. Drawn, it is to be `finish`ed before the surface's drawing ends.
+    ///
+    /// Handed a region of a larger atlas, it is drawn from its own corner on a bitmap of its own first, then put in
+    /// its region pixel for pixel (see `finish`). Drawn straight into the region, its place there is reckoned in DIPs
+    /// (355 px at 1.5 is 236.666…), rarely exactly, and where it was put by a hair either way, text's baselines,
+    /// which DirectWrite puts on whole pixels, and its glyphs' places along the line went to one pixel or step or the
+    /// other as the region did from frame to frame: the overlay's words shook by a pixel as its readings changed.
+    pub(super) fn begun(gfx: &'a Gfx, dc: ID2D1DeviceContext, offset: POINT, size: (u32, u32), scale: f32) -> Result<Self> {
+        let atlas = if offset.x != 0 || offset.y != 0 {
+            let target = unsafe { dc.GetTarget()? };
+            let mut kept = gfx.scratch.borrow_mut();
+            let fits = kept.as_ref().is_some_and(|(_, has)| has.0 >= size.0 && has.1 >= size.1);
+            if !fits {
+                let has = kept.as_ref().map_or((0, 0), |(_, has)| *has);
+                let made = (has.0.max(size.0).max(1), has.1.max(size.1).max(1));
+                let properties = D2D1_BITMAP_PROPERTIES1 {
+                    pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                    bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+                    ..Default::default()
+                };
+                let bitmap = unsafe { dc.CreateBitmap(D2D_SIZE_U { width: made.0, height: made.1 }, None, 0, &properties)? };
+                *kept = Some((bitmap, made));
+            }
+            let scratch = kept.as_ref().unwrap().0.clone();
+            unsafe { dc.SetTarget(&scratch) };
+            Some((target, scratch, offset, size))
+        } else {
+            None
+        };
+        let base = Matrix3x2::identity();
         unsafe {
             dc.SetDpi(96.0 * scale, 96.0 * scale);
             dc.SetTransform(&base);
@@ -929,7 +1007,26 @@ impl<'a> Frame<'a> {
             dc.Clear(Some(&D2D1_COLOR_F::default()));
         }
         let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)? };
-        Ok(Frame { gfx, dc, brush, base })
+        Ok(Frame { gfx, dc, brush, base, atlas })
+    }
+
+    /// What was drawn put in the region of the atlas the frame was handed (see `begun`), pixel for pixel: its
+    /// place given in pixels, no DIPs between.
+    pub(super) fn finish(&self) -> Result<()> {
+        let Some((target, scratch, offset, size)) = &self.atlas else { return Ok(()) };
+        use windows::Win32::Graphics::Direct2D::Common::D2D1_COMPOSITE_MODE_SOURCE_COPY;
+        use windows::Win32::Graphics::Direct2D::{D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_UNIT_MODE_DIPS, D2D1_UNIT_MODE_PIXELS};
+        unsafe {
+            let dc = &self.dc;
+            dc.SetTarget(target);
+            dc.SetUnitMode(D2D1_UNIT_MODE_PIXELS);
+            dc.SetTransform(&Matrix3x2::identity());
+            let from = D2D_RECT_F { left: 0.0, top: 0.0, right: size.0 as f32, bottom: size.1 as f32 };
+            let image: ID2D1Image = scratch.cast()?;
+            dc.DrawImage(&image, Some(&Vector2 { X: offset.x as f32, Y: offset.y as f32 }), Some(&from), D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
+            dc.SetUnitMode(D2D1_UNIT_MODE_DIPS);
+        }
+        Ok(())
     }
 
     /// A brush for `fill`; none if Direct2D cannot make it.
@@ -1347,9 +1444,10 @@ impl Surface {
         let mut offset = POINT::default();
         let began = std::time::Instant::now();
         let dc: ID2D1DeviceContext = unsafe { surface.BeginDraw(None, &mut offset)? };
-        let frame = Frame::begun(gfx, dc, offset, scale)?;
+        let frame = Frame::begun(gfx, dc, offset, self.size, scale)?;
         let given = began.elapsed();
         paint(&frame);
+        frame.finish()?;
         let painted = began.elapsed();
         unsafe {
             surface.EndDraw()?;

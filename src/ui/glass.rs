@@ -186,9 +186,10 @@ impl Frosted {
         let interop: ICompositionDrawingSurfaceInterop = surface.cast()?;
         let mut offset = POINT::default();
         let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, &mut offset)? };
-        let frame = Frame::begun(gfx, dc, offset, scale);
+        let frame = Frame::begun(gfx, dc, offset, size, scale);
         if let Ok(frame) = &frame {
             paint(frame);
+            frame.finish()?;
         }
         unsafe { interop.EndDraw()? };
         frame.map(|_| ())
