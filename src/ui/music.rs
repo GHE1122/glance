@@ -215,6 +215,8 @@ const KEY_GAP: f32 = 2.0;
 const KEY_LEAD: f32 = (CONTROL - KEY_ICON) / 2.0 + KEY_ICON * 4.0 / 24.0;
 /// The sound's drawing reaches nearer its box's right side (to 23 of the 24).
 const SOUND_TRAIL: f32 = (CONTROL - KEY_ICON) / 2.0 + KEY_ICON * 1.0 / 24.0;
+/// How far in from its top and right the buttons set in its corner are (DIPs).
+const CORNER: f32 = 12.0;
 /// How tall the sound's track standing up over its key is, at most (DIPs).
 const SOUND_UP: f32 = 96.0;
 /// The spectrum's row of its own, under kept controls, and the room between rows (DIPs).
@@ -724,11 +726,18 @@ fn tween(from: Placed, to: Placed, t: f32) -> Placed {
     }
 }
 
-/// The stage's record: its middle and how wide it is, in a room `w` × `h` (as tall as the room above the rows along
-/// the bottom, no wider than two fifths of it).
-fn stage_record((w, h): (f32, f32)) -> ((f32, f32), f32) {
+/// The stage's record: its middle and how wide it is, in a room `w` × `h` showing `shows` (as tall as the room above
+/// the rows along the bottom as they are, no wider than two fifths of it).
+fn stage_record((w, h): (f32, f32), shows: &Shows) -> ((f32, f32), f32) {
     let pad = pad(Layout::Stage);
-    let above = h - 2.0 * pad - CONTROL - ROW_GAP - STAGE_SPECTRUM - 14.0;
+    // The rows along the bottom: kept showing, the controls with the spectrum over them; else the spectrum alone (the
+    // controls come over it), or the controls' row where there is no spectrum.
+    let rows = match (shows.controls, shows.spectrum) {
+        (true, true) => CONTROL + ROW_GAP + STAGE_SPECTRUM,
+        (false, true) => STAGE_SPECTRUM,
+        _ => CONTROL,
+    };
+    let above = h - 2.0 * pad - rows - 14.0;
     let side = above.min(w * 0.4).max(0.0);
     // (In the middle of the room above the rows along the bottom, where it is narrower than that is tall.)
     ((pad + side / 2.0, pad + above.max(0.0) / 2.0), side)
@@ -824,7 +833,7 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
         // The record drawn as it turns (not on the ground); what plays at the top of the column beside it.
         // (Level with the record's top: the record and the column beside it together in the middle.)
         Layout::Stage => {
-            let ((_, cy), side) = stage_record((w, h));
+            let ((_, cy), side) = stage_record((w, h), shows);
             let top = cy - side / 2.0;
             let left = pad + side + side * 0.28 + 12.0;
             let width = (w - left - pad).max(0.0);
@@ -960,7 +969,7 @@ impl Drawing<'_> {
 
     /// The sound's key, its box at `x` on `row`, the track before it from `from`: its icon (pressed, the sound muted or
     /// not); with the pointer on it (or on what comes), a thin track of how loud the sound is standing up over it, on
-    /// nothing but what is behind, and with the pointer on that, beside the pointer how loud that place is.
+    /// nothing but what is behind, its knob where the sound is (no level said: pressed or dragged, it is heard).
     fn sound_key(&mut self, from: f32, x: f32, row: f32, fade: f32) {
         self.progress(from, x - 4.0, row, fade);
         let frame = self.frame;
@@ -1002,25 +1011,9 @@ impl Drawing<'_> {
         let filled = (bottom - top) * fraction;
         frame.fill_rounded(colour(self.accent, 0.95 * fade), line, bottom - filled, thick, filled, thick / 2.0);
         frame.fill_circle(Color::hex(self.ink, fade), Point { x: centre.x, y: bottom - filled }, if lit { 6.0 } else { 4.5 });
-        if let Some((_, py)) = self.pointer.filter(|&p| inside(p, up_x, up_top, CONTROL, up_bottom - up_top)) {
-            let at = ((bottom - py) / (bottom - top)).clamp(0.0, 1.0);
-            let said = format!("{}%", (at * 100.0).round() as u32);
-            let wide = frame.measure(&said, self.fonts.time) + 2.0;
-            let y = py.clamp(top, bottom) - self.fonts.time.size * 0.7;
-            words(frame, &said, self.fonts.time, Color::hex(self.ink, 0.95), line - 8.0 - wide, y, wide, Align::End, true);
-        }
         if self.music.controls_in >= 0.5 {
             self.hits.push((up_x, top, CONTROL, bottom - top, Hit::VolumeUp));
         }
-    }
-
-    /// The time at a place along the track, `said` over `row` (its middle at `x`, kept between `lo` and `hi`): on
-    /// nothing but what is behind, with the dark edge words have there.
-    fn pill(&self, said: &str, x: f32, lo: f32, hi: f32, row: f32) {
-        let frame = self.frame;
-        let wide = frame.measure(said, self.fonts.time) + 2.0;
-        let left = (x - wide / 2.0).clamp(lo - 4.0, hi - wide + 4.0);
-        words(frame, said, self.fonts.time, Color::hex(self.ink, 0.95), left, row - 14.0, wide, Align::Start, true);
     }
 
     /// What goes back, pauses or plays, and skips, their boxes in a row from `x`, `gap` apart, at `row`, `fade` of
@@ -1049,9 +1042,10 @@ impl Drawing<'_> {
     }
 
     /// What plays's track, from `from` to `to` on `row`, with how long is left at its end, `fade` of it shown (thicker
-    /// under the pointer, or dragged, its knob on it; under the pointer, the time there over it; dragged, the time it
-    /// is dragged to). Pressed and dragged along it (see `Hit::Seek`), what plays is shown that far in, and played from
-    /// there once let go. (Only the full screen keeps its track thin and bare.)
+    /// under the pointer, or dragged, its knob on it; no times said over it: dragged, the time left at its end is that
+    /// from where it is dragged to). Pressed and dragged along it (see `Hit::Seek`), what plays is shown that far in,
+    /// and played from there once let go. (Only the full screen keeps its track thin and bare, and says the time at
+    /// the pointer.)
     fn progress(&mut self, from: f32, to: f32, row: f32, fade: f32) {
         let Some((length, seekable)) = self.moment.length.filter(|(length, _)| *length > 0.0) else { return };
         let frame = self.frame;
@@ -1073,13 +1067,6 @@ impl Drawing<'_> {
             frame.fill_circle(Color::hex(self.ink, fade), Point { x: from + track * fraction, y: middle }, 6.0);
         }
         words(frame, &left_over, self.fonts.time, Color::hex(self.ink, 0.6 * fade), to - time_wide, middle - self.fonts.time.size * 0.7, time_wide, Align::End, self.edged);
-        // Dragged, the time it is dragged to, over where it is; else, under the pointer, the time there.
-        if dragged {
-            self.pill(&super::text::clock(position.max(0.0).round() as u32), from + track * fraction, from, from + track, row);
-        } else if let Some((px, _)) = self.pointer.filter(|_| seekable && lit) {
-            let at = ((px - from) / track).clamp(0.0, 1.0) as f64;
-            self.pill(&super::text::clock((at * length).round() as u32), px, from, from + track, row);
-        }
         if seekable && self.music.controls_in >= 0.5 {
             self.hits.push((from, row, track, CONTROL, Hit::Seek(crate::playing::Follow::Music)));
         }
@@ -1441,7 +1428,7 @@ impl Drawing<'_> {
         let (w, h) = self.size;
         let pad = pad_of(Layout::Stage, self.shows);
         let at = self.placed(Layout::Stage);
-        let ((cx, cy), side) = stage_record(self.size);
+        let ((cx, cy), side) = stage_record(self.size, self.shows);
         self.record(cx, cy, side);
         // Along the bottom, all across: kept showing, the controls and the track, and the spectrum over them; else the
         // spectrum, the controls coming over it as the pointer does (as in every layout).
@@ -1780,11 +1767,10 @@ impl Drawing<'_> {
 }
 
 impl Music {
-    /// Where buttons set in its top right corner go, showing `shows` (as last laid out), `size` large: their tops and
-    /// their right ends its edge's room in from its top and right (where the time left and the sound's key end below).
-    pub fn top_right(&self, size: (f32, f32), shows: &Shows) -> (f32, f32) {
-        let pad = pad_of(self.layout.unwrap_or(Layout::Player), shows);
-        (pad, size.0 - pad)
+    /// Where buttons set in its top right corner go, `size` large: near the corner, not as far in as what it shows (they
+    /// are the window's, not what it shows).
+    pub fn top_right(&self, size: (f32, f32)) -> (f32, f32) {
+        (CORNER, size.0 - CORNER)
     }
 
     /// The colour its own ground shows most along its edges, `size` large (for what stands in for it, as where it

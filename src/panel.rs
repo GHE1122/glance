@@ -2878,8 +2878,8 @@ impl<'a> Panel<'a> {
             if let Some((px_x, px_y)) = pointer {
                 let ground = music.ground_colour(size);
                 let (side, gap) = (crate::ui::buttons::SIZE, crate::ui::buttons::GAP);
-                // (Lined up with what it shows: their tops with the cover's, their right end with the time left's.)
-                let (top, right) = music.top_right(size, &shows);
+                // (In its corner.)
+                let (top, right) = music.top_right(size);
                 for (index, (button, hit)) in [(crate::ui::buttons::Button::Pin, Hit::Pin), (crate::ui::buttons::Button::Settings, Hit::Settings), (crate::ui::buttons::Button::Full, Hit::Full)].into_iter().enumerate() {
                     let (bx, by) = (right - side - index as f32 * (side + gap), top);
                     let over = px_x >= bx && px_x < bx + side && px_y >= by && px_y < by + side;
