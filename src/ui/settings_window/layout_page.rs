@@ -370,9 +370,9 @@ impl Ui {
         let k = r.w / self.stage.size.0;
         let shows = super::super::music::Shows::from(&self.settings.view);
         let room = self.settings.music_rooms.at(edge == Edge::Top);
-        let zoom = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
+        // (As large as it rests at: what plays is not made larger with the panel's size, as the readings are.)
         let size = super::super::music::rests_at(room, &shows);
-        let (w, h) = (size.0 * zoom, size.1 * zoom);
+        let (w, h) = size;
         let (sw, sh) = self.stage.size;
         let inset = 8.0;
         let (x, y) = match edge {
@@ -381,8 +381,8 @@ impl Ui {
             Edge::Top => ((sw - w) / 2.0, inset),
         };
         unsafe { frame.dc.PushAxisAlignedClip(&rect(r.x, r.y, r.w, r.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-        frame.place(Matrix3x2::scale(zoom * k, zoom * k) * Matrix3x2::translation(r.x + x * k, r.y + y * k));
-        let (ground, scale, now) = (super::super::music::Ground::of(&shows), self.scale * zoom * k, Instant::now());
+        frame.place(Matrix3x2::scale(k, k) * Matrix3x2::translation(r.x + x * k, r.y + y * k));
+        let (ground, scale, now) = (super::super::music::Ground::of(&shows), self.scale * k, Instant::now());
         let painted = if super::super::music::heard() {
             self.music.paint(frame, size, &shows, ground, scale, None, now)
         } else {
