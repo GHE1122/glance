@@ -1188,6 +1188,40 @@ impl Drawing<'_> {
         self.hits.push((cx, cy, chip_wide, 18.0, Hit::Line(index as u16)));
     }
 
+    /// As `turned_to`, on the rail: the line in rows as it is when sung (`full`, in rows `width / zoom` wide, drawn
+    /// `zoom` times as large, as the rail draws its lines), not cut short (cut short, played from, it came whole and
+    /// moved); what plays it from there after its last row, or under it where that row has no room (see `chip_at`).
+    #[allow(clippy::too_many_arguments)]
+    fn turned_wrapped(&mut self, lines: &[Line], index: usize, x: f32, y: f32, width: f32, full: Font, zoom: f32) {
+        let frame = self.frame;
+        let line = &lines[index];
+        let text = if line.text.trim().is_empty() { "…".to_string() } else { line.text.clone() };
+        let room = width / zoom;
+        let colour = Color::hex(self.ink, 0.92);
+        let edged = self.edged;
+        frame.scaled(x, y, zoom, |frame| {
+            if edged {
+                edge(frame, colour.a, |frame| frame.text_wrapped(&text, full, Color::hex(0xFFFFFF, 1.0), x, y, room));
+            }
+            frame.text_wrapped(&text, full, colour, x, y, room);
+        });
+        let tall = frame.gfx.wrapped_height(&text, full, room) * zoom;
+        self.hits.push((x, y, width, tall, Hit::Line(index as u16)));
+        if !self.seekable() {
+            return;
+        }
+        let chip = super::text::clock(line.at.max(0.0) as u32);
+        let chip_wide = frame.measure(&chip, self.fonts.time) + 26.0;
+        let (dx, dy, _) = chip_at(frame, &text, full, width, zoom, chip_wide);
+        let (cx, cy) = (x + dx, y + dy);
+        let on = self.pointer.is_some_and(|(px, py)| px >= cx && px < cx + chip_wide && py >= cy && py < cy + 18.0);
+        frame.fill_rounded(Color::hex(self.ink, if on { 0.24 } else { 0.1 }), cx, cy, chip_wide, 18.0, 9.0);
+        frame.stroke_rounded(Fill::Solid(Color::hex(self.ink, 0.5)), cx, cy, chip_wide, 18.0, 9.0, 1.0);
+        frame.icon(Icon::Play, Point { x: cx + 10.0, y: cy + 9.0 }, 10.0, Color::hex(self.ink, 0.95));
+        frame.text(&chip, self.fonts.time, Color::hex(self.ink, 0.95), cx + 17.0, cy + 2.0, chip_wide, Align::Start);
+        self.hits.push((cx, cy, chip_wide, 18.0, Hit::Line(index as u16)));
+    }
+
     /// The strip: the cover small at its start, the line sung now, and at its end the spectrum or the controls (kept
     /// showing: the controls at the end, the spectrum before them). With no ground and no cover, the line large in its
     /// middle and what is under it below, the controls at its start as the pointer comes.
@@ -1389,11 +1423,35 @@ impl Drawing<'_> {
         match (&lines, now) {
             (Some(lines), _) if self.music.turned != 0 => {
                 let index = turned_to(now, self.music.turned, lines.len()).unwrap_or(0);
-                self.turned_to(lines, index, left, line_top, width, self.fonts.line);
                 let under = lines[index].translation.clone().filter(|_| self.shows.translation).unwrap_or_default();
-                let under_top = line_top + self.fonts.line.size * 1.4 + 2.0;
+                // As the line sung now is sized (below): in rows, at the largest size at which they fit with what plays
+                // it from (after its last row, or under it) and its translation, else without that; cut short only
+                // where none does. (Cut short as it was, played from, it came whole, and moved.)
+                let text = if lines[index].text.trim().is_empty() { "…".to_string() } else { lines[index].text.clone() };
+                let chip = if self.seekable() { Some(frame.measure(&super::text::clock(lines[index].at.max(0.0) as u32), self.fonts.time) + 26.0) } else { None };
+                let tall = |font: Font| {
+                    let rows = frame.gfx.wrapped_height(&text, font, width);
+                    rows + match chip {
+                        Some(chip) if chip_at(frame, &text, font, width, 1.0, chip).2 => CHIP_ROW,
+                        _ => 0.0,
+                    }
+                };
+                let sizes = || (0..).map(|step| self.fonts.line.size - step as f32).take_while(|size| *size >= self.fonts.under.size).map(|size| Font { size, ..self.fonts.line });
+                let room = bottom - line_top;
+                let wants_under = if under.is_empty() { 0.0 } else { 2.0 + under_tall };
+                let (line_tall, under_font) = match sizes().find(|font| tall(*font) + wants_under <= room).or_else(|| sizes().find(|font| tall(*font) <= room)) {
+                    Some(font) => {
+                        self.turned_wrapped(lines, index, left, line_top, width, font, 1.0);
+                        (tall(font), self.fonts.under)
+                    }
+                    None => {
+                        self.turned_to(lines, index, left, line_top, width, self.fonts.line);
+                        (self.fonts.line.size * 1.4, self.fonts.under)
+                    }
+                };
+                let under_top = line_top + line_tall + 2.0;
                 if !under.is_empty() && under_top + under_tall <= bottom {
-                    words(frame, &fitted(frame, &under, self.fonts.under, width), self.fonts.under, Color::hex(self.ink, 0.55), left, under_top, width + 2.0, Align::Start, self.edged);
+                    words(frame, &fitted(frame, &under, under_font, width), under_font, Color::hex(self.ink, 0.55), left, under_top, width + 2.0, Align::Start, self.edged);
                 }
             }
             (Some(lines), Some(now)) => {
@@ -1703,9 +1761,19 @@ impl Drawing<'_> {
         // where a line just filling its rows broke).
         let full = self.fonts.now;
         let zoom = |scale: f32| scale * size / full.size;
+        // The line turned to, and whether what plays it from goes under it (a row more: see `chip_at`).
+        let seekable = self.seekable();
+        let chip_under = |index: usize, scale: f32| {
+            let line = &lines[index];
+            let text = if line.text.trim().is_empty() { "…" } else { &line.text };
+            let chip = frame.measure(&super::text::clock(line.at.max(0.0) as u32), self.fonts.time) + 26.0;
+            seekable && turned == Some(index) && chip_at(frame, text, full, width, zoom(scale), chip).2
+        };
         let height_of = |index: usize, scale: f32| {
             let line = &lines[index];
-            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, full, width / zoom(scale)) * zoom(scale) + if translated && line.translation.is_some() { TRANSLATION_ROW * scale } else { 0.0 }
+            frame.gfx.wrapped_height(if line.text.trim().is_empty() { "M" } else { &line.text }, full, width / zoom(scale)) * zoom(scale)
+                + if translated && line.translation.is_some() { TRANSLATION_ROW * scale } else { 0.0 }
+                + if chip_under(index, scale) { CHIP_ROW } else { 0.0 }
         };
         let rail = self.music.rail;
         let base = rail.floor().max(-1.0);
@@ -1779,7 +1847,7 @@ impl Drawing<'_> {
             let line = &lines[index];
             let font = Font { size: size * scale, ..self.fonts.now };
             if turned == Some(index) {
-                self.turned_to(lines, index, x, y, width, font);
+                self.turned_wrapped(lines, index, x, y, width, full, zoom(scale));
             } else if Some(index) == current {
                 let next = lines.get(index + 1).map(|line| line.at);
                 let (text, parts) = parts(line, next);
@@ -1933,6 +2001,22 @@ impl Music {
 fn turned_to(now: Option<usize>, turned: i32, count: usize) -> Option<usize> {
     (turned != 0 && count > 0).then(|| (now.map_or(-1, |now| now as i32) + turned).clamp(0, count as i32 - 1) as usize)
 }
+
+/// Where what plays a turned line from goes (see `Drawing::turned_wrapped`), the line `text` laid out in rows of
+/// `width / zoom` at `full`, drawn `zoom` times as large, what plays it `chip` wide: after its last row where that row
+/// has room for it, else under the line. From the line's corner; and whether under it (a row more for the line).
+fn chip_at(frame: &Frame, text: &str, full: Font, width: f32, zoom: f32, chip: f32) -> (f32, f32, bool) {
+    let room = width / zoom;
+    let (end, row_top) = frame.gfx.wrapped_end(text, full, room);
+    if end * zoom + 10.0 + chip <= width {
+        (end * zoom + 10.0, (row_top + full.size * 0.66) * zoom - 9.0, false)
+    } else {
+        (0.0, frame.gfx.wrapped_height(text, full, room) * zoom + 4.0, true)
+    }
+}
+
+/// The room a turned line's chip takes under it, where its last row has none for it (see `chip_at`).
+const CHIP_ROW: f32 = 22.0;
 
 fn parts(line: &Line, next: Option<f64>) -> (String, Vec<(usize, usize, f64, f64)>) {
     if !line.words.is_empty() {

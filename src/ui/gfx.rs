@@ -320,6 +320,21 @@ impl Gfx {
         self.laid_out(text, font, width, Align::Start, true)
     }
 
+    /// Where `text` laid out in lines `width` wide ends: how far along its last line (DIPs), and that line's top.
+    pub fn wrapped_end(&self, text: &str, font: Font, width: f32) -> (f32, f32) {
+        let units = text.encode_utf16().count() as u32;
+        if units == 0 {
+            return (0.0, 0.0);
+        }
+        let (mut x, mut y) = (0.0f32, 0.0f32);
+        let mut metrics = windows::Win32::Graphics::DirectWrite::DWRITE_HIT_TEST_METRICS::default();
+        let hit = unsafe { self.wrapped(text, font, width).HitTestTextPosition(units - 1, true, &mut x, &mut y, &mut metrics) };
+        if hit.is_err() {
+            return (width, 0.0);
+        }
+        (x, metrics.top)
+    }
+
     /// How tall `text` is laid out in lines `width` wide.
     pub fn wrapped_height(&self, text: &str, font: Font, width: f32) -> f32 {
         let mut metrics = DWRITE_TEXT_METRICS::default();
