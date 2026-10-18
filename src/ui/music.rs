@@ -37,7 +37,7 @@ pub enum Layout {
     /// The card stood on end: the cover above, what plays under it, then the lines.
     Tall,
     /// Wide and tall: the cover on a record turning as it plays at the start, what plays and the lines beside it, and
-    /// along the bottom the spectrum over the controls, both kept showing.
+    /// along the bottom the spectrum and the controls (kept showing, the spectrum over them; else coming over it).
     Stage,
 }
 
@@ -598,7 +598,10 @@ impl Music {
         }
         // The controls, in toward the pointer over it and out after it (kept showing, always in).
         let controls_to = if pointer.is_some() || shows.controls { 1.0 } else { 0.0 };
-        self.controls_in = if controls_to > self.controls_in { (self.controls_in + step / CONTROLS_FADE).min(controls_to) } else { (self.controls_in - step / CONTROLS_FADE).max(controls_to) };
+        // (A frame long after the last, as the first after a rest is, moves them no further than a short one would:
+        // they come and go smoothly, not half way at once.)
+        let fade_step = step.min(1.0 / 30.0);
+        self.controls_in = if controls_to > self.controls_in { (self.controls_in + fade_step / CONTROLS_FADE).min(controls_to) } else { (self.controls_in - fade_step / CONTROLS_FADE).max(controls_to) };
         let coming = self.controls_in != controls_to;
         // The spectrum, falling where the sound has fallen (drawn from what it shows, not what is heard).
         for (shown, heard) in self.bands.iter_mut().zip(moment.sound.bands) {
@@ -1431,13 +1434,25 @@ impl Drawing<'_> {
         let at = self.placed(Layout::Stage);
         let ((cx, cy), side) = stage_record(self.size);
         self.record(cx, cy, side);
-        // Along the bottom, all across: the controls and the track, and the spectrum over them.
+        // Along the bottom, all across: kept showing, the controls and the track, and the spectrum over them; else the
+        // spectrum, the controls coming over it as the pointer does (as in every layout).
         let row = h - pad - CONTROL;
-        self.bottom_row(pad, w - pad, row, 1.0, None);
-        if self.shows.spectrum {
-            spectrum(self.frame, self.moment, (self.accent, self.tint), (pad, row - ROW_GAP, w - 2.0 * pad, STAGE_SPECTRUM), 0.85);
-        }
-        let floor = row - ROW_GAP - if self.shows.spectrum { STAGE_SPECTRUM + 10.0 } else { 0.0 };
+        let floor = if self.shows.controls {
+            self.bottom_row(pad, w - pad, row, 1.0, None);
+            if self.shows.spectrum {
+                spectrum(self.frame, self.moment, (self.accent, self.tint), (pad, row - ROW_GAP, w - 2.0 * pad, STAGE_SPECTRUM), 0.85);
+            }
+            row - ROW_GAP - if self.shows.spectrum { STAGE_SPECTRUM + 10.0 } else { 0.0 }
+        } else {
+            let shown_in = self.music.controls_shown();
+            if shown_in < 1.0 && self.shows.spectrum {
+                spectrum(self.frame, self.moment, (self.accent, self.tint), (pad, h - pad - 2.0, w - 2.0 * pad, STAGE_SPECTRUM), 0.85 * (1.0 - shown_in));
+            }
+            if shown_in > 0.0 {
+                self.bottom_row(pad, w - pad, row, shown_in, None);
+            }
+            h - pad - if self.shows.spectrum { STAGE_SPECTRUM } else { CONTROL } - 10.0
+        };
         // (Down to the rows along the bottom; the line sung now level with the record's middle, as far as the lines
         // next to it stay whole.)
         let (top, bottom) = (at.below, floor);
@@ -1756,19 +1771,11 @@ impl Drawing<'_> {
 }
 
 impl Music {
-    /// Where buttons set at its top right go, `size` large showing `shows` (as last laid out): their tops level with
-    /// the top of what it shows there (the cover, else what plays), their right ends on its edge's room, as the time
-    /// left and the sound's key end below them.
+    /// Where buttons set in its top right corner go, showing `shows` (as last laid out), `size` large: their tops and
+    /// their right ends its edge's room in from its top and right (where the time left and the sound's key end below).
     pub fn top_right(&self, size: (f32, f32), shows: &Shows) -> (f32, f32) {
-        let layout = self.layout.unwrap_or(Layout::Player);
-        let pad = pad_of(layout, shows);
-        let at = placed(layout, size, shows);
-        let top = match (at.cover, at.title) {
-            (Some((_, y, _)), _) => y,
-            (None, Some((_, y, _, _))) => y + 2.0,
-            (None, None) => pad,
-        };
-        (top, size.0 - pad)
+        let pad = pad_of(self.layout.unwrap_or(Layout::Player), shows);
+        (pad, size.0 - pad)
     }
 
     /// The colour its own ground shows most along its edges, `size` large (for what stands in for it, as where it

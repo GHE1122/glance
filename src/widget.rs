@@ -111,6 +111,8 @@ const SLOW_FRAME: Duration = Duration::from_millis(12);
 /// How often a widget at rest is drawn again (its charts step with the
 /// samples).
 const REST_FRAME: Duration = Duration::from_millis(250);
+/// How soon one with the pointer over it is drawn again at rest.
+const HOVERED_FRAME: Duration = Duration::from_millis(33);
 /// Without live refraction, how long after a frame of what is behind is taken another is looked for (see
 /// `collect`).
 pub const LOOK_AGAIN: Duration = Duration::from_millis(250);
@@ -1619,7 +1621,8 @@ impl Widgets {
                     due = Duration::ZERO;
                 }
                 Frame::Rest | Frame::Waiting => {
-                    let rest = if widget.lingered.is_some() { WATCHED } else { REST_FRAME };
+                    // (The pointer over it: looked at often, so that what comes with it goes as soon as it leaves.)
+                    let rest = if widget.lingered.is_some() { WATCHED } else if widget.hover { HOVERED_FRAME } else { REST_FRAME };
                     // (Or sooner, a frame of what is behind it having come.)
                     let rest = widget.backdrop_wait(self.live).map_or(rest, |wait| rest.min(wait));
                     widget.next_frame = now + rest;
