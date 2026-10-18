@@ -1148,9 +1148,13 @@ struct Placement {
     /// Where along the edge the panel centres: the pointer where it was
     /// opened, or the middle of the work area.
     anchor: POINT,
+    /// Its window: the screen it opens on (the whole desktop, away from the edge), all the while it is up. The panel
+    /// is drawn in it where it is, laid out, sized and let go, and the window is not moved or sized: made smaller or
+    /// larger where it shows, its corner moved, and what is drawn moved within it, the two come to the screen a frame
+    /// of the compositor's apart, whichever is done first (the panel flashed out where it was, or showed where it was
+    /// not, as it was sized and let go). Only the panel takes the pointer (see `track`).
     window: RECT,
-    /// What is drawn in the window: the panel and its shadow's room (all of the window, but while it is sized: see
-    /// `place`).
+    /// What is drawn in the window: the panel and its shadow's room.
     painted: RECT,
     /// The panel at rest, and the pointer's leeway around it (physical px).
     panel: RECT,
@@ -1166,10 +1170,6 @@ struct Placement {
     /// Where the pointer opened it (a push into the edge, a rest on the seam): within its reach till it is moved
     /// away from the edge (see `place`); none, opened by hand (the shortcut, the tray), from anywhere.
     came_from: Option<POINT>,
-    /// Where its window is to be put, once the frame laid out for it there is drawn (see `Panel::frame`).
-    due: Option<RECT>,
-    /// Its window as large as it was made while the panel was sized, larger than the panel (see `place`).
-    wide: bool,
 }
 
 /// A corner of the panel held where it is (physical px): its left or
@@ -1470,7 +1470,10 @@ impl<'a> Panel<'a> {
     fn new(controller: &'a Controller) -> windows::core::Result<Self> {
         let gfx = gfx::current()?;
         let window = Window::new()?;
-        let surface = Some(Surface::new(&gfx, window.hwnd)?);
+        // Its window holds its screen (see `Placement::window`): not a program in full screen there, which the shell
+        // would make way for (the taskbar hidden).
+        unsafe { windows::Win32::UI::WindowsAndMessaging::SetPropW(window.hwnd, windows::core::w!("NonRudeHWND"), Some(windows::Win32::Foundation::HANDLE(1 as _)))? };
+        let surface = Some(Surface::new(&gfx, window.hwnd)?.clipped());
         let mut panel = Panel {
             controller,
             gfx,
@@ -1697,10 +1700,12 @@ impl<'a> Panel<'a> {
                 Anchor::Pointer => cursor,
                 Anchor::Center => POINT { x: (work.left + work.right) / 2, y: (work.top + work.bottom) / 2 },
             };
+            // (Away from the edge, it may be sized past its screen, and let go on another: see `Placement::window`.)
+            let window = if floating.is_some() { crate::mouse::desktop() } else { contact.monitor };
             self.placement = Some(Placement {
                 contact,
                 anchor,
-                window: RECT::default(),
+                window,
                 painted: RECT::default(),
                 panel: RECT::default(),
                 reach: RECT::default(),
@@ -1708,28 +1713,27 @@ impl<'a> Panel<'a> {
                 floating,
                 held: None,
                 came_from: pushed.then_some(cursor),
-                due: None,
-                wide: false,
             });
+            self.window.place(window);
             self.scroll = 0.0;
             self.scroll_target = 0.0;
             self.hover = None;
             self.game = exclusive_fullscreen().then(|| unsafe { GetForegroundWindow() }).filter(|game| !game.is_invalid());
             self.shift.jump(1.0);
             self.opacity.jump(0.0);
+            self.arrange();
             // The desktop where the panel will be, taken while the window is
             // still hidden.
             if self.skin.sees_backdrop() {
-                self.arrange();
                 let placement = self.placement.as_ref().unwrap();
                 // Unreadable (the lock screen): the glass goes without. All
                 // the screen the panel may grow into while it is up: the
                 // strip along its edge (it grows along it, never across).
-                let monitor = placement.contact.monitor;
+                let (monitor, painted) = (placement.contact.monitor, placement.painted);
                 let area = match (placement.floating, self.edge) {
-                    (Some(_), _) => placement.window,
-                    (None, Edge::Left | Edge::Right) => RECT { top: monitor.top, bottom: monitor.bottom, ..placement.window },
-                    (None, Edge::Top) => RECT { left: monitor.left, right: monitor.right, ..placement.window },
+                    (Some(_), _) => painted,
+                    (None, Edge::Left | Edge::Right) => RECT { top: monitor.top, bottom: monitor.bottom, ..painted },
+                    (None, Edge::Top) => RECT { left: monitor.left, right: monitor.right, ..painted },
                 };
                 let taken = Instant::now();
                 self.behind = Capture::take(area).map(|capture| Behind::new(capture, placement, now, None));
@@ -1757,7 +1761,9 @@ impl<'a> Panel<'a> {
             self.shift.retarget(0.0, OPEN.0, OPEN.1, now);
             self.opacity.retarget(1.0, OPEN_FADE, LINEAR, now);
         }
-        self.window.set_click_through(false);
+        // (Its window holds its screen: a click off the panel, as it shows, is for what is under it.)
+        let off = self.placement.as_ref().zip(cursor_position()).is_none_or(|(placement, cursor)| !contains(&placement.panel, cursor));
+        self.window.set_click_through(off);
         // The first frame is drawn before the window shows, so it never shows empty.
         self.last_frame = now;
         self.frame(now);
@@ -1765,7 +1771,7 @@ impl<'a> Panel<'a> {
         // (Where it stands among the windows as it shows, for the journal with its opening: see below.)
         let standing = self.window.standing();
         if let Some(placement) = &self.placement {
-            crate::widget::own_window_changed(placement.window);
+            crate::widget::own_window_changed(placement.painted);
         }
         // An opening slow enough to be seen, and why, for the journal.
         let took = began.elapsed();
@@ -1796,7 +1802,10 @@ impl<'a> Panel<'a> {
     /// The screens changed (`dpi` 0), or the window's scale did (to `dpi`):
     /// a panel placed, zoomed and backed for screens no longer so is taken
     /// down, to be opened afresh. Its own move to a monitor of another scale
-    /// as it opens tells a scale it was already placed for, and is no change.
+    /// as it opens tells a scale it was already placed for, and is no change;
+    /// nor is the scale of a window over the whole desktop (a panel away from
+    /// the edge: see `Placement::window`), its largest screen's: only its own
+    /// screen's scale counts.
     fn screens_changed(&mut self, dpi: u32, now: Instant) {
         // Dragged onto another screen, it is laid out for it as it is let
         // go; the screens themselves changing, seen to then.
@@ -1811,7 +1820,9 @@ impl<'a> Panel<'a> {
             // panel whose screen is as it was stays as it is.
             monitor_at(placement.anchor) != Some(placement.contact)
         } else {
-            (dpi as f32 / 96.0 - placement.contact.scale).abs() > 0.001
+            let monitor = placement.contact.monitor;
+            let middle = POINT { x: (monitor.left + monitor.right) / 2, y: (monitor.top + monitor.bottom) / 2 };
+            monitor_at(middle).is_none_or(|now| (now.scale - placement.contact.scale).abs() > 0.001)
         };
         if !changed {
             return;
@@ -1857,7 +1868,7 @@ impl<'a> Panel<'a> {
         self.pinned = false;
         self.window.hide();
         if let Some(placement) = &self.placement {
-            crate::widget::own_window_changed(placement.window);
+            crate::widget::own_window_changed(placement.painted);
         }
         self.exclude();
         self.capturing = None;
@@ -2160,6 +2171,11 @@ impl<'a> Panel<'a> {
         self.drag.is_some_and(|drag| !drag.edges.any() && !drag.sized) && self.placement.as_ref().is_some_and(|placement| placement.held.is_none())
     }
 
+    /// Whether `client` (physical px in the window) is on the panel, not in its shadow's room or past it.
+    fn on_panel(&self, client: POINT) -> bool {
+        self.placement.as_ref().is_some_and(|placement| contains(&placement.panel, POINT { x: client.x + placement.window.left, y: client.y + placement.window.top }))
+    }
+
     /// Whether `client` (physical px in the window) is on the panel's bar.
     fn on_bar(&self, client: POINT) -> bool {
         let Some(placement) = &self.placement else { return false };
@@ -2172,6 +2188,10 @@ impl<'a> Panel<'a> {
     /// it is pinned, on its edges it begins to size it, elsewhere (see
     /// `grip_at`) to move it.
     fn press(&mut self, client: POINT) {
+        // (Off the panel, in its window before it was told to let clicks through there: nothing of the panel's.)
+        if !self.on_panel(client) {
+            return;
+        }
         // On the sound's track: it is slid along till let go.
         if let Some(slider) = self.hit_at(client).and_then(Hit::slider) {
             self.sliding = Some(slider);
@@ -2406,10 +2426,6 @@ impl<'a> Panel<'a> {
     /// sized (its size).
     fn let_go(&mut self, now: Instant) -> Option<(Kept, Option<f32>)> {
         let drag = self.end_drag()?;
-        // Sized: its window back to its size (see `place`).
-        if drag.edges.any() {
-            self.arrange();
-        }
         // (What plays keeps the room it was given instead: see `sized_room`.)
         let size = (drag.sized && self.part != Part::Music).then_some(self.size);
         // Moved or sized, the desktop behind is taken again for what it now covers.
@@ -2506,9 +2522,8 @@ impl<'a> Panel<'a> {
         let least = crate::ui::music::LEAST;
         let room = (room.0.min(most.0).max(least.0), room.1.min(most.1).max(least.1));
         let size = crate::ui::music::rests_at(room, &shows);
-        let sizing = self.drag.is_some_and(|drag| drag.edges.any());
         let placement = self.placement.as_mut().unwrap();
-        place(placement, self.edge, &self.theme, size, self.size, sizing);
+        place(placement, self.edge, &self.theme, size, self.size);
         size
     }
 
@@ -2558,9 +2573,8 @@ impl<'a> Panel<'a> {
         let lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &opening.seen));
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
         drop(history);
-        let sizing = self.drag.is_some_and(|drag| drag.edges.any());
         let placement = self.placement.as_mut().unwrap();
-        place(placement, self.edge, &self.theme, (layout.width(), layout.height()), zoom, sizing);
+        place(placement, self.edge, &self.theme, (layout.width(), layout.height()), zoom);
         (lanes, layout)
     }
 
@@ -2580,7 +2594,7 @@ impl<'a> Panel<'a> {
         // (A window has one composition target: the old one goes first.)
         self.gone();
         self.behind = behind.map(|behind| Behind { bitmap: None, former: None, ..behind });
-        let Ok(surface) = Surface::new(&current, self.window.hwnd) else {
+        let Ok(surface) = Surface::new(&current, self.window.hwnd).map(Surface::clipped) else {
             gfx::lost();
             return false;
         };
@@ -2593,20 +2607,8 @@ impl<'a> Panel<'a> {
         true
     }
 
-    /// Draws the panel as it is at `now`, and finishes a closing that is done; then puts its window where the frame
-    /// was laid out for, if that moved: the two reach the screen together. (The window moved first, and the frame
-    /// after, at the next turn of the loop, what was drawn for the window where it was showed for a moment in the
-    /// window where it is: let go after it was sized, from its screen's whole to its own size, it was off the
-    /// window, and the panel flashed out.)
+    /// Draws the panel as it is at `now` where it is laid out in its window, and finishes a closing that is done.
     fn frame(&mut self, now: Instant) {
-        let due = self.placement.as_mut().and_then(|placement| placement.due.take());
-        self.draw_frame(now);
-        if let Some(window) = due {
-            self.window.place(window);
-        }
-    }
-
-    fn draw_frame(&mut self, now: Instant) {
         let by_hand = self.drag.is_some_and(|drag| drag.edges.any());
         let _sizing = gfx::sizing(by_hand);
         if matches!(self.phase, Phase::Closing) && self.shift.done(now) && self.opacity.done(now) {
@@ -2878,6 +2880,12 @@ impl<'a> Panel<'a> {
 
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
+        // Off the panel (its window holds its screen): clicks there are let through at once, not as the pointer is
+        // next followed (see `track`), which a quick click comes before.
+        if self.drag.is_none() && self.sliding.is_none() && !self.on_panel(client) {
+            self.window.set_click_through(true);
+            return;
+        }
         // Unpinned, its edges and its bar show what a drag there does (the
         // rest moves it too, under the reader's arrow).
         match self.drag.map(|drag| drag.edges).or_else(|| self.grip_at(client).filter(|edges| edges.any() || self.on_bar(client))) {
@@ -3024,10 +3032,8 @@ unsafe extern "system" fn sink_procedure(hwnd: HWND, message: u32, wparam: WPARA
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-/// Positions the panel for a layout `size` DIPs large, and has its window moved there if that changed it, as the
-/// frame laid out for it is drawn (see `Panel::frame`).
-/// `sizing`: the panel is being sized by its edges (see `place`'s window).
-fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32), zoom: f32, sizing: bool) {
+/// Positions the panel for a layout `size` DIPs large, in its window (see `Placement::window`).
+fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32), zoom: f32) {
     let Contact { monitor, work, scale } = placement.contact;
     let px = scale * zoom;
     let (width, height) = ((size.0 * px).round() as i32, (size.1 * px).round() as i32);
@@ -3046,41 +3052,16 @@ fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32),
     };
     let panel = RECT { left, top, right: left + width, bottom: top + height };
     let margin = (theme.margin * px).ceil() as i32;
-    // The shadow's room, kept on this monitor (while it is dragged, onto
-    // another too).
-    let mut window = RECT { left: left - margin, top: top - margin, right: panel.right + margin, bottom: panel.bottom + margin };
+    // The shadow's room, kept on this monitor (while it is sized away from
+    // the edge, past it too).
+    let mut painted = RECT { left: left - margin, top: top - margin, right: panel.right + margin, bottom: panel.bottom + margin };
     if placement.held.is_none() {
-        window = RECT {
-            left: window.left.max(monitor.left),
-            top: window.top.max(monitor.top),
-            right: window.right.min(monitor.right),
-            bottom: window.bottom.min(monitor.bottom),
+        painted = RECT {
+            left: painted.left.max(monitor.left),
+            top: painted.top.max(monitor.top),
+            right: painted.right.min(monitor.right),
+            bottom: painted.bottom.min(monitor.bottom),
         };
-    }
-    // While it is sized, its window holds its whole screen (and all of it, if it reaches past), not moved or sized
-    // with it: each size is then one frame of the compositor's. A window moved under it shows the frame before at
-    // its new place for a moment, and the panel shakes as it grows towards that side. What is drawn, and taken from
-    // behind it, is still only the panel and its shadow's room, placed in the window by the compositor.
-    // Sized and let go, the window stays as large as it was while the panel is up (nothing that lies outside the
-    // panel takes a click: see `track`), and is its own size again as the panel next opens: made smaller where it
-    // shows, its corner moved, and what is drawn moved within it, and the two come to the screen a frame of the
-    // compositor's apart, whichever is done first (the panel flashed out where it was, or showed where it was not).
-    let painted = window;
-    let contains = |outer: RECT, inner: RECT| outer.left <= inner.left && outer.top <= inner.top && outer.right >= inner.right && outer.bottom >= inner.bottom;
-    if sizing {
-        window = RECT {
-            left: window.left.min(monitor.left),
-            top: window.top.min(monitor.top),
-            right: window.right.max(monitor.right),
-            bottom: window.bottom.max(monitor.bottom),
-        };
-    } else if placement.wide && contains(placement.window, painted) {
-        window = placement.window;
-    } else {
-        placement.wide = false;
-    }
-    if sizing {
-        placement.wide = true;
     }
     let tolerance = (LEAVE_TOLERANCE * scale).round() as i32;
     let mut reach = RECT {
@@ -3108,18 +3089,16 @@ fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32),
             };
         }
     }
+    if placement.painted != painted {
+        // Where it was and where it is: a widget that took the desktop with
+        // it there takes it again.
+        crate::widget::own_window_changed(placement.painted);
+        crate::widget::own_window_changed(painted);
+    }
     placement.panel = panel;
     placement.painted = painted;
     placement.reach = reach;
     placement.px = px;
-    if placement.window != window {
-        // Where it was and where it is: a widget that took the desktop with
-        // it there takes it again.
-        crate::widget::own_window_changed(placement.window);
-        crate::widget::own_window_changed(window);
-        placement.window = window;
-        placement.due = Some(window);
-    }
 }
 
 /// Over the middle of a panel `area` DIPs large while it is sized by its

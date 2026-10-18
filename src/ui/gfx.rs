@@ -1194,6 +1194,10 @@ pub struct Surface {
     /// Where in the window it is drawn (physical px), and where it was last.
     at: (i32, i32),
     placed: (i32, i32),
+    /// Shown no further than the size it is drawn at, where its window is larger than that (see `clipped`): the size
+    /// it was last cut to.
+    clips: bool,
+    clipped_to: (u32, u32),
     /// How long the last frame drawn on it took, part by part.
     pub took: Took,
 }
@@ -1213,13 +1217,20 @@ impl Surface {
         let target = unsafe { gfx.dcomp.CreateTargetForHwnd(hwnd, true)? };
         let visual: IDCompositionVisual2 = unsafe { gfx.dcomp.CreateVisual()? };
         unsafe { target.SetRoot(&visual)? };
-        Ok(Surface { _target: target, visual, surface: None, size: (0, 0), shown: false, at: (0, 0), placed: (0, 0), took: Default::default() })
+        Ok(Surface { _target: target, visual, surface: None, size: (0, 0), shown: false, at: (0, 0), placed: (0, 0), clips: false, clipped_to: (0, 0), took: Default::default() })
+    }
+
+    /// Shown no further than the size each frame is drawn at, for a window larger than what is drawn in it (the
+    /// panel's): the room a surface is made with past that, and anything drawn into it, is not shown.
+    pub fn clipped(mut self) -> Self {
+        self.clips = true;
+        self
     }
 
     /// Draws from now on at `at` (physical px) in its window, with the next
-    /// frame: a window larger than what is drawn in it (a panel being sized)
-    /// has only that much surface, and it is moved with what it shows, in
-    /// the same frame of the compositor's.
+    /// frame: a window larger than what is drawn in it (the panel's) has only
+    /// that much surface, and it is moved with what it shows, in the same
+    /// frame of the compositor's.
     pub fn offset(&mut self, at: (i32, i32)) {
         self.at = at;
     }
@@ -1245,6 +1256,11 @@ impl Surface {
                 self.visual.SetOffsetY2(self.at.1 as f32)?;
             }
             self.placed = self.at;
+        }
+        if self.clips && self.clipped_to != size {
+            let clip = D2D_RECT_F { left: 0.0, top: 0.0, right: size.0 as f32, bottom: size.1 as f32 };
+            unsafe { self.visual.SetClip2(&clip)? };
+            self.clipped_to = size;
         }
         gfx.last_drawn.set(Some(Instant::now()));
         gfx.trimmed.set(false);
