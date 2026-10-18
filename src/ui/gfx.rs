@@ -751,6 +751,7 @@ impl Canvas for Frame<'_> {
     }
 
     fn fill(&self, color: Color, x: f32, y: f32, width: f32, height: f32) {
+        let (x, y, width, height) = self.on_pixels(x, y, width, height);
         unsafe { self.dc.FillRectangle(&rect(x, y, width, height), self.brush(color)) };
     }
 
@@ -758,6 +759,7 @@ impl Canvas for Frame<'_> {
         if radius == 0.0 {
             return Canvas::fill(self, color, x, y, width, height);
         }
+        let (x, y, width, height) = self.on_pixels(x, y, width, height);
         let radius = radius.min(width / 2.0).min(height / 2.0);
         let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius };
         unsafe { self.dc.FillRoundedRectangle(&shape, self.brush(color)) };
@@ -824,10 +826,12 @@ impl Canvas for Frame<'_> {
     fn icon(&self, icon: Icon, centre: Point, size: f32, color: Color) {
         let Some(path) = self.gfx.icon_path(icon) else { return };
         let scale = size / 24.0;
+        // (Its box's corner on a whole pixel: drawn between two, every stroke of it was spread over both, and blurred.)
+        let (left, top) = self.on_pixel(centre.x - size / 2.0, centre.y - size / 2.0);
         let mut parent = Matrix3x2::default();
         unsafe {
             self.dc.GetTransform(&mut parent);
-            let placed = Matrix3x2::scale(scale, scale) * Matrix3x2::translation(centre.x - size / 2.0, centre.y - size / 2.0) * parent;
+            let placed = Matrix3x2::scale(scale, scale) * Matrix3x2::translation(left, top) * parent;
             self.dc.SetTransform(&placed);
             self.dc.DrawGeometry(&path, self.brush(color), icons::STROKE, &self.gfx.round);
             self.dc.SetTransform(&parent);
@@ -836,6 +840,8 @@ impl Canvas for Frame<'_> {
 
     fn picture(&self, picture: &super::canvas::Picture, x: f32, y: f32, size: f32, radius: f32, opacity: f32) {
         let Some(bitmap) = self.gfx.picture_bitmap(&self.dc, picture) else { return };
+        // (On whole pixels, its edges sharp; its size kept, so as not to scale it a second time.)
+        let (x, y) = self.on_pixel(x, y);
         let scale = size / picture.side.max(1) as f32;
         unsafe {
             let properties = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_BRUSH_PROPERTIES1 {
@@ -851,6 +857,18 @@ impl Canvas for Frame<'_> {
     }
 
     fn stroke_rounded(&self, fill: Fill, x: f32, y: f32, width: f32, height: f32, radius: f32, line: f32) {
+        // Its edges on whole pixels, and a line an odd number of pixels wide drawn on their middles: drawn across two,
+        // a hairline came out two pixels wide and half as strong.
+        let (mut x, mut y, mut width, mut height) = self.on_pixels(x, y, width, height);
+        if let Some((t, device)) = self.grid() {
+            if ((line * t.M11 * device).round() as i32) % 2 == 1 {
+                let (half_x, half_y) = (0.5 / (device * t.M11), 0.5 / (device * t.M22));
+                x += half_x;
+                y += half_y;
+                width -= 2.0 * half_x;
+                height -= 2.0 * half_y;
+            }
+        }
         let radius = radius.max(0.0).min(width / 2.0).min(height / 2.0);
         let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius };
         if let Some(brush) = self.paint_with(fill) {
@@ -993,6 +1011,44 @@ impl<'a> Frame<'a> {
         }
     }
 
+    /// The transform drawn through now and how many of the target's pixels a DIP is, where the transform keeps axes
+    /// as they are (no turn, skew or mirror): what whole pixels are reckoned by.
+    fn grid(&self) -> Option<(Matrix3x2, f32)> {
+        let mut t = Matrix3x2::default();
+        let mut dpi = (0.0f32, 0.0f32);
+        unsafe {
+            self.dc.GetTransform(&mut t);
+            self.dc.GetDpi(&mut dpi.0, &mut dpi.1);
+        }
+        (t.M12 == 0.0 && t.M21 == 0.0 && t.M11 > 0.0 && t.M22 > 0.0 && dpi.0 > 0.0).then_some((t, dpi.0 / 96.0))
+    }
+
+    /// Where `(x, y)` (DIPs, as drawn now) lands on a whole pixel of what is drawn on, moved the least to (see `grid`);
+    /// as it is where the transform turns, skews or mirrors, or for a place too far to count (as a whole frame's
+    /// bounds are given).
+    pub fn on_pixel(&self, x: f32, y: f32) -> (f32, f32) {
+        let Some((t, device)) = self.grid() else { return (x, y) };
+        let whole = |v: f32, scale: f32, offset: f32| {
+            if !v.is_finite() || v.abs() > 1.0e6 {
+                return v;
+            }
+            (((v * scale + offset) * device).round() / device - offset) / scale
+        };
+        (whole(x, t.M11, t.M31), whole(y, t.M22, t.M32))
+    }
+
+    /// The rectangle `(x, y, width, height)` (DIPs) with its edges on whole pixels (see `on_pixel`), none shrunk away:
+    /// a side that had length keeps at least a pixel's.
+    pub fn on_pixels(&self, x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
+        let Some((t, device)) = self.grid() else { return (x, y, width, height) };
+        let (left, top) = self.on_pixel(x, y);
+        let (right, bottom) = self.on_pixel(x + width, y + height);
+        let (one_x, one_y) = (1.0 / (device * t.M11), 1.0 / (device * t.M22));
+        let width = if width > 0.0 { (right - left).max(one_x.min(width)) } else { right - left };
+        let height = if height > 0.0 { (bottom - top).max(one_y.min(height)) } else { bottom - top };
+        (left, top, width, height)
+    }
+
     /// Draws from here on with `(x, y)`, in DIPs from the surface's corner, as the origin.
     pub fn origin(&self, x: f32, y: f32) {
         self.place(Matrix3x2::translation(x, y));
@@ -1064,8 +1120,9 @@ impl<'a> Frame<'a> {
         unsafe { self.dc.DrawRoundedRectangle(&shape, self.brush(color), width, &self.gfx.dashed) };
     }
 
-    /// Draws `text` in lines `width` wide, the first line's box at `(x, y)`.
+    /// Draws `text` in lines `width` wide, the first line's box at `(x, y)` (on a whole pixel: see `text`).
     pub fn text_wrapped(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32) {
+        let (x, y) = self.on_pixel(x, y);
         let layout = self.gfx.wrapped(text, font, width);
         unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: x, Y: y }, &layout, self.brush(color), D2D1_DRAW_TEXT_OPTIONS_NONE) };
     }
@@ -1085,7 +1142,10 @@ impl<'a> Frame<'a> {
         };
     }
 
+    /// Draws `text` with its first baseline-box at `(x, y)`, put on a whole pixel (still text: drawn between two,
+    /// its stems were spread over both, and it looked softer than the same words elsewhere), in a box `width` wide.
     pub fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align) {
+        let (x, y) = self.on_pixel(x, y);
         let layout = self.gfx.layout(text, font, width, align);
         unsafe {
             self.dc.DrawTextLayout(
