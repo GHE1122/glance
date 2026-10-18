@@ -1929,6 +1929,11 @@ impl Drawing<'_> {
 }
 
 impl Music {
+    /// How it is laid out at `size`, as `paint` lays it out (see `Layout::for_room`).
+    pub fn layout_at(&self, size: (f32, f32), shows: &Shows) -> Layout {
+        Layout::for_room(size, shows, self.layout)
+    }
+
     /// Where buttons set in its top right corner go, `size` large: near the corner, not as far in as what it shows (they
     /// are the window's, not what it shows).
     pub fn top_right(&self, size: (f32, f32)) -> (f32, f32) {

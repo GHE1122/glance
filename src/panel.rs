@@ -1163,6 +1163,9 @@ struct Placement {
     /// The panel at rest, and the pointer's leeway around it (physical px).
     panel: RECT,
     reach: RECT,
+    /// Its buttons' row outside it, where it has one (what plays as a strip, as low as its keys: see `Rack`), on the
+    /// screen (physical px), and whether under it.
+    rack: Option<(RECT, bool)>,
     /// Physical px per DIP: the monitor's scale, times the zoom of a panel
     /// too large for its screen.
     px: f32,
@@ -1725,6 +1728,7 @@ impl<'a> Panel<'a> {
                 painted: RECT::default(),
                 panel: RECT::default(),
                 reach: RECT::default(),
+                rack: None,
                 px: contact.scale,
                 floating,
                 held: None,
@@ -2189,7 +2193,10 @@ impl<'a> Panel<'a> {
 
     /// Whether `client` (physical px in the window) is on the panel, not in its shadow's room or past it.
     fn on_panel(&self, client: POINT) -> bool {
-        self.placement.as_ref().is_some_and(|placement| contains(&placement.panel, POINT { x: client.x + placement.window.left, y: client.y + placement.window.top }))
+        self.placement.as_ref().is_some_and(|placement| {
+            let at = POINT { x: client.x + placement.window.left, y: client.y + placement.window.top };
+            contains(&placement.panel, at) || placement.rack.is_some_and(|(rack, _)| contains(&rack, at))
+        })
     }
 
     /// Whether `client` (physical px in the window) is on the panel's bar.
@@ -2553,8 +2560,10 @@ impl<'a> Panel<'a> {
         let least = crate::ui::music::LEAST;
         let room = (room.0.min(most.0).max(least.0), room.1.min(most.1).max(least.1));
         let size = crate::ui::music::rests_at(room, &shows);
+        // As a strip, its buttons in a row outside it, as a widget's are (in its corner they lay over its keys).
+        let rack = (self.music.layout_at(size, &shows) == crate::ui::music::Layout::Strip).then_some(RACK);
         let placement = self.placement.as_mut().unwrap();
-        place(placement, self.edge, &self.theme, size, 1.0);
+        place(placement, self.edge, &self.theme, size, 1.0, rack);
         size
     }
 
@@ -2605,7 +2614,7 @@ impl<'a> Panel<'a> {
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
         drop(history);
         let placement = self.placement.as_mut().unwrap();
-        place(placement, self.edge, &self.theme, (layout.width(), layout.height()), zoom);
+        place(placement, self.edge, &self.theme, (layout.width(), layout.height()), zoom, None);
         (lanes, layout)
     }
 
@@ -2856,7 +2865,15 @@ impl<'a> Panel<'a> {
             Edge::Right => x += shift * travel,
             Edge::Top => y -= shift * travel,
         }
-        let pointer = cursor_position().map(|cursor| ((cursor.x - window.left) as f32 / px - x, (cursor.y - window.top) as f32 / px - y)).filter(|(px_x, px_y)| *px_x >= 0.0 && *px_y >= 0.0 && *px_x < size.0 && *px_y < size.1);
+        // Its buttons: in its top right corner, or in their row outside it (see `Placement::rack`), from its corner.
+        let rack = placement.rack.map(|(_, under)| {
+            let (w, h) = RACK;
+            (size.0 - w, if under { size.1 } else { -h }, w, h)
+        });
+        let at = cursor_position().map(|cursor| ((cursor.x - window.left) as f32 / px - x, (cursor.y - window.top) as f32 / px - y));
+        let within = |(px_x, px_y): (f32, f32), (rx, ry, rw, rh): (f32, f32, f32, f32)| px_x >= rx && px_y >= ry && px_x < rx + rw && px_y < ry + rh;
+        let pointer = at.filter(|at| within(*at, (0.0, 0.0, size.0, size.1)));
+        let at_buttons = at.filter(|at| pointer.is_some() || rack.is_some_and(|rack| within(*at, rack)));
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
         let music = &mut self.music;
         let layer = &mut self.music_layer;
@@ -2885,11 +2902,14 @@ impl<'a> Panel<'a> {
             if drew.is_err() {
                 painted = None;
             }
-            if let Some((px_x, px_y)) = pointer {
+            if let Some((px_x, px_y)) = at_buttons {
                 let ground = music.ground_colour(size);
                 let (side, gap) = (crate::ui::buttons::SIZE, crate::ui::buttons::GAP);
-                // (In its corner.)
-                let (top, right) = music.top_right(size);
+                // (In its corner, or in their row.)
+                let (top, right) = match rack {
+                    Some((rx, ry, rw, _)) => (ry + RACK_INSET, rx + rw),
+                    None => music.top_right(size),
+                };
                 for (index, (button, hit)) in [(crate::ui::buttons::Button::Pin, Hit::Pin), (crate::ui::buttons::Button::Settings, Hit::Settings), (crate::ui::buttons::Button::Full, Hit::Full)].into_iter().enumerate() {
                     let (bx, by) = (right - side - index as f32 * (side + gap), top);
                     let over = px_x >= bx && px_x < bx + side && px_y >= by && px_y < by + side;
@@ -3081,8 +3101,15 @@ unsafe extern "system" fn sink_procedure(hwnd: HWND, message: u32, wparam: WPARA
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-/// Positions the panel for a layout `size` DIPs large, in its window (see `Placement::window`).
-fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32), zoom: f32) {
+/// A row of buttons outside the panel (see `Placement::rack`): its width and height (DIPs), at its right end.
+const RACK: (f32, f32) = (3.0 * crate::ui::buttons::SIZE + 2.0 * crate::ui::buttons::GAP, crate::ui::buttons::SIZE + 2.0 * RACK_INSET);
+/// The room between such a row and the panel, and round it.
+const RACK_INSET: f32 = 6.0;
+
+/// Positions the panel for a layout `size` DIPs large, in its window (see `Placement::window`); with a row of buttons
+/// `rack` large outside it at its right end (above it, or under it where its screen has no room above), where it has
+/// one.
+fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32), zoom: f32, rack: Option<(f32, f32)>) {
     let Contact { monitor, work, scale } = placement.contact;
     let px = scale * zoom;
     let (width, height) = ((size.0 * px).round() as i32, (size.1 * px).round() as i32);
@@ -3100,10 +3127,19 @@ fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32),
         (None, None, Edge::Top) => (centred(placement.anchor.x, width, work.left, work.right), monitor.top + inset),
     };
     let panel = RECT { left, top, right: left + width, bottom: top + height };
+    let rack = rack.map(|(w, h)| {
+        let (w, h) = ((w * px).ceil() as i32, (h * px).ceil() as i32);
+        let under = panel.top - h < work.top;
+        let top = if under { panel.bottom } else { panel.top - h };
+        (RECT { left: panel.right - w, top, right: panel.right, bottom: top + h }, under)
+    });
     let margin = (theme.margin * px).ceil() as i32;
     // The shadow's room, kept on this monitor (while it is sized away from
-    // the edge, past it too).
+    // the edge, past it too); and its buttons' row's.
     let mut painted = RECT { left: left - margin, top: top - margin, right: panel.right + margin, bottom: panel.bottom + margin };
+    if let Some((r, _)) = rack {
+        painted = RECT { left: painted.left.min(r.left), top: painted.top.min(r.top), right: painted.right.max(r.right), bottom: painted.bottom.max(r.bottom) };
+    }
     if placement.held.is_none() {
         painted = RECT {
             left: painted.left.max(monitor.left),
@@ -3138,6 +3174,11 @@ fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32),
             };
         }
     }
+    // (The pointer going to its buttons' row is still at it.)
+    if let Some((r, _)) = rack {
+        reach = RECT { left: reach.left.min(r.left), top: reach.top.min(r.top), right: reach.right.max(r.right), bottom: reach.bottom.max(r.bottom) };
+    }
+    placement.rack = rack;
     if placement.painted != painted {
         // Where it was and where it is: a widget that took the desktop with
         // it there takes it again.
