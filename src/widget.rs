@@ -1492,13 +1492,7 @@ impl Widgets {
     /// it. (A widget gone meanwhile, nothing.)
     pub fn chose(&mut self, hwnd: HWND, row: usize) -> Option<WidgetChoice> {
         let index = self.list.iter().position(|w| w.window.hwnd == hwnd)?;
-        let choice = match row {
-            0 => WidgetChoice::Pin,
-            1 => WidgetChoice::ClickThrough,
-            2 => WidgetChoice::AboveOthers,
-            3 => WidgetChoice::Close,
-            _ => WidgetChoice::Settings,
-        };
+        let choice = *menu_choices(self.list[index].shows_full()).get(row)?;
         self.list[index].next_frame = Instant::now();
         match choice {
             WidgetChoice::Pin => self.list[index].pinned ^= true,
@@ -1507,6 +1501,11 @@ impl Widgets {
                 let widget = &mut self.list[index];
                 widget.on_desktop ^= true;
                 widget.window.set_on_desktop(widget.low());
+            }
+            WidgetChoice::Full => {
+                let contact = self.list[index].contact;
+                self.open_full(contact.monitor, contact.scale);
+                return None;
             }
             WidgetChoice::Close => self.put_away_at(index),
             WidgetChoice::Settings => return Some(choice),
@@ -1781,10 +1780,13 @@ impl Widgets {
 }
 
 /// What a widget's menu was used for.
+#[derive(Clone, Copy)]
 pub enum WidgetChoice {
     Pin,
     ClickThrough,
     AboveOthers,
+    /// What plays over the whole screen (offered by a widget that shows it).
+    Full,
     Close,
     Settings,
 }
@@ -3162,7 +3164,12 @@ impl Widget {
 
     /// Its menu, up (as the apps are, light or dark).
     fn menu(&self, lang: Lang, over_the_panel: bool) -> Option<crate::ui::menu::Menu> {
-        crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop).into(), crate::os::apps_dark(), over_the_panel)
+        crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop, self.shows_full()), crate::os::apps_dark(), over_the_panel)
+    }
+
+    /// Whether it shows what plays (and so offers it over the whole screen, as its button does).
+    fn shows_full(&self) -> bool {
+        self.content.buttons().contains(&Button::Full)
     }
 }
 
@@ -3203,17 +3210,32 @@ pub(crate) fn paint_hint(canvas: &dyn Canvas, theme: &Theme, (w, h): (f32, f32),
     }
 }
 
-/// A widget's menu: pinned or not, letting clicks through or not.
-pub(crate) fn menu_items(lang: Lang, pinned: bool, through: bool, above: bool) -> [crate::ui::menu::Item<'static>; 5] {
+/// What a widget's menu offers, row by row (`full`: it shows what plays, and offers it over the whole screen).
+fn menu_choices(full: bool) -> Vec<WidgetChoice> {
+    let mut choices = vec![WidgetChoice::Pin, WidgetChoice::ClickThrough, WidgetChoice::AboveOthers];
+    if full {
+        choices.push(WidgetChoice::Full);
+    }
+    choices.extend([WidgetChoice::Close, WidgetChoice::Settings]);
+    choices
+}
+
+/// A widget's menu, as `menu_choices` orders it: pinned or not, letting clicks through or not, above the others or
+/// not; what plays over the whole screen, where it shows that.
+pub(crate) fn menu_items(lang: Lang, pinned: bool, through: bool, above: bool, full: bool) -> Vec<crate::ui::menu::Item<'static>> {
     use crate::ui::menu::Item;
     let item = |zh, en, icon, checked, rule_before| Item { label: lang.pick(zh, en), icon: Some(icon), checked, rule_before };
-    [
-        item("固定位置和大小", "Pin where it is", Icon::Pin, pinned, false),
-        item("鼠标穿透", "Let clicks through", Icon::Pointer, through, false),
-        item("置于其他窗口之上", "Keep above other windows", Icon::Layers, above, false),
-        item("收起", "Put away", Icon::Close, false, false),
-        item("设置…", "Settings…", Icon::Settings, false, true),
-    ]
+    menu_choices(full)
+        .into_iter()
+        .map(|choice| match choice {
+            WidgetChoice::Pin => item("固定位置和大小", "Pin where it is", Icon::Pin, pinned, false),
+            WidgetChoice::ClickThrough => item("鼠标穿透", "Let clicks through", Icon::Pointer, through, false),
+            WidgetChoice::AboveOthers => item("置于其他窗口之上", "Keep above other windows", Icon::Layers, above, false),
+            WidgetChoice::Full => item("全屏播放", "Full screen", Icon::Maximize, false, false),
+            WidgetChoice::Close => item("收起", "Put away", Icon::Close, false, false),
+            WidgetChoice::Settings => item("设置…", "Settings…", Icon::Settings, false, true),
+        })
+        .collect()
 }
 
 /// The least rectangle holding both.
