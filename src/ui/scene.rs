@@ -87,6 +87,10 @@ impl Device {
     }
 }
 
+/// (Tests: how long a read is made to take, see `Shared::read_counted`.)
+#[cfg(test)]
+static READ_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// What a scene's frames meet as they come, on whatever thread they come on.
 struct Shared {
     /// What its frames are of: the area, when it was last arranged anew (the system's clock of frames, in 100 ns:
@@ -136,6 +140,9 @@ impl Shared {
     }
 
     fn read_counted(&self, frame: &Direct3D11CaptureFrame) -> bool {
+        // (Tests: a read as slow as on a slow card, to widen what a frame met while it is read overlaps.)
+        #[cfg(test)]
+        std::thread::sleep(std::time::Duration::from_millis(READ_DELAY_MS.load(Ordering::Relaxed)));
         let (area, arranged, covered) = self.of.lock().unwrap().clone();
         let read = (|| {
             if frame.SystemRelativeTime().ok()?.Duration < arranged {
@@ -816,5 +823,152 @@ mod tests {
                 println!("{name} {taken}: at {:?} after arranging, mean {mean:.3}, spread {spread:.3}", arranged.elapsed());
             }
         }
+    }
+
+    /// A scene arranged at alternating places and sizes over a window that changes all the time (so frames keep
+    /// coming), wanted, polled and rested, for a minute, its reads made slow: a watchdog reports any step that takes
+    /// more than 5 s (the thread that draws hung on the capture's pool) and ends the test.
+    /// `cargo test --lib -- --ignored --exact ui::scene::tests::scene_stress --nocapture`.
+    #[test]
+    #[ignore = "captures this PC's desktop"]
+    fn scene_stress() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
+        use std::time::{Duration, Instant};
+        use windows::Win32::Graphics::Gdi::{BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, PeekMessageW, SetTimer, TranslateMessage, HWND_TOP, MSG, PM_REMOVE, SWP_NOMOVE, WM_PAINT, WM_TIMER, WS_VISIBLE,
+        };
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        READ_DELAY_MS.store(std::env::var("SCENE_READ_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(40), Ordering::Relaxed);
+        static TICK: AtomicU64 = AtomicU64::new(0);
+        unsafe extern "system" fn painted(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            unsafe {
+                match message {
+                    WM_PAINT => {
+                        let mut paint = PAINTSTRUCT::default();
+                        let dc = BeginPaint(window, &mut paint);
+                        let tick = TICK.load(Ordering::Relaxed);
+                        let colour = windows::Win32::Foundation::COLORREF(((tick * 37) % 256 | ((tick * 91) % 256) << 8 | ((tick * 53) % 256) << 16) as u32);
+                        let brush = CreateSolidBrush(colour);
+                        FillRect(dc, &paint.rcPaint, brush);
+                        let _ = DeleteObject(brush.into());
+                        let _ = EndPaint(window, &paint);
+                        LRESULT(0)
+                    }
+                    WM_TIMER => {
+                        TICK.fetch_add(1, Ordering::Relaxed);
+                        let _ = InvalidateRect(Some(window), None, false);
+                        LRESULT(0)
+                    }
+                    _ => DefWindowProcW(window, message, wparam, lparam),
+                }
+            }
+        }
+        // What changes behind: a window of its own, repainted every 15 ms, on a thread of its own.
+        let (sent, got) = std::sync::mpsc::channel::<isize>();
+        std::thread::spawn(move || unsafe {
+            let module = GetModuleHandleW(None).unwrap();
+            let class = WNDCLASSW { lpfnWndProc: Some(painted), hInstance: module.into(), lpszClassName: w!("GlanceStressBehind"), ..Default::default() };
+            RegisterClassW(&class);
+            let window = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!("behind"), WS_POPUP | WS_VISIBLE, 100, 100, 700, 500, None, None, Some(module.into()), None).unwrap();
+            SetTimer(Some(window), 1, 15, None);
+            sent.send(window.0 as isize).unwrap();
+            let mut message = MSG::default();
+            while GetMessageW(&mut message, None, 0, 0).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        });
+        let _behind = got.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        // What the scene is over: a hidden window of its own put on top, every other window behind it.
+        let over = unsafe {
+            let module = GetModuleHandleW(None).unwrap();
+            let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: w!("GlanceStressOver"), ..Default::default() };
+            RegisterClassW(&class);
+            let over = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!("over"), WS_POPUP, 0, 0, 1, 1, None, None, Some(module.into()), None).unwrap();
+            let _ = SetWindowPos(over, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            over
+        };
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let mut scene = Scene::new(RECT { left: 150, top: 150, right: 450, bottom: 350 }, wake, &gfx).expect("scene");
+        let pump = || unsafe {
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        };
+        // The watchdog: what step, in what, since when (ms from the start).
+        let start = Instant::now();
+        let step_at = Arc::new(AtomicU64::new(0));
+        let doing = Arc::new(AtomicUsize::new(0));
+        let step_no = Arc::new(AtomicU64::new(0));
+        const DOING: [&str; 5] = ["idle", "arrange", "want", "rest", "ready/pump"];
+        {
+            let (step_at, doing, step_no) = (step_at.clone(), doing.clone(), step_no.clone());
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(250));
+                let since = start.elapsed().as_millis() as u64 - step_at.load(Ordering::Acquire);
+                if since > 5000 {
+                    println!("HANG: step {} stuck in {} for {} ms (at {:.1} s)", step_no.load(Ordering::Acquire), DOING[doing.load(Ordering::Acquire)], since, start.elapsed().as_secs_f64());
+                    std::process::exit(2);
+                }
+            });
+        }
+        let mark = |what: usize| {
+            doing.store(what, Ordering::Release);
+            step_at.store(start.elapsed().as_millis() as u64, Ordering::Release);
+        };
+        let (mut most_arrange, mut most_rest, mut most_want, mut most_step) = (Duration::ZERO, Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        let (mut steps, mut taken, mut rests) = (0u64, 0u64, 0u64);
+        while start.elapsed() < Duration::from_secs(60) {
+            let step = Instant::now();
+            step_no.store(steps, Ordering::Release);
+            let (x, grow) = (120 + (steps as i32 % 7) * 37, (steps as i32 % 5) * 41);
+            let area = RECT { left: x, top: 120 + grow / 2, right: x + 200 + grow, bottom: 300 + grow };
+            if steps % 6 == 5 {
+                mark(3);
+                let t = Instant::now();
+                scene.rest();
+                most_rest = most_rest.max(t.elapsed());
+                rests += 1;
+            }
+            mark(1);
+            let t = Instant::now();
+            scene.arrange(area, over);
+            most_arrange = most_arrange.max(t.elapsed());
+            // Wanted once (a frame come meanwhile read on another thread, else the next as it comes), and polled a
+            // while: arranged again, often before a read is done.
+            mark(2);
+            let t = Instant::now();
+            scene.want();
+            most_want = most_want.max(t.elapsed());
+            let polled = Instant::now();
+            while polled.elapsed() < Duration::from_millis(15 + (steps % 4) * 20) {
+                mark(4);
+                pump();
+                if scene.ready().is_some() {
+                    taken += 1;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            mark(0);
+            most_step = most_step.max(step.elapsed());
+            steps += 1;
+        }
+        let frames = TICK.load(Ordering::Relaxed);
+        println!(
+            "NO HANG: {steps} steps, {rests} rests, {taken} frames taken, {frames} repaints behind, read delay {} ms; most: arrange {:.1} ms, rest {:.1} ms, want {:.1} ms, step {:.1} ms",
+            READ_DELAY_MS.load(Ordering::Relaxed),
+            most_arrange.as_secs_f64() * 1000.0,
+            most_rest.as_secs_f64() * 1000.0,
+            most_want.as_secs_f64() * 1000.0,
+            most_step.as_secs_f64() * 1000.0
+        );
+        drop(scene);
     }
 }
