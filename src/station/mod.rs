@@ -8,6 +8,7 @@ pub mod folder;
 pub mod keep;
 pub mod run;
 pub mod shelf;
+pub mod thumbs;
 #[cfg(test)]
 mod spike;
 

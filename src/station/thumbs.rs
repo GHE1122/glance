@@ -1,0 +1,150 @@
+//! Each thing on the station's picture: a file's as Explorer shows it (its thumbnail: a picture's, a video's, a
+//! PDF's; else its icon), through the shell, on a thread of its own (a thumbnail may take a while to be made: never
+//! on a thread that draws), kept once made.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
+use windows::core::HSTRING;
+use windows::Win32::Foundation::SIZE;
+use windows::Win32::Graphics::Gdi::{DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HGDIOBJ};
+use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_RESIZETOFIT};
+
+/// A picture: its pixels (BGRA, premultiplied, top row first) and how many across and down.
+#[derive(Debug)]
+pub struct Thumb {
+    pub pixels: Vec<u8>,
+    pub size: (u32, u32),
+}
+
+/// What a picture is asked for: the file, when it was last written (a file written again is pictured again), and the
+/// side (physical px) it is to fill.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Key {
+    path: PathBuf,
+    written: Option<std::time::SystemTime>,
+    side: u32,
+}
+
+/// The most pictures kept (the oldest asked for go first).
+const KEPT_MOST: usize = 256;
+
+struct Kept {
+    made: HashMap<Key, Option<Arc<Thumb>>>,
+    /// Asked for, in the order they were (the oldest first), and being made.
+    order: Vec<Key>,
+    asked: HashSet<Key>,
+}
+
+static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
+static ASKS: OnceLock<Mutex<Sender<Key>>> = OnceLock::new();
+/// Called (on the pictures' thread) as one is made.
+static TOLD: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Starts the pictures' thread; `told` is called as each is made.
+pub fn start(told: impl Fn() + Send + Sync + 'static) {
+    let _ = TOLD.set(Box::new(told));
+    let (sender, asks) = std::sync::mpsc::channel();
+    if ASKS.set(Mutex::new(sender)).is_err() {
+        return;
+    }
+    *KEPT.lock().unwrap() = Some(Kept { made: HashMap::new(), order: Vec::new(), asked: HashSet::new() });
+    std::thread::Builder::new().name("glance: station pictures".into()).spawn(move || make(asks)).expect("a thread started");
+}
+
+/// The picture of the file at `path`, `side` physical px across: as made; none yet (asked for, and told when it is),
+/// or none to be had.
+pub fn of(path: &Path, side: u32) -> Option<Arc<Thumb>> {
+    let key = Key { path: path.to_path_buf(), written: std::fs::metadata(path).and_then(|meta| meta.modified()).ok(), side };
+    let mut kept = KEPT.lock().unwrap();
+    let kept = kept.as_mut()?;
+    if let Some(made) = kept.made.get(&key) {
+        return made.clone();
+    }
+    if kept.asked.insert(key.clone()) {
+        if let Some(asks) = ASKS.get() {
+            let _ = asks.lock().unwrap().send(key);
+        }
+    }
+    None
+}
+
+fn make(asks: Receiver<Key>) {
+    // (The shell's thumbnail makers expect a single-threaded apartment.)
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+    }
+    while let Ok(key) = asks.recv() {
+        let made = picture(&key.path, key.side).map(Arc::new);
+        {
+            let mut kept = KEPT.lock().unwrap();
+            let Some(kept) = kept.as_mut() else { continue };
+            kept.asked.remove(&key);
+            kept.order.push(key.clone());
+            kept.made.insert(key, made);
+            while kept.order.len() > KEPT_MOST {
+                let oldest = kept.order.remove(0);
+                kept.made.remove(&oldest);
+            }
+        }
+        if let Some(told) = TOLD.get() {
+            told();
+        }
+    }
+}
+
+/// The picture of the file at `path`, as large as fits `side` square (its shape kept), as Explorer shows it.
+fn picture(path: &Path, side: u32) -> Option<Thumb> {
+    unsafe {
+        // (Its parts joined as Windows writes paths: the shell does not read one written with '/'.)
+        let path: PathBuf = path.components().collect();
+        let factory: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
+        let side = side.max(16) as i32;
+        let bitmap = factory.GetImage(SIZE { cx: side, cy: side }, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK).ok()?;
+        let thumb = pixels_of(bitmap);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        thumb
+    }
+}
+
+/// A bitmap's pixels (32 bits, as the shell makes them: premultiplied BGRA), top row first.
+unsafe fn pixels_of(bitmap: HBITMAP) -> Option<Thumb> {
+    unsafe {
+        let mut described = BITMAP::default();
+        if GetObjectW(HGDIOBJ(bitmap.0), std::mem::size_of::<BITMAP>() as i32, Some((&mut described as *mut BITMAP).cast())) == 0 {
+            return None;
+        }
+        let (w, h) = (described.bmWidth, described.bmHeight.abs());
+        let mut info = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, ..Default::default() }, ..Default::default() };
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        let screen = windows::Win32::Graphics::Gdi::GetDC(None);
+        let lines = GetDIBits(screen, bitmap, 0, h as u32, Some(pixels.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
+        windows::Win32::Graphics::Gdi::ReleaseDC(None, screen);
+        if lines != h {
+            return None;
+        }
+        // (A picture with no alpha of its own, as an icon of old may be, wholly opaque.)
+        if described.bmBitsPixel != 32 || pixels.chunks_exact(4).all(|pixel| pixel[3] == 0) {
+            pixels.chunks_exact_mut(4).for_each(|pixel| pixel[3] = 255);
+        }
+        Some(Thumb { pixels, size: (w as u32, h as u32) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A picture's file gives its picture, another file its icon; each within the side asked for.
+    #[test]
+    #[ignore = "asks this PC's shell"]
+    fn files_are_pictured_as_explorer_shows_them() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let picture = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/website/apple-touch-icon.png")), 96).expect("a picture's");
+        assert!(picture.size.0 <= 96 && picture.size.1 <= 96 && picture.size.0.max(picture.size.1) >= 48, "{:?}", picture.size);
+        let icon = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")), 48).expect("an icon");
+        assert!(icon.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
+        println!("picture {:?}, icon {:?}", picture.size, icon.size);
+    }
+}
