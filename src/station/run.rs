@@ -209,6 +209,19 @@ fn open(given: &Content) {
     }
 }
 
+/// `act` done with the shell (opening, showing in Explorer) on a thread of its own, a single-threaded apartment as the
+/// shell wants: the station's thread never waits on Explorer (showing a file in a library's folder could keep it waiting
+/// for good, and with it everything the station does).
+fn by_the_shell(act: impl FnOnce() + Send + 'static) {
+    let _ = std::thread::Builder::new().name("glance: shell".into()).spawn(move || {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        act();
+        unsafe { windows::Win32::System::Com::CoUninitialize() };
+    });
+}
+
 /// `paths` shown in Explorer, selected: each folder they are in opened with those of them in it selected.
 fn show_in_explorer(paths: &[std::path::PathBuf]) {
     use windows::Win32::UI::Shell::{ILCreateFromPathW, ILFindLastID, ILFree, SHOpenFolderAndSelectItems};
@@ -399,12 +412,12 @@ impl Station {
                 }
                 Ask::Open(id) => {
                     if let Some(given) = self.keep.shelf.get(id).and_then(|item| self.keep.content_of(item)) {
-                        open(&given);
+                        by_the_shell(move || open(&given));
                     }
                 }
                 Ask::Show(id) => {
                     if let Some(Content::Files(paths)) = self.keep.shelf.get(id).and_then(|item| self.keep.content_of(item)) {
-                        show_in_explorer(&paths);
+                        by_the_shell(move || show_in_explorer(&paths));
                     }
                 }
                 Ask::Settings => self.follow_settings(),
@@ -417,12 +430,12 @@ impl Station {
                             self.ours = sequence;
                         }
                     }
-                    FilesAct::Open => open(&Content::Files(paths)),
-                    FilesAct::Show => show_in_explorer(&paths),
+                    FilesAct::Open => by_the_shell(move || open(&Content::Files(paths))),
+                    FilesAct::Show => by_the_shell(move || show_in_explorer(&paths)),
                 },
-                Ask::Launch(target) => unsafe {
+                Ask::Launch(target) => by_the_shell(move || unsafe {
                     windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(target.as_str()), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
-                },
+                }),
                 Ask::CopyText(text) => {
                     if let Some(sequence) = clipboard::put(self.window, &Content::Text(text), false) {
                         self.ours = sequence;

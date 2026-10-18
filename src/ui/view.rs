@@ -149,7 +149,7 @@ fn opens_marked(frame: &dyn Canvas, theme: &Theme, label: &str, left: f32, top: 
 }
 
 /// What a click or a wheel turn on the panel lands on.
-#[derive(Clone, Copy, PartialEq, Hash)]
+#[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum Hit {
     Settings,
     Pin,
@@ -318,7 +318,8 @@ impl Scrolls {
 /// Sliders' knobs all at rest (for what keeps none of its own).
 pub static RESTING: super::thumb::Dots<Hit> = super::thumb::Dots::new();
 
-/// A region of the panel and what lands on it, in DIPs from its corner.
+/// A region of the panel and what lands on it, in DIPs from its corner. A press lands on the first region it is in, as
+/// they were drawn: what is on a list is pushed before the list (and the room round it) it is on.
 pub type HitBox = (f32, f32, f32, f32, Hit);
 
 /// What the readings are drawn with: the moment, the data, and the choices.
@@ -2506,9 +2507,6 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
     }
     let (places, whole) = shelf_places(shows, tiles.len(), width);
     let most = (whole - tall).max(0.0);
-    if most > 0.0 {
-        hits.push((left, top, width, tall, Hit::List(List::Shelf, most.to_bits())));
-    }
     let scroll = scene.scrolls.at(List::Shelf).clamp(0.0, most);
     frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
     for (tile, place) in tiles.iter().zip(&places) {
@@ -2562,8 +2560,11 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         hits.push((x, y, place.w, place.h, Hit::Shelf(tile.id)));
     }
     frame.unclip();
-    // Where something dragged may be dropped: all of its lane, its head too (after its things: a press finds a thing
-    // first).
+    // What the wheel scrolls, and where something dragged may be dropped: all of its lane, its head too (after its
+    // things: a press finds the first box it is in, a thing before the list it is on).
+    if most > 0.0 {
+        hits.push((left, top, width, tall, Hit::List(List::Shelf, most.to_bits())));
+    }
     hits.push(drop_area(left, top, width, tall));
     // No room left: said over it.
     if let Some(said) = said {
@@ -2636,9 +2637,6 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
     }
     let whole = y;
     let most = (whole - list_tall).max(0.0);
-    if most > 0.0 {
-        hits.push((left, list_top, width, list_tall, Hit::List(List::Recent, most.to_bits())));
-    }
     let scroll = scene.scrolls.at(List::Recent).clamp(0.0, most);
     frame.clip(left - 4.0, list_top, width + 8.0, list_tall);
     for (at, day) in headings {
@@ -2664,6 +2662,10 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         hits.push((left, y, width, LIST_ROW, Hit::Recent(row.file)));
     }
     frame.unclip();
+    // (After its rows: a press finds a row before the list it is on.)
+    if most > 0.0 {
+        hits.push((left, list_top, width, list_tall, Hit::List(List::Recent, most.to_bits())));
+    }
     scroll_thumb(frame, theme, left + width + 6.0, list_top, list_tall, whole, scroll, most);
 }
 
@@ -2725,9 +2727,6 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
     }
     let whole = rows.len() as f32 * LIST_ROW;
     let most = (whole - tall).max(0.0);
-    if most > 0.0 {
-        hits.push((left, top, width, tall, Hit::List(List::Copies, most.to_bits())));
-    }
     let scroll = scene.scrolls.at(List::Copies).clamp(0.0, most);
     frame.clip(left - 4.0, top, width + 8.0, tall);
     for (at, row) in rows.iter().enumerate() {
@@ -2746,6 +2745,10 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         hits.push((left, y, width, LIST_ROW, Hit::Copied(row.id)));
     }
     frame.unclip();
+    // (After its rows: a press finds a row before the list it is on.)
+    if most > 0.0 {
+        hits.push((left, top, width, tall, Hit::List(List::Copies, most.to_bits())));
+    }
     scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
 }
 
@@ -3450,6 +3453,63 @@ three
 four
 five
 six".into()));
+    }
+
+    /// A canvas that draws nothing, measuring text as so many DIPs a character: for what is drawn's places alone.
+    struct Nothing;
+
+    impl Canvas for Nothing {
+        fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {}
+        fn measure(&self, text: &str, font: Font) -> f32 {
+            text.chars().count() as f32 * font.size * 0.6
+        }
+        fn baseline(&self, font: Font) -> (f32, f32) {
+            (font.size, font.size * 0.25)
+        }
+        fn ink(&self, _: &str, font: Font) -> (f32, f32) {
+            (font.size * 0.2, font.size)
+        }
+        fn clip(&self, _: f32, _: f32, _: f32, _: f32) {}
+        fn unclip(&self) {}
+        fn fill(&self, _: Color, _: f32, _: f32, _: f32, _: f32) {}
+        fn fill_rounded(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn fill_circle(&self, _: Color, _: Point, _: f32) {}
+        fn stroke(&self, _: &[Point], _: Color, _: f32) {}
+        fn stroke_dashed(&self, _: &[Point], _: Color, _: f32) {}
+        fn fill_shape(&self, _: &[Point], _: Fill) {}
+        fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
+        fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
+        fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+    }
+
+    /// On a station, a list of what was copied, Recent files, long enough to scroll: a press on a thing finds the
+    /// thing, not the list it is on.
+    #[test]
+    fn a_press_on_a_list_finds_its_thing() {
+        let theme = Theme::new(Skin::Paper, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let ink = theme.ink("station");
+        let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false };
+        let first = |hits: &[HitBox], x: f32, y: f32| hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4);
+        let many: Vec<Tile> = (1..=40).map(tile).collect();
+        for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Pictures)] {
+            let mut hits = Vec::new();
+            paint_shelf(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, shows, STATION_TALL, None, false, &mut hits);
+            assert_eq!(first(&hits, 10.0, 10.0), Some(Hit::Shelf(1)), "{shows:?}");
+        }
+        let mut hits = Vec::new();
+        paint_copies(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, STATION_TALL, &mut hits);
+        assert_eq!(first(&hits, 10.0, 10.0), Some(Hit::Copied(1)));
+        let rows: Vec<Lately> = (1..=40).map(|file| Lately { file, day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new() }).collect();
+        let mut hits = Vec::new();
+        paint_recent(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &rows, Default::default(), STATION_TALL, &mut hits);
+        let row = hits.iter().find(|hit| hit.4 == Hit::Recent(1)).copied().unwrap();
+        assert_eq!(first(&hits, row.0 + 5.0, row.1 + 5.0), Some(Hit::Recent(1)));
     }
 
     /// The station's places as each view lays them out: cards across the column, spread over it; a list a row each;

@@ -186,7 +186,7 @@ pub struct ProcessPrefs {
     pub sort: ProcessSort,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProcessSort {
     #[default]
