@@ -1317,7 +1317,7 @@ impl Widgets {
             if crate::station::run::drag_begins(from, now) {
                 widget.shelf_press = None;
                 let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
-                crate::station::run::ask(crate::station::run::Ask::DragOut(id));
+                crate::station::run::ask(crate::station::run::Ask::DragOut(id, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }));
             }
             return;
         }

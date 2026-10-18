@@ -42,8 +42,9 @@ pub enum Ask {
     Settings,
     /// Something dragged is over a station now, or no longer.
     Over(bool),
-    /// What `id` holds dragged off it (pressed on it and moved: see `drag_from`).
-    DragOut(u64),
+    /// What `id` holds dragged off it (pressed on it and moved: see `drag_begins`), pressed on a window of the
+    /// thread numbered so.
+    DragOut(u64, u32),
 }
 
 /// What the station shows: what it holds, oldest first, and how it stands.
@@ -202,8 +203,9 @@ struct Station {
     over: bool,
     /// Where drops are caught while something is dragged (see `catch`).
     catchers: super::catch::Catchers,
-    /// What is to be dragged off it, asked (dragged once it is done answering: see `drag_off`).
-    dragging: Option<u64>,
+    /// What is to be dragged off it, asked, and the thread it was pressed on (dragged once it is done answering: see
+    /// `drag_off`).
+    dragging: Option<(u64, u32)>,
 }
 
 thread_local! {
@@ -245,9 +247,15 @@ fn run(asks: Receiver<Ask>) {
 /// settings say so.
 fn drag_off() {
     let mut given = None;
-    with_station(|station| given = station.dragging.take().and_then(|id| station.drag_given(id)));
+    let mut thread = 0;
+    with_station(|station| {
+        given = station.dragging.take().and_then(|(id, pressed_on)| {
+            thread = pressed_on;
+            station.drag_given(id)
+        })
+    });
     let Some((id, content, stays_here, held)) = given else { return };
-    let dragged = super::drag::drag(&content, stays_here);
+    let dragged = super::drag::drag(&content, stays_here, thread);
     with_station(|station| {
         for name in &held {
             station.keep.folder.let_go(name);
@@ -349,7 +357,7 @@ impl Station {
                 }
                 Ask::Settings => self.follow_settings(),
                 Ask::Over(over) => self.over = over,
-                Ask::DragOut(id) => self.dragging = Some(id),
+                Ask::DragOut(id, thread) => self.dragging = Some((id, thread)),
             }
         }
         self.show();

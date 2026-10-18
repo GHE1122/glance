@@ -22,8 +22,22 @@ pub enum Dragged {
 
 /// Drags `content` off the station (`stays_here`: see `shelf::Item::stays_here`) till it is dropped or given up, on
 /// this thread (which must be the station's: in a single-threaded apartment, its messages pumped meanwhile by
-/// Windows); none where it could not be begun.
-pub fn drag(content: &Content, stays_here: bool) -> Option<Dragged> {
+/// Windows), pressed on a window of the thread `pressed_on`: whose input this thread shares meanwhile (the pointer
+/// is that thread's while its button is down; not shared, the drag saw it neither move nor let go). None where it
+/// could not be begun.
+pub fn drag(content: &Content, stays_here: bool, pressed_on: u32) -> Option<Dragged> {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    let this = unsafe { GetCurrentThreadId() };
+    let shared = pressed_on != this && unsafe { AttachThreadInput(this, pressed_on, true) }.as_bool();
+    let dragged = drag_here(content, stays_here);
+    if shared {
+        let _ = unsafe { AttachThreadInput(this, pressed_on, false) };
+    }
+    dragged
+}
+
+/// As `drag`, its input this thread's.
+fn drag_here(content: &Content, stays_here: bool) -> Option<Dragged> {
     let formats = clipboard::formats_of(content, stays_here)?;
     unsafe {
         // The shell's own data object, which keeps whatever it is given (and gives the receiving program what it
@@ -67,9 +81,13 @@ struct Source;
 
 impl IDropSource_Impl for Source_Impl {
     fn QueryContinueDrag(&self, escape: BOOL, keys: MODIFIERKEYS_FLAGS) -> HRESULT {
-        if escape.as_bool() {
+        // (The button and Esc as they are, not only as the drag's messages say: pressed on another thread's window,
+        // those may never come, and the drag never ended.)
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON};
+        let down = |key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0;
+        if escape.as_bool() || down(VK_ESCAPE) {
             windows::Win32::Foundation::DRAGDROP_S_CANCEL
-        } else if keys.0 & MK_LBUTTON.0 == 0 {
+        } else if keys.0 & MK_LBUTTON.0 == 0 || !down(VK_LBUTTON) {
             windows::Win32::Foundation::DRAGDROP_S_DROP
         } else {
             HRESULT(0)

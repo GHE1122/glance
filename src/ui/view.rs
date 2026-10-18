@@ -1964,7 +1964,7 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         frame.stroke_rounded(Fill::Solid(ink.trace.alpha(0.8)), left - 4.0, top - 4.0, width + 8.0, tall + 8.0, 10.0, 1.5);
     }
     if tiles.is_empty() {
-        hits.push((left - 4.0, top - 4.0, width + 8.0, tall + 8.0, Hit::Station));
+        hits.push(drop_area(left, top, width, tall));
         // Nothing on it: where to drop, and what.
         if !over {
             frame.stroke_rounded(Fill::Solid(theme.text3.alpha(0.5)), left, top, width, tall, 10.0, 1.0);
@@ -2034,8 +2034,9 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         hits.push((x, y, TILE_W, TILE_H, Hit::Shelf(tile.id)));
     }
     frame.unclip();
-    // Where something dragged may be dropped: all of it (after its things: a press finds a thing first).
-    hits.push((left - 4.0, top - 4.0, width + 8.0, tall + 8.0, Hit::Station));
+    // Where something dragged may be dropped: all of its lane, its head too (after its things: a press finds a thing
+    // first).
+    hits.push(drop_area(left, top, width, tall));
     // No room left: said over it.
     if let Some(said) = said {
         let wide = (frame.measure(said, theme.small) + 20.0).min(width);
@@ -2047,6 +2048,13 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         let at = top + (tall - thumb) * scroll / most;
         frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
     }
+}
+
+/// Where something dragged may be dropped on a station whose tiles are `width` × `tall` from (`left`, `top`): its
+/// lane from its head down.
+fn drop_area(left: f32, top: f32, width: f32, tall: f32) -> HitBox {
+    let head = top - SHELF_GAP - HEAD - HEAD_GAP;
+    (left - 4.0, head, width + 8.0, top + tall + 4.0 - head, Hit::Station)
 }
 
 /// `text` in the middle of `width` from `x`.

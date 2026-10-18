@@ -1,6 +1,7 @@
-//! Whether OLE drag and drop works with the windows of another thread (see docs/station-and-notes.md, section 七): a
-//! drop target registered by the station's thread (an STA) for windows a multithreaded thread owns, as the panel's
-//! thread owns its windows; and a drag begun on the station's thread as the button is pressed in such a window.
+//! Whether the station's drag and drop works as it is built (see docs/station-and-notes.md, section 七): a drag
+//! begun on the station's thread (an STA) as the button is pressed in a window a multithreaded thread owns (as the
+//! panel's thread owns its windows), its input shared meanwhile, dropped on a window of the station's own (as its
+//! catchers are). (Registered for the other thread's window, a drop target saw nothing, and the drag never ended.)
 //!
 //! It moves the pointer and presses its button: run it in the test VM, never on a desktop in use.
 //! `glance_lib-*.exe --ignored --exact station::spike::drag_and_drop_across_threads --nocapture`
@@ -51,35 +52,37 @@ fn pointer(at: POINT, buttons: windows::Win32::UI::Input::KeyboardAndMouse::MOUS
 #[test]
 #[ignore = "moves the pointer and presses its button: run in the test VM"]
 fn drag_and_drop_across_threads() {
-    // The windows' thread: multithreaded, as the panel's is; two windows, one dragged from, one dropped on.
+    // The windows' thread: multithreaded, as the panel's is; the window dragged from (pressed on).
     let (made, windows) = mpsc::channel();
     std::thread::spawn(move || unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let class = WNDCLASSW { lpfnWndProc: Some(procedure), lpszClassName: w!("GlanceSpike"), hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(windows::Win32::Graphics::Gdi::GetStockObject(windows::Win32::Graphics::Gdi::WHITE_BRUSH).0), ..Default::default() };
         RegisterClassW(&class);
-        let make = |x: i32| CreateWindowExW(WS_EX_TOPMOST, class.lpszClassName, w!("spike"), WS_POPUP | WS_VISIBLE, x, 200, 200, 200, None, None, None, None).unwrap();
-        let (from, to) = (make(200), make(600));
-        made.send((from.0 as isize, to.0 as isize)).unwrap();
+        let from = CreateWindowExW(WS_EX_TOPMOST, class.lpszClassName, w!("spike"), WS_POPUP | WS_VISIBLE, 200, 200, 200, 200, None, None, None, None).unwrap();
+        made.send((from.0 as isize, windows::Win32::System::Threading::GetCurrentThreadId())).unwrap();
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             DispatchMessageW(&message);
         }
     });
-    let (from, to) = windows.recv().unwrap();
-    // The station's thread: an STA with OLE; registers the drop target for the other thread's window, and drags
-    // from it as asked.
+    let (from, pressed_on) = windows.recv().unwrap();
+    // The station's thread: an STA with OLE; the window dropped on its own (as the station's catchers are), and the
+    // drag from the other thread's window as it is pressed, its input shared meanwhile (see `drag::drag`).
     let (dropped_tx, dropped) = mpsc::channel::<String>();
     let (registered_tx, registered) = mpsc::channel();
     let station = std::thread::spawn(move || unsafe {
         STATION_THREAD.store(windows::Win32::System::Threading::GetCurrentThreadId(), Ordering::Release);
         windows::Win32::System::Ole::OleInitialize(None).unwrap();
+        let class = WNDCLASSW { lpfnWndProc: Some(procedure), lpszClassName: w!("GlanceSpikeStation"), hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(windows::Win32::Graphics::Gdi::GetStockObject(windows::Win32::Graphics::Gdi::GRAY_BRUSH).0), ..Default::default() };
+        RegisterClassW(&class);
+        let to = CreateWindowExW(WS_EX_TOPMOST, class.lpszClassName, w!("spike station"), WS_POPUP | WS_VISIBLE, 600, 200, 200, 200, None, None, None, None).unwrap();
         let target = super::drop::Target::new(move |dragged| {
             if let super::drop::Dragged::Dropped(given) = dragged {
                 let _ = dropped_tx.send(format!("{given:?}"));
             }
         });
-        let said = windows::Win32::System::Ole::RegisterDragDrop(HWND(to as *mut _), &target);
-        registered_tx.send(said.map_err(|error| error.to_string())).unwrap();
+        let said = windows::Win32::System::Ole::RegisterDragDrop(to, &target);
+        registered_tx.send((said.map_err(|error| error.to_string()), to.0 as isize)).unwrap();
         // Waits for the press in the window dragged from, then drags.
         let began = Instant::now();
         while !PRESSED.load(Ordering::Acquire) && began.elapsed() < Duration::from_secs(10) {
@@ -90,14 +93,14 @@ fn drag_and_drop_across_threads() {
             std::thread::sleep(Duration::from_millis(10));
         }
         DRAG_FROM.store(1, Ordering::Release);
-        let dragged = super::drag::drag(&super::clipboard::Content::Text("across threads".into()), false);
+        let dragged = super::drag::drag(&super::clipboard::Content::Text("across threads".into()), false, pressed_on);
         println!("the drag ended: {dragged:?}");
-        let _ = windows::Win32::System::Ole::RevokeDragDrop(HWND(to as *mut _));
+        let _ = windows::Win32::System::Ole::RevokeDragDrop(to);
         dragged
     });
-    let registered = registered.recv().unwrap();
-    println!("registered for the other thread's window: {registered:?}");
-    assert!(registered.is_ok(), "a drop target is registered for another thread's window");
+    let (registered, to) = registered.recv().unwrap();
+    println!("registered for the station's own window: {registered:?}");
+    assert!(registered.is_ok(), "a drop target is registered for the station's own window");
     let middle = |window: isize| {
         let mut rect = RECT::default();
         unsafe { GetWindowRect(HWND(window as *mut _), &mut rect).unwrap() };
@@ -125,7 +128,7 @@ fn drag_and_drop_across_threads() {
     std::thread::sleep(Duration::from_millis(200));
     pointer(b, MOUSEEVENTF_LEFTUP);
     let given = dropped.recv_timeout(Duration::from_secs(5));
-    println!("dropped on the other thread's window, heard on the station's: {given:?}");
+    println!("dropped on the station's window: {given:?}");
     let dragged = station.join().unwrap();
     assert!(given.is_ok_and(|given| given.contains("across threads")), "the drop came to the station's thread");
     assert_eq!(dragged, Some(super::drag::Dragged::Taken));
