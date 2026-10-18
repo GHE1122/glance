@@ -78,8 +78,8 @@ const KEPT: &str = ".glance-notes.json";
 pub enum Written {
     /// Written in its place (its file as it is now).
     Done(Stamp),
-    /// Its file had been changed outside since it was read: left as it was, and what was written here put in a copy
-    /// beside it, by this name.
+    /// Its file had been changed outside since it was read (or deleted): left as it was, and what was written here
+    /// put in a copy beside it, by this name.
     Apart(String),
 }
 
@@ -132,9 +132,10 @@ impl Folder {
         let now = self.stamp(name);
         let changed_outside = match (was, now) {
             (Some(was), Some(now)) => was.bytes != now.bytes || was.digest != now.digest,
-            (None, Some(_)) => true,
-            // (Gone since: written again where it was.)
-            (_, None) => false,
+            // A note new here whose name was taken meanwhile; or one deleted outside since (not made again where it
+            // was, as if it had never been deleted: what was written here kept apart).
+            (None, Some(_)) | (Some(_), None) => true,
+            (None, None) => false,
         };
         if changed_outside {
             let stem = Path::new(name).file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
@@ -265,6 +266,11 @@ mod tests {
         assert_eq!(folder.read(&apart).unwrap().0, "here again");
         // A note new here whose name was taken meanwhile: put apart too.
         assert!(matches!(folder.write("a.md", "new", None).unwrap(), Written::Apart(_)));
+        // One deleted outside since it was read: not made again in its place, what was written kept apart.
+        let Written::Done(stamp) = folder.write("b.md", "b", None).unwrap() else { panic!("written") };
+        std::fs::remove_file(folder.path.join("b.md")).unwrap();
+        assert!(matches!(folder.write("b.md", "b again", Some(stamp)).unwrap(), Written::Apart(_)));
+        assert!(!folder.path.join("b.md").exists());
         let _ = std::fs::remove_dir_all(&folder.path);
     }
 }

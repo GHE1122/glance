@@ -574,8 +574,8 @@ impl Beside {
             }
             Ok(crate::notes::Written::Apart(apart)) => {
                 writing.said = Some(match lang {
-                    super::text::Lang::Zh => format!("这条便签在别处被改过，你写的已另存为“{apart}”"),
-                    super::text::Lang::En => format!("Changed elsewhere meanwhile: what you wrote is kept as \"{apart}\""),
+                    super::text::Lang::Zh => format!("这条便签在别处被改过或删除，你写的已另存为“{apart}”"),
+                    super::text::Lang::En => format!("Changed or deleted elsewhere meanwhile: what you wrote is kept as \"{apart}\""),
                 });
                 writing.stamp = folder.stamp(&apart);
                 writing.name = Some(apart);
