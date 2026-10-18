@@ -75,6 +75,10 @@ impl Keep {
                 }
             }
             Content::Png(png) => Ok((What::Picture { file: self.kept(&png, "png")? }, png.len() as u64)),
+            Content::Saved { name, bytes } => {
+                let extension = std::path::Path::new(&name).extension().and_then(|extension| extension.to_str()).unwrap_or_default().to_string();
+                Ok((What::Saved { file: self.kept(&bytes, &extension)?, name }, bytes.len() as u64))
+            }
             Content::Files(paths) => {
                 if !self.always_copy {
                     return Ok((What::Files { paths, kept: Vec::new() }, 0));

@@ -43,6 +43,9 @@ pub enum Content {
     Text(String),
     /// A picture, as a PNG's bytes.
     Png(Vec<u8>),
+    /// A file with no path of its own, as it was given (dragged from a mail or a page: see `drop`): its name, and
+    /// what it holds.
+    Saved { name: String, bytes: Vec<u8> },
 }
 
 /// What was copied, as Glance read it.
@@ -222,6 +225,8 @@ pub fn put(owner: HWND, content: &Content, stays_here: bool) -> Option<u32> {
     let mut formats: Vec<(u32, Vec<u8>)> = match content {
         Content::Text(text) => vec![(TEXT, utf16_z(text))],
         Content::Files(paths) => vec![(FILES, dropped(paths))],
+        // (Given back as the file the station keeps of it: see `keep::Keep::content_of`.)
+        Content::Saved { .. } => return None,
         Content::Png(png) => {
             let dib = unsafe { dib_of(png).ok()? };
             vec![(unsafe { RegisterClipboardFormatW(w!("PNG")) }, png.clone()), (DIB, dib)]
@@ -272,7 +277,7 @@ fn utf16_z(text: &str) -> Vec<u8> {
 }
 
 /// `paths` as files are put on the clipboard (`DROPFILES`, then each path in UTF-16 ended by a zero, and a zero more).
-fn dropped(paths: &[PathBuf]) -> Vec<u8> {
+pub(super) fn dropped(paths: &[PathBuf]) -> Vec<u8> {
     // pFiles (where the paths begin), pt (x, y), fNC, fWide.
     let mut bytes: Vec<u8> = [20u32, 0, 0, 0, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
     for path in paths {
