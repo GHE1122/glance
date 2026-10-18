@@ -4330,7 +4330,7 @@ impl Ui {
             Edge::Right => (sw - inset - pw, along(sh / 2.0, ph, sh)),
             Edge::Top => (along(sw / 2.0, pw, sw), inset),
         };
-        let (k, stage_x, stage_y) = self.staged(area, edge, (pw, ph), false);
+        let (k, stage_x, stage_y) = self.staged(area, edge, pw, false);
         let (ox, oy) = (area.x + stage_x, area.y + stage_y);
         self.stage_picture(frame, area, (ox, oy), k, zoom);
         unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
@@ -4396,11 +4396,10 @@ impl Ui {
         self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false).0
     }
 
-    /// How the stage is shown in `area` with a panel `(pw, ph)` large (stage DIPs) slid out from `edge`: how large a
-    /// stage DIP is drawn, and where the stage's corner is in the area. The whole screen (`whole`), else the whole
-    /// height of it (along the top, the panel and the screen below) with the whole panel and a strip of desktop
-    /// beside it.
-    fn staged(&self, area: Rect, edge: Edge, (pw, ph): (f32, f32), whole: bool) -> (f32, f32, f32) {
+    /// How the stage is shown in `area` with a panel `pw` wide (stage DIPs) slid out from `edge`: how large a stage
+    /// DIP is drawn, and where the stage's corner is in the area. The whole screen (`whole`), else the whole height of
+    /// it with the whole panel and a strip of desktop beside it (along the top, either side of it).
+    fn staged(&self, area: Rect, edge: Edge, pw: f32, whole: bool) -> (f32, f32, f32) {
         let (sw, sh) = self.stage.size;
         let fit = (area.w / sw).min(area.h / sh).min(1.0);
         match (whole, edge) {
@@ -4418,16 +4417,18 @@ impl Ui {
                 };
                 (k, x, (area.h - sh * k) / 2.0)
             }
+            // The panel in the middle of the top, with as much desktop either side of it as the sides' previews have
+            // beside theirs, and the whole height of the screen under it. (Its whole width shown, a wide screen made
+            // the panel small.)
             (false, Edge::Top) => {
-                let shown = ph + PREVIEW_MARGIN;
-                let k = (area.w / sw).min(area.h / shown).min(1.0);
-                (k, (area.w - sw * k) / 2.0, ((area.h - shown * k) / 2.0).max(0.0))
+                let k = (area.h / sh).min(area.w / (pw + 2.0 * PREVIEW_MARGIN).min(sw)).min(1.0);
+                (k, (area.w - sw * k) / 2.0, (area.h - sh * k) / 2.0)
             }
         }
     }
 
     /// The stage's desktop in `area` and, where `edge` is one, the panel showing `prefs` slid out from it, running
-    /// live: the whole screen (`whole`), else the whole height of it (along the top, the panel and the screen below)
+    /// live: the whole screen (`whole`), else the whole height of it
     /// with the whole panel and a strip of desktop beside it. Returns how fast the panel's charts move (physical pixels
     /// a second), and where the screen was drawn.
     fn panel_on_stage(&mut self, frame: &Frame, area: Rect, edge: Option<Edge>, prefs: Option<&Prefs>, whole: bool) -> (Option<f32>, Rect) {
@@ -4477,7 +4478,7 @@ impl Ui {
         let scene = Scene { music_apart: false, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let lanes = view::lanes(&scene);
 
-        let (k, stage_x, stage_y) = self.staged(area, edge, (pw, ph), whole);
+        let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);
         let (ox, oy) = (area.x + stage_x, area.y + stage_y);
         let mask = unsafe {
             frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(area.x, area.y, area.w, area.h), radiusX: 8.0, radiusY: 8.0 })
