@@ -162,6 +162,8 @@ struct Beside {
 /// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
 /// colour, its words' box, whether what is written is not yet kept, and what was last said of keeping it.
 struct Writing {
+    /// The folder it is in (kept to: the folder chosen in the settings changed meanwhile, it is kept where it was read).
+    folder: std::path::PathBuf,
     name: Option<String>,
     stamp: Option<crate::notes::store::Stamp>,
     colour: crate::notes::Colour,
@@ -372,7 +374,7 @@ fn show(opening: Opening) {
                 }
                 let _ = editor.send(WM_SETFOCUS, WPARAM(0), LPARAM(0));
                 let written_ms = read.as_ref().map_or_else(crate::station::now_ms, |(_, stamp)| stamp.written_ms);
-                let writing = Writing { name, stamp: read.map(|(_, stamp)| stamp), colour, written_ms, editor, palette, composing: false, unkept: false, said: None };
+                let writing = Writing { folder: folder.path.clone(), name, stamp: read.map(|(_, stamp)| stamp), colour, written_ms, editor, palette, composing: false, unkept: false, said: None };
                 writing.dress();
                 with(|beside| beside.writing = Some(writing));
             }
@@ -608,7 +610,7 @@ impl Beside {
         let lang = self.lang;
         let Some(writing) = self.writing.as_mut().filter(|writing| writing.unkept) else { return true };
         let text = writing.editor.text();
-        let folder = crate::notes::folder();
+        let folder = crate::notes::folder_at(writing.folder.clone());
         let name = match &writing.name {
             Some(name) => name.clone(),
             None if text.trim().is_empty() => {
@@ -673,7 +675,7 @@ impl Beside {
     fn note_chose(&mut self, choice: NoteChoice) -> bool {
         let _ = self.keep();
         let Some(writing) = self.writing.as_mut() else { return false };
-        let folder = crate::notes::folder();
+        let folder = crate::notes::folder_at(writing.folder.clone());
         match choice {
             NoteChoice::Colour(colour) => {
                 writing.colour = colour;

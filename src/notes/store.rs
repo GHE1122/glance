@@ -6,8 +6,11 @@
 //!   or the new, never half of one).
 //! - Each note as it was last read or written (its length, when it was written, a digest of its bytes): one changed
 //!   outside since is never written over. Its words from outside stay where they are, and what was written here goes
-//!   to a copy beside it, named as a conflict's copy, so nothing is lost.
-//! - Taken away to the Recycle Bin, not deleted.
+//!   to a copy beside it, named as a conflict's copy, so nothing is lost. The file a write takes the place of is kept
+//!   till it is seen to be the one read: one changed outside in the moment between is put back.
+//! - Read as their bytes say they are written (UTF-8, UTF-16 by its mark, or the system's code page); written in
+//!   UTF-8. One whose words could not all be read is never written over (what was written here goes apart).
+//! - Taken away to the Recycle Bin, not deleted (where a folder has none, Windows asks first).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -40,6 +43,11 @@ pub struct Stamp {
 }
 
 impl Stamp {
+    /// Whether it is of the same bytes as `other` (whenever written).
+    fn same(&self, other: &Stamp) -> bool {
+        self.bytes == other.bytes && self.digest == other.digest
+    }
+
     fn of(bytes: &[u8], written_ms: u64) -> Stamp {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         bytes.hash(&mut hasher);
@@ -114,9 +122,7 @@ impl Folder {
         let path = self.path.join(name);
         let bytes = std::fs::read(&path).ok()?;
         let written = written_ms(&path)?;
-        // (Words not in UTF-8, as another editor may have saved them: read as near as they go.)
-        let text = String::from_utf8(bytes.clone()).unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
-        Some((text.strip_prefix('\u{FEFF}').map(str::to_string).unwrap_or(text), Stamp::of(&bytes, written)))
+        Some((decoded(&bytes).0, Stamp::of(&bytes, written)))
     }
 
     /// The note `name`'s file as it is now, if it is there.
@@ -129,22 +135,70 @@ impl Folder {
     /// here, whose file must not be there yet): in its place, unless it was changed outside since (see `Written`).
     pub fn write(&self, name: &str, text: &str, was: Option<Stamp>) -> std::io::Result<Written> {
         std::fs::create_dir_all(&self.path)?;
-        let now = self.stamp(name);
-        let changed_outside = match (was, now) {
-            (Some(was), Some(now)) => was.bytes != now.bytes || was.digest != now.digest,
+        let now = std::fs::read(self.path.join(name)).ok();
+        let changed_outside = match (was, &now) {
+            // (One whose words were not all read: never written over.)
+            (Some(was), Some(now)) => !was.same(&Stamp::of(now, 0)) || !decoded(now).1,
             // A note new here whose name was taken meanwhile; or one deleted outside since (not made again where it
             // was, as if it had never been deleted: what was written here kept apart).
             (None, Some(_)) | (Some(_), None) => true,
             (None, None) => false,
         };
         if changed_outside {
-            let stem = Path::new(name).file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
-            let apart = self.free_name(&format!("{stem}{}.md", self.apart));
-            self.replace(&apart, text)?;
-            return Ok(Written::Apart(apart));
+            return self.apart(name, text);
         }
-        self.replace(name, text)?;
-        Ok(Written::Done(self.stamp(name).unwrap_or_default()))
+        self.put(name, text, was)
+    }
+
+    /// `text` put in the place of the note `name`, its file having been `was` as last read or written (none: a note
+    /// new here): written beside it first, then taking its place, the file it took the place of kept till it is seen
+    /// to be `was` (a file changed outside in the moment between put back, and what was written here put apart; a new
+    /// note never put over a file that took its name).
+    fn put(&self, name: &str, text: &str, was: Option<Stamp>) -> std::io::Result<Written> {
+        let path = self.path.join(name);
+        let beside = self.path.join(format!(".{name}.glance-writing"));
+        let bytes = text.as_bytes();
+        std::fs::write(&beside, bytes)?;
+        let placed = match was {
+            None => put_new(&beside, &path),
+            Some(was) => {
+                let displaced = self.path.join(format!(".{name}.glance-was"));
+                let _ = std::fs::remove_file(&displaced);
+                let placed = put_over(&beside, &path, &displaced);
+                if placed.is_ok() {
+                    let as_read = std::fs::read(&displaced).is_ok_and(|displaced| was.same(&Stamp::of(&displaced, 0)));
+                    if !as_read {
+                        let stem = Path::new(name).file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+                        let apart = self.free_name(&format!("{stem}{}.md", self.apart));
+                        std::fs::rename(&path, self.path.join(&apart))?;
+                        std::fs::rename(&displaced, &path)?;
+                        return Ok(Written::Apart(apart));
+                    }
+                    let _ = std::fs::remove_file(&displaced);
+                }
+                placed
+            }
+        };
+        match placed {
+            // (As written here: its digest of the bytes written, not of a file read again after, which another may
+            // have written meanwhile.)
+            Ok(()) => Ok(Written::Done(Stamp::of(bytes, written_ms(&path).unwrap_or_default()))),
+            Err(error) => {
+                let _ = std::fs::remove_file(&beside);
+                match error.kind() {
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound => self.apart(name, text),
+                    _ => Err(error),
+                }
+            }
+        }
+    }
+
+    /// What was written here as the note `name` put in a conflict's copy beside it.
+    fn apart(&self, name: &str, text: &str) -> std::io::Result<Written> {
+        let stem = Path::new(name).file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+        let apart = self.free_name(&format!("{stem}{}.md", self.apart));
+        self.replace(&apart, text)?;
+        Ok(Written::Apart(apart))
     }
 
     /// `text` in the file `name`: written beside it first, then put in its place.
@@ -208,21 +262,99 @@ impl Folder {
     }
 }
 
+/// A note's words from its file's `bytes`, as they say they are written: UTF-8 (its mark left out), UTF-16 by its mark,
+/// else the system's code page (another editor's, saving as programs did before Unicode); and whether they were read
+/// faithfully (none of the bytes lost: read as near as they go, they are never written over).
+pub fn decoded(bytes: &[u8]) -> (String, bool) {
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return match std::str::from_utf8(rest) {
+            Ok(text) => (text.to_string(), true),
+            Err(_) => (String::from_utf8_lossy(rest).into_owned(), false),
+        };
+    }
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
+        let units: Vec<u16> = rest.chunks_exact(2).map(|pair| unit([pair[0], pair[1]])).collect();
+        match String::from_utf16(&units) {
+            Ok(text) => (text, rest.len() % 2 == 0),
+            Err(_) => (String::from_utf16_lossy(&units), false),
+        }
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return utf16(rest, u16::from_le_bytes);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return utf16(rest, u16::from_be_bytes);
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return (text.to_string(), true);
+    }
+    match system_code_page(bytes) {
+        Some(text) => (text, true),
+        None => (String::from_utf8_lossy(bytes).into_owned(), false),
+    }
+}
+
+/// `bytes` read in the system's code page for programs that are not Unicode; none where they are not written in it.
+#[cfg(windows)]
+fn system_code_page(bytes: &[u8]) -> Option<String> {
+    use windows::Win32::Globalization::{MultiByteToWideChar, CP_ACP, MB_ERR_INVALID_CHARS};
+    let length = unsafe { MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, bytes, None) };
+    if length <= 0 {
+        return None;
+    }
+    let mut units = vec![0u16; length as usize];
+    let written = unsafe { MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, bytes, Some(&mut units)) };
+    (written == length).then(|| String::from_utf16_lossy(&units))
+}
+
+#[cfg(not(windows))]
+fn system_code_page(_: &[u8]) -> Option<String> {
+    None
+}
+
+/// The file at `from` given the name `to`, where no file has it (one that does: `AlreadyExists`).
+#[cfg(windows)]
+fn put_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+    unsafe { MoveFileExW(&windows::core::HSTRING::from(from.as_os_str()), &windows::core::HSTRING::from(to.as_os_str()), MOVE_FILE_FLAGS(0)) }.map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xFFFF))
+}
+
+/// The file at `from` put in the place of the one at `to`, which is kept as `kept` (gone: `NotFound`).
+#[cfg(windows)]
+fn put_over(from: &Path, to: &Path, kept: &Path) -> std::io::Result<()> {
+    use windows::Win32::Storage::FileSystem::{ReplaceFileW, REPLACE_FILE_FLAGS};
+    let name = |path: &Path| windows::core::HSTRING::from(path.as_os_str());
+    unsafe { ReplaceFileW(&name(to), &name(from), &name(kept), REPLACE_FILE_FLAGS(0), None, None) }.map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xFFFF))
+}
+
+#[cfg(not(windows))]
+fn put_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(from, to)?;
+    std::fs::remove_file(from)
+}
+
+#[cfg(not(windows))]
+fn put_over(from: &Path, to: &Path, kept: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(to, kept)?;
+    std::fs::rename(from, to)
+}
+
 /// When the file at `path` was last written (ms since 1970).
 fn written_ms(path: &Path) -> Option<u64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
 }
 
-/// The file at `path` moved to the Recycle Bin; whether it was.
+/// The file at `path` moved to the Recycle Bin; whether it was. (Where it would be deleted for good, its folder having
+/// no Recycle Bin, Windows asks first: never deleted for good unasked.)
 #[cfg(windows)]
 fn recycle(path: &Path) -> bool {
-    use windows::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE, SHFILEOPSTRUCTW};
+    use windows::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE, SHFILEOPSTRUCTW};
     // (Its path ended by two nulls, as the call reads a list of them.)
     use std::os::windows::ffi::OsStrExt;
     let mut from: Vec<u16> = path.as_os_str().encode_wide().collect();
     from.extend([0, 0]);
-    let mut operation = SHFILEOPSTRUCTW { wFunc: FO_DELETE, pFrom: windows::core::PCWSTR(from.as_ptr()), fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT).0 as u16, ..Default::default() };
+    let mut operation = SHFILEOPSTRUCTW { wFunc: FO_DELETE, pFrom: windows::core::PCWSTR(from.as_ptr()), fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING | FOF_NOERRORUI | FOF_SILENT).0 as u16, ..Default::default() };
     unsafe { SHFileOperationW(&mut operation) == 0 && !operation.fAnyOperationsAborted.as_bool() }
 }
 
@@ -271,6 +403,52 @@ mod tests {
         std::fs::remove_file(folder.path.join("b.md")).unwrap();
         assert!(matches!(folder.write("b.md", "b again", Some(stamp)).unwrap(), Written::Apart(_)));
         assert!(!folder.path.join("b.md").exists());
+        let _ = std::fs::remove_dir_all(&folder.path);
+    }
+
+    /// Changed outside in the moment between a note being looked at and written: the file it took the place of seen
+    /// not to be the one read, and put back; what was written here put apart. Its stamp from the bytes written.
+    #[test]
+    fn puts_back_what_changed_outside_meanwhile() {
+        let folder = folder("meanwhile");
+        let Written::Done(stamp) = folder.write("a.md", "here", None).unwrap() else { panic!("written") };
+        assert!(stamp.same(&Stamp::of(b"here", 0)));
+        std::fs::write(folder.path.join("a.md"), "outside").unwrap();
+        // (Past the look before writing, as if it came just after it.)
+        let Written::Apart(apart) = folder.put("a.md", "here again", Some(stamp)).unwrap() else { panic!("put apart") };
+        assert_eq!(folder.read("a.md").unwrap().0, "outside");
+        assert_eq!(folder.read(&apart).unwrap().0, "here again");
+        // A new note whose name another took meanwhile: not put over it.
+        assert!(matches!(folder.put("a.md", "new", None).unwrap(), Written::Apart(_)));
+        assert_eq!(folder.read("a.md").unwrap().0, "outside");
+        // Nothing of its writing left beside them.
+        assert!(std::fs::read_dir(&folder.path).unwrap().flatten().all(|entry| !entry.file_name().to_string_lossy().starts_with(".a.md")));
+        let _ = std::fs::remove_dir_all(&folder.path);
+    }
+
+    /// Words saved by other editors read as written: UTF-8 with its mark, UTF-16 either way round by its mark; and
+    /// one in UTF-16 written here again, faithfully, in UTF-8.
+    #[test]
+    fn reads_what_other_editors_saved() {
+        assert_eq!(decoded("\u{FEFF}便签".as_bytes()), ("便签".to_string(), true));
+        let le: Vec<u8> = [0xFF, 0xFE].into_iter().chain("便签 a".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let be: Vec<u8> = [0xFE, 0xFF].into_iter().chain("便签 a".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        assert_eq!(decoded(&le), ("便签 a".to_string(), true));
+        assert_eq!(decoded(&be), ("便签 a".to_string(), true));
+        // Half a unit at its end: read as near as it goes, never written over.
+        assert!(!decoded(&le[..le.len() - 1]).1);
+        let folder = folder("utf16");
+        std::fs::create_dir_all(&folder.path).unwrap();
+        std::fs::write(folder.path.join("u.md"), &le).unwrap();
+        let (text, stamp) = folder.read("u.md").unwrap();
+        assert_eq!(text, "便签 a");
+        assert!(matches!(folder.write("u.md", &format!("{text}!"), Some(stamp)).unwrap(), Written::Done(_)));
+        assert_eq!(std::fs::read(folder.path.join("u.md")).unwrap(), "便签 a!".as_bytes());
+        // One not read faithfully: what is written here goes apart.
+        std::fs::write(folder.path.join("half.md"), &le[..le.len() - 1]).unwrap();
+        let (text, stamp) = folder.read("half.md").unwrap();
+        assert!(matches!(folder.write("half.md", &text, Some(stamp)).unwrap(), Written::Apart(_)));
+        assert_eq!(std::fs::read(folder.path.join("half.md")).unwrap(), &le[..le.len() - 1]);
         let _ = std::fs::remove_dir_all(&folder.path);
     }
 }

@@ -37,10 +37,13 @@ pub fn look(told: impl Fn() + Send + 'static) {
     std::thread::Builder::new()
         .name("glance: start menu".into())
         .spawn(move || {
-            unsafe {
-                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            // (Its apartment left once the shell's objects are let go of, as `read` returns.)
+            let joined = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) }.is_ok();
+            let found = read();
+            if joined {
+                unsafe { windows::Win32::System::Com::CoUninitialize() };
             }
-            if let Some(found) = read() {
+            if let Some(found) = found {
                 *FOUND.lock().unwrap() = Some(Arc::new(found));
             }
             LOOKING.store(false, Ordering::Release);

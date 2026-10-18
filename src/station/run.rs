@@ -129,19 +129,18 @@ pub enum Lands {
 /// told it by message): a drag over a strip along `edge` opens the station there, as a push into the edge does.
 pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Lands) {
     if lands == Lands::Apps {
-        // Files, folders and shortcuts dropped, and web addresses, kept at hand after what is there.
+        // Files, folders and shortcuts dropped, and web addresses, kept at hand after what is there. (Told apart on a
+        // thread of their own: a path on a drive slow to answer would else hold the station's thread, and the
+        // clipboard with it.)
         if let Dragged::Dropped(given) = dragged {
-            let added: Vec<super::apps::App> = given
-                .iter()
-                .flat_map(|content| match content {
-                    Content::Files(paths) => paths.iter().filter_map(|path| super::apps::App::of_path(path)).collect(),
-                    Content::Text(text) => super::apps::App::of_url(text.trim()).into_iter().collect(),
-                    _ => Vec::new(),
-                })
-                .collect();
-            if !added.is_empty() {
-                super::apps::change(move |apps| apps.extend(added.into_iter().filter(|app| !apps.contains(app)).collect::<Vec<_>>()));
-            }
+            let paths: Vec<std::path::PathBuf> = given.iter().flat_map(|content| if let Content::Files(paths) = content { paths.clone() } else { Vec::new() }).collect();
+            let urls: Vec<String> = given.iter().filter_map(|content| if let Content::Text(text) = content { Some(text.trim().to_string()) } else { None }).collect();
+            std::thread::spawn(move || {
+                let added: Vec<super::apps::App> = paths.iter().filter_map(|path| super::apps::App::of_path(path)).chain(urls.iter().filter_map(|url| super::apps::App::of_url(url))).collect();
+                if !added.is_empty() {
+                    super::apps::change(move |apps| apps.extend(added.into_iter().filter(|app| !apps.contains(app)).collect::<Vec<_>>()));
+                }
+            });
         }
         return;
     }

@@ -30,12 +30,16 @@ pub fn pretend(notes: Vec<Note>) {
     *SHOWN.lock().unwrap() = Some(Arc::new(notes));
 }
 
-/// The notes' folder as the settings have it, and what a conflict's copy is called in the language shown.
+/// The notes' folder as the settings have it (none chosen yet: the one in the language shown, kept as chosen once the
+/// notes are first read, so it stays as the language changes), and what a conflict's copy is called in it.
 pub fn folder() -> Folder {
     let chosen = crate::app().settings.lock().unwrap().notes_folder.clone();
-    let lang = crate::update::language();
-    let path = chosen.unwrap_or_else(|| default_folder(lang));
-    Folder { path, apart: lang.pick("（冲突副本）", " (conflicted copy)") }
+    folder_at(chosen.unwrap_or_else(|| default_folder(crate::update::language())))
+}
+
+/// The notes' folder at `path`, a conflict's copy called as the language shown says.
+pub fn folder_at(path: PathBuf) -> Folder {
+    Folder { path, apart: crate::update::language().pick("（冲突副本）", " (conflicted copy)") }
 }
 
 /// `Documents\Glance 便签` (`Glance Notes` in English).
@@ -78,6 +82,15 @@ pub fn start(told: impl Fn() + Send + Sync + 'static) {
 }
 
 fn follow() {
+    // The folder in the language shown kept as chosen, where none is yet.
+    if crate::app().settings.lock().unwrap().notes_folder.is_none() {
+        let path = default_folder(crate::update::language());
+        crate::app().change(move |settings| {
+            if settings.notes_folder.is_none() {
+                settings.notes_folder = Some(path);
+            }
+        });
+    }
     // What the folder held as last read: each note's name and file.
     let mut held: Vec<(String, store::Stamp, Colour)> = Vec::new();
     let mut looked = std::time::Instant::now();
