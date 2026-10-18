@@ -743,6 +743,9 @@ impl Canvas for Frame<'_> {
     }
 
     fn clip(&self, x: f32, y: f32, width: f32, height: f32) {
+        // (On whole pixels, as what is filled in it is: else a fill to its edge stopped half a pixel short of the same
+        // fill unclipped, and what was under showed there.)
+        let (x, y, width, height) = self.on_pixels(x, y, width, height);
         unsafe { self.dc.PushAxisAlignedClip(&rect(x, y, width, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
     }
 
@@ -857,18 +860,7 @@ impl Canvas for Frame<'_> {
     }
 
     fn stroke_rounded(&self, fill: Fill, x: f32, y: f32, width: f32, height: f32, radius: f32, line: f32) {
-        // Its edges on whole pixels, and a line an odd number of pixels wide drawn on their middles: drawn across two,
-        // a hairline came out two pixels wide and half as strong.
-        let (mut x, mut y, mut width, mut height) = self.on_pixels(x, y, width, height);
-        if let Some((t, device)) = self.grid() {
-            if ((line * t.M11 * device).round() as i32) % 2 == 1 {
-                let (half_x, half_y) = (0.5 / (device * t.M11), 0.5 / (device * t.M22));
-                x += half_x;
-                y += half_y;
-                width -= 2.0 * half_x;
-                height -= 2.0 * half_y;
-            }
-        }
+        let (x, y, width, height) = self.stroked(x, y, width, height, line);
         let radius = radius.max(0.0).min(width / 2.0).min(height / 2.0);
         let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius };
         if let Some(brush) = self.paint_with(fill) {
@@ -1037,6 +1029,31 @@ impl<'a> Frame<'a> {
         (whole(x, t.M11, t.M31), whole(y, t.M22, t.M32))
     }
 
+    /// The path `(x, y, width, height)` (DIPs) a line `line` wide is drawn along (its middle), put where the line
+    /// covers whole pixels (see `grid`): a line an odd number of pixels wide on the middles of pixels, one given on
+    /// their edges half a pixel in (a hairline on an edge was drawn across two pixels, at half strength); one even, on
+    /// their edges. Given on the middles already (as the menus give theirs), it stays there.
+    pub fn stroked(&self, x: f32, y: f32, width: f32, height: f32, line: f32) -> (f32, f32, f32, f32) {
+        let Some((t, device)) = self.grid() else { return (x, y, width, height) };
+        let odd = ((line * t.M11 * device).round() as i32) % 2 == 1;
+        // (In the target's pixels and back.)
+        let put = |v: f32, scale: f32, offset: f32, far: bool| {
+            if !v.is_finite() || v.abs() > 1.0e6 {
+                return v;
+            }
+            let at = (v * scale + offset) * device;
+            let at = match (odd, far) {
+                (true, false) => (at + 1.0e-3).floor() + 0.5,
+                (true, true) => (at - 1.0e-3).ceil() - 0.5,
+                (false, _) => at.round(),
+            };
+            (at / device - offset) / scale
+        };
+        let (left, right) = (put(x, t.M11, t.M31, false), put(x + width, t.M11, t.M31, true));
+        let (top, bottom) = (put(y, t.M22, t.M32, false), put(y + height, t.M22, t.M32, true));
+        (left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+    }
+
     /// The rectangle `(x, y, width, height)` (DIPs) with its edges on whole pixels (see `on_pixel`), none shrunk away:
     /// a side that had length keeps at least a pixel's.
     pub fn on_pixels(&self, x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
@@ -1116,6 +1133,7 @@ impl<'a> Frame<'a> {
     /// The outline of the rounded rectangle, dashed, a line `width` DIPs wide centred on it.
     #[allow(clippy::too_many_arguments)]
     pub fn stroke_rounded_dashed(&self, color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32, width: f32) {
+        let (x, y, w, h) = self.stroked(x, y, w, h, width);
         let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: radius, radiusY: radius };
         unsafe { self.dc.DrawRoundedRectangle(&shape, self.brush(color), width, &self.gfx.dashed) };
     }
@@ -1576,6 +1594,45 @@ pub fn rect(left: f32, top: f32, width: f32, height: f32) -> D2D_RECT_F {
 #[cfg(test)]
 mod tests {
     use super::room;
+
+    /// Drawn off screen at 100%, `size` pixels square: each pixel's alpha, rows top to bottom.
+    #[cfg(feature = "studio")]
+    fn alphas(size: u32, paint: impl FnOnce(&super::Frame)) -> Vec<Vec<u8>> {
+        let gfx = super::Gfx::new().expect("graphics");
+        let pixels = gfx.draw_offscreen((size, size), 1.0, paint).expect("drawn");
+        pixels.chunks(size as usize * 4).map(|row| row.chunks(4).map(|pixel| pixel[3]).collect()).collect()
+    }
+
+    /// A hairline round a box covers one whole pixel at each edge, inside the box, whether it is given at the box's
+    /// edge or half a pixel in (as the menus give theirs); not two pixels at half strength, nor a pixel further in.
+    #[test]
+    #[cfg(feature = "studio")]
+    fn a_hairline_covers_whole_pixels() {
+        use super::super::canvas::{Canvas, Color, Fill};
+        for (x, side) in [(2.0, 10.0), (2.5, 9.0)] {
+            let seen = alphas(16, |frame| frame.stroke_rounded(Fill::Solid(Color::hex(0xffffff, 1.0)), x, x, side, side, 0.0, 1.0));
+            assert_eq!(seen[6][2], 255, "given at {x}: its left edge's pixel");
+            assert_eq!(seen[6][1], 0, "given at {x}: the pixel outside it");
+            assert_eq!(seen[6][3], 0, "given at {x}: the pixel inside it");
+            assert_eq!(seen[11][6], 255, "given at {x}: its bottom edge's pixel");
+            assert_eq!(seen[12][6], 0, "given at {x}: the pixel below it");
+        }
+    }
+
+    /// A fill clipped to a box half a pixel off the grid covers what the same fill unclipped does at that edge (both
+    /// put on whole pixels): nothing of what is under shows along it.
+    #[test]
+    #[cfg(feature = "studio")]
+    fn a_clipped_fill_meets_its_clip() {
+        use super::super::canvas::{Canvas, Color};
+        let seen = alphas(16, |frame| {
+            frame.clip(2.0, 2.0, 10.0, 7.5);
+            frame.fill(Color::hex(0xffffff, 1.0), 2.0, 2.0, 10.0, 7.5);
+            frame.unclip();
+        });
+        assert_eq!(seen[9][5], 255, "the fill's last row, inside the clip");
+        assert_eq!(seen[10][5], 0, "past both");
+    }
 
     #[test]
     fn room_is_made_anew_a_few_times_as_a_window_is_sized() {
