@@ -1953,6 +1953,7 @@ impl Widget {
             size,
             parts,
             beside,
+            before: None,
         }
     }
 
