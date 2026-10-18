@@ -48,6 +48,7 @@ pub enum Page {
 
 /// Where the page goes: beside `by` (screen px: the panel or the widget it opens from), on the side `side` (away from
 /// the screen's edge it is at), in the skin and its light or dark.
+#[derive(Clone)]
 pub struct Opening {
     pub page: Page,
     pub by: RECT,
@@ -88,8 +89,10 @@ static ASKS: OnceLock<Mutex<Sender<Ask>>> = OnceLock::new();
 /// Its thread's window for asks (message-only), and whether a page is up.
 static POST: AtomicIsize = AtomicIsize::new(0);
 static UP: AtomicBool = AtomicBool::new(false);
-/// Its message: something asked.
+/// Its messages: something asked; the page to go, as soon as it is free (see `gone`); the page made again as its
+/// screen's scale changed.
 const ASKED: u32 = WM_APP + 7;
+const GO_SOON: u32 = WM_APP + 8;
 /// Its timers: the caret's blink, drawn again while pictures are being made, and a note kept a moment after it was
 /// last written in (the text services' own timers are numbered past these).
 const BLINK: usize = 1;
@@ -152,6 +155,8 @@ struct Beside {
     waiting: bool,
     /// The note written, on a note's page.
     writing: Option<Writing>,
+    /// How it was opened (made again so as its screen's scale changes).
+    opening: Option<Opening>,
 }
 
 /// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
@@ -231,6 +236,10 @@ fn run(asks: Receiver<Ask>) {
         let _ = PostMessageW(Some(post), ASKED, WPARAM(0), LPARAM(0));
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            if message.hwnd == post && message.message == GO_SOON {
+                gone();
+                continue;
+            }
             if message.hwnd == post && message.message == ASKED {
                 while let Ok(ask) = asks.try_recv() {
                     match ask {
@@ -258,6 +267,15 @@ fn run(asks: Receiver<Ask>) {
                 }
                 _ => {}
             }
+            // Its menu left for another program's window: the menu and the page go (the page took no deactivation:
+            // its menu had the front).
+            let left = MENU.with(|menu| menu.borrow().as_ref().is_some_and(|(open, _)| open.left()));
+            if left && !ours(GetForegroundWindow()) {
+                if let Some((open, _)) = MENU.with(|menu| menu.borrow_mut().take()) {
+                    open.close();
+                }
+                gone();
+            }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
@@ -267,6 +285,10 @@ fn run(asks: Receiver<Ask>) {
 /// The page `opening` asks for, up beside what it opens from.
 fn show(opening: Opening) {
     gone();
+    // (The page before still up, its note not kept or the page in use: it stays, the new one not made.)
+    if BESIDE.with(|cell| cell.try_borrow().map_or(true, |beside| beside.is_some())) {
+        return;
+    }
     let Ok(gfx) = gfx::current() else { return };
     let showing = super::life::Showing::of(&gfx);
     unsafe {
@@ -312,7 +334,7 @@ fn show(opening: Opening) {
             scale,
             theme: Rc::new(Theme::new(opening.skin, opening.dark)),
             lang: crate::update::language(),
-            page: opening.page,
+            page: opening.page.clone(),
             search: Typing::most(SEARCH_MOST),
             scroll: 0.0,
             scroll_most: 0.0,
@@ -322,6 +344,7 @@ fn show(opening: Opening) {
             caret_on: true,
             waiting: false,
             writing: None,
+            opening: Some(opening.clone()),
         };
         let page = beside.page.clone();
         let theme = beside.theme.clone();
@@ -378,13 +401,27 @@ thread_local! {
     static DROP_TARGET: RefCell<Option<windows::Win32::System::Ole::IDropTarget>> = const { RefCell::new(None) };
 }
 
-/// The page up, gone (a note on it kept first).
+/// The page up, gone (a note on it kept first: one that cannot be kept leaves it up, saying so). Asked while the page
+/// is in use (a message come in the middle of what it does), it goes as soon as it is free.
 fn gone() {
-    with(Beside::keep);
+    let Ok(mut held) = BESIDE.with(|cell| cell.try_borrow_mut().map(|mut beside| beside.take())) else {
+        let post = POST.load(Ordering::Acquire);
+        let _ = unsafe { PostMessageW(Some(HWND(post as *mut _)), GO_SOON, WPARAM(0), LPARAM(0)) };
+        return;
+    };
+    if let Some(beside) = held.as_mut() {
+        if !beside.keep() {
+            beside.redraw();
+            BESIDE.with(|cell| *cell.borrow_mut() = held);
+            return;
+        }
+    }
     if let Some((open, _)) = MENU.with(|menu| menu.borrow_mut().take()) {
         open.close();
     }
-    if let Some(beside) = BESIDE.with(|cell| cell.borrow_mut().take()) {
+    if let Some(mut beside) = held {
+        // (The text services let go of before the window they write in.)
+        beside.writing = None;
         unsafe {
             let _ = windows::Win32::System::Ole::RevokeDragDrop(beside.hwnd);
             let _ = DestroyWindow(beside.hwnd);
@@ -392,6 +429,11 @@ fn gone() {
         DROP_TARGET.with(|held| held.borrow_mut().take());
     }
     UP.store(false, Ordering::Release);
+}
+
+/// Whether `window` is one of this thread's (the page's, its menu's).
+fn ours(window: HWND) -> bool {
+    !window.is_invalid() && unsafe { GetWindowThreadProcessId(window, None) } == unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }
 }
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -443,7 +485,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                     BLINK => beside.caret_on = !beside.caret_on,
                     KEEP => {
                         let _ = unsafe { KillTimer(Some(hwnd), KEEP) };
-                        beside.keep();
+                        let _ = beside.keep();
                     }
                     _ => {}
                 }
@@ -457,10 +499,27 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Another program's window come in front: the page goes (the panel takes no focus, and leaves it up; its own
         // menu leaves it up too).
         WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
-            let coming = HWND(lparam.0 as *mut _);
-            let ours = !coming.is_invalid() && unsafe { GetWindowThreadProcessId(coming, None) } == unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
-            if !ours {
+            if !ours(HWND(lparam.0 as *mut _)) {
+                // (Gone once the page is free: this may come in the middle of what it does.)
+                let post = POST.load(Ordering::Acquire);
+                let _ = unsafe { PostMessageW(Some(HWND(post as *mut _)), GO_SOON, WPARAM(0), LPARAM(0)) };
+            }
+        }
+        // Its screen's scale changed (moved to another screen, or the scale chosen): made again at the new one.
+        WM_DPICHANGED => {
+            let again = with(|beside| {
+                let _ = beside.keep();
+                beside.opening.as_ref().map(|opening| Opening { page: beside.page.clone(), ..opening.clone() })
+            })
+            .flatten();
+            if let Some(opening) = again {
+                // (A note new when it opened, kept since: opened again as the note it now is.)
+                let opening = match (&opening.page, with(|beside| beside.writing.as_ref().and_then(|writing| writing.name.clone())).flatten()) {
+                    (Page::Note(None), Some(name)) => Opening { page: Page::Note(Some(name)), ..opening },
+                    _ => opening,
+                };
                 gone();
+                show(opening);
             }
         }
         _ => return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
@@ -544,16 +603,17 @@ impl Beside {
 
     /// The note written kept in its file, where what is written is not kept yet (see `notes::Folder::write`): a new
     /// one named by its title as it is first kept (an empty one never), one changed outside meanwhile kept apart.
-    fn keep(&mut self) {
+    /// Whether all that was written is kept now (a failure leaves it not kept: the page stays up, and says so).
+    fn keep(&mut self) -> bool {
         let lang = self.lang;
-        let Some(writing) = self.writing.as_mut().filter(|writing| writing.unkept) else { return };
+        let Some(writing) = self.writing.as_mut().filter(|writing| writing.unkept) else { return true };
         let text = writing.editor.text();
         let folder = crate::notes::folder();
         let name = match &writing.name {
             Some(name) => name.clone(),
             None if text.trim().is_empty() => {
                 writing.unkept = false;
-                return;
+                return true;
             }
             None => {
                 let title = crate::notes::Note { name: String::new(), text: text.clone(), colour: writing.colour, stamp: Default::default() }.title().to_string();
@@ -580,10 +640,15 @@ impl Beside {
                 writing.stamp = folder.stamp(&apart);
                 writing.name = Some(apart);
             }
-            Err(_) => writing.said = Some(lang.pick("没能保存，请检查便签文件夹", "Not kept: see the notes' folder").to_string()),
+            Err(_) => {
+                // (Not kept: tried again with the next key, and as the page goes, which waits on it.)
+                writing.said = Some(lang.pick("没能保存，请检查便签文件夹；关闭前会再试", "Not kept: see the notes' folder (tried again before it closes)").to_string());
+                return false;
+            }
         }
         writing.unkept = false;
         crate::notes::read_again();
+        true
     }
 
     /// The note's menu, at its button.
@@ -606,7 +671,7 @@ impl Beside {
 
     /// `choice` made in the note's menu: done; whether the page is to go.
     fn note_chose(&mut self, choice: NoteChoice) -> bool {
-        self.keep();
+        let _ = self.keep();
         let Some(writing) = self.writing.as_mut() else { return false };
         let folder = crate::notes::folder();
         match choice {
@@ -689,6 +754,9 @@ impl Beside {
     }
 
     fn key(&mut self, key: VIRTUAL_KEY) {
+        if self.page != Page::Picker {
+            return;
+        }
         let ctrl = unsafe { GetKeyState(i32::from(VK_CONTROL.0)) } < 0;
         match key {
             VK_LEFT => self.search.go(self.search.step(self.search.caret, false), false),
@@ -719,6 +787,9 @@ impl Beside {
     }
 
     fn char(&mut self, unit: u16) {
+        if self.page != Page::Picker {
+            return;
+        }
         // (Control characters are keys, seen to in `key`.)
         if unit < 0x20 || unit == 0x7F {
             return;
@@ -1120,6 +1191,7 @@ otepad.exe"),
                             caret_on: true,
                             waiting: false,
                             writing: None,
+                            opening: None,
                         };
                         beside.search.put(&search.encode_utf16().collect::<Vec<_>>());
                         let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, h))).unwrap();

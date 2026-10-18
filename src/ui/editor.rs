@@ -123,8 +123,9 @@ impl Editor {
 
     /// `text` written in it, in place of what was.
     pub fn set_text(&self, text: &str) {
+        // (Each line break one carriage return, as the text services keep them: Windows' pairs as one too.)
         unsafe {
-            let _ = self.services.TxSetText(&HSTRING::from(text.replace('\n', "\r")));
+            let _ = self.services.TxSetText(&HSTRING::from(text.replace("\r\n", "\n").replace('\n', "\r")));
         }
         self.kept.changed.set(false);
     }
@@ -135,10 +136,12 @@ impl Editor {
     }
 
     /// A window message for it (the keys, the input method's, the pointer's, its timers'): what it answers.
+    /// (None: not theirs, `S_FALSE`, for the window's own handling to see to, as an input method's message may be.)
     pub fn send(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         let mut result = LRESULT(0);
-        let handled = unsafe { self.services.TxSendMessage(message, wparam, lparam, &mut result) };
-        handled.is_ok().then_some(result)
+        // (Called through its table, its answer kept whole: the bindings' call takes S_FALSE for done.)
+        let answer = unsafe { (Interface::vtable(&self.services).base__.TxSendMessage)(Interface::as_raw(&self.services), message, wparam, lparam, &mut result) };
+        (answer == windows::Win32::Foundation::S_OK).then_some(result)
     }
 
     /// Its words dressed as `looks` says (see `notes::markdown`), in `palette`'s colours and faces: what they are
@@ -228,6 +231,9 @@ impl Editor {
 }
 
 impl Drop for Editor {
+    /// (Not shut down with `ShutdownTextServices`: their host is counted, held as long as they are, so a reference to
+    /// them kept elsewhere finds it still there; shut down, msftedit lets go of the host a second time as the last such
+    /// reference goes.)
     fn drop(&mut self) {
         unsafe {
             let _ = self.services.OnTxInPlaceDeactivate();
@@ -490,6 +496,9 @@ mod tests {
             // Chinese and an emoji written and given back as written.
             editor.set_text("你好 😀");
             assert_eq!(editor.text().trim_end(), "你好 😀");
+            // A file written on Windows: its line breaks one each, not two.
+            editor.set_text("一\r\n二");
+            assert_eq!(editor.text().trim_end(), "一\n二");
             drop(editor);
             let _ = DestroyWindow(hwnd);
         }
