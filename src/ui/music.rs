@@ -278,20 +278,20 @@ pub struct Music {
     /// How far the controls have come in over the spectrum (0 to 1: in while the pointer is over it).
     controls_in: f32,
     /// Whether the sound's slider is open beside its key (the pointer came onto the key, and has stayed on it or the
-    /// slider since), how far it has opened (0 to 1, eased), and where the key and its slider were last drawn with the
-    /// pointer last seen (for the wheel: turned over them, it turns the sound).
+    /// slider since), and how far it has opened (0 to 1, eased).
     sound_open: bool,
     sound_in: f32,
     /// How lit the track and the sound's slider are (0 to 1, eased: thicker, their knobs larger, without a jump as
     /// they move under a pointer that stands still).
     track_lit: f32,
     sound_lit: f32,
+    /// Whether one of those was drawn short of where it is going, this frame (more frames wanted). Not where they
+    /// stand: one not drawn (the controls gone, another layout) is not eased on, and stands short of it for good.
+    easing: bool,
     /// Since when the pointer has been off the sound's key and slider (they close only after `SOUND_LINGER`), and the
     /// sound as last read (a frame that read none shows it, and does not close the slider).
     sound_left: Option<Instant>,
     sound_seen: Option<(u8, bool)>,
-    sound_at: Option<(f32, f32, f32, f32)>,
-    pointer: Option<(f32, f32)>,
     /// Its spectrum as shown: up at once with the sound, down no faster than `SPECTRUM_FALL`.
     bands: [f32; crate::sound::BANDS],
     /// Where in the rail of lines the line aimed at is drawn (DIPs, from its top), easing toward where it is to be (it
@@ -315,6 +315,8 @@ pub struct Music {
     turned: i32,
     turned_at: Instant,
     wheeled: f32,
+    /// The wheel turned over the sound, short of a step of it (see `wheel`).
+    sound_wheeled: f32,
 }
 
 /// Where the line aimed at in the rail of lines is drawn (from its top, DIPs): moving from where it was (`from`, the
@@ -355,10 +357,9 @@ impl Default for Music {
             sound_in: 0.0,
             track_lit: 0.0,
             sound_lit: 0.0,
+            easing: false,
             sound_left: None,
             sound_seen: None,
-            sound_at: None,
-            pointer: None,
             bands: [0.0; crate::sound::BANDS],
             anchor: None,
             step: 0.0,
@@ -372,6 +373,7 @@ impl Default for Music {
             turned: 0,
             turned_at: Instant::now(),
             wheeled: 0.0,
+            sound_wheeled: 0.0,
         }
     }
 }
@@ -529,16 +531,19 @@ pub fn play_line(index: u16) {
 impl Music {
     /// The wheel turned by `delta` (a notch, 120) over it: the lines turned by as many, from the one sung now (or the
     /// one turned to), down toward the end for a turn toward the user.
-    pub fn wheel(&mut self, delta: i16) {
-        // Over the sound's key or its slider: the sound turned, two in a hundred a notch (as Windows' own does).
-        if let (Some((x, y, w, h)), Some((px, py))) = (self.sound_at, self.pointer) {
-            if px >= x && px < x + w && py >= y && py < y + h {
-                if let Some((level, _)) = crate::playing::sound() {
-                    let to = (level as f32 + 2.0 * delta as f32 / NOTCH).round().clamp(0.0, 100.0) as u8;
-                    crate::playing::set_sound(Some(to), Some(false));
-                }
-                return;
+    pub fn wheel(&mut self, delta: i16, on_sound: bool) {
+        // Over the sound's key or its slider (`on_sound`, as its host finds it where the wheel turned): the sound
+        // turned, two in a hundred a notch (as Windows' own does); a part of a notch kept toward the next (a touchpad
+        // turns it by little ones).
+        if on_sound {
+            self.sound_wheeled += 2.0 * delta as f32 / NOTCH;
+            let steps = self.sound_wheeled.trunc();
+            self.sound_wheeled -= steps;
+            if let (Some((level, _)), true) = (crate::playing::sound(), steps != 0.0) {
+                let to = (level as f32 + steps).clamp(0.0, 100.0) as u8;
+                crate::playing::set_sound(Some(to), Some(false));
             }
+            return;
         }
         self.wheeled -= delta as f32;
         let lines = (self.wheeled / NOTCH).trunc();
@@ -596,9 +601,7 @@ impl Music {
         let step = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
         self.step = step;
-        // (Where the sound's key is, found anew as it is drawn.)
-        self.pointer = pointer;
-        self.sound_at = None;
+        self.easing = false;
         // The colours, toward the cover's (a little each frame).
         if let Some(cover) = &moment.cover {
             let ease = (step * 3.0).min(1.0);
@@ -708,8 +711,7 @@ impl Music {
             unsafe { frame.dc.PopLayer() };
         }
         let hits = drawing.hits;
-        let opening = self.sound_left.is_some() && self.sound_open || (self.sound_in > 0.0 && self.sound_in < 1.0) || (self.track_lit > 0.0 && self.track_lit < 1.0) || (self.sound_lit > 0.0 && self.sound_lit < 1.0);
-        Painted { hits, busy: opening || self.anchoring || moment.playing || settling || coming || falling || swinging || self.fading.is_some() || self.turned != 0 || moment.dragged_to.is_some() || turn.is_some() }
+        Painted { hits, busy: self.easing || self.anchoring || moment.playing || settling || coming || falling || swinging || self.fading.is_some() || self.turned != 0 || moment.dragged_to.is_some() || turn.is_some() }
     }
 }
 
@@ -1040,7 +1042,6 @@ impl Drawing<'_> {
         self.music.sound_in = if to > self.music.sound_in { (self.music.sound_in + fade_step).min(to) } else { (self.music.sound_in - fade_step).max(to) };
         let opened = self.music.sound_in * self.music.sound_in * (3.0 - 2.0 * self.music.sound_in);
         let x = whole(home - room * opened);
-        self.music.sound_at = Some((x, row, home + CONTROL - x, CONTROL));
         // The track, ending before the key wherever the key is.
         self.progress(from, x - 4.0, row, fade, 1.0);
         let on = self.pointer.is_some_and(|p| inside(p, x, row, CONTROL, CONTROL));
@@ -1063,6 +1064,8 @@ impl Drawing<'_> {
         let over_slider = self.pointer.is_some_and(|p| inside(p, slider - 4.0, row, SOUND_WIDE + 8.0, CONTROL));
         let lit_to = if opened >= 1.0 && (over_slider || crate::playing::volume_held()) { 1.0 } else { 0.0 };
         self.music.sound_lit = eased_toward(self.music.sound_lit, lit_to, self.music.step);
+        // (Lingering, it closes once the time is up: a frame wanted then.)
+        self.music.easing |= lingering || self.music.sound_in != to || self.music.sound_lit != lit_to;
         if opened <= 0.0 {
             return;
         }
@@ -1076,7 +1079,9 @@ impl Drawing<'_> {
         frame.fill_circle(Color::hex(self.ink, alpha), Point { x: slider + SOUND_WIDE * fraction, y: centre.y }, 4.5 + 1.5 * lit);
         frame.unclip();
         if self.music.controls_in >= 0.5 && opened >= 1.0 {
-            self.hits.push((slider - 4.0, row, SOUND_WIDE + 8.0, CONTROL, Hit::Volume));
+            // (Its box as wide as its track, as every slider's: where it is pressed along the box is where along the
+            // track it is set to, and a wider box set it off by as much.)
+            self.hits.push((slider, row, SOUND_WIDE, CONTROL, Hit::Volume));
         }
     }
 
@@ -1129,6 +1134,7 @@ impl Drawing<'_> {
         // made it jump between thin and thick.)
         let lit_to = if seekable && (lit || dragged) { 1.0 } else { 0.0 };
         self.music.track_lit = eased_toward(self.music.track_lit, lit_to, self.music.step);
+        self.music.easing |= self.music.track_lit != lit_to;
         let shine = self.music.track_lit;
         let thick = 3.0 + 2.0 * shine;
         frame.fill_rounded(Color::hex(self.ink, 0.2 * fade), from, middle - thick / 2.0, track, thick, thick / 2.0);

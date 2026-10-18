@@ -1372,8 +1372,20 @@ impl Widgets {
     /// the lines of what plays.
     pub fn wheel(&mut self, hwnd: HWND, screen: POINT, delta: i16) {
         let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
+        // What it shows where the wheel turned, as a press there finds it.
+        let hit = {
+            let mut client = screen;
+            unsafe {
+                let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
+            }
+            let px = widget.contact.scale * widget.zoom;
+            let margin = widget.margin_px();
+            let (x, y) = ((client.x - margin) as f32 / px - widget.hits_from.0, (client.y - margin) as f32 / px - widget.hits_from.1);
+            widget.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
+        };
+        let on_sound = hit.is_some_and(view::Hit::of_sound);
         if let Content::Music(shown) = &mut widget.content {
-            shown.music.wheel(delta);
+            shown.music.wheel(delta, on_sound);
             widget.next_frame = Instant::now();
             return;
         }
@@ -1386,20 +1398,13 @@ impl Widgets {
             let at = ((client.x - margin) as f32 / widget.contact.scale, (client.y - margin) as f32 / widget.contact.scale);
             if let Some((index, _)) = merged.part_at(at) {
                 if let Content::Music(shown) = &mut merged.parts[index] {
-                    shown.music.wheel(delta);
+                    shown.music.wheel(delta, on_sound);
                     widget.next_frame = Instant::now();
                     return;
                 }
             }
         }
-        let mut client = screen;
-        unsafe {
-            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
-        }
-        let px = widget.contact.scale * widget.zoom;
-        let margin = widget.margin_px();
-        let (x, y) = ((client.x - margin) as f32 / px - widget.hits_from.0, (client.y - margin) as f32 / px - widget.hits_from.1);
-        let most = widget.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).and_then(|hit| hit.4.max_scroll());
+        let most = hit.and_then(view::Hit::max_scroll);
         let readings = match &mut widget.content {
             Content::Readings(readings) => Some(readings),
             Content::Merged(merged) => merged.parts.iter_mut().find_map(|part| if let Content::Readings(readings) = part { Some(readings) } else { None }),
@@ -3167,9 +3172,14 @@ impl Widget {
         crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop, self.shows_full()), crate::os::apps_dark(), over_the_panel)
     }
 
-    /// Whether it shows what plays (and so offers it over the whole screen, as its button does).
+    /// Whether it shows what plays, alone or merged with others (and so offers it over the whole screen). (Not by its
+    /// buttons: merged, it takes those of the readings, which have no full screen.)
     fn shows_full(&self) -> bool {
-        self.content.buttons().contains(&Button::Full)
+        match &self.content {
+            Content::Music(_) => true,
+            Content::Merged(merged) => merged.parts.iter().any(|part| matches!(part, Content::Music(_))),
+            Content::Readings(_) => false,
+        }
     }
 }
 

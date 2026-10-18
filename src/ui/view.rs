@@ -179,6 +179,11 @@ impl Hit {
         }
     }
 
+    /// Whether it is the sound's: its key, or its slider (the wheel over it turns the sound).
+    pub fn of_sound(self) -> bool {
+        matches!(self, Hit::Volume | Hit::VolumeUp | Hit::Media(crate::playing::Key::Mute, _))
+    }
+
     /// Whether it is a track standing up (dragged along from its bottom).
     pub fn upright(self) -> bool {
         self == Hit::VolumeUp

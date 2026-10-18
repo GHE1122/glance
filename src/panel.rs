@@ -3005,7 +3005,8 @@ impl<'a> Panel<'a> {
         let Some(window) = self.placement.as_ref().map(|p| p.window) else { return };
         // What plays: its lines turned.
         if self.part == Part::Music {
-            self.music.wheel(delta);
+            let on_sound = self.hit_at(POINT { x: screen.x - window.left, y: screen.y - window.top }).is_some_and(Hit::of_sound);
+            self.music.wheel(delta, on_sound);
             self.next_frame = Instant::now();
             return;
         }
