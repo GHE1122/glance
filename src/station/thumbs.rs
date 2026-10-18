@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
+use crate::ui::canvas::Picture;
 use std::sync::{Arc, Mutex, OnceLock};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::SIZE;
@@ -13,9 +14,9 @@ use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingN
 
 /// A picture: its pixels (BGRA, premultiplied, top row first) and how many across and down.
 #[derive(Debug)]
-pub struct Thumb {
-    pub pixels: Vec<u8>,
-    pub size: (u32, u32),
+struct Thumb {
+    pixels: Vec<u8>,
+    size: (u32, u32),
 }
 
 /// What a picture is asked for: the file, when it was last written (a file written again is pictured again), and the
@@ -31,7 +32,7 @@ struct Key {
 const KEPT_MOST: usize = 256;
 
 struct Kept {
-    made: HashMap<Key, Option<Arc<Thumb>>>,
+    made: HashMap<Key, Option<Picture>>,
     /// Asked for, in the order they were (the oldest first), and being made.
     order: Vec<Key>,
     asked: HashSet<Key>,
@@ -53,9 +54,9 @@ pub fn start(told: impl Fn() + Send + Sync + 'static) {
     std::thread::Builder::new().name("glance: station pictures".into()).spawn(move || make(asks)).expect("a thread started");
 }
 
-/// The picture of the file at `path`, `side` physical px across: as made; none yet (asked for, and told when it is),
-/// or none to be had.
-pub fn of(path: &Path, side: u32) -> Option<Arc<Thumb>> {
+/// The picture of the file at `path`, `side` physical px square (its own shape in its middle): as made; none yet
+/// (asked for, and told when it is), or none to be had.
+pub fn of(path: &Path, side: u32) -> Option<Picture> {
     let key = Key { path: path.to_path_buf(), written: std::fs::metadata(path).and_then(|meta| meta.modified()).ok(), side };
     let mut kept = KEPT.lock().unwrap();
     let kept = kept.as_mut()?;
@@ -76,7 +77,12 @@ fn make(asks: Receiver<Key>) {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
     }
     while let Ok(key) = asks.recv() {
-        let made = picture(&key.path, key.side).map(Arc::new);
+        let made = picture(&key.path, key.side).map(|thumb| squared(&thumb, key.side, {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        }));
         {
             let mut kept = KEPT.lock().unwrap();
             let Some(kept) = kept.as_mut() else { continue };
@@ -92,6 +98,19 @@ fn make(asks: Receiver<Key>) {
             told();
         }
     }
+}
+
+/// `thumb` in the middle of a square `side` across, clear round it, as a picture known by `key`.
+fn squared(thumb: &Thumb, side: u32, key: u64) -> Picture {
+    let (w, h) = (thumb.size.0.min(side), thumb.size.1.min(side));
+    let (left, top) = ((side - w) / 2, (side - h) / 2);
+    let mut pixels = vec![0u8; (side * side * 4) as usize];
+    for row in 0..h {
+        let from = (row * thumb.size.0 * 4) as usize;
+        let to = (((top + row) * side + left) * 4) as usize;
+        pixels[to..to + (w * 4) as usize].copy_from_slice(&thumb.pixels[from..from + (w * 4) as usize]);
+    }
+    Picture { key, side, pixels: Arc::new(pixels) }
 }
 
 /// The picture of the file at `path`, as large as fits `side` square (its shape kept), as Explorer shows it.

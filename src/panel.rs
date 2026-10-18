@@ -6,7 +6,6 @@
 //! the panel rests, so nothing that moves on screen feeds back into it.
 
 use std::collections::VecDeque;
-use std::f32::consts::E;
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::rc::Rc;
@@ -1402,8 +1401,8 @@ struct Panel<'a> {
     /// When live refraction last tried to take the desktop.
     tried_behind: Instant,
     frost: f32,
-    scroll: f32,
-    scroll_target: f32,
+    /// How far its lists are scrolled (see `view::Scrolls`).
+    scrolls: view::Scrolls,
     hover: Option<Hit>,
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
@@ -1532,8 +1531,7 @@ impl<'a> Panel<'a> {
             behind: None,
             tried_behind: Instant::now(),
             frost: 0.0,
-            scroll: 0.0,
-            scroll_target: 0.0,
+            scrolls: view::Scrolls::default(),
             hover: None,
             pinned: false,
             full_asked: None,
@@ -1751,8 +1749,7 @@ impl<'a> Panel<'a> {
                 came_from: pushed.then_some(cursor),
             });
             self.window.place(window);
-            self.scroll = 0.0;
-            self.scroll_target = 0.0;
+            self.scrolls.reset();
             self.hover = None;
             self.game = exclusive_fullscreen().then(|| unsafe { GetForegroundWindow() }).filter(|game| !game.is_invalid());
             self.shift.jump(1.0);
@@ -2618,7 +2615,7 @@ impl<'a> Panel<'a> {
             }
             self.game_at = game;
         }
-        let (prefs, theme, lang, scroll, hover, pinned) = (&self.drawn, &self.theme, self.lang, self.scroll, self.hover, self.pinned);
+        let (prefs, theme, lang, scroll, hover, pinned) = (&self.drawn, &self.theme, self.lang, self.scrolls, self.hover, self.pinned);
         let opening = match &mut self.opening {
             Some(opening) => {
                 // What the machine has shown since joins its lane where it
@@ -2697,7 +2694,7 @@ impl<'a> Panel<'a> {
         }
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
-        self.scroll += (self.scroll_target - self.scroll) * (1.0 - E.powf(-dt / SCROLL_EASE));
+        let lists_moving = self.scrolls.ease(dt, SCROLL_EASE);
 
         if self.part == Part::Music {
             return self.frame_music(now);
@@ -2752,7 +2749,7 @@ impl<'a> Panel<'a> {
         // The knob under the pointer, and the one held (the slider in hand's).
         let held = self.sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
         let thumbs_moving = self.thumbs.step(now, self.hover.filter(|hit| hit.slider().is_some()), held);
-        let scene = Scene { thumbs: &self.thumbs, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scroll, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
+        let scene = Scene { thumbs: &self.thumbs, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -2867,7 +2864,7 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel.
-        let moving = thumbs_moving || !self.shift.done(now) || !self.opacity.done(now) || (self.scroll_target - self.scroll).abs() > 0.05 || crate::playing::gliding() || self.turning.is_some();
+        let moving = thumbs_moving || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::playing::gliding() || self.turning.is_some();
         self.next_frame = if moving {
             now
         } else {
@@ -2985,9 +2982,20 @@ impl<'a> Panel<'a> {
 
     /// Which hit region a point in the window's client area (physical px) is in.
     fn hit_at(&self, client: POINT) -> Option<Hit> {
-        let px = self.placement.as_ref()?.px;
+        self.hits_at(client).next()
+    }
+
+    /// Each hit region a point in the window's client area (physical px) is in, in the order they were drawn.
+    fn hits_at(&self, client: POINT) -> impl Iterator<Item = Hit> + '_ {
+        let px = self.placement.as_ref().map_or(1.0, |placement| placement.px);
         let (x, y) = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
-        self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
+        self.hits.iter().filter(move |(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
+    }
+
+    /// The list a point in the window's client area (physical px) is on, and how far it scrolls (under what is on
+    /// it: the wheel over a thing on the station scrolls the station).
+    fn list_at(&self, client: POINT) -> Option<(view::List, f32)> {
+        self.hits_at(client).find_map(Hit::list)
     }
 
     /// The pointer moved over the panel: lights what it is over.
@@ -3006,7 +3014,7 @@ impl<'a> Panel<'a> {
             None if self.hit_at(client).is_some_and(|hit| hit.takes_press()) => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_HAND),
             None => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_ARROW),
         }
-        let hover = self.hit_at(client).filter(|hit| hit.max_scroll().is_none());
+        let hover = self.hit_at(client).filter(|hit| hit.list().is_none());
         if hover != self.hover {
             // What a press does, said under what says so (a drive's row, the line that switches players).
             match (hover.and_then(|hit| Some((hit, says(hit, self.lang)?))), self.placement.as_ref()) {
@@ -3065,8 +3073,7 @@ impl<'a> Panel<'a> {
             Some(Hit::Sort(sort)) if sort != self.drawn.processes.sort => {
                 self.prefs.processes.sort = sort;
                 self.drawn.processes.sort = sort;
-                self.scroll = 0.0;
-                self.scroll_target = 0.0;
+                self.scrolls.reset();
                 // Kept for next time, as if chosen in the settings.
                 // Saving tells this thread to restyle; not from here.
                 std::thread::spawn(move || crate::app().set_process_sort(sort));
@@ -3086,9 +3093,9 @@ impl<'a> Panel<'a> {
             return;
         }
         let client = POINT { x: screen.x - window.left, y: screen.y - window.top };
-        if let Some(max_scroll) = self.hit_at(client).and_then(Hit::max_scroll) {
+        if let Some((list, most)) = self.list_at(client) {
             let rows = -(delta as f32) / 120.0 * WHEEL_ROWS;
-            self.scroll_target = (self.scroll_target + rows * TABLE_ROW).clamp(0.0, max_scroll);
+            self.scrolls.turn(list, rows * TABLE_ROW, most);
             self.next_frame = Instant::now();
         }
     }
@@ -3108,7 +3115,7 @@ fn scene<'s>(
     prefs: &'s Prefs,
     theme: &'s Theme,
     lang: Lang,
-    scroll: f32,
+    scrolls: view::Scrolls,
     hover: Option<Hit>,
     pinned: bool,
     history: &'s [Sample],
@@ -3126,7 +3133,7 @@ fn scene<'s>(
         history,
         seen,
         pen_ms: wall - interval.as_secs_f64() * 1000.0 - PEN_LAG_MS,
-        process_scroll: scroll,
+        scrolls,
         hover,
         pinned,
         overlay,
@@ -3138,7 +3145,7 @@ fn scene<'s>(
 
 /// What a desktop widget's readings are drawn with at this moment.
 pub(crate) fn scene_for<'s>(controller: &'s Controller, prefs: &'s Prefs, theme: &'s Theme, lang: Lang, history: &'s [Sample], seen: &'s Seen) -> Scene<'s> {
-    Scene { buttons: false, ..scene(controller, prefs, theme, lang, 0.0, None, false, history, seen) }
+    Scene { buttons: false, ..scene(controller, prefs, theme, lang, view::Scrolls::default(), None, false, history, seen) }
 }
 
 /// The sink's procedure: the input loop takes its messages before they are dispatched.

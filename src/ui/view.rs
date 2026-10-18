@@ -152,8 +152,8 @@ pub enum Hit {
     /// The music shown over the whole of its screen.
     Full,
     Sort(ProcessSort),
-    /// The process list, and how far it scrolls.
-    Processes(u32),
+    /// A list scrolled through (the processes', the station's), and how far it scrolls (DIPs, as `f32::to_bits`).
+    List(List, u32),
     /// The overlay's switch.
     Overlay,
     /// The game button: the window in front taken for a game, or games turned off (see `presents::GameMode`).
@@ -180,7 +180,7 @@ impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::Processes(_) | Hit::Thread(_))
+        !matches!(self, Hit::List(..) | Hit::Thread(_))
     }
 
     /// The track it is, where it is one dragged along.
@@ -202,12 +202,62 @@ impl Hit {
         self == Hit::VolumeUp
     }
 
-    /// How far the process list scrolls, for a hit on it.
-    pub fn max_scroll(self) -> Option<f32> {
+    /// The list it is, and how far it scrolls, for a hit on one.
+    pub fn list(self) -> Option<(List, f32)> {
         match self {
-            Hit::Processes(bits) => Some(f32::from_bits(bits)),
+            Hit::List(list, bits) => Some((list, f32::from_bits(bits))),
             _ => None,
         }
+    }
+}
+
+/// A list a lane is scrolled through by the wheel.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum List {
+    Processes,
+    /// What is on the station, and what was copied lately.
+    Shelf,
+    Copies,
+}
+
+/// How far each list is scrolled (DIPs), and how far it is going (each frame a little nearer: see `ease`).
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Scrolls {
+    at: [f32; 3],
+    to: [f32; 3],
+}
+
+impl Scrolls {
+    /// How far `list` is scrolled.
+    pub fn at(&self, list: List) -> f32 {
+        self.at[list as usize]
+    }
+
+    /// `list` to be scrolled `by` more (DIPs), within `most`.
+    pub fn turn(&mut self, list: List, by: f32, most: f32) {
+        let to = &mut self.to[list as usize];
+        *to = (*to + by).clamp(0.0, most);
+    }
+
+    /// Each list `dt` seconds nearer where it is going (`ease`: the seconds it takes to come most of the way);
+    /// whether one is still on its way.
+    pub fn ease(&mut self, dt: f32, ease: f32) -> bool {
+        let mut moving = false;
+        for (at, to) in self.at.iter_mut().zip(self.to) {
+            *at += (to - *at) * (1.0 - std::f32::consts::E.powf(-dt / ease));
+            moving |= (to - *at).abs() > 0.05;
+        }
+        moving
+    }
+
+    /// Each list back at its top.
+    pub fn reset(&mut self) {
+        *self = Scrolls::default();
+    }
+
+    /// As each is scrolled, for what is drawn to tell one drawing from another.
+    pub fn bits(&self) -> [u32; 3] {
+        self.at.map(f32::to_bits)
     }
 }
 
@@ -229,7 +279,8 @@ pub struct Scene<'a> {
     /// The pen's time: the chart runs a little behind the newest sample, so
     /// the next one has always arrived by the time it is drawn to.
     pub pen_ms: f64,
-    pub process_scroll: f32,
+    /// How far each list is scrolled (see `Scrolls`).
+    pub scrolls: Scrolls,
     /// What the pointer is over.
     pub hover: Option<Hit>,
     /// Its sliders' knobs' dots, as they ease (see `thumb::Dots`).
@@ -1720,9 +1771,9 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let list_height = *visible as f32 * TABLE_ROW;
                 let max_scroll = if *scrolls { (rows.len().saturating_sub(*visible)) as f32 * TABLE_ROW } else { 0.0 };
                 if *scrolls {
-                    hits.push((left, y, width, list_height, Hit::Processes(max_scroll.to_bits())));
+                    hits.push((left, y, width, list_height, Hit::List(List::Processes, max_scroll.to_bits())));
                 }
-                let scroll = scene.process_scroll.clamp(0.0, max_scroll);
+                let scroll = scene.scrolls.at(List::Processes).clamp(0.0, max_scroll);
                 frame.clip(left, y, width, list_height);
                 for (i, row) in rows.iter().enumerate() {
                     let row_y = y + i as f32 * TABLE_ROW - scroll;
@@ -2169,7 +2220,7 @@ mod tests {
         read.threads_ghz = vec![Some(5.0), Some(4.5), Some(5.4), Some(4.2)];
         let history = leak(vec![read]);
         let seen = Box::leak(Box::new(Seen::of(history)));
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let cpu = lane(&scene, "cpu", Detail::Full).unwrap();
         let tags: Vec<&String> = cpu.iter().filter_map(|block| if let Block::Threads(cells) = block { Some(cells.iter().map(|(_, _, tag)| tag)) } else { None }).flatten().collect();
         assert_eq!(tags[2], "Thread 3 · 5.40 GHz · 10%");
@@ -2179,7 +2230,7 @@ mod tests {
     fn shows_each_kind_of_cores_clock() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         // Big and little cores: each kind's clock, in place of the one clock.
         let mut hybrid = sample(None, None, None);
         hybrid.kinds_ghz = vec![Some(5.2), None];
@@ -2192,7 +2243,7 @@ mod tests {
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
@@ -2216,7 +2267,7 @@ mod tests {
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
@@ -2234,7 +2285,7 @@ mod tests {
         two.drives = vec!["NVMe".into(), "SATA".into()];
         two.drive_ids = vec![0, 1];
         let history = leak(vec![with(Vec::new(), vec![(0, 35.0)])]);
-        let scene_two = Scene { music_apart: false, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene_two = Scene { music_apart: false, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let disk = facts(&lane(&scene_two, "disk", Detail::Full).unwrap());
         assert_eq!(&disk[..2], [("NVMe".to_string(), "35 °C".to_string()), ("SATA".to_string(), UNREAD.to_string())]);
         // The first chiplet missed this time: the second's reading stays its own.
@@ -2255,7 +2306,7 @@ mod tests {
             s
         };
         let cpu_fans = |prefs: &Prefs, history: &'static [Sample]| {
-            let scene = Scene { music_apart: false, info: &info, prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+            let scene = Scene { music_apart: false, info: &info, prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
             facts(&lane(&scene, "cpu", Detail::Full).unwrap()).into_iter().filter(|(_, value)| value.ends_with("RPM") || value == UNREAD).collect::<Vec<_>>()
         };
         let prefs = Prefs::default();

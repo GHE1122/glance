@@ -178,7 +178,7 @@ impl Ui {
         let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs: &prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay, buttons: false, newer };
+        let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs: &prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), hover: None, pinned: false, overlay, buttons: false, newer };
         let heights = view::heights(&scene);
         let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
         let readings = super::super::forms::count(&scene);

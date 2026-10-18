@@ -4499,7 +4499,7 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
+        let probe = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let heights: Vec<f32> = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), self.settings.columns, SIZES.1);
         let size = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
@@ -4520,7 +4520,7 @@ impl Ui {
         let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
+        let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let lanes = view::lanes(&scene);
 
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);

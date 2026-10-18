@@ -916,15 +916,15 @@ struct Readings {
     /// showing more comes back only with room to spare.
     taken: Option<arrange::Shown>,
     /// How far its process list is turned (DIPs), and where the wheel turns it to (see `Widgets::wheel`).
-    scroll: f32,
-    scroll_target: f32,
+    /// How far its lists are scrolled (see `view::Scrolls`).
+    scrolls: view::Scrolls,
     /// Its lanes the workbench's (torn off a workbench's panel), not the readings'.
     workbench: bool,
 }
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scroll: 0.0, scroll_target: 0.0, workbench: false }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scrolls: view::Scrolls::default(), workbench: false }
     }
 
     /// What it shows, as the settings keep it.
@@ -973,12 +973,12 @@ impl Content {
         }
     }
 
-    /// How far its process list is turned (DIPs).
-    fn process_scroll(&self) -> f32 {
+    /// How far its lists are scrolled: its readings' (merged, the first readings part's).
+    fn scrolls(&self) -> view::Scrolls {
         match self {
-            Content::Readings(readings) => readings.scroll,
-            Content::Music(_) => 0.0,
-            Content::Merged(merged) => merged.parts.iter().map(Content::process_scroll).fold(0.0, f32::max),
+            Content::Readings(readings) => readings.scrolls,
+            Content::Music(_) => view::Scrolls::default(),
+            Content::Merged(merged) => merged.parts.iter().find(|part| matches!(part, Content::Readings(_))).map_or_else(view::Scrolls::default, Content::scrolls),
         }
     }
 
@@ -1252,7 +1252,7 @@ impl Widgets {
     }
 
     pub fn any_showing_processes(&self) -> bool {
-        self.list.iter().any(|widget| widget.showing.is_some() && widget.hits.iter().any(|hit| matches!(hit.4, view::Hit::Processes(_))))
+        self.list.iter().any(|widget| widget.showing.is_some() && widget.hits.iter().any(|hit| matches!(hit.4, view::Hit::List(view::List::Processes, _))))
     }
 
     /// The widgets kept in the settings (and a panel 0.2.3 left on the
@@ -1383,8 +1383,12 @@ impl Widgets {
             let px = widget.contact.scale * widget.zoom;
             let margin = widget.margin_px();
             let (x, y) = ((client.x - margin) as f32 / px - widget.hits_from.0, (client.y - margin) as f32 / px - widget.hits_from.1);
-            widget.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
+            let under: Vec<view::Hit> = widget.hits.iter().filter(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4).collect();
+            under
         };
+        // (Under what is on it: the wheel over a thing on the station scrolls the station.)
+        let list = hit.iter().find_map(|hit| hit.list());
+        let hit = hit.first().copied();
         let on_sound = hit.is_some_and(view::Hit::of_sound);
         if let Content::Music(shown) = &mut widget.content {
             shown.music.wheel(delta, on_sound);
@@ -1406,15 +1410,15 @@ impl Widgets {
                 }
             }
         }
-        let most = hit.and_then(view::Hit::max_scroll);
+
         let readings = match &mut widget.content {
             Content::Readings(readings) => Some(readings),
             Content::Merged(merged) => merged.parts.iter_mut().find_map(|part| if let Content::Readings(readings) = part { Some(readings) } else { None }),
             Content::Music(_) => None,
         };
-        if let (Some(most), Some(readings)) = (most, readings) {
+        if let (Some((list, most)), Some(readings)) = (list, readings) {
             let rows = -(delta as f32) / 120.0 * crate::panel::WHEEL_ROWS;
-            readings.scroll_target = (readings.scroll_target + rows * view::TABLE_ROW).clamp(0.0, most);
+            readings.scrolls.turn(list, rows * view::TABLE_ROW, most);
             widget.next_frame = Instant::now();
         }
     }
@@ -2583,8 +2587,7 @@ impl Widget {
             Content::Music(_) => Vec::new(),
         };
         for readings in readings {
-            readings.scroll += (readings.scroll_target - readings.scroll) * (1.0 - std::f32::consts::E.powf(-dt / 1000.0 / crate::panel::SCROLL_EASE));
-            moving |= (readings.scroll_target - readings.scroll).abs() > 0.05;
+            moving |= readings.scrolls.ease(dt / 1000.0, crate::panel::SCROLL_EASE);
         }
         // Settling this frame (its last too): its far edges held.
         let settling = self.settle.is_some();
@@ -2640,12 +2643,12 @@ impl Widget {
         // Room round it for its shadow (the skin's; what plays, its own), and above it for its buttons.
         let shadow = if matches!(self.content, Content::Music(_)) || on_music { MUSIC_SHADOW } else { theme.margin };
         self.margin = shadow.max(BUTTON + 2.0 * BUTTON_INSET);
-        let process_scroll = self.content.process_scroll();
+        let scrolls = self.content.scrolls();
         let music_apart = self.content.music_apart();
         // Merged with what plays, the readings without the music lane (what plays shows itself).
         let prefs = self.content.prefs(look.prefs);
         let prefs = prefs.as_ref().unwrap_or(look.prefs);
-        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, process_scroll, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, scrolls, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -2950,7 +2953,7 @@ impl Widget {
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| sees));
         let dark = dark || on_music;
         let theme = if dark == theme.dark { theme } else { Theme::new(look.skin, dark) };
-        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, process_scroll, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, scrolls, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, now);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).

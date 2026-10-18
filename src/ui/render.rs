@@ -141,7 +141,7 @@ impl PanelLayers {
         let mut key = DefaultHasher::new();
         (theme.skin, theme.dark, scale.to_bits()).hash(&mut key);
         layout.lanes().iter().chain([&layout.bar()]).for_each(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits).hash(&mut key));
-        (picture.lanes, &layout.cuts, layout.columns, scene.lang, scene.process_scroll.to_bits(), scene.hover, scene.pinned).hash(&mut key);
+        (picture.lanes, &layout.cuts, layout.columns, scene.lang, scene.scrolls.bits(), scene.hover, scene.pinned).hash(&mut key);
         // (The sliders' knobs as they ease: kept as they were, the knob grew only as a sample came, once a second.)
         scene.thumbs.hash(&mut key);
         scene.overlay.hash(&mut key);
