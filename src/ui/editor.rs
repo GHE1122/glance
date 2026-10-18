@@ -62,6 +62,17 @@ pub struct Editor {
     services: std::mem::ManuallyDrop<ITextServices2>,
     _host: ITextHost2,
     kept: Rc<Kept>,
+    /// What the keys last did (see `send`).
+    typed: Cell<Typed>,
+}
+
+/// What the keys last did to the words: nothing yet (or the input method gave words), wrote, erased. Undo takes back one
+/// kind at a time: the text services gather writing and the erasing after it into one step, as a word processor does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Typed {
+    Nothing,
+    Wrote,
+    Erased,
 }
 
 /// The text services' maker, and the interface they are asked for, as msftedit.dll gives them.
@@ -116,7 +127,7 @@ impl Editor {
             let _ = services.OnTxUIActivate();
             let mut result = LRESULT(0);
             let _ = services.TxSendMessage(EM_SETEVENTMASK, WPARAM(0), LPARAM(ENM_CHANGE as isize), &mut result);
-            Some(Editor { services: std::mem::ManuallyDrop::new(services), _host: host, kept })
+            Some(Editor { services: std::mem::ManuallyDrop::new(services), _host: host, kept, typed: Cell::new(Typed::Nothing) })
         }
     }
 
@@ -146,7 +157,33 @@ impl Editor {
 
     /// A window message for it (the keys, the input method's, the pointer's, its timers'): what it answers.
     /// (None: not theirs, `S_FALSE`, for the window's own handling to see to, as an input method's message may be.)
+    /// Writing after erasing, erasing after writing, and what the input method gives each begin a step of their own
+    /// for undo to take back.
     pub fn send(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        use windows::Win32::UI::Input::Ime::GCS_RESULTSTR;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_DELETE};
+        use windows::Win32::UI::WindowsAndMessaging::{WM_CHAR, WM_IME_COMPOSITION, WM_KEYDOWN};
+        let now = match message {
+            WM_KEYDOWN if wparam.0 == usize::from(VK_BACK.0) || wparam.0 == usize::from(VK_DELETE.0) => Some(Typed::Erased),
+            WM_CHAR if wparam.0 >= 0x20 && wparam.0 != 0x7F => Some(Typed::Wrote),
+            WM_IME_COMPOSITION if lparam.0 as u32 & GCS_RESULTSTR.0 != 0 => Some(Typed::Nothing),
+            _ => None,
+        };
+        if let Some(now) = now {
+            if now != self.typed.replace(now) || now == Typed::Nothing {
+                self.answer(EM_STOPGROUPTYPING, WPARAM(0), LPARAM(0));
+            }
+        }
+        let answer = self.answer(message, wparam, lparam);
+        // (What the input method gave, a step of its own: what is written after it begins another.)
+        if now == Some(Typed::Nothing) {
+            self.answer(EM_STOPGROUPTYPING, WPARAM(0), LPARAM(0));
+        }
+        answer
+    }
+
+    /// `message` handled by the text services: what they answer.
+    fn answer(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         let mut result = LRESULT(0);
         // (Called through its table, its answer kept whole: the bindings' call takes S_FALSE for done.)
         let answer = unsafe { (Interface::vtable(&*self.services).base__.TxSendMessage)(Interface::as_raw(&*self.services), message, wparam, lparam, &mut result) };
@@ -552,6 +589,21 @@ mod tests {
             // Chinese and an emoji written and given back as written.
             editor.set_text("你好 😀");
             assert_eq!(editor.text().trim_end(), "你好 😀");
+            // Chinese typed, dressed, then one character taken back with Backspace (dressed again): undo brings that
+            // character back, not all that was typed.
+            editor.set_text("");
+            for c in "你好世界".encode_utf16() {
+                let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(usize::from(c)), LPARAM(0));
+            }
+            editor.dress(&looks(&editor.text()), &palette);
+            let back = WPARAM(usize::from(windows::Win32::UI::Input::KeyboardAndMouse::VK_BACK.0));
+            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN, back, LPARAM(0));
+            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(8), LPARAM(0));
+            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_KEYUP, back, LPARAM(0));
+            editor.dress(&looks(&editor.text()), &palette);
+            assert_eq!(editor.text().trim_end(), "你好世");
+            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
+            assert_eq!(editor.text().trim_end(), "你好世界");
             // A file written on Windows: its line breaks one each, not two.
             editor.set_text("一\r\n二");
             assert_eq!(editor.text().trim_end(), "一\n二");
