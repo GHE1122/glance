@@ -213,8 +213,8 @@ const KEY_GAP: f32 = 2.0;
 /// How far inside a key's box its drawing begins (its outer stroke, as the icons are drawn on a 24 grid): a row of
 /// them is lined up with what is above it by their drawings, not their boxes.
 const KEY_LEAD: f32 = (CONTROL - KEY_ICON) / 2.0 + KEY_ICON * 4.0 / 24.0;
-/// The sound's drawing reaches nearer its box's right side (to 23 of the 24).
-const SOUND_TRAIL: f32 = (CONTROL - KEY_ICON) / 2.0 + KEY_ICON * 1.0 / 24.0;
+/// The sound's drawing begins nearer its box's left side (from 1 of the 24).
+const SOUND_LEAD: f32 = (CONTROL - KEY_ICON) / 2.0 + KEY_ICON * 1.0 / 24.0;
 /// How far up from the stage's foot its rows along the bottom are (DIPs): as a card's, less than its sides' room.
 const STAGE_FOOT: f32 = 22.0;
 /// How far in from its top and right the buttons set in its corner are (DIPs).
@@ -981,38 +981,39 @@ impl Drawing<'_> {
 
     /// The row along the bottom, from `x` to `right` (where the drawings at its ends begin and end) on `row`, `fade`
     /// of it shown: the keys first, spread across under the cover where the cover stands over them (`beside`: the
-    /// cover's right edge, and where the words beside it begin); the track from where those words begin (else after
-    /// the keys); the sound's key last.
+    /// cover's right edge, and where the words beside it begin); then the sound's key (its drawing where those words
+    /// begin, else after the keys), its slider opening to its right; the track after it, to `right`, with the time
+    /// left at its end.
     fn bottom_row(&mut self, x: f32, right: f32, row: f32, fade: f32, beside: Option<(f32, f32)>) {
         let gap = beside.map_or(KEY_GAP, |(cover_right, _)| ((cover_right - x + 2.0 * KEY_LEAD - 3.0 * CONTROL) / 2.0).max(KEY_GAP));
         let end = self.keys(x - KEY_LEAD, gap, row, fade);
-        let from = beside.map_or(end + 10.0, |(_, words)| words.max(end + 6.0));
-        let sound = right + SOUND_TRAIL - CONTROL;
-        self.sound_key(from, sound, row, fade);
+        let sound = beside.map_or(end + 4.0, |(_, words)| (words - SOUND_LEAD).max(end + 4.0));
+        self.sound_key(sound, right, row, fade);
     }
 
-    /// The sound's key, its box at `x` on `row`, the track before it from `from`: its icon (pressed, the sound muted or
-    /// not); with the pointer on it (or on what opens), a slider of how loud the sound is opening beside it, in the
-    /// row, the track drawing back to make room and the time left going meanwhile (nothing laid over what else it
-    /// shows); its knob where the sound is, no level said (pressed, dragged or turned by the wheel, it is heard).
-    fn sound_key(&mut self, from: f32, x: f32, row: f32, fade: f32) {
+    /// The sound's key, its box at `x` on `row`, and the track after it to `right`: its icon (pressed, the sound muted
+    /// or not); with the pointer on it (or on what opens), a slider of how loud the sound is opening to its right, in
+    /// the row, the track giving way (nothing laid over what else it shows). The slider lies where it lies, shown more
+    /// of as it opens (its knob never slides as it opens); no level said (pressed, dragged or turned by the wheel, it is
+    /// heard).
+    fn sound_key(&mut self, x: f32, right: f32, row: f32, fade: f32) {
         let frame = self.frame;
         let sound = crate::playing::sound();
         let (level, muted) = sound.unwrap_or((0, false));
         let inside = |(px, py): (f32, f32), x: f32, y: f32, w: f32, h: f32| px >= x && px < x + w && py >= y && py < y + h;
         let on = self.pointer.is_some_and(|p| inside(p, x, row, CONTROL, CONTROL));
-        // Open, the slider takes `SOUND_WIDE` of the row before the key (and the room between).
+        let slider = x + CONTROL + 4.0;
         let room = (SOUND_WIDE + 10.0) * self.music.sound_in;
-        let over_open = self.pointer.is_some_and(|p| inside(p, x - room - 4.0, row - 6.0, room + 4.0 + CONTROL, CONTROL + 12.0));
+        let over_open = self.pointer.is_some_and(|p| inside(p, x, row - 6.0, CONTROL + 4.0 + room, CONTROL + 12.0));
         self.music.sound_open = sound.is_some() && fade > 0.0 && (on || crate::playing::volume_held() || (self.music.sound_open && over_open));
         let to = if self.music.sound_open { 1.0 } else { 0.0 };
         let fade_step = self.music.step.min(1.0 / 30.0) / SOUND_OPEN;
         self.music.sound_in = if to > self.music.sound_in { (self.music.sound_in + fade_step).min(1.0) } else { (self.music.sound_in - fade_step).max(0.0) };
         let opened = self.music.sound_in * self.music.sound_in * (3.0 - 2.0 * self.music.sound_in);
         let room = (SOUND_WIDE + 10.0) * opened;
-        self.music.sound_at = Some((x - room - 4.0, row, room + 4.0 + CONTROL, CONTROL));
-        // The track, drawn back to leave the slider its room, the time left going as it opens.
-        self.progress(from, x - 4.0 - room, row, fade, 1.0 - opened);
+        self.music.sound_at = Some((x, row, CONTROL + 4.0 + room, CONTROL));
+        // The track after it, giving way as the slider opens; the time left at its end.
+        self.progress(slider + room + 4.0, right, row, fade, 1.0);
         if on {
             frame.fill_rounded(Color::hex(self.ink, 0.14 * fade), x, row, CONTROL, CONTROL, CONTROL / 2.0);
         }
@@ -1029,16 +1030,18 @@ impl Drawing<'_> {
         if opened <= 0.0 {
             return;
         }
-        let (left, wide) = (x - 4.0 - SOUND_WIDE * opened, SOUND_WIDE * opened);
+        // (Its knob's room past its ends: the knob is not cut as the slider shows whole.)
         let fraction = if muted { 0.0 } else { level as f32 / 100.0 };
-        let lit = self.pointer.is_some_and(|p| inside(p, left - 4.0, row, wide + 8.0, CONTROL)) || crate::playing::volume_held();
+        let lit = self.pointer.is_some_and(|p| inside(p, slider - 4.0, row, SOUND_WIDE + 8.0, CONTROL)) || crate::playing::volume_held();
         let thick = if lit { 5.0 } else { 3.0 };
-        let alpha = opened * fade;
-        frame.fill_rounded(Color::hex(self.ink, 0.25 * alpha), left, centre.y - thick / 2.0, wide, thick, thick / 2.0);
-        frame.fill_rounded(colour(self.accent, 0.95 * alpha), left, centre.y - thick / 2.0, wide * fraction, thick, thick / 2.0);
-        frame.fill_circle(Color::hex(self.ink, alpha), Point { x: left + wide * fraction, y: centre.y }, if lit { 6.0 } else { 4.5 });
+        let alpha = fade * opened;
+        frame.clip(slider - 8.0, row, 8.0 + (SOUND_WIDE + 8.0) * opened, CONTROL);
+        frame.fill_rounded(Color::hex(self.ink, 0.25 * alpha), slider, centre.y - thick / 2.0, SOUND_WIDE, thick, thick / 2.0);
+        frame.fill_rounded(colour(self.accent, 0.95 * alpha), slider, centre.y - thick / 2.0, SOUND_WIDE * fraction, thick, thick / 2.0);
+        frame.fill_circle(Color::hex(self.ink, alpha), Point { x: slider + SOUND_WIDE * fraction, y: centre.y }, if lit { 6.0 } else { 4.5 });
+        frame.unclip();
         if self.music.controls_in >= 0.5 && opened >= 1.0 {
-            self.hits.push((left - 4.0, row, wide + 8.0, CONTROL, Hit::Volume));
+            self.hits.push((slider - 4.0, row, SOUND_WIDE + 8.0, CONTROL, Hit::Volume));
         }
     }
 
