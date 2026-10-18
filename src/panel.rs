@@ -872,8 +872,20 @@ impl Controller {
                 WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam), panel.lang),
                 WM_RBUTTONUP if widgets.owns(msg.hwnd) => {
                     self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
-                    menu = widgets.menu(msg.hwnd, panel.lang, panel.is_shown()).map(|open| (open, MenuFor::Widget(msg.hwnd)));
+                    // On a thing on the station, its menu; else the widget's.
+                    menu = match widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
+                        Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Station(id, choices))),
+                        _ => widgets.menu(msg.hwnd, panel.lang, panel.is_shown()).map(|open| (open, MenuFor::Widget(msg.hwnd))),
+                    };
                     keep_menu_above(&menu, &mut overlay);
+                }
+                // On a thing on the station in the panel, its menu.
+                WM_RBUTTONUP if msg.hwnd == panel.window.hwnd => {
+                    if let Some(Hit::Shelf(id)) = panel.hit_at(lparam_point(msg.lParam)) {
+                        self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
+                        menu = cursor_position().and_then(|at| crate::station::menu(id, at, true)).map(|(open, choices)| (open, MenuFor::Station(id, choices)));
+                        keep_menu_above(&menu, &mut overlay);
+                    }
                 }
                 // Let go: the button up, the capture lost, or the pointer moved with the button up (its going up
                 // told to another window).
@@ -1078,6 +1090,8 @@ enum MenuFor {
     Tray(Vec<usize>),
     Widget(HWND),
     Overlay,
+    /// A thing on the station, by its number, and what each row does.
+    Station(u64, Vec<crate::station::Choice>),
 }
 
 impl Controller {
@@ -1098,6 +1112,11 @@ impl Controller {
             MenuFor::Overlay => {
                 if let (Some(row), Some(overlay)) = (choice, overlay.as_ref()) {
                     self.overlay_chosen(overlay.chose(row), panel);
+                }
+            }
+            MenuFor::Station(id, choices) => {
+                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
+                    crate::station::chose(id, *choice);
                 }
             }
         }

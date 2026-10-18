@@ -1494,6 +1494,15 @@ impl Widgets {
         self.full = None;
     }
 
+    /// What of the widget at `hwnd` is at `client` (physical px in its window), as a press there finds it.
+    pub fn hit_at(&self, hwnd: HWND, client: POINT) -> Option<view::Hit> {
+        let widget = self.list.iter().find(|w| w.window.hwnd == hwnd)?;
+        let px = widget.contact.scale * widget.zoom;
+        let margin = widget.margin_px();
+        let (x, y) = ((client.x - margin) as f32 / px - widget.hits_from.0, (client.y - margin) as f32 / px - widget.hits_from.1);
+        widget.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
+    }
+
     /// The menu of the widget at `hwnd` (a right click on it), up (see `chose`).
     pub fn menu(&mut self, hwnd: HWND, lang: Lang, over_the_panel: bool) -> Option<crate::ui::menu::Menu> {
         self.list.iter().find(|w| w.window.hwnd == hwnd)?.menu(lang, over_the_panel)

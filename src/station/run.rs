@@ -34,6 +34,9 @@ pub enum Ask {
     Clear,
     /// What `id` holds put on the clipboard.
     Copy(u64),
+    /// What `id` holds opened as Explorer opens it (a web address in the browser); shown in Explorer, selected there.
+    Open(u64),
+    Show(u64),
     /// The settings changed (see `settings::StationSettings`).
     Settings,
 }
@@ -98,6 +101,44 @@ pub fn shown() -> Arc<Shown> {
 #[cfg(all(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>) {
     *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, paused: false, full: false, over: false }));
+}
+
+/// `given` opened as Explorer opens it: each file (a folder in Explorer), or a web address in the browser.
+fn open(given: &Content) {
+    let shell = |what: &std::ffi::OsStr| unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(what), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
+    };
+    match given {
+        Content::Files(paths) => paths.iter().for_each(|path| shell(path.as_os_str())),
+        Content::Text(text) if text.starts_with("https://") || text.starts_with("http://") => shell(std::ffi::OsStr::new(text)),
+        _ => {}
+    }
+}
+
+/// `paths` shown in Explorer, selected: each folder they are in opened with those of them in it selected.
+fn show_in_explorer(paths: &[std::path::PathBuf]) {
+    use windows::Win32::UI::Shell::{ILCreateFromPathW, ILFindLastID, ILFree, SHOpenFolderAndSelectItems};
+    let mut folders: Vec<(std::path::PathBuf, Vec<&std::path::PathBuf>)> = Vec::new();
+    for path in paths {
+        let Some(parent) = path.parent() else { continue };
+        match folders.iter_mut().find(|(folder, _)| folder == parent) {
+            Some((_, inside)) => inside.push(path),
+            None => folders.push((parent.to_path_buf(), vec![path])),
+        }
+    }
+    for (folder, inside) in folders {
+        unsafe {
+            let held = ILCreateFromPathW(&windows::core::HSTRING::from(folder.as_os_str()));
+            if held.is_null() {
+                continue;
+            }
+            let items: Vec<_> = inside.iter().map(|path| ILCreateFromPathW(&windows::core::HSTRING::from(path.as_os_str()))).filter(|item| !item.is_null()).collect();
+            let last: Vec<_> = items.iter().map(|item| ILFindLastID(*item) as *const _).collect();
+            let _ = SHOpenFolderAndSelectItems(held, Some(&last), 0);
+            items.into_iter().for_each(|item| ILFree(Some(item)));
+            ILFree(Some(held));
+        }
+    }
 }
 
 /// The station on its thread.
@@ -214,6 +255,16 @@ impl Station {
                         if let Some(sequence) = clipboard::put(self.window, &content, stays_here) {
                             self.ours = sequence;
                         }
+                    }
+                }
+                Ask::Open(id) => {
+                    if let Some(given) = self.keep.shelf.get(id).and_then(|item| self.keep.content_of(item)) {
+                        open(&given);
+                    }
+                }
+                Ask::Show(id) => {
+                    if let Some(Content::Files(paths)) = self.keep.shelf.get(id).and_then(|item| self.keep.content_of(item)) {
+                        show_in_explorer(&paths);
                     }
                 }
                 Ask::Settings => self.follow_settings(),
