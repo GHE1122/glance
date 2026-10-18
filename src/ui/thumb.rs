@@ -7,8 +7,10 @@ use std::time::Instant;
 
 use super::canvas::{Canvas, Color, Point};
 
-/// The dot's radius at rest, of the face's (with its edge): the settings' own, 5 in 11.
-const DOT: f32 = 5.0 / 11.0;
+/// The face's radius with its edge, and its dot's at rest (DIPs): Windows 11's own, measured pixel by pixel on a
+/// 150% screen (its face 28.5 pixels across, its dot 13.5).
+pub const FACE: f32 = 9.5;
+const DOT: f32 = 4.5 / FACE;
 /// The dot under the pointer, and held, of its size at rest (held, as large: it is still under the pointer).
 pub const OVER: f32 = 1.4;
 /// How quickly the dot goes toward its size: each moment, this much of the way left a second, as an exponent (fast
@@ -68,6 +70,16 @@ impl<K: Copy + PartialEq> Dots<K> {
         }
         self.now.retain(|(key, dot)| *dot != 1.0 || over == Some(*key) || held == Some(*key));
         moving
+    }
+}
+
+/// What is drawn of them: each dot not at rest and its size (a layer drawn with them is drawn again as one eases).
+impl<K: std::hash::Hash> std::hash::Hash for Dots<K> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        for (key, dot) in &self.now {
+            key.hash(state);
+            dot.to_bits().hash(state);
+        }
     }
 }
 

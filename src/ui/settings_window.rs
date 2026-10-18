@@ -100,7 +100,7 @@ const CHOICE_LINE: f32 = 40.0;
 /// A slider's track, the room for its value, and its thumb's radius.
 const SLIDER_WIDTH: f32 = 160.0;
 const SLIDER_VALUE: f32 = 44.0;
-const SLIDER_THUMB: f32 = 10.0;
+const SLIDER_THUMB: f32 = crate::ui::thumb::FACE;
 /// The narrowest a row's word may be beside its choices.
 const MIN_WORDS: f32 = 140.0;
 /// The page's name, at the top of the page.
@@ -3662,7 +3662,7 @@ impl Ui {
                     fill(frame, palette.switch_on, start, cy - 2.0, at - start, 4.0, 2.0);
                     // As Windows' own (see `thumb`): a ring around a dot in the accent, the dot growing under the
                     // pointer and shrinking as it is held.
-                    crate::ui::thumb::draw(frame, Point { x: at, y: cy }, SLIDER_THUMB + 1.0, self.slider_dots.of(field), palette.switch_knob_ring, palette.card_stroke, palette.switch_on);
+                    crate::ui::thumb::draw(frame, Point { x: at, y: cy }, SLIDER_THUMB, self.slider_dots.of(field), palette.switch_knob_ring, palette.card_stroke, palette.switch_on);
                     self.targets.push((track, Target::Slider(field)));
                 }
                 Row::Skins => {
