@@ -1189,6 +1189,8 @@ pub struct Surface {
     visual: IDCompositionVisual2,
     surface: Option<IDCompositionSurface>,
     size: (u32, u32),
+    /// Whether the window shows `surface` (one made anew is shown once it is first drawn on: see `draw`).
+    shown: bool,
     /// Where in the window it is drawn (physical px), and where it was last.
     at: (i32, i32),
     placed: (i32, i32),
@@ -1211,7 +1213,7 @@ impl Surface {
         let target = unsafe { gfx.dcomp.CreateTargetForHwnd(hwnd, true)? };
         let visual: IDCompositionVisual2 = unsafe { gfx.dcomp.CreateVisual()? };
         unsafe { target.SetRoot(&visual)? };
-        Ok(Surface { _target: target, visual, surface: None, size: (0, 0), at: (0, 0), placed: (0, 0), took: Default::default() })
+        Ok(Surface { _target: target, visual, surface: None, size: (0, 0), shown: false, at: (0, 0), placed: (0, 0), took: Default::default() })
     }
 
     /// Draws from now on at `at` (physical px) in its window, with the next
@@ -1229,11 +1231,13 @@ impl Surface {
         // window sized frame by frame (a widget settling, sticking, sized)
         // draws on one surface, not a new one each frame. What lies past the
         // window is not shown.
+        // (A surface made anew is shown only once it is drawn on: shown at once, anything committed meanwhile, by
+        // this window or another on the device, showed it empty for a frame, and the window flashed out.)
         if let Some(made) = room(self.surface.as_ref().map(|_| self.size), size) {
             let surface = unsafe { gfx.dcomp.CreateSurface(made.0, made.1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED)? };
-            unsafe { self.visual.SetContent(&surface)? };
             self.surface = Some(surface);
             self.size = made;
+            self.shown = false;
         }
         if self.at != self.placed {
             unsafe {
@@ -1254,6 +1258,10 @@ impl Surface {
         let painted = began.elapsed();
         unsafe {
             surface.EndDraw()?;
+            if !self.shown {
+                self.visual.SetContent(surface)?;
+                self.shown = true;
+            }
             gfx.dcomp.Commit()?;
         }
         self.took = Took { given, painted: painted - given, handed: began.elapsed() - painted };

@@ -1166,6 +1166,10 @@ struct Placement {
     /// Where the pointer opened it (a push into the edge, a rest on the seam): within its reach till it is moved
     /// away from the edge (see `place`); none, opened by hand (the shortcut, the tray), from anywhere.
     came_from: Option<POINT>,
+    /// Where its window is to be put, once the frame laid out for it there is drawn (see `Panel::frame`).
+    due: Option<RECT>,
+    /// Its window as large as it was made while the panel was sized, larger than the panel (see `place`).
+    wide: bool,
 }
 
 /// A corner of the panel held where it is (physical px): its left or
@@ -1704,6 +1708,8 @@ impl<'a> Panel<'a> {
                 floating,
                 held: None,
                 came_from: pushed.then_some(cursor),
+                due: None,
+                wide: false,
             });
             self.scroll = 0.0;
             self.scroll_target = 0.0;
@@ -2502,7 +2508,7 @@ impl<'a> Panel<'a> {
         let size = crate::ui::music::rests_at(room, &shows);
         let sizing = self.drag.is_some_and(|drag| drag.edges.any());
         let placement = self.placement.as_mut().unwrap();
-        place(placement, &self.window, self.edge, &self.theme, size, self.size, sizing);
+        place(placement, self.edge, &self.theme, size, self.size, sizing);
         size
     }
 
@@ -2554,7 +2560,7 @@ impl<'a> Panel<'a> {
         drop(history);
         let sizing = self.drag.is_some_and(|drag| drag.edges.any());
         let placement = self.placement.as_mut().unwrap();
-        place(placement, &self.window, self.edge, &self.theme, (layout.width(), layout.height()), zoom, sizing);
+        place(placement, self.edge, &self.theme, (layout.width(), layout.height()), zoom, sizing);
         (lanes, layout)
     }
 
@@ -2587,8 +2593,20 @@ impl<'a> Panel<'a> {
         true
     }
 
-    /// Draws the panel as it is at `now`, and finishes a closing that is done.
+    /// Draws the panel as it is at `now`, and finishes a closing that is done; then puts its window where the frame
+    /// was laid out for, if that moved: the two reach the screen together. (The window moved first, and the frame
+    /// after, at the next turn of the loop, what was drawn for the window where it was showed for a moment in the
+    /// window where it is: let go after it was sized, from its screen's whole to its own size, it was off the
+    /// window, and the panel flashed out.)
     fn frame(&mut self, now: Instant) {
+        let due = self.placement.as_mut().and_then(|placement| placement.due.take());
+        self.draw_frame(now);
+        if let Some(window) = due {
+            self.window.place(window);
+        }
+    }
+
+    fn draw_frame(&mut self, now: Instant) {
         let by_hand = self.drag.is_some_and(|drag| drag.edges.any());
         let _sizing = gfx::sizing(by_hand);
         if matches!(self.phase, Phase::Closing) && self.shift.done(now) && self.opacity.done(now) {
@@ -3006,10 +3024,10 @@ unsafe extern "system" fn sink_procedure(hwnd: HWND, message: u32, wparam: WPARA
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-/// Positions the panel for a layout `size` DIPs large, and moves the window
-/// if that changed it.
+/// Positions the panel for a layout `size` DIPs large, and has its window moved there if that changed it, as the
+/// frame laid out for it is drawn (see `Panel::frame`).
 /// `sizing`: the panel is being sized by its edges (see `place`'s window).
-fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &Theme, size: (f32, f32), zoom: f32, sizing: bool) {
+fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32), zoom: f32, sizing: bool) {
     let Contact { monitor, work, scale } = placement.contact;
     let px = scale * zoom;
     let (width, height) = ((size.0 * px).round() as i32, (size.1 * px).round() as i32);
@@ -3043,7 +3061,12 @@ fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &T
     // with it: each size is then one frame of the compositor's. A window moved under it shows the frame before at
     // its new place for a moment, and the panel shakes as it grows towards that side. What is drawn, and taken from
     // behind it, is still only the panel and its shadow's room, placed in the window by the compositor.
+    // Sized and let go, the window stays as large as it was while the panel is up (nothing that lies outside the
+    // panel takes a click: see `track`), and is its own size again as the panel next opens: made smaller where it
+    // shows, its corner moved, and what is drawn moved within it, and the two come to the screen a frame of the
+    // compositor's apart, whichever is done first (the panel flashed out where it was, or showed where it was not).
     let painted = window;
+    let contains = |outer: RECT, inner: RECT| outer.left <= inner.left && outer.top <= inner.top && outer.right >= inner.right && outer.bottom >= inner.bottom;
     if sizing {
         window = RECT {
             left: window.left.min(monitor.left),
@@ -3051,6 +3074,13 @@ fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &T
             right: window.right.max(monitor.right),
             bottom: window.bottom.max(monitor.bottom),
         };
+    } else if placement.wide && contains(placement.window, painted) {
+        window = placement.window;
+    } else {
+        placement.wide = false;
+    }
+    if sizing {
+        placement.wide = true;
     }
     let tolerance = (LEAVE_TOLERANCE * scale).round() as i32;
     let mut reach = RECT {
@@ -3088,7 +3118,7 @@ fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &T
         crate::widget::own_window_changed(placement.window);
         crate::widget::own_window_changed(window);
         placement.window = window;
-        panel_window.place(window);
+        placement.due = Some(window);
     }
 }
 
