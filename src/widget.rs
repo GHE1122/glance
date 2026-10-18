@@ -51,6 +51,26 @@ pub(crate) fn note_sparingly(kind: &'static str, what: impl FnOnce() -> String) 
 }
 use crate::mouse::{cursor_position, monitor_at, Contact};
 use crate::settings::{WidgetAt, WidgetSide, MUSIC_FORM};
+
+/// What a widget showing one lane alone keeps before its module's id and its form (see `form_of`).
+const ONLY_FORM: &str = "only:";
+
+/// The form a widget's readings are kept as: `form`, or for one lane alone (`only`), its module's id and its form
+/// after `ONLY_FORM` (a form an older Glance does not know: it leaves the widget out, rather than show all the lanes).
+fn form_of(only: Option<&str>, form: String) -> String {
+    match only {
+        Some(id) => format!("{ONLY_FORM}{id}:{form}"),
+        None => form,
+    }
+}
+
+/// A kept form read back (see `form_of`): the one lane it shows, if it shows one, and its form.
+fn only_of(kept: &str) -> (Option<String>, String) {
+    match kept.strip_prefix(ONLY_FORM).and_then(|rest| rest.split_once(':')) {
+        Some((id, form)) => (Some(id.to_string()), form.to_string()),
+        None => (None, kept.to_string()),
+    }
+}
 use crate::ui::buttons::{self, Button};
 use crate::ui::arrange::{self, Choice, Form, Want};
 use crate::ui::backdrop::Capture;
@@ -925,16 +945,20 @@ struct Readings {
     tab: view::Tab,
     /// Its lanes the workbench's (torn off a workbench's panel), not the readings'.
     workbench: bool,
+    /// The one lane it shows (its module's id: torn off by that lane's head), whatever else the panel shows, and shown
+    /// though it is switched off there.
+    only: Option<String>,
 }
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false, only: None }
     }
 
     /// What it shows, as the settings keep it.
     fn kept(&self) -> crate::settings::PanelLayout {
-        crate::settings::PanelLayout { workbench: self.workbench, ..self.choice.kept() }
+        let kept = self.choice.kept();
+        crate::settings::PanelLayout { workbench: self.workbench, form: form_of(self.only.as_deref(), kept.form), ..kept }
     }
 }
 
@@ -1015,6 +1039,20 @@ impl Content {
             Content::Music(_) => false,
         };
         let mut prefs = if workbench { prefs.clone().holding(crate::settings::Part::Workbench) } else { prefs.clone() };
+        // One lane alone: that one, on, whatever else the panel shows (taken out of the edge since, or switched off
+        // there, it is still what this widget shows).
+        let only = match self {
+            Content::Readings(readings) => readings.only.clone(),
+            Content::Merged(merged) => merged.parts.iter().find_map(|part| if let Content::Readings(readings) = part { readings.only.clone() } else { None }),
+            Content::Music(_) => None,
+        };
+        if let Some(only) = only {
+            prefs.modules.retain(|module| module.id == only);
+            match prefs.modules.first_mut() {
+                Some(module) => module.on = true,
+                None => prefs.modules.push(crate::ui::prefs::ModuleEntry { id: only, on: true, items: Default::default() }),
+            }
+        }
         match self {
             Content::Merged(merged) if merged.music_apart() => match prefs.modules.iter_mut().find(|module| module.id == "lyrics") {
                 Some(module) => module.on = true,
@@ -1128,16 +1166,17 @@ impl Widgets {
     /// from its corner; on the desktop the panel had taken (`lent`: its
     /// capture, as a bitmap, and its tone), if it had, till it takes its own
     /// (on another thread: it is drawn at once). `from`: the edge the panel
-    /// was at, if it was at one; `part`: what the panel showed.
+    /// was at, if it was at one; `part`: what the panel showed; `only`: the one lane of it it shows (torn off by that
+    /// lane's head), if it shows one.
     #[allow(clippy::too_many_arguments)]
-    pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, size: (f32, f32), lent: Option<Lent>, from: Option<Edge>, part: crate::settings::Part) -> bool {
+    pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, size: (f32, f32), lent: Option<Lent>, from: Option<Edge>, part: crate::settings::Part, only: Option<String>) -> bool {
         let Some(contact) = monitor_at(at) else { return false };
         let choice = Choice { form, scale, extra: (0.0, 0.0) };
         let made = Instant::now();
         // What the panel showed, as large as it was.
         let content = match part {
-            crate::settings::Part::Monitor => Content::Readings(Readings::new(choice)),
-            crate::settings::Part::Workbench => Content::Readings(Readings { workbench: true, ..Readings::new(choice) }),
+            crate::settings::Part::Monitor => Content::Readings(Readings { only, ..Readings::new(choice) }),
+            crate::settings::Part::Workbench => Content::Readings(Readings { workbench: true, only, ..Readings::new(choice) }),
             crate::settings::Part::Music => Content::Music(MusicShown::new(size)),
         };
         let Some(mut widget) = Widget::new(contact, at, content) else { return false };
@@ -1983,7 +2022,11 @@ impl Widget {
         let one = |layout: &crate::settings::PanelLayout| -> Option<Content> {
             Some(match layout.form.as_str() {
                 MUSIC_FORM => Content::Music(MusicShown::new(kept.size.unwrap_or(music::LEAST))),
-                _ => Content::Readings(Readings { workbench: layout.workbench, ..Readings::new(Choice::from_kept(layout)?) }),
+                form => {
+                    let (only, form) = only_of(form);
+                    let choice = Choice::from_kept(&crate::settings::PanelLayout { form, ..layout.clone() })?;
+                    Content::Readings(Readings { workbench: layout.workbench, only, ..Readings::new(choice) })
+                }
             })
         };
         let content = match &kept.parts {
@@ -3421,6 +3464,17 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One lane alone kept under a form of its own, read back as that lane and its form; a whole panel's form as it
+    /// was; and the form an older Glance reads it as is none it knows (it leaves the widget out).
+    #[test]
+    fn keeps_one_lane_apart() {
+        let form = Form::Lanes { detail: view::Detail::Full, columns: 1 }.key();
+        let kept = form_of(Some("station"), form.clone());
+        assert_eq!(only_of(&kept), (Some("station".to_string()), form.clone()));
+        assert_eq!(only_of(&form_of(None, form.clone())), (None, form));
+        assert!(Form::from_key(&kept).is_none());
+    }
 
     #[test]
     fn a_corner_is_taken_along_either_edge() {

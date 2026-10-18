@@ -813,7 +813,7 @@ impl Controller {
                 crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.shelf_press.is_some() => panel.shelf_press = None,
                 WM_TIMER if msg.hwnd == panel.window.hwnd && panel.held() => {
                     panel.dragged(now);
-                    if let Some((form, scale, at, grab, size)) = panel.tear.take() {
+                    if let Some((form, scale, at, grab, size, only)) = panel.tear.take() {
                         // The widget takes the desktop behind it before the
                         // panel goes: without the panel in it (it is put back
                         // in captures as it goes).
@@ -826,7 +826,7 @@ impl Controller {
                         });
                         // The edge it was at, unless it had been moved away.
                         let from = panel.placement.as_ref().filter(|placement| placement.floating.is_none()).map(|_| panel.edge);
-                        if !widgets.tear(form, scale, at, grab, size, lent, from, panel.part) {
+                        if !widgets.tear(form, scale, at, grab, size, lent, from, panel.part, only) {
                             panel.torn = false;
                             panel.exclude();
                         }
@@ -1290,6 +1290,9 @@ struct PanelDrag {
     room: (f32, f32),
     edges: Edges,
     sized: bool,
+    /// The lane whose head it was taken by (its place among the opening's lanes): pulled off, that lane alone is torn
+    /// off (see `head_at`).
+    lane: Option<usize>,
 }
 
 /// A limit a panel sized by its edges stops at.
@@ -1522,8 +1525,10 @@ struct Panel<'a> {
     /// The bar, from the panel's corner (DIPs): a pinned panel is dragged by it.
     bar: view::Rect,
     /// Torn off as it was dragged: the widget to make (its form, scale and
-    /// corner on the screen, and where the hand holds it from that corner).
-    tear: Option<(Form, f32, POINT, POINT, (f32, f32))>,
+    /// corner on the screen, where the hand holds it from that corner, its size, and the one lane it shows, where it
+    /// was taken by that lane's head).
+    #[allow(clippy::type_complexity)]
+    tear: Option<(Form, f32, POINT, POINT, (f32, f32), Option<String>)>,
     /// What plays torn off its lane as it was dragged: the music widget to make (its size, DIPs, its corner on the
     /// screen, and where the hand holds it from that corner). The panel stays.
     tear_music: Option<((f32, f32), POINT, POINT)>,
@@ -2285,6 +2290,18 @@ impl<'a> Panel<'a> {
         self.hit_at(client).is_none_or(|hit| !hit.takes_press() || matches!(hit, Hit::Line(_))).then_some(edges)
     }
 
+    /// The lane whose head is at `client` (physical px in the window): its place among the opening's lanes; none where
+    /// the panel shows one lane only (pulled, the panel is torn off whole), or the point is on no lane's head.
+    fn head_at(&self, client: POINT) -> Option<usize> {
+        let (placement, opening) = (self.placement.as_ref()?, self.opening.as_ref()?);
+        let (x, y) = (client.x as f32 / placement.px - self.corner.0, client.y as f32 / placement.px - self.corner.1);
+        let lanes = opening.layout.lanes();
+        if lanes.len() < 2 {
+            return None;
+        }
+        lanes.iter().position(|lane| x >= lane.x && x < lane.x + lane.w && y >= lane.y && y < lane.y + self.theme.pad_top + view::HEAD_BAND)
+    }
+
     /// Whether the press in hand is a tap so far: neither moved nor sized since.
     fn tapped(&self) -> bool {
         self.drag.is_some_and(|drag| !drag.edges.any() && !drag.sized) && self.placement.as_ref().is_some_and(|placement| placement.held.is_none())
@@ -2336,7 +2353,8 @@ impl<'a> Panel<'a> {
         let room = self.music_room();
         // (Settling after a drag before: taken in hand where it is.)
         self.music_settle = None;
-        self.drag = Some(PanelDrag { from, rect, size: self.size, room, edges, sized: false });
+        let lane = (!edges.any()).then(|| self.head_at(client)).flatten();
+        self.drag = Some(PanelDrag { from, rect, size: self.size, room, edges, sized: false, lane });
         unsafe {
             windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd);
             SetTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER, FOLLOW_MS, None);
@@ -2429,10 +2447,19 @@ impl<'a> Panel<'a> {
                 return;
             }
             let Some(opening) = &self.opening else { return };
-            let form = Form::Lanes { detail: Detail::Full, columns: opening.layout.columns };
-            let at = POINT { x: placement.panel.left + dx, y: placement.panel.top + dy };
+            // Taken by a lane's head: that lane alone, a widget of its own (one column of it), its corner where the
+            // lane's was; else the panel as it shows.
+            let lane = drag.lane.and_then(|at| Some((opening.lane_ids().get(at)?.clone(), *opening.layout.lanes().get(at)?)));
+            let (form, at, only) = match lane {
+                Some((id, lane)) => {
+                    let corner = |along: f32, corner: f32, window: i32| window + ((along + corner) * placement.px).round() as i32;
+                    let at = POINT { x: corner(lane.x, self.corner.0, placement.window.left) + dx, y: corner(lane.y, self.corner.1, placement.window.top) + dy };
+                    (Form::Lanes { detail: Detail::Full, columns: 1 }, at, Some(id))
+                }
+                None => (Form::Lanes { detail: Detail::Full, columns: opening.layout.columns }, POINT { x: placement.panel.left + dx, y: placement.panel.top + dy }, None),
+            };
             let size = ((placement.panel.right - placement.panel.left) as f32 / placement.contact.scale, (placement.panel.bottom - placement.panel.top) as f32 / placement.contact.scale);
-            self.tear = Some((form, opening.zoom, at, POINT { x: cursor.x - at.x, y: cursor.y - at.y }, size));
+            self.tear = Some((form, opening.zoom, at, POINT { x: cursor.x - at.x, y: cursor.y - at.y }, size, only));
             self.end_drag();
             self.torn = true;
             return;
@@ -2718,12 +2745,12 @@ impl<'a> Panel<'a> {
             }
             self.game_at = game;
         }
-        let (prefs, theme, lang, scroll, hover, pinned) = (&self.drawn, &self.theme, self.lang, self.scrolls, self.hover, self.pinned);
+        let (prefs, theme, lang, scroll, tab, hover, pinned) = (&self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned);
         let opening = match &mut self.opening {
             Some(opening) => {
                 // What the machine has shown since joins its lane where it
                 // fits (each lane measured holding what it would hold).
-                let probe = scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &now);
+                let probe = scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
                 opening.grow(&now, &controller.info, |id, seen, detail| view::lane_height(&probe, id, seen, detail));
                 opening
             }
@@ -2732,7 +2759,7 @@ impl<'a> Panel<'a> {
                     Some(held) => held.join(&now, &controller.info),
                     None => now,
                 };
-                let scene = scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &now);
+                let scene = scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
                 let heights = view::heights(&scene);
                 let tall: Vec<f32> = heights.iter().map(|(_, height)| height[0]).collect();
                 self.largest = arrange::largest(theme, self.edge, &tall, work, self.columns, SIZES.1);
@@ -2740,7 +2767,7 @@ impl<'a> Panel<'a> {
                 self.opening.insert(arrange::Opening::new(theme, self.edge, &lanes, 0, work, self.columns, self.size, arrange::Want::Itself, now.clone()))
             }
         };
-        let lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &opening.seen));
+        let lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
         drop(history);
         let placement = self.placement.as_mut().unwrap();
@@ -2852,7 +2879,7 @@ impl<'a> Panel<'a> {
         // The knob under the pointer, and the one held (the slider in hand's).
         let held = self.sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
         let thumbs_moving = self.thumbs.step(now, self.hover.filter(|hit| hit.slider().is_some()), held);
-        let scene = Scene { thumbs: &self.thumbs, tab: self.tab, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
+        let scene = Scene { thumbs: &self.thumbs, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -3240,6 +3267,7 @@ fn scene<'s>(
     theme: &'s Theme,
     lang: Lang,
     scrolls: view::Scrolls,
+    tab: view::Tab,
     hover: Option<Hit>,
     pinned: bool,
     history: &'s [Sample],
@@ -3258,7 +3286,7 @@ fn scene<'s>(
         seen,
         pen_ms: wall - interval.as_secs_f64() * 1000.0 - PEN_LAG_MS,
         scrolls,
-        tab: view::Tab::default(),
+        tab,
         hover,
         pinned,
         overlay,
@@ -3270,7 +3298,7 @@ fn scene<'s>(
 
 /// What a desktop widget's readings are drawn with at this moment.
 pub(crate) fn scene_for<'s>(controller: &'s Controller, prefs: &'s Prefs, theme: &'s Theme, lang: Lang, history: &'s [Sample], seen: &'s Seen) -> Scene<'s> {
-    Scene { buttons: false, ..scene(controller, prefs, theme, lang, view::Scrolls::default(), None, false, history, seen) }
+    Scene { buttons: false, ..scene(controller, prefs, theme, lang, view::Scrolls::default(), view::Tab::default(), None, false, history, seen) }
 }
 
 /// The sink's procedure: the input loop takes its messages before they are dispatched.

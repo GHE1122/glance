@@ -19,6 +19,9 @@ const LABEL: f32 = 96.0;
 const LABEL_GAP: f32 = 12.0;
 const HEAD: f32 = 17.0;
 const HEAD_GAP: f32 = 8.0;
+/// How far below its top a lane's head reaches (its title row, and the room under it), past its padding: what a lane is
+/// taken by, to be torn off alone.
+pub const HEAD_BAND: f32 = HEAD + HEAD_GAP;
 const PLOT: f32 = 40.0;
 const RATE_PLOT: f32 = 36.0;
 /// Rate charts start this much further right, past the rates beside them.
@@ -2172,12 +2175,11 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
     let radius = (side / 9.0).clamp(4.0, 10.0);
     match &tile.face {
         Face::Picture { path, more } => {
+            // (On a ground of its own: a file's icon, or a picture not square, sits on it as a tile.)
+            frame.fill_rounded(theme.track, x, y, side, side, radius);
             match crate::station::thumbs::of(path, pixels) {
                 Some(picture) => frame.picture(&picture, x, y, side, radius, 1.0),
-                None => {
-                    frame.fill_rounded(theme.track, x, y, side, side, radius);
-                    frame.icon(Icon::File, Point { x: x + side / 2.0, y: y + side / 2.0 }, side / 2.0, theme.text3);
-                }
+                None => frame.icon(Icon::File, Point { x: x + side / 2.0, y: y + side / 2.0 }, side / 2.0, theme.text3),
             }
             // Files put on it together: how many more.
             if *more > 0 && side >= 40.0 {
