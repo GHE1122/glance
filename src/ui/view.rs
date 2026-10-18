@@ -2289,6 +2289,10 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
     let mut y = area.y + theme.pad_top;
     let charts = lane.blocks.iter().filter(|block| matches!(block, Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. })).count();
     let taller = if charts > 0 { (grow / charts as f32).min(RATE_PLOT) } else { 0.0 };
+    // The room the lane is given past what its blocks take (a column's lanes share what is left over): a list at its
+    // foot takes it, its things down to the lane's foot, not stopping part way.
+    let natural = theme.pad_top + theme.pad_bottom + lane.blocks.iter().map(Block::height).sum::<f32>() + taller * charts as f32;
+    let spare = if lane.blocks.last().is_some_and(|block| matches!(block, Block::Shelf { .. } | Block::Copies { .. } | Block::Recent { .. } | Block::Notes { .. })) { (area.h - natural).max(0.0) } else { 0.0 };
     // Each part named by its lane and what it is, the small layouts naming
     // theirs alike (see `morph`): the CPU's figure is "cpu.value" in both.
     let id = &lane.id;
@@ -2602,19 +2606,19 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 paint_tabs(frame, scene, ink, (left, y, width), *tab, *count, *copies, *recent, *view, hits);
             }
             (Block::Notes { notes, view, tall }, Pass::Content) => {
-                paint_notes(frame, scene, (left, y + SHELF_GAP, width), notes, *view, *tall, hits);
+                paint_notes(frame, scene, (left, y + SHELF_GAP, width), notes, *view, *tall + spare, hits);
             }
             (Block::Apps { apps, rows, named }, Pass::Content) => {
                 paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, *rows, *named, hits);
             }
             (Block::Recent { rows, filter, tall }, Pass::Content) => {
-                paint_recent(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *filter, *tall, hits);
+                paint_recent(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *filter, *tall + spare, hits);
             }
             (Block::Shelf { tiles, shows, tall, said, over }, Pass::Content) => {
-                paint_shelf(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, *shows, *tall, said.as_deref(), *over, hits);
+                paint_shelf(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, *shows, *tall + spare, said.as_deref(), *over, hits);
             }
             (Block::Copies { rows, tall }, Pass::Content) => {
-                paint_copies(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *tall, hits);
+                paint_copies(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *tall + spare, hits);
             }
         }
         frame.key("");
@@ -3970,6 +3974,24 @@ six".into()));
         }
         let at_end = pressed(scrolls);
         assert!(at_end.contains(&0) && at_end.contains(&12), "{at_end:?}");
+    }
+
+    /// A lane given more room than its blocks take (its column taller): the notes' list at its foot goes down to the
+    /// lane's foot, not stopping part way.
+    #[test]
+    fn a_list_at_a_lanes_foot_fills_it() {
+        let theme = Theme::new(Skin::Paper, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let notes: Vec<NoteCard> = (0..30).map(|at| NoteCard { at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default() }).collect();
+        let lane = Lane { id: "notes".into(), blocks: vec![head("Notes", String::from("15"), "", false), Block::Notes { notes, view: crate::settings::NotesView::List, tall: NOTES_TALL }], ink: theme.ink("notes") };
+        let area = Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 700.0 };
+        let mut hits = Vec::new();
+        paint_lane(&Nothing, &scene, &lane, area, 0.0, Pass::Content, &mut hits);
+        let lowest = hits.iter().filter(|hit| matches!(hit.4, Hit::Note(_))).map(|hit| hit.1 + hit.3).fold(0.0, f32::max);
+        assert!(lowest > area.h - theme.pad_bottom - NOTE_ROW, "the notes end at {lowest} in a lane {} tall", area.h);
     }
 
     /// A list shown another way, or under another filter, starts at its top; shown as before, it stays where it was.
