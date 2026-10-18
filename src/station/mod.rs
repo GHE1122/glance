@@ -60,6 +60,7 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
 pub enum Choice {
     Copy,
     Open,
+    Preview,
     Show,
     Pin,
     Remove,
@@ -83,6 +84,7 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
     if opens {
         rows.push((Choice::Open, lang.pick("打开", "Open"), Icon::File, false));
     }
+    rows.push((Choice::Preview, lang.pick("预览", "Preview"), Icon::Image, false));
     if in_explorer {
         rows.push((Choice::Show, lang.pick("在资源管理器中显示", "Show in Explorer"), Icon::Panel, false));
     }
@@ -99,6 +101,8 @@ pub fn chose(id: u64, choice: Choice) {
     run::ask(match choice {
         Choice::Copy => run::Ask::Copy(id),
         Choice::Open => run::Ask::Open(id),
+        // (Opened beside what it was chosen on, by that: see `Controller::end_menu`.)
+        Choice::Preview => return,
         Choice::Show => run::Ask::Show(id),
         Choice::Pin => run::Ask::Pin(id, !pinned),
         Choice::Remove => run::Ask::Remove(id),

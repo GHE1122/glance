@@ -1223,6 +1223,13 @@ impl Widgets {
         }
     }
 
+    /// `page` opened beside the widget at `hwnd` (from its menu: a thing on its station previewed).
+    pub fn open_beside(&self, hwnd: HWND, page: crate::ui::beside::Page) {
+        if let Some(widget) = self.list.iter().find(|widget| widget.window.hwnd == hwnd) {
+            widget.open_beside(page);
+        }
+    }
+
     /// The widget the note `name` is stuck on the desktop as taken away (the note deleted): not put away to be
     /// brought back, gone.
     pub fn unstick_note(&mut self, name: &str) {
@@ -1993,6 +2000,16 @@ struct Request {
 pub const CAPTURED: u32 = WM_APP + 12;
 
 impl Widget {
+    /// `page` opened beside it, on the side of its screen with more room, drawn as it is.
+    fn open_beside(&self, page: crate::ui::beside::Page) {
+        use crate::ui::beside::{Opening, Side};
+        let by = self.rect();
+        let screen = self.contact.monitor;
+        let side = if (by.left + by.right) / 2 > (screen.left + screen.right) / 2 { Side::Left } else { Side::Right };
+        let (skin, dark) = self.drawn_look;
+        crate::ui::beside::open(Opening { page, by, side, skin, dark });
+    }
+
     fn new(contact: Contact, at: POINT, content: Content) -> Option<Self> {
         let gfx = gfx::current().ok()?;
         let window = Window::new().ok()?;
@@ -2579,19 +2596,15 @@ impl Widget {
                                 Some(hit) if hit.opens_menu() => return Released::Menu(hit),
                                 // Quick launch's choosing of programs, a note: beside it on the side with more room.
                                 Some(hit @ (view::Hit::AddApp | view::Hit::NewNote | view::Hit::Note(_))) => {
-                                    use crate::ui::beside::{Opening, Page, Side};
+                                    use crate::ui::beside::Page;
                                     let page = match hit {
                                         view::Hit::AddApp => Some(Page::Picker),
                                         view::Hit::NewNote => Some(Page::Note(None)),
                                         view::Hit::Note(at) => crate::notes::shown().get(usize::from(at)).map(|note| Page::Note(Some(note.name.clone()))),
                                         _ => None,
                                     };
-                                    let by = self.rect();
-                                    let screen = self.contact.monitor;
-                                    let side = if (by.left + by.right) / 2 > (screen.left + screen.right) / 2 { Side::Left } else { Side::Right };
-                                    let (skin, dark) = self.drawn_look;
                                     if let Some(page) = page {
-                                        crate::ui::beside::open(Opening { page, by, side, skin, dark });
+                                        self.open_beside(page);
                                     }
                                 }
                                 Some(view::Hit::Line(index)) => {

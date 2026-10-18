@@ -912,7 +912,7 @@ impl Controller {
                     self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
                     // On a thing on the station, its menu; else the widget's.
                     menu = match widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
-                        Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Station(id, choices))),
+                        Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
                         Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
                         Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel.is_shown())).map(|(open, choices)| (open, MenuFor::App(at, choices))),
                         _ => widgets.menu(msg.hwnd, panel.lang, panel.is_shown()).map(|open| (open, MenuFor::Widget(msg.hwnd))),
@@ -924,7 +924,7 @@ impl Controller {
                     match panel.hit_at(lparam_point(msg.lParam)) {
                         Some(Hit::Shelf(id)) => {
                             self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
-                            menu = cursor_position().and_then(|at| crate::station::menu(id, at, true)).map(|(open, choices)| (open, MenuFor::Station(id, choices)));
+                            menu = cursor_position().and_then(|at| crate::station::menu(id, at, true)).map(|(open, choices)| (open, MenuFor::Station(id, choices, None)));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         Some(Hit::App(at)) => {
@@ -1174,8 +1174,8 @@ enum MenuFor {
     Tray(Vec<usize>),
     Widget(HWND),
     Overlay,
-    /// A thing on the station, by its number, and what each row does.
-    Station(u64, Vec<crate::station::Choice>),
+    /// A thing on the station, by its number, what each row does, and the widget it was opened on (none: the panel).
+    Station(u64, Vec<crate::station::Choice>, Option<HWND>),
     /// The station's head's (see `station::head_menu`).
     StationHead(Vec<crate::station::HeadChoice>),
     /// A file come lately, by its number, and what each row does (see `station::recent_menu`).
@@ -1204,11 +1204,12 @@ impl Controller {
                     self.overlay_chosen(overlay.chose(row), panel);
                 }
             }
-            MenuFor::Station(id, choices) => {
-                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
-                    crate::station::chose(id, *choice);
-                }
-            }
+            MenuFor::Station(id, choices, on) => match (choice.and_then(|row| choices.get(row)), on) {
+                (Some(crate::station::Choice::Preview), Some(widget)) => widgets.open_beside(widget, crate::ui::beside::Page::Preview(id)),
+                (Some(crate::station::Choice::Preview), None) => panel.open_beside(crate::ui::beside::Page::Preview(id)),
+                (Some(choice), _) => crate::station::chose(id, *choice),
+                (None, _) => {}
+            },
             MenuFor::App(at, choices) => {
                 if let Some(choice) = choice.and_then(|row| choices.get(row)) {
                     crate::station::app_chose(at, *choice);
