@@ -255,6 +255,19 @@ impl Editor {
         self.kept.changed.set(true);
     }
 
+    /// What is chosen in it (from, to: characters).
+    pub fn selection(&self) -> (i32, i32) {
+        let mut range = CHARRANGE::default();
+        self.answer(EM_EXGETSEL, WPARAM(0), LPARAM(&mut range as *mut _ as isize));
+        (range.cpMin, range.cpMax)
+    }
+
+    /// `from`..`to` chosen in it (as far as its words go).
+    pub fn select(&self, (from, to): (i32, i32)) {
+        let range = CHARRANGE { cpMin: from, cpMax: to };
+        self.answer(EM_EXSETSEL, WPARAM(0), LPARAM(&range as *const _ as isize));
+    }
+
     /// Whether `point` (in the window) is where its words are.
     pub fn holds(&self, point: POINT) -> bool {
         let rect = self.kept.rect.get();
@@ -604,6 +617,10 @@ mod tests {
             assert_eq!(editor.text().trim_end(), "你好世");
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
             assert_eq!(editor.text().trim_end(), "你好世界");
+            // What is chosen, chosen again.
+            editor.set_text("abcdef");
+            editor.select((2, 4));
+            assert_eq!(editor.selection(), (2, 4));
             // A file written on Windows: its line breaks one each, not two.
             editor.set_text("一\r\n二");
             assert_eq!(editor.text().trim_end(), "一\n二");

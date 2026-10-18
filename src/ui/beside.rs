@@ -98,6 +98,9 @@ const GO_SOON: u32 = WM_APP + 8;
 const BLINK: usize = 1;
 const AGAIN: usize = 2;
 const KEEP: usize = 3;
+/// Its timer for a note's file looked at, for what changed outside (see `Beside::read_outside`), and how often.
+const FOLLOW: usize = 4;
+const FOLLOW_MS: u32 = 1000;
 /// How long after the last key a note is kept.
 const KEEP_AFTER_MS: u32 = 600;
 
@@ -391,6 +394,7 @@ fn show(opening: Opening) {
         let _ = windows::Win32::System::Ole::RegisterDragDrop(hwnd, &target);
         DROP_TARGET.with(|held| *held.borrow_mut() = Some(target));
         let _ = SetTimer(Some(hwnd), BLINK, windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime(), None);
+        let _ = SetTimer(Some(hwnd), FOLLOW, FOLLOW_MS, None);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(hwnd));
@@ -489,6 +493,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                         let _ = unsafe { KillTimer(Some(hwnd), KEEP) };
                         let _ = beside.keep();
                     }
+                    FOLLOW => beside.read_outside(),
                     _ => {}
                 }
                 beside.redraw();
@@ -555,7 +560,7 @@ impl Beside {
                 writing.editor.holds(at)
             }
             WM_MOUSEWHEEL => true,
-            WM_TIMER => !matches!(wparam.0, BLINK | AGAIN | KEEP),
+            WM_TIMER => !matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW),
             _ => false,
         };
         if !its {
@@ -669,6 +674,24 @@ impl Beside {
         if let Some(menu) = Menu::open_at(items, self.theme.dark, at, false, false) {
             MENU.with(|held| *held.borrow_mut() = Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect())));
         }
+    }
+
+    /// The note on the page as its file is now, where that was changed outside and nothing written here waits to be
+    /// kept (or is being composed): read again, what was chosen kept as far as the words go. (With something waiting,
+    /// it is kept apart as it is kept: see `keep`. Deleted outside: left as it is, kept apart likewise.)
+    fn read_outside(&mut self) {
+        let Some(writing) = self.writing.as_mut().filter(|writing| !writing.unkept && !writing.composing) else { return };
+        let Some(name) = writing.name.clone() else { return };
+        let Some((text, stamp)) = crate::notes::folder_at(writing.folder.clone()).read(&name) else { return };
+        if writing.stamp.is_some_and(|was| was.same(&stamp)) {
+            return;
+        }
+        let chosen = writing.editor.selection();
+        writing.editor.set_text(&text);
+        writing.editor.select(chosen);
+        writing.stamp = Some(stamp);
+        writing.written_ms = stamp.written_ms;
+        writing.dress();
     }
 
     /// `choice` made in the note's menu: done; whether the page is to go.

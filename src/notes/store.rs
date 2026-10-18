@@ -44,7 +44,7 @@ pub struct Stamp {
 
 impl Stamp {
     /// Whether it is of the same bytes as `other` (whenever written).
-    fn same(&self, other: &Stamp) -> bool {
+    pub fn same(&self, other: &Stamp) -> bool {
         self.bytes == other.bytes && self.digest == other.digest
     }
 
