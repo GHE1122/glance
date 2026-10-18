@@ -3,6 +3,7 @@
 
 pub mod clipboard;
 pub mod folder;
+pub mod keep;
 pub mod shelf;
 
 /// Now, in ms since 1970 (as the shelf keeps when things were put on it).

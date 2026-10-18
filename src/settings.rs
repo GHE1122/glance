@@ -704,7 +704,41 @@ pub struct Settings {
     pub widgets: Vec<WidgetAt>,
     /// The player music is followed from, while it plays (see `media::choose_music`); none: as Glance picks.
     pub music_source: Option<MusicSource>,
+    /// The station's (see `station`).
+    #[serde(default)]
+    pub station: StationSettings,
     pub view: serde_json::Value,
+}
+
+/// How the station keeps what is put on it, and what is copied.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StationSettings {
+    /// What is copied kept in Recently copied.
+    pub history: bool,
+    /// Recently copied paused: nothing copied meanwhile is kept.
+    pub paused: bool,
+    /// How many days what is not pinned stays.
+    pub keep_days: u32,
+    /// The most the station keeps of its own (GB).
+    pub most_gb: u32,
+    /// Files put on it kept as a copy too (else only where they are).
+    pub always_copy: bool,
+    /// What is dragged off it taken off it.
+    pub remove_after_drag: bool,
+}
+
+impl Default for StationSettings {
+    fn default() -> Self {
+        StationSettings { history: true, paused: false, keep_days: 7, most_gb: 2, always_copy: false, remove_after_drag: false }
+    }
+}
+
+impl StationSettings {
+    /// What the shelf keeps to (see `station::shelf::Rules`).
+    pub fn rules(&self) -> crate::station::shelf::Rules {
+        crate::station::shelf::Rules { keep_days: self.keep_days, most_bytes: u64::from(self.most_gb) << 30 }
+    }
 }
 
 impl Default for Settings {
@@ -740,6 +774,7 @@ impl Default for Settings {
             music_rooms: MusicRooms::default(),
             widgets: Vec::new(),
             music_source: None,
+            station: StationSettings::default(),
             view: serde_json::Value::Null,
         }
     }
@@ -826,6 +861,8 @@ impl Settings {
         settings.interval_ms = settings.interval_ms.clamp(250, 10_000);
         settings.close_delay_ms = settings.close_delay_ms.min(10_000);
         settings.overlay.clear = settings.overlay.clear.clamp(0.0, 1.0);
+        settings.station.keep_days = settings.station.keep_days.clamp(1, 365);
+        settings.station.most_gb = settings.station.most_gb.clamp(1, 100);
         settings.carry_over();
         settings
     }

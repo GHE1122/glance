@@ -52,6 +52,19 @@ impl Folder {
 
     /// Keeps `bytes` in a file of its own, of the kind `extension` says (letters and digits, else none): its name.
     pub fn keep(&self, bytes: &[u8], extension: &str) -> std::io::Result<String> {
+        self.written(extension, |file| std::io::Write::write_all(file, bytes))
+    }
+
+    /// Keeps a copy of the file at `path` in a file of its own, of its kind: its name.
+    pub fn keep_file(&self, path: &Path) -> std::io::Result<String> {
+        let extension = path.extension().and_then(|extension| extension.to_str()).unwrap_or_default();
+        let mut from = std::fs::File::open(path)?;
+        self.written(extension, |file| std::io::copy(&mut from, file).map(|_| ()))
+    }
+
+    /// A new file of its own of the kind `extension` says (letters and digits, else none), as `write` writes it: its
+    /// name. (Not written whole: none.)
+    fn written(&self, extension: &str, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<String> {
         std::fs::create_dir_all(&self.dir)?;
         let extension: String = extension.chars().filter(char::is_ascii_alphanumeric).take(8).collect::<String>().to_ascii_lowercase();
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -60,8 +73,7 @@ impl Folder {
             // (A new file: a name taken, the next.)
             match std::fs::OpenOptions::new().write(true).create_new(true).open(self.dir.join(&name)) {
                 Ok(mut file) => {
-                    use std::io::Write;
-                    if let Err(error) = file.write_all(bytes) {
+                    if let Err(error) = write(&mut file) {
                         drop(file);
                         let _ = std::fs::remove_file(self.dir.join(&name));
                         return Err(error);

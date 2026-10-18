@@ -22,8 +22,11 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, GetHGlobalFromStream};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, STREAM_SEEK_END};
-use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW};
-use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use std::os::windows::ffi::OsStrExt;
+use windows::Win32::Foundation::{GlobalFree, HANDLE};
+use windows::Win32::Graphics::Imaging::WICDecodeMetadataCacheOnDemand;
+use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 /// The clipboard's own formats: a picture, text, files.
@@ -34,7 +37,7 @@ const FILES: u32 = 15;
 const BYTES_MOST: usize = 256 << 20;
 
 /// What was copied.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Content {
     Files(Vec<PathBuf>),
     Text(String),
@@ -85,20 +88,27 @@ pub fn sequence() -> u32 {
     unsafe { GetClipboardSequenceNumber() }
 }
 
-/// What is on the clipboard, read for `why` by window `owner`, as `judged` takes it: none if it is not taken, holds
-/// nothing the station keeps, or the clipboard is held by another just now.
-pub fn read(owner: HWND, why: Why) -> Option<Copied> {
+/// The clipboard held by another program just now (to be read again in a moment).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Busy;
+
+/// What is on the clipboard, read for `why` by window `owner`, as `judged` takes it: none if it is not taken or holds
+/// nothing the station keeps; `Busy` if another program holds it just now.
+pub fn read(owner: HWND, why: Why) -> Result<Option<Copied>, Busy> {
     unsafe {
-        OpenClipboard(Some(owner)).ok()?;
+        OpenClipboard(Some(owner)).map_err(|_| Busy)?;
         let read = read_open(why);
         let _ = CloseClipboard();
-        let (taken, stays_here, sequence) = read?;
+        let Some((taken, stays_here, sequence)) = read else { return Ok(None) };
         // (A picture read as the clipboard's was copied into a bitmap of Glance's; made a PNG now it is closed.)
         let content = match taken {
             Taken::Content(content) => content,
-            Taken::Bitmap(bitmap) => Content::Png(png(&bitmap).ok()?),
+            Taken::Bitmap(bitmap) => match png(&bitmap) {
+                Ok(png) => Content::Png(png),
+                Err(_) => return Ok(None),
+            },
         };
-        Some(Copied { content, stays_here, sequence })
+        Ok(Some(Copied { content, stays_here, sequence }))
     }
 }
 
@@ -203,6 +213,108 @@ unsafe fn png(image: &IWICBitmapSource) -> windows::core::Result<Vec<u8>> {
     }
 }
 
+/// Puts `content` on the clipboard, by window `owner` (`stays_here`: marked not to leave this PC, as its copier marked
+/// it: see `Marks::upload`). A picture goes as a PNG and as a bitmap (programs that read no PNG take that). Its
+/// sequence number once it is there (what Glance itself put there, not taken for a copy: see `read`); none if the
+/// clipboard was held by another, or what was to go there could not be made.
+pub fn put(owner: HWND, content: &Content, stays_here: bool) -> Option<u32> {
+    // Made before the clipboard is opened (a picture decoded): it is held no longer than it takes to hand it over.
+    let mut formats: Vec<(u32, Vec<u8>)> = match content {
+        Content::Text(text) => vec![(TEXT, utf16_z(text))],
+        Content::Files(paths) => vec![(FILES, dropped(paths))],
+        Content::Png(png) => {
+            let dib = unsafe { dib_of(png).ok()? };
+            vec![(unsafe { RegisterClipboardFormatW(w!("PNG")) }, png.clone()), (DIB, dib)]
+        }
+    };
+    if stays_here {
+        formats.push((unsafe { RegisterClipboardFormatW(w!("CanUploadToCloudClipboard")) }, 0u32.to_le_bytes().to_vec()));
+    }
+    unsafe {
+        OpenClipboard(Some(owner)).ok()?;
+        let _ = EmptyClipboard();
+        let mut all = true;
+        for (format, bytes) in &formats {
+            all &= hand_over(*format, bytes);
+        }
+        let _ = CloseClipboard();
+        all.then(|| GetClipboardSequenceNumber())
+    }
+}
+
+/// The clipboard's device-independent bitmap format.
+const DIB: u32 = 8;
+
+/// `bytes` handed to the clipboard (open) as `format`: whether it took them (the clipboard owns them from then; not
+/// taken, they are let go of here).
+unsafe fn hand_over(format: u32, bytes: &[u8]) -> bool {
+    unsafe {
+        let Ok(memory) = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) else { return false };
+        let at = GlobalLock(memory);
+        if at.is_null() {
+            let _ = GlobalFree(Some(memory));
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), at.cast::<u8>(), bytes.len());
+        let _ = GlobalUnlock(memory);
+        if SetClipboardData(format, Some(HANDLE(memory.0))).is_ok() {
+            true
+        } else {
+            let _ = GlobalFree(Some(memory));
+            false
+        }
+    }
+}
+
+/// `text` as the clipboard keeps text: UTF-16, ended by a zero.
+fn utf16_z(text: &str) -> Vec<u8> {
+    text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()
+}
+
+/// `paths` as files are put on the clipboard (`DROPFILES`, then each path in UTF-16 ended by a zero, and a zero more).
+fn dropped(paths: &[PathBuf]) -> Vec<u8> {
+    // pFiles (where the paths begin), pt (x, y), fNC, fWide.
+    let mut bytes: Vec<u8> = [20u32, 0, 0, 0, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
+    for path in paths {
+        bytes.extend(path.as_os_str().encode_wide().chain([0]).flat_map(u16::to_le_bytes));
+    }
+    bytes.extend([0, 0]);
+    bytes
+}
+
+/// A PNG's picture as a device-independent bitmap (`BITMAPINFOHEADER`, 32 bits a pixel, its rows bottom up).
+unsafe fn dib_of(png: &[u8]) -> windows::core::Result<Vec<u8>> {
+    unsafe {
+        let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let stream = factory.CreateStream()?;
+        stream.InitializeFromMemory(png)?;
+        let decoder = factory.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)?;
+        let frame = decoder.GetFrame(0)?;
+        let (mut width, mut height) = (0, 0);
+        frame.GetSize(&mut width, &mut height)?;
+        let converter = factory.CreateFormatConverter()?;
+        converter.Initialize(&frame, &GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
+        let row = width as usize * 4;
+        let mut pixels = vec![0u8; row * height as usize];
+        converter.CopyPixels(std::ptr::null(), row as u32, &mut pixels)?;
+        // biSize, biWidth, biHeight (bottom up), biPlanes and biBitCount, biCompression (BI_RGB), biSizeImage, the
+        // rest none.
+        let mut dib: Vec<u8> = Vec::with_capacity(40 + pixels.len());
+        dib.extend(40u32.to_le_bytes());
+        dib.extend((width as i32).to_le_bytes());
+        dib.extend((height as i32).to_le_bytes());
+        dib.extend(1u16.to_le_bytes());
+        dib.extend(32u16.to_le_bytes());
+        dib.extend(0u32.to_le_bytes());
+        dib.extend((pixels.len() as u32).to_le_bytes());
+        dib.extend([0u8; 16]);
+        for line in pixels.chunks_exact(row).rev() {
+            dib.extend_from_slice(line);
+        }
+        Ok(dib)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +333,15 @@ mod tests {
         // Not to be uploaded: kept, never to leave this PC.
         assert_eq!(judged(Marks { upload: Some(0), ..plain }, Why::Changed), Some(true));
         assert_eq!(judged(Marks { upload: Some(0), excluded: true, ..plain }, Why::Pasted), Some(true));
+    }
+
+    /// Files go on the clipboard as Explorer puts them: where their paths begin, wide, each ended, and the list too.
+    #[test]
+    fn files_are_put_as_explorer_puts_them() {
+        let bytes = dropped(&[PathBuf::from(r"C:\a"), PathBuf::from(r"D:\b")]);
+        assert_eq!(&bytes[..4], &20u32.to_le_bytes());
+        assert_eq!(&bytes[16..20], &1u32.to_le_bytes());
+        let units: Vec<u16> = bytes[20..].chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+        assert_eq!(String::from_utf16(&units).unwrap(), "C:\\a\0D:\\b\0\0");
     }
 }
