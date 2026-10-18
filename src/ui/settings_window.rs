@@ -2252,11 +2252,13 @@ impl Ui {
         match field {
             // No larger than the screen holds it: at that, said so.
             Field::PanelSize => {
-                // (On a step, as the slider moves by them: a most between two could never be reached.)
-                let most = (sizes.0 + ((self.largest - sizes.0) / 0.05 + 1e-4).floor() * 0.05).clamp(sizes.0, sizes.1);
+                // A hundredth at a step, as sizing the panel by its corner goes. (On a step, as the slider moves by
+                // them: a most between two could never be reached.)
+                const STEP: f32 = 0.01;
+                let most = (sizes.0 + ((self.largest - sizes.0) / STEP + 1e-4).floor() * STEP).clamp(sizes.0, sizes.1);
                 let value = self.settings.panel_size.clamp(sizes.0, most);
                 let name = if most < sizes.1 && value >= most - 0.001 { pick(lang, "面板大小（已达屏幕上限）", "Panel size (as large as this screen holds)") } else { pick(lang, "面板大小", "Panel size") };
-                (name, sizes.0, most, 0.05, value)
+                (name, sizes.0, most, STEP, value)
             }
             Field::OverlayClear => (pick(lang, "玻璃透明度", "Glass clarity"), 0.0, 1.0, 0.05, overlay.clear.clamp(0.0, 1.0)),
             _ => (pick(lang, "大小", "Size"), sizes.0, sizes.1, 0.05, overlay.size.clamp(sizes.0, sizes.1)),
@@ -3422,10 +3424,14 @@ impl Ui {
         self.hovered_now = self.hovered();
         self.targets.clear();
         self.paint_nav(frame, &palette);
+        // The preview before the list (they do not meet): it finds how large the panel can be on its screen, which the
+        // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
+        // largest there is, and its knob jumped as the window first showed).
+        let creep = self.paint_preview(frame, &palette, width, height);
         unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, PANE, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         self.paint_list(frame, &palette, now, height);
         unsafe { frame.dc.PopAxisAlignedClip() };
-        self.paint_preview(frame, &palette, width, height)
+        creep
     }
 
     /// The pages' list: the window's name, then each page, the one shown lit

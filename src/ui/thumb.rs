@@ -11,8 +11,9 @@ use super::canvas::{Canvas, Color, Point};
 /// 150% screen (its face 28.5 pixels across, its dot 13.5).
 pub const FACE: f32 = 9.5;
 const DOT: f32 = 4.5 / FACE;
-/// The dot under the pointer, and held, of its size at rest (held, as large: it is still under the pointer).
+/// The dot under the pointer, and held, of its size at rest (held, a little smaller than at rest, as Windows' is).
 pub const OVER: f32 = 1.4;
+pub const HELD: f32 = 0.85;
 /// How quickly the dot goes toward its size: each moment, this much of the way left a second, as an exponent (fast
 /// at first, slowing as it comes; most of the way in about a tenth of a second, all of it in about a sixth).
 const EASE: f32 = 25.0;
@@ -58,7 +59,7 @@ impl<K: Copy + PartialEq> Dots<K> {
                 self.now.push((key, 1.0));
             }
         }
-        let to = |key: K| if held == Some(key) || over == Some(key) { OVER } else { 1.0 };
+        let to = |key: K| if held == Some(key) { HELD } else if over == Some(key) { OVER } else { 1.0 };
         let mut moving = false;
         for (key, dot) in &mut self.now {
             let to = to(*key);
@@ -94,7 +95,8 @@ mod tests {
     use super::*;
 
     /// At rest the dot is small; under the pointer it grows over several frames, fast then slowing, not at once; held,
-    /// it stays as large; let go and left, it is back at rest and forgotten, and nothing more is wanted.
+    /// it shrinks, a little smaller than at rest; let go and left, it is back at rest and forgotten, and nothing more
+    /// is wanted.
     #[test]
     fn the_dot_eases_between_its_sizes() {
         let mut dots: Dots<u8> = Dots::new();
@@ -117,8 +119,10 @@ mod tests {
         let moves: Vec<f32> = steps.windows(2).map(|pair| pair[1] - pair[0]).collect();
         assert!(moves.windows(2).all(|pair| pair[1] <= pair[0] + 1e-6), "{moves:?}");
         ms += 16;
-        assert!(!dots.step(at(ms), Some(1), Some(1)));
-        assert_eq!(dots.of(1), OVER);
+        while dots.step(at(ms), Some(1), Some(1)) {
+            ms += 16;
+        }
+        assert_eq!(dots.of(1), HELD);
         ms += 16;
         while dots.step(at(ms), None, None) {
             ms += 16;
