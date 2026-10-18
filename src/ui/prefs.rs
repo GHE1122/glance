@@ -94,6 +94,8 @@ const LYRICS: [Item; 6] = [
     item("controls", false),
     item("clear", false),
 ];
+/// The station: what was copied lately under what is on it.
+const STATION: [Item; 1] = [item("copies", true)];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
 const GAME: [Item; 9] = [
     item("chart", true),
@@ -132,6 +134,7 @@ pub fn items(module: &str) -> &'static [Item] {
         "battery" => &BATTERY,
         "system" => &SYSTEM,
         "time" => &TIME,
+        "station" => &STATION,
         "lyrics" => &LYRICS,
         "wsl" => &WSL,
         "game" => &GAME,
@@ -251,7 +254,7 @@ impl Default for ProcessPrefs {
 }
 
 /// The workbench's modules, in default order (each on until chosen otherwise).
-pub const WORKBENCH: [&str; 1] = ["time"];
+pub const WORKBENCH: [&str; 2] = ["time", "station"];
 
 /// Whether module `id` among `entries` shows its item `name` (whether or not the module itself is on).
 pub fn shows_in(entries: &[ModuleEntry], id: &str, name: &str) -> bool {

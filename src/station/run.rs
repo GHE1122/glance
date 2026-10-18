@@ -47,6 +47,8 @@ pub struct Shown {
     pub paused: bool,
     /// What was last given could not be taken: no room but what is pinned holds.
     pub full: bool,
+    /// Something is dragged over a station, to be dropped.
+    pub over: bool,
 }
 
 /// Its window's message: asked something (see `ask`).
@@ -92,6 +94,12 @@ pub fn shown() -> Arc<Shown> {
     SHOWN.lock().unwrap().clone().unwrap_or_default()
 }
 
+/// For pictures: as if the station held `items` (its thread not started).
+#[cfg(all(test, feature = "studio"))]
+pub fn pretend(items: Vec<Item>) {
+    *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, paused: false, full: false, over: false }));
+}
+
 /// The station on its thread.
 struct Station {
     keep: Keep,
@@ -104,6 +112,8 @@ struct Station {
     ours: u32,
     /// Times the clipboard was found held by another since it changed.
     tries: u32,
+    /// Something dragged over a station, to be dropped (see `drop`).
+    over: bool,
 }
 
 thread_local! {
@@ -125,7 +135,7 @@ fn run(asks: Receiver<Ask>) {
         let settings = crate::app().settings.lock().unwrap().station;
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
         keep.expire(super::now_ms());
-        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0 }));
+        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false }));
         WINDOW.store(window.0 as isize, Ordering::Release);
         let _ = SetTimer(Some(window), EXPIRE, EXPIRE_EVERY_MS, None);
         with_station(|station| {
@@ -263,7 +273,7 @@ impl Station {
     /// What it shows now, for the other threads, who are told.
     fn show(&self) {
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, paused: settings.paused, full: self.keep.full };
+        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, paused: settings.paused, full: self.keep.full, over: self.over };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();

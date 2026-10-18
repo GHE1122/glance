@@ -435,7 +435,7 @@ impl Controller {
         // The game in front first, while there is one.
         let mut known = vec!["game".to_string(), "cpu".to_string()];
         known.extend(self.info.gpu_modules());
-        known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "lyrics", "wsl", "docker"].map(String::from));
+        known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "station", "lyrics", "wsl", "docker"].map(String::from));
         known
     }
 
@@ -3070,6 +3070,7 @@ impl<'a> Panel<'a> {
                 self.music.back_to_now();
             }
             Some(Hit::Drive(letter)) => open_drive(letter),
+            Some(hit) if crate::station::pressed(hit) => {}
             Some(Hit::Sort(sort)) if sort != self.drawn.processes.sort => {
                 self.prefs.processes.sort = sort;
                 self.drawn.processes.sort = sort;

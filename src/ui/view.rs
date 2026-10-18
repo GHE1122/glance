@@ -174,6 +174,11 @@ pub enum Hit {
     Drive(char),
     /// A line of the lyrics turned to by the wheel (by its place among them): played from its start.
     Line(u16),
+    /// A thing on the station, by its number (see `station::shelf::Item`); something copied lately, by its; all
+    /// that is not pinned taken off it.
+    Shelf(u64),
+    Copied(u64),
+    ShelfClear,
 }
 
 impl Hit {
@@ -364,6 +369,126 @@ enum Block {
     Table { headings: Vec<(String, Option<ProcessSort>)>, sort: Option<ProcessSort>, rows: Vec<[String; 5]>, visible: usize, scrolls: bool, widths: [f32; 4] },
     /// Room this tall left empty, for what is drawn there apart (see `Scene::music_apart`).
     Room(f32),
+    /// What is on the station, the newest first, as tiles in `rows` rows, scrolled through past them; `said`, what
+    /// it says instead of them (nothing on it), or over them (no room left); `over`, something dragged over it, to
+    /// be dropped.
+    Shelf { tiles: Vec<Tile>, rows: usize, said: Option<String>, over: bool },
+    /// What was copied lately, the newest first, a line each, scrolled through past `COPIES_SHOWN`; `paused`, so
+    /// said over them.
+    Copies { rows: Vec<(u64, String)>, paused: bool },
+}
+
+/// A thing on the station as its tile shows it: its number, its name under it, its face, and whether it is pinned.
+#[derive(Clone, Debug, PartialEq, Hash)]
+pub struct Tile {
+    id: u64,
+    label: String,
+    face: Face,
+    pinned: bool,
+}
+
+/// What a tile shows: a file's picture as Explorer shows it (with how many more files there are with it), the
+/// first lines of text, or a web address's mark.
+#[derive(Clone, Debug, PartialEq, Hash)]
+enum Face {
+    Picture { path: std::path::PathBuf, more: usize },
+    Text(String),
+    Link,
+}
+
+impl Tile {
+    /// `item` as its tile shows it (its own files in `folder`).
+    fn of(item: &crate::station::shelf::Item, folder: &crate::station::folder::Folder, lang: Lang) -> Tile {
+        use crate::station::shelf::What;
+        let (label, face) = match &item.what {
+            What::Files { paths, kept } => {
+                // (A file gone from where it was, by its copy where one is kept.)
+                let first = match kept.first().filter(|name| !name.is_empty() && !paths[0].exists()) {
+                    Some(name) => folder.path(name),
+                    None => paths.first().cloned().unwrap_or_default(),
+                };
+                let name = paths.first().and_then(|path| path.file_name()).map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+                (name, Face::Picture { path: first, more: paths.len().saturating_sub(1) })
+            }
+            What::Text { text } => (lang.pick("文字", "Text").into(), Face::Text(text.lines().filter(|line| !line.trim().is_empty()).take(4).collect::<Vec<_>>().join("\n"))),
+            What::Link { url } => (url.split("://").nth(1).unwrap_or(url).split(['/', '?', '#']).next().unwrap_or_default().to_string(), Face::Link),
+            What::Picture { file } => (lang.pick("图片", "Picture").into(), Face::Picture { path: folder.path(file), more: 0 }),
+            What::Saved { file, name } => (name.clone(), Face::Picture { path: folder.path(file), more: 0 }),
+        };
+        Tile { id: item.id, label, face, pinned: item.pinned }
+    }
+}
+
+/// What a thing copied lately is, in a line.
+fn copied_line(what: &crate::station::shelf::What, lang: Lang) -> String {
+    use crate::station::shelf::What;
+    match what {
+        What::Text { text } => text.split_whitespace().collect::<Vec<_>>().join(" "),
+        What::Link { url } => url.clone(),
+        What::Files { paths, .. } => match paths.as_slice() {
+            [one] => one.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            many => format!("{} {}", many.len(), lang.pick("个文件", "files")),
+        },
+        What::Picture { .. } => lang.pick("图片", "Picture").into(),
+        What::Saved { name, .. } => name.clone(),
+    }
+}
+
+/// The station's tiles: each one's room across, its picture's side, its room down (the picture, its name under it),
+/// the gap between them, and the room above them.
+const TILE_W: f32 = 72.0;
+const TILE_PICTURE: f32 = 56.0;
+const TILE_H: f32 = TILE_PICTURE + 4.0 + 16.0;
+const TILE_GAP: f32 = 8.0;
+const SHELF_GAP: f32 = 6.0;
+/// How many rows of tiles a whole station lane shows.
+const SHELF_ROWS: usize = 2;
+/// The side of a tile's picture as it is asked for (physical px: as large as it is drawn up to 225%).
+const TILE_PIXELS: u32 = 128;
+/// What was copied lately: a row's height, the room above them and their heading, and how many show.
+const COPY_ROW: f32 = 24.0;
+const COPIES_GAP: f32 = 12.0;
+const COPIES_SHOWN: usize = 4;
+
+/// How many tiles go across `width`.
+fn tiles_across(width: f32) -> usize {
+    (((width + TILE_GAP) / (TILE_W + TILE_GAP)) as usize).max(1)
+}
+
+/// How tall `rows` rows of tiles are.
+fn shelf_tall(rows: usize) -> f32 {
+    rows as f32 * TILE_H + rows.saturating_sub(1) as f32 * TILE_GAP
+}
+
+/// The station's lane: what is on it (in as many rows as it takes, up to `SHELF_ROWS`, a lane `pad_x` in at each
+/// side, as wide as a column), and (`full`, with `copies` switched on and Recently copied on) what was copied lately.
+fn station_lane(full: bool, copies: bool, lang: Lang, pad_x: f32) -> Vec<Block> {
+    let shown = crate::station::run::shown();
+    let folder = crate::station::folder::Folder::own();
+    let tiles: Vec<Tile> = shown.items.iter().rev().filter(|item| !item.copied).map(|item| Tile::of(item, &folder, lang)).collect();
+    let loose = tiles.iter().any(|tile| !tile.pinned);
+    let count = match tiles.len() {
+        0 => String::new(),
+        n if lang == Lang::Zh => format!("{n} 项"),
+        1 => "1 item".into(),
+        n => format!("{n} items"),
+    };
+    let said = if shown.full {
+        Some(lang.pick("空间已满：请取消一些固定，或在设置里调大上限", "No room left: unpin some, or allow more in the settings").to_string())
+    } else if tiles.is_empty() {
+        Some(lang.pick("把文件、图片或文字拖到这里", "Drag files, pictures or text here").to_string())
+    } else {
+        None
+    };
+    let mut blocks = vec![
+        head(lang.pick("中转站", "Station"), count, if loose { lang.pick("全部清空", "Clear all") } else { "" }, false),
+        Block::Shelf { rows: tiles.len().div_ceil(tiles_across(COLUMN_WIDTH - 2.0 * pad_x)).clamp(1, if full { SHELF_ROWS } else { 1 }), tiles, said, over: shown.over },
+    ];
+    if full && copies && shown.history {
+        let rows = shown.items.iter().rev().filter(|item| item.copied).map(|item| (item.id, copied_line(&item.what, lang))).collect();
+        blocks.push(Block::Copies { rows, paused: shown.paused });
+    }
+    blocks
 }
 
 impl Block {
@@ -383,6 +508,8 @@ impl Block {
             Block::Lyric { .. } => MEDIA_GAP + 2.0 * LINE,
             Block::Table { visible, .. } => *visible as f32 * TABLE_ROW,
             Block::Room(tall) => *tall,
+            Block::Shelf { rows, .. } => SHELF_GAP + shelf_tall(*rows),
+            Block::Copies { .. } => COPIES_GAP + LINE + COPIES_SHOWN as f32 * COPY_ROW,
         }
     }
 }
@@ -409,6 +536,14 @@ impl Hash for Block {
                 headings.iter().for_each(|(label, key)| (label, key.map(|key| key as u8)).hash(state));
                 (sort.map(|sort| sort as u8), rows, visible, scrolls, widths.map(f32::to_bits)).hash(state);
             }
+            Block::Shelf { tiles, rows, said, over } => {
+                (tiles, rows, said, over).hash(state);
+                // (Each picture as it is now: one made since is drawn.)
+                tiles.iter().for_each(|tile| if let Face::Picture { path, .. } = &tile.face {
+                    crate::station::thumbs::of(path, TILE_PIXELS).map(|picture| picture.key).hash(state);
+                });
+            }
+            Block::Copies { rows, paused } => (rows, paused).hash(state),
         }
     }
 }
@@ -1196,6 +1331,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             blocks
         }
+        "station" => station_lane(full, on("copies"), lang, scene.theme.pad_x),
         // What plays, in a widget merged with readings: drawn apart (see `Scene::music_apart`), its lane its head and
         // room under it (a player's, full; a strip's, compact).
         "lyrics" if scene.music_apart => {
@@ -1520,6 +1656,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Progress { .. } => "progress",
             Block::Lyric { .. } => "lyric",
             Block::Table { .. } => "table",
+            Block::Shelf { .. } => "shelf",
+            Block::Copies { .. } => "copies",
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
         kinds.push(kind);
@@ -1794,9 +1932,179 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
                 }
             }
+            (Block::Shelf { tiles, rows, said, over }, Pass::Content) => {
+                paint_shelf(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, *rows, said.as_deref(), *over, hits);
+            }
+            (Block::Copies { rows, paused }, Pass::Content) => {
+                paint_copies(frame, scene, (left, y + COPIES_GAP, width), rows, *paused, hits);
+            }
         }
         frame.key("");
         y += height;
+    }
+}
+
+/// The station's tiles (see `Block::Shelf`) from (`left`, `top`), `width` across, `rows` rows of them shown and
+/// scrolled through past them; the press on its head's word that clears it (drawn as the head's aside).
+#[allow(clippy::too_many_arguments)]
+fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], rows: usize, said: Option<&str>, over: bool, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    let tall = shelf_tall(rows);
+    // Its head's word that clears it, pressed there.
+    if tiles.iter().any(|tile| !tile.pinned) {
+        let clear = scene.lang.pick("全部清空", "Clear all");
+        let wide = frame.measure(clear, theme.body);
+        hits.push((left + width - wide, top - SHELF_GAP - HEAD - HEAD_GAP, wide, HEAD, Hit::ShelfClear));
+    }
+    // Something dragged over it: where it goes, lit.
+    if over {
+        frame.fill_rounded(ink.trace.alpha(0.12), left - 4.0, top - 4.0, width + 8.0, tall + 8.0, 10.0);
+        frame.stroke_rounded(Fill::Solid(ink.trace.alpha(0.8)), left - 4.0, top - 4.0, width + 8.0, tall + 8.0, 10.0, 1.5);
+    }
+    if tiles.is_empty() {
+        // Nothing on it: where to drop, and what.
+        if !over {
+            frame.stroke_rounded(Fill::Solid(theme.text3.alpha(0.5)), left, top, width, tall, 10.0, 1.0);
+        }
+        let middle = top + tall / 2.0;
+        frame.icon(Icon::Inbox, Point { x: left + width / 2.0, y: middle - 12.0 }, 22.0, theme.text3);
+        centred(frame, said.unwrap_or_default(), theme.small, theme.text2, left, middle + 4.0, width);
+        return;
+    }
+    let across = tiles_across(width);
+    // (Spread over the width: the gaps share what is left over.)
+    let gap = if across > 1 { (width - across as f32 * TILE_W) / (across - 1) as f32 } else { 0.0 };
+    let lines = tiles.len().div_ceil(across);
+    let most = lines.saturating_sub(rows) as f32 * (TILE_H + TILE_GAP);
+    if most > 0.0 {
+        hits.push((left, top, width, tall, Hit::List(List::Shelf, most.to_bits())));
+    }
+    let scroll = scene.scrolls.at(List::Shelf).clamp(0.0, most);
+    frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
+    for (at, tile) in tiles.iter().enumerate() {
+        let x = left + (at % across) as f32 * (TILE_W + gap);
+        let y = top + (at / across) as f32 * (TILE_H + TILE_GAP) - scroll;
+        if y + TILE_H < top || y > top + tall {
+            continue;
+        }
+        let lit = scene.hover == Some(Hit::Shelf(tile.id));
+        let (px, py) = (x + (TILE_W - TILE_PICTURE) / 2.0, y);
+        if lit {
+            frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, TILE_W + 4.0, TILE_H + 4.0, 8.0);
+        }
+        match &tile.face {
+            Face::Picture { path, more } => {
+                match crate::station::thumbs::of(path, TILE_PIXELS) {
+                    Some(picture) => frame.picture(&picture, px, py, TILE_PICTURE, 6.0, 1.0),
+                    None => frame.icon(Icon::File, Point { x: px + TILE_PICTURE / 2.0, y: py + TILE_PICTURE / 2.0 }, 28.0, theme.text3),
+                }
+                // Files put on it together: how many more.
+                if *more > 0 {
+                    let badge = format!("+{more}");
+                    let wide = frame.measure(&badge, theme.small) + 10.0;
+                    frame.fill_rounded(ink.trace, px + TILE_PICTURE - wide + 4.0, py + TILE_PICTURE - 14.0, wide, 18.0, 9.0);
+                    centred(frame, &badge, theme.small, Color::hex(0xFFFFFF, 1.0), px + TILE_PICTURE - wide + 4.0, py + TILE_PICTURE - 13.0, wide);
+                }
+            }
+            Face::Text(text) => {
+                frame.fill_rounded(theme.track, px, py, TILE_PICTURE, TILE_PICTURE, 6.0);
+                // Its first lines, each cut short where it is longer than the tile is wide.
+                let small = Font { size: 9.0, ..theme.small };
+                for (at, line) in text.lines().take(4).enumerate() {
+                    // (The first short of a pin in the corner.)
+                    let room = TILE_PICTURE - 10.0 - if at == 0 && tile.pinned { 14.0 } else { 0.0 };
+                    frame.text(&fitted(frame, line.trim(), small, room), small, theme.text2, px + 5.0, py + 5.0 + at as f32 * 11.5, room, Align::Start);
+                }
+            }
+            Face::Link => {
+                frame.fill_rounded(theme.track, px, py, TILE_PICTURE, TILE_PICTURE, 6.0);
+                frame.icon(Icon::Link, Point { x: px + TILE_PICTURE / 2.0, y: py + TILE_PICTURE / 2.0 }, 24.0, ink.trace);
+            }
+        }
+        // Pinned: a pin in its corner.
+        if tile.pinned {
+            let corner = Point { x: px + TILE_PICTURE - 9.0, y: py + 9.0 };
+            frame.fill_circle(ink.trace, corner, 8.0);
+            frame.icon(Icon::Pin, corner, 10.0, Color::hex(0xFFFFFF, 1.0));
+        }
+        centred(frame, &fitted(frame, &tile.label, theme.small, TILE_W), theme.small, if lit { theme.text } else { theme.text2 }, x, y + TILE_PICTURE + 4.0, TILE_W);
+        hits.push((x, y, TILE_W, TILE_H, Hit::Shelf(tile.id)));
+    }
+    frame.unclip();
+    // No room left: said over it.
+    if let Some(said) = said {
+        let wide = (frame.measure(said, theme.small) + 20.0).min(width);
+        frame.fill_rounded(theme.signal, left + (width - wide) / 2.0, top + tall - 24.0, wide, 22.0, 11.0);
+        centred(frame, said, theme.small, Color::hex(0xFFFFFF, 1.0), left + (width - wide) / 2.0, top + tall - 21.0, wide);
+    }
+    if most > 0.0 {
+        let thumb = (tall * rows as f32 / lines as f32).max(12.0);
+        let at = top + (tall - thumb) * scroll / most;
+        frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
+    }
+}
+
+/// `text` in the middle of `width` from `x`.
+#[allow(clippy::too_many_arguments)]
+fn centred(frame: &dyn Canvas, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32) {
+    let wide = frame.measure(text, font);
+    frame.text(text, font, color, x + (width - wide).max(0.0) / 2.0, y, width, Align::Start);
+}
+
+/// `text`, or as much of its start as is no wider than `room` with an ellipsis after it.
+fn fitted<'t>(frame: &dyn Canvas, text: &'t str, font: Font, room: f32) -> std::borrow::Cow<'t, str> {
+    if frame.measure(text, font) <= room {
+        return text.into();
+    }
+    let mut kept: Vec<char> = text.chars().collect();
+    loop {
+        kept.pop();
+        let cut = format!("{}…", kept.iter().collect::<String>().trim_end());
+        if kept.is_empty() || frame.measure(&cut, font) <= room {
+            return cut.into();
+        }
+    }
+}
+
+/// What was copied lately (see `Block::Copies`) from (`left`, `top`), `width` across: its heading, then a line each,
+/// pressed to be copied again.
+fn paint_copies(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), rows: &[(u64, String)], paused: bool, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    let lang = scene.lang;
+    frame.text(lang.pick("最近复制", "Recently copied"), theme.small, theme.text2, left, top, width, Align::Start);
+    if paused {
+        frame.text(lang.pick("已暂停", "Paused"), theme.small, theme.signal, left, top, width, Align::End);
+    }
+    let list_top = top + LINE;
+    let tall = COPIES_SHOWN as f32 * COPY_ROW;
+    if rows.is_empty() {
+        frame.text(lang.pick("复制的文字、图片和文件会出现在这里", "What you copy shows here"), theme.small, theme.text3, left, list_top + 4.0, width, Align::Start);
+        return;
+    }
+    let most = rows.len().saturating_sub(COPIES_SHOWN) as f32 * COPY_ROW;
+    if most > 0.0 {
+        hits.push((left, list_top, width, tall, Hit::List(List::Copies, most.to_bits())));
+    }
+    let scroll = scene.scrolls.at(List::Copies).clamp(0.0, most);
+    frame.clip(left - 4.0, list_top, width + 8.0, tall);
+    for (at, (id, line)) in rows.iter().enumerate() {
+        let y = list_top + at as f32 * COPY_ROW - scroll;
+        if y + COPY_ROW < list_top || y > list_top + tall {
+            continue;
+        }
+        let lit = scene.hover == Some(Hit::Copied(*id));
+        if lit {
+            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, COPY_ROW - 2.0, 6.0);
+        }
+        frame.icon(Icon::Clipboard, Point { x: left + 7.0, y: y + COPY_ROW / 2.0 }, 12.0, theme.text3);
+        frame.text(&fitted(frame, line, theme.body, width - 20.0), theme.body, if lit { theme.text } else { theme.text2 }, left + 20.0, y + (COPY_ROW - LINE) / 2.0, width - 20.0, Align::Start);
+        hits.push((left, y, width, COPY_ROW, Hit::Copied(*id)));
+    }
+    frame.unclip();
+    if most > 0.0 {
+        let thumb = (tall * COPIES_SHOWN as f32 / rows.len() as f32).max(12.0);
+        let at = list_top + (tall - thumb) * scroll / most;
+        frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
     }
 }
 

@@ -2556,6 +2556,7 @@ impl Ui {
             "docker" => ("Docker".into(), Some(p("运行中的容器各占多少处理器、内存、网络和磁盘，问的是 Docker 当前连接的引擎", "What each container running uses, as the engine Docker's current context points at says"))),
             "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器和内存占用，只从 Windows 读取，不会启动或唤醒发行版", "WSL 2's processors and memory, read from Windows alone: no distribution is started or kept up"))),
             "time" => (p("时间与媒体", "Time and media"), Some(p("时间和日期，以及音量和正在播放的内容", "The time and the date, the sound's level and what is playing"))),
+            "station" => (p("中转站", "Station"), Some(p("临时放东西的地方：拖进来的文件、图片和文字，以及最近复制的内容。拖进来的文件只记位置，不复制", "A place to put things for a while: files, pictures and text dragged onto it, and what was copied lately. Files dragged onto it stay where they are"))),
             "lyrics" => (
                 p("音乐", "Music"),
                 Some(p(
@@ -2707,6 +2708,7 @@ impl Ui {
             ("overlay", "time") => (p("时间", "Time"), None),
             ("overlay" | "time", "twelve") => (p("12 小时制", "12-hour clock"), Some(p("关闭时为 24 小时制", "Off, a 24-hour clock"))),
             ("time", "sound") => (p("音量", "Volume"), Some(p("拖动调节音量，可静音", "Dragged to set how loud the sound is; muted too"))),
+            ("station", "copies") => (p("最近复制", "Recently copied"), Some(p("复制过的文字、图片和文件，点一下再次复制", "What was copied lately: pressed, copied again"))),
             ("time", "media") => (p("正在播放", "Now playing"), Some(p("可暂停、播放和切换曲目", "Paused, played and skipped"))),
             ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在唱的这一句和下一句。查找时会把歌名发给网易云音乐、QQ 音乐或 LRCLIB", "The line sung now and the next. To find them the track's title is sent to NetEase Cloud Music, QQ Music or LRCLIB"))),
             ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在正在唱的这一句下面", "Under the line sung now, where there is one"))),
@@ -4783,6 +4785,24 @@ mod pictures {
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
         let history = (0..120).map(|i| crate::studio::made_up(&info, now_ms - (120 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
         crate::pictured(info, history);
+        // The station holding a few things (files of this repository, pictured as Explorer shows them).
+        {
+            use crate::station::shelf::{Item, What};
+            let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
+            let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: 0, pinned: id == 2, copied, stays_here: false, own_bytes: 0 };
+            crate::station::thumbs::start(|| {});
+            crate::station::run::pretend(vec![
+                item(1, What::Files { paths: vec![file("website/apple-touch-icon.png")], kept: Vec::new() }, false),
+                item(2, What::Text { text: "会议改到周四下午三点
+地点：二楼小会议室
+记得带上季度报表".into() }, false),
+                item(3, What::Link { url: "https://github.com/lulu-loopp/glance/releases".into() }, false),
+                item(4, What::Files { paths: vec![file("Cargo.toml"), file("README.md"), file("LICENSE")], kept: Vec::new() }, false),
+                item(5, What::Text { text: "cargo build --profile fast".into() }, true),
+                item(6, What::Link { url: "https://glancepc.com/app".into() }, true),
+                item(7, What::Files { paths: vec![file("docs/station-and-notes.md")], kept: Vec::new() }, true),
+            ]);
+        }
         let gfx = gfx::held().unwrap();
         let hwnd = make(gfx.clone(), false).unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/settings", env!("CARGO_MANIFEST_DIR")));
