@@ -2339,6 +2339,11 @@ impl Widget {
                 // as a band gives) onto what it shows, the edges not dragged
                 // where they are.
                 if self.room.take().is_some() {
+                    // What plays, within the range its layout is right in, from as large as the hand made it.
+                    if let Content::Music(shown) = &mut self.content {
+                        shown.size = music::rests_at(shown.size, &Shows::from(&crate::app().settings.lock().unwrap().view));
+                        self.shown = shown.size;
+                    }
                     self.settle = Some((now, self.surface_size));
                     let r = self.rect();
                     self.anchor = Some(POINT { x: r.right, y: r.bottom });
@@ -2688,12 +2693,13 @@ impl Widget {
                 }
                 moving |= readings.morph.is_some();
             }
-            // What plays is laid out for the room it is given (see `music::Layout`): it comes to rest as large as the
-            // hand made it, within the range its layout is right in (the hand pulling it past that part of the way, as
-            // it pulls a widget of readings past its form: see `GIVE`).
+            // What plays is laid out for the room it is given (see `music::Layout`), as large as the hand makes it while
+            // it is sized (as a widget of readings follows the hand), and let go, it settles within the range its layout
+            // is right in (see `release`). (Held to that range as it was sized, it followed the hand only part of the way
+            // past it, and between one layout's range and the next's it held back.)
             Content::Music(shown) => {
                 if let Some(room) = sized_to {
-                    shown.size = music::rests_at(room, &Shows::from(&crate::app().settings.lock().unwrap().view));
+                    shown.size = (room.0.max(music::LEAST.0), room.1.max(music::LEAST.1));
                 }
                 self.zoom = 1.0;
                 self.shown = shown.size;
