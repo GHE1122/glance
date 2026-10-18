@@ -831,6 +831,35 @@ impl Controller {
                 // The pinned panel dragged by its bar.
                 WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => panel.press(lparam_point(msg.lParam)),
                 WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd && panel.shelf_press.is_some() => panel.shelf_moved(),
+                // A thing kept at hand pressed and moved: put elsewhere among them as it is let go, over another.
+                WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd && panel.app_press.is_some() => {
+                    if let (Some((at, from, false)), Some(now)) = (panel.app_press, cursor_position()) {
+                        if crate::station::run::drag_begins(from, now) {
+                            panel.app_press = Some((at, from, true));
+                        }
+                    }
+                    panel.hover_at(lparam_point(msg.lParam));
+                }
+                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.app_press.is_some() => {
+                    let (from, _, moved) = panel.app_press.take().unwrap();
+                    let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                    let over = panel.hit_at(lparam_point(msg.lParam));
+                    match (msg.message == WM_LBUTTONUP, moved, over) {
+                        (true, true, Some(Hit::App(to))) if to != from => {
+                            crate::station::apps::change(move |apps| {
+                                let (from, to) = (usize::from(from), usize::from(to));
+                                if from < apps.len() && to < apps.len() {
+                                    let moving = apps.remove(from);
+                                    apps.insert(to, moving);
+                                }
+                            });
+                        }
+                        (true, false, Some(Hit::App(at))) if at == from => {
+                            crate::station::pressed(Hit::App(at));
+                        }
+                        _ => {}
+                    }
+                }
                 // (The pointer taken from it as a thing on its station was pressed: nothing pressed.)
                 crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.shelf_press.is_some() => panel.shelf_press = None,
                 WM_TIMER if msg.hwnd == panel.window.hwnd && panel.held() => {
@@ -1599,6 +1628,9 @@ struct Panel<'a> {
     /// A thing on its station pressed, and where the pointer was: dragged off it once moved far enough (see
     /// `shelf_moved`), else pressed as it is let go.
     shelf_press: Option<(Hit, POINT)>,
+    /// A thing kept at hand pressed (its place), where the pointer was, and whether it has been moved far enough to
+    /// be put elsewhere among them: let go on another, it goes there; else it is opened as it is let go.
+    app_press: Option<(u16, POINT, bool)>,
     /// The sound's track is being slid along.
     sliding: Option<crate::playing::Slider>,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
@@ -1695,6 +1727,7 @@ impl<'a> Panel<'a> {
             sized_room: None,
             music_settle: None,
             shelf_press: None,
+            app_press: None,
             sliding: None,
             thumbs: crate::ui::thumb::Dots::new(),
             recapture: false,
@@ -2391,6 +2424,12 @@ impl<'a> Panel<'a> {
     fn press(&mut self, client: POINT) {
         // (Off the panel, in its window before it was told to let clicks through there: nothing of the panel's.)
         if !self.on_panel(client) {
+            return;
+        }
+        // On a thing kept at hand: moved among them, or opened (see `app_press`).
+        if let (Some(Hit::App(at)), Some(from)) = (self.hit_at(client), cursor_position()) {
+            self.app_press = Some((at, from, false));
+            unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd) };
             return;
         }
         // On a thing on its station: dragged off it, or pressed (see `shelf_press`).
