@@ -2084,7 +2084,11 @@ fn chip_at(frame: &Frame, text: &str, full: Font, width: f32, zoom: f32, settled
     let (end, _) = frame.gfx.wrapped_end(text, full, room);
     if end * settled + 10.0 + chip <= width {
         let (end, row_top) = frame.gfx.wrapped_end(text, full, room);
-        (end * zoom + 10.0, (row_top + full.size * 0.66) * zoom - 9.0, false)
+        // Its middle level with the middle of the row's words: between a capital's top and the baseline (reckoned
+        // from the font's size, it stood above the words).
+        let (cap_top, _) = frame.gfx.ink("H", full);
+        let middle = (cap_top + frame.gfx.baseline(full).0) / 2.0;
+        (end * zoom + 10.0, (row_top + middle) * zoom - 9.0, false)
     } else {
         (0.0, frame.gfx.wrapped_height(text, full, room) * zoom + 4.0, true)
     }
@@ -2901,6 +2905,28 @@ mod pictures {
             let path = std::path::PathBuf::from(format!("{out}/{name}.png"));
             crate::studio::save_png(&path, size.0, size.1, &pixels).unwrap();
             println!("{}", path.display());
+        }
+        // How long a frame takes as it is sized a little each frame (as a hand drags it), and at one size.
+        {
+            let shows = all;
+            let mut music = Music { turned_by: 30.0, arm: 1.0, ..Music::default() };
+            let start = Instant::now();
+            for (label, sizing) in [("one size", false), ("sized each frame", true)] {
+                let mut times = Vec::new();
+                for i in 0..60 {
+                    let (w, h) = if sizing { (400.0 + i as f32 * 3.0, 300.0 + i as f32 * 2.0) } else { (500.0, 360.0) };
+                    let at = start + std::time::Duration::from_millis(16 * i as u64 + if sizing { 10_000 } else { 0 });
+                    let began = Instant::now();
+                    gfx.draw_offscreen(((w * 1.5) as u32 + 90, (h * 1.5) as u32 + 90), 1.5, |frame| {
+                        frame.origin(30.0, 30.0);
+                        music.paint_moment(frame, (w, h), &shows, Ground::of(&shows), 1.5, None, at, playing(false));
+                    })
+                    .unwrap();
+                    times.push(began.elapsed().as_secs_f64() * 1000.0);
+                }
+                times.sort_by(f64::total_cmp);
+                println!("music, {label}: median {:.1} ms, slowest {:.1} ms", times[30], times[59]);
+            }
         }
         // Turning from the card into the stage and back, at moments on the way: the cover moving into the record's
         // middle, rounding, the record growing in round it (`turn-…-<ms>.png`).
