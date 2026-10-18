@@ -198,6 +198,8 @@ impl App {
             // Still under the lock: two changes at once reach the panel in
             // the order they were made, the later last.
             self.controller.apply(&held);
+            // (The station reads them as it is told: see `station::run::Ask::Settings`.)
+            station::run::ask(station::run::Ask::Settings);
         }
         // The tray reads the shortcut's setting from here: told once it is in.
         tray::follow_settings();
@@ -484,6 +486,8 @@ pub fn run() {
         move || controller.run()
     }).expect("a thread started");
     thread::Builder::new().name("glance: updates".into()).spawn(update::watch).expect("a thread started");
+    // The station (its own thread: see `station::run`), the panel woken as what it holds changes.
+    station::run::start(|| app().controller.wake());
     // The phone remote, if it is on: running from now, whatever stopped it.
     thread::Builder::new().name("glance: phone remote".into()).spawn(phone::keep).expect("a thread started");
     // What touches the PC while the phone remote has the screens out, heard for it.
