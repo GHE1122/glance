@@ -178,6 +178,10 @@ static LYRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 #[cfg(windows)]
 static POSITION: [Mutex<Option<(f64, std::time::Instant, bool, f64)>>; 2] = [Mutex::new(None), Mutex::new(None)];
 
+/// What `POSITION` and `HELD` are of: its program (as Windows identifies it) and its track's title.
+#[cfg(windows)]
+static TRACK: [Mutex<Option<(String, String)>>; 2] = [Mutex::new(None), Mutex::new(None)];
+
 /// Played from elsewhere along its track: where (seconds), when, and the track (its title).
 #[cfg(windows)]
 static SOUGHT: [Mutex<Option<(f64, std::time::Instant, String)>>; 2] = [Mutex::new(None), Mutex::new(None)];
@@ -236,6 +240,13 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
     if let (Some(playing), seeking) = (playing.as_mut(), seeking) {
         let said_at = playing.said_ago.map(|ago| now - std::time::Duration::from_secs_f64(ago));
         let mut held = HELD[f].lock().unwrap();
+        // (What was looked at before, and held, is of this track, or nothing to it: another program's playing as it
+        // closed was taken for this one's pausing just then, and all the time since it last said where it was added
+        // to it, past its end.)
+        let same = TRACK[f].lock().unwrap().as_ref().is_some_and(|(app, title)| *app == playing.app_id && *title == playing.title);
+        if !same {
+            *held = None;
+        }
         match (playing.playing, playing.timeline.as_mut()) {
             (false, Some((position, _))) if !seeking => {
                 let was = *POSITION[f].lock().unwrap();
@@ -243,7 +254,7 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
                     // The same saying as when the pause was seen: where it was held.
                     Some((at, by)) if said_at.is_some_and(|said| said <= by + std::time::Duration::from_millis(50)) => *position = at,
                     // Paused just now: on from what was said, to now.
-                    _ if was.is_some_and(|(_, _, playing, _)| playing) => {
+                    _ if same && was.is_some_and(|(_, _, playing, _)| playing) => {
                         let rate = was.map_or(1.0, |(_, _, _, rate)| rate);
                         let at = *position + playing.said_ago.unwrap_or(0.0) * rate;
                         *position = at;
@@ -257,6 +268,7 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
         }
     }
     *POSITION[f].lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, now, playing.playing, playing.rate)));
+    *TRACK[f].lock().unwrap() = playing.as_ref().map(|playing| (playing.app_id.clone(), playing.title.clone()));
     let timeline = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, length)| Timeline { at: at.floor(), length, seekable: playing.seekable }));
     let sound = crate::actions::volume();
     // (The slider held, where it is.)
