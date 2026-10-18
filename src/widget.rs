@@ -508,7 +508,7 @@ struct Widget {
     hits_from: (f32, f32),
     /// A thing on its station pressed, and where the pointer was: dragged off it once moved far enough, else pressed
     /// as it is let go (see `Widgets::hover`, `Widgets::release`).
-    shelf_press: Option<(u64, POINT)>,
+    shelf_press: Option<(view::Hit, POINT)>,
     behind: Option<Behind>,
     /// When it is next drawn: at once while it moves, else after a rest (as
     /// its charts step), or sooner as the pointer comes or it is pressed.
@@ -1335,11 +1335,11 @@ impl Widgets {
         }
         // A thing on its station pressed and moved far enough: dragged off it (by the station, which takes the
         // pointer from here).
-        if let (Some((id, from)), Some(now)) = (widget.shelf_press, cursor_position()) {
+        if let (Some((hit, from)), Some(now)) = (widget.shelf_press, cursor_position()) {
             if crate::station::run::drag_begins(from, now) {
                 widget.shelf_press = None;
                 let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
-                crate::station::run::ask(crate::station::run::Ask::DragOut(id, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }));
+                crate::station::drag_off(hit, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() });
             }
             return;
         }
@@ -1462,10 +1462,10 @@ impl Widgets {
     pub fn release(&mut self, hwnd: HWND, now: Instant, cancelled: bool) {
         // A thing on its station pressed and let go where it was: pressed (its capture lost: nothing).
         if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
-            if let Some((id, _)) = widget.shelf_press.take() {
+            if let Some((hit, _)) = widget.shelf_press.take() {
                 let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
                 if !cancelled {
-                    crate::station::pressed(view::Hit::Shelf(id));
+                    crate::station::pressed(hit);
                 }
                 widget.next_frame = now;
                 return;
@@ -2266,8 +2266,8 @@ impl Widget {
         self.anchor = None;
         let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
         // On a thing on its station: dragged off it, or pressed (see `shelf_press`).
-        if let Some(view::Hit::Shelf(id)) = self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4) {
-            self.shelf_press = Some((id, from));
+        if let Some(hit) = self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4).filter(|hit| hit.drags()) {
+            self.shelf_press = Some((hit, from));
             unsafe { SetCapture(self.window.hwnd) };
             return;
         }

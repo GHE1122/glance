@@ -45,6 +45,26 @@ pub enum Ask {
     /// What `id` holds dragged off it (pressed on it and moved: see `drag_begins`), pressed on a window of the
     /// thread numbered so.
     DragOut(u64, u32),
+    /// Files not on it (Recent files'): put on the clipboard, opened, shown in Explorer; dragged off (pressed on a
+    /// window of the thread numbered so).
+    Files(Vec<std::path::PathBuf>, FilesAct),
+    DragFiles(Vec<std::path::PathBuf>, u32),
+    /// Text put on the clipboard (a file's path).
+    CopyText(String),
+}
+
+/// What is done with files not on the station (see `Ask::Files`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FilesAct {
+    Copy,
+    Open,
+    Show,
+}
+
+/// What is to be dragged off the station: a thing on it, by its number, or files not on it.
+enum Leaving {
+    Item(u64),
+    Files(Vec<std::path::PathBuf>),
 }
 
 /// What the station shows: what it holds, oldest first, and how it stands.
@@ -206,7 +226,7 @@ struct Station {
     catchers: super::catch::Catchers,
     /// What is to be dragged off it, asked, and the thread it was pressed on (dragged once it is done answering: see
     /// `drag_off`).
-    dragging: Option<(u64, u32)>,
+    dragging: Option<(Leaving, u32)>,
 }
 
 thread_local! {
@@ -250,9 +270,13 @@ fn drag_off() {
     let mut given = None;
     let mut thread = 0;
     with_station(|station| {
-        given = station.dragging.take().and_then(|(id, pressed_on)| {
+        given = station.dragging.take().and_then(|(dragged, pressed_on)| {
             thread = pressed_on;
-            station.drag_given(id)
+            match dragged {
+                Leaving::Item(id) => station.drag_given(id).map(|(id, content, stays_here, held)| (Some(id), content, stays_here, held)),
+                // (Files not its own: given where they are, never taken off anything.)
+                Leaving::Files(paths) => Some((None, Content::Files(paths), false, Vec::new())),
+            }
         })
     });
     let Some((id, content, stays_here, held)) = given else { return };
@@ -262,7 +286,7 @@ fn drag_off() {
             station.keep.folder.let_go(name);
         }
         let remove = crate::app().settings.lock().unwrap().station.remove_after_drag;
-        if remove && dragged == Some(super::drag::Dragged::Taken) {
+        if let (true, Some(id), Some(super::drag::Dragged::Taken)) = (remove, id, dragged) {
             station.keep.remove(id);
         }
         station.show();
@@ -358,7 +382,22 @@ impl Station {
                 }
                 Ask::Settings => self.follow_settings(),
                 Ask::Over(over) => self.over = over,
-                Ask::DragOut(id, thread) => self.dragging = Some((id, thread)),
+                Ask::DragOut(id, thread) => self.dragging = Some((Leaving::Item(id), thread)),
+                Ask::DragFiles(paths, thread) => self.dragging = Some((Leaving::Files(paths), thread)),
+                Ask::Files(paths, act) => match act {
+                    FilesAct::Copy => {
+                        if let Some(sequence) = clipboard::put(self.window, &Content::Files(paths), false) {
+                            self.ours = sequence;
+                        }
+                    }
+                    FilesAct::Open => open(&Content::Files(paths)),
+                    FilesAct::Show => show_in_explorer(&paths),
+                },
+                Ask::CopyText(text) => {
+                    if let Some(sequence) = clipboard::put(self.window, &Content::Text(text), false) {
+                        self.ours = sequence;
+                    }
+                }
             }
         }
         self.show();

@@ -178,7 +178,10 @@ pub enum Hit {
     /// A thing on the station, by its number (see `station::shelf::Item`); something copied lately, by its.
     Shelf(u64),
     Copied(u64),
-    /// One of the station's pages chosen (see `Tab`); the menu of how what is on it shows; its menu of the rest.
+    /// A file come lately, by its number on its drive (see `station::recent`).
+    Recent(u128),
+    /// One of the station's pages chosen (see `Tab`; Recent files', with which of them it shows); the menu of how what
+    /// is on it shows; its menu of the rest.
     Tab(Tab),
     StationView,
     StationMore,
@@ -200,6 +203,12 @@ impl Hit {
             Hit::Seek(follow) => Some(crate::playing::Slider::Seek(follow)),
             _ => None,
         }
+    }
+
+    /// Whether a press on it may drag what it is off (a thing on the station, copied lately, a file come lately: see
+    /// `station::drag_off`).
+    pub fn drags(self) -> bool {
+        matches!(self, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))
     }
 
     /// Whether a press on it opens a menu (the station's head's buttons: see `station::head_menu`).
@@ -230,24 +239,27 @@ impl Hit {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum List {
     Processes,
-    /// What is on the station, and what was copied lately.
+    /// What is on the station, what was copied lately, and the files come lately.
     Shelf,
     Copies,
+    Recent,
 }
 
-/// Which of its pages the station's lane shows: what is on it, or what was copied lately.
+/// Which of its pages the station's lane shows: what is on it, what was copied lately, or the files come lately (those
+/// the filter takes).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Tab {
     #[default]
     Shelf,
     Copies,
+    Recent(crate::station::recent::Filter),
 }
 
 /// How far each list is scrolled (DIPs), and how far it is going (each frame a little nearer: see `ease`).
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Scrolls {
-    at: [f32; 3],
-    to: [f32; 3],
+    at: [f32; 4],
+    to: [f32; 4],
 }
 
 impl Scrolls {
@@ -279,7 +291,7 @@ impl Scrolls {
     }
 
     /// As each is scrolled, for what is drawn to tell one drawing from another.
-    pub fn bits(&self) -> [u32; 3] {
+    pub fn bits(&self) -> [u32; 4] {
         self.at.map(f32::to_bits)
     }
 }
@@ -392,13 +404,46 @@ enum Block {
     /// The station's head: its pages as tabs (`tab` the one shown; how many things are on it; how many were copied
     /// since its copies were last shown, where they are a page of it), and its buttons (how what is on it shows, while
     /// that is shown; the rest).
-    Tabs { tab: Tab, count: usize, copies: Option<usize>, view: ShelfView },
+    Tabs { tab: Tab, count: usize, copies: Option<usize>, recent: bool, view: ShelfView },
     /// What is on the station, the newest first, as `shows` lays it out in room `tall` high, scrolled through past
     /// it; `said`, what it says instead of them (nothing on it), or over them (no room left); `over`, something
     /// dragged over it, to be dropped.
     Shelf { tiles: Vec<Tile>, shows: Shows, tall: f32, said: Option<String>, over: bool },
     /// What was copied lately, the newest first, a row each, in room `tall` high, scrolled through past it.
     Copies { rows: Vec<Tile>, tall: f32 },
+    /// The files come lately that `filter` takes, the newest first, under the day each came, a row each, in room
+    /// `tall` high under the filter's choices, scrolled through past it.
+    Recent { rows: Vec<Lately>, filter: crate::station::recent::Filter, tall: f32 },
+}
+
+/// A file come lately as its row shows it: its number, the day it came (as the rows are grouped), its name, where it
+/// came from and how large it is, how long ago, and its picture's file.
+#[derive(Clone, Debug, PartialEq, Hash)]
+pub struct Lately {
+    file: u128,
+    day: &'static str,
+    label: String,
+    about: String,
+    when: String,
+    path: std::path::PathBuf,
+}
+
+impl Lately {
+    fn of(came: &crate::station::recent::Came, lang: Lang, now: u64) -> Lately {
+        let label = came.path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        let from = match &came.site {
+            Some(site) => format!("{} {site}", lang.pick("来自", "from")),
+            // (The folder it is in, by its last two names: "Documents\Work".)
+            None => {
+                let folders: Vec<String> = came.path.parent().into_iter().flat_map(|parent| parent.components()).filter_map(|part| match part {
+                    std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+                    _ => None,
+                }).collect();
+                folders[folders.len().saturating_sub(2)..].join("\\")
+            }
+        };
+        Lately { file: came.file, day: text::day_of(came.came_ms, now, lang), label, about: format!("{from} · {}", text::bytes(came.bytes as f64)), when: text::since(came.came_ms, now, lang), path: came.path.clone() }
+    }
 }
 
 /// How the station's things are laid out: as `ShelfView` says, or (a small lane) in one row of pictures, named.
@@ -523,10 +568,17 @@ fn station_lane(full: bool, copies: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     }
     let seen = COPIES_SEEN.load(Ordering::Relaxed);
     let fresh = shown.items.iter().filter(|item| item.copied && item.id > seen).count();
-    let mut blocks = vec![Block::Tabs { tab, count: tiles.len(), copies: copies.then_some(fresh), view: shown.view }];
+    let recent = crate::station::recent::on();
+    let tab = if !recent && matches!(tab, Tab::Recent(_)) { Tab::Shelf } else { tab };
+    let mut blocks = vec![Block::Tabs { tab, count: tiles.len(), copies: copies.then_some(fresh), recent, view: shown.view }];
     blocks.push(match tab {
         Tab::Shelf => Block::Shelf { tiles, shows: Shows::View(shown.view), tall: STATION_TALL, said, over: shown.over },
         Tab::Copies => Block::Copies { rows: shown.items.iter().rev().filter(|item| item.copied).map(|item| Tile::of(item, &folder, lang, now)).collect(), tall: STATION_TALL },
+        Tab::Recent(filter) => Block::Recent {
+            rows: crate::station::recent::shown().iter().filter(|came| filter.takes(came)).map(|came| Lately::of(came, lang, now)).collect(),
+            filter,
+            tall: STATION_TALL,
+        },
     });
     blocks
 }
@@ -549,7 +601,7 @@ impl Block {
             Block::Table { visible, .. } => *visible as f32 * TABLE_ROW,
             Block::Room(tall) => *tall,
             Block::Tabs { .. } => HEAD + HEAD_GAP,
-            Block::Shelf { tall, .. } | Block::Copies { tall, .. } => SHELF_GAP + tall,
+            Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } => SHELF_GAP + tall,
         }
     }
 }
@@ -576,7 +628,11 @@ impl Hash for Block {
                 headings.iter().for_each(|(label, key)| (label, key.map(|key| key as u8)).hash(state));
                 (sort.map(|sort| sort as u8), rows, visible, scrolls, widths.map(f32::to_bits)).hash(state);
             }
-            Block::Tabs { tab, count, copies, view } => (tab, count, copies, view).hash(state),
+            Block::Tabs { tab, count, copies, recent, view } => (tab, count, copies, recent, view).hash(state),
+            Block::Recent { rows, filter, tall } => {
+                (rows, filter, tall.to_bits()).hash(state);
+                rows.iter().for_each(|row| crate::station::thumbs::of(&row.path, TILE_PIXELS).map(|picture| picture.key).hash(state));
+            }
             Block::Shelf { tiles, shows, tall, said, over } => {
                 (tiles, shows, tall.to_bits(), said, over).hash(state);
                 pictures_made(tiles, if *shows == Shows::View(ShelfView::Pictures) { LARGE_PIXELS } else { TILE_PIXELS }, state);
@@ -1707,6 +1763,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Tabs { .. } => "tabs",
             Block::Shelf { .. } => "shelf",
             Block::Copies { .. } => "copies",
+            Block::Recent { .. } => "recent",
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
         kinds.push(kind);
@@ -1981,8 +2038,11 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
                 }
             }
-            (Block::Tabs { tab, count, copies, view }, Pass::Content) => {
-                paint_tabs(frame, scene, ink, (left, y, width), *tab, *count, *copies, *view, hits);
+            (Block::Tabs { tab, count, copies, recent, view }, Pass::Content) => {
+                paint_tabs(frame, scene, ink, (left, y, width), *tab, *count, *copies, *recent, *view, hits);
+            }
+            (Block::Recent { rows, filter, tall }, Pass::Content) => {
+                paint_recent(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *filter, *tall, hits);
             }
             (Block::Shelf { tiles, shows, tall, said, over }, Pass::Content) => {
                 paint_shelf(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, *shows, *tall, said.as_deref(), *over, hits);
@@ -1999,7 +2059,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
 /// The station's head (see `Block::Tabs`) on the head row at `top`, from `left`, `width` across: its pages' tabs,
 /// the one shown marked as its skin marks what is chosen, and its buttons at the end.
 #[allow(clippy::too_many_arguments)]
-fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tab: Tab, count: usize, copies: Option<usize>, view: ShelfView, hits: &mut Vec<HitBox>) {
+fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tab: Tab, count: usize, copies: Option<usize>, recent: bool, view: ShelfView, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let lang = scene.lang;
     let row = top + (HEAD - TAB_H) / 2.0;
@@ -2011,6 +2071,11 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
     let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), if count > 0 { count.to_string() } else { String::new() }, false)];
     if let Some(fresh) = copies {
         pages.push((Tab::Copies, lang.pick("最近复制", "Recently copied"), if fresh > 0 && tab != Tab::Copies { fresh.to_string() } else { String::new() }, true));
+    }
+    if recent {
+        // (Chosen again, with the filter it had.)
+        let filter = if let Tab::Recent(filter) = tab { filter } else { Default::default() };
+        pages.push((Tab::Recent(filter), lang.pick("最近文件", "Recent files"), String::new(), false));
     }
     for (page, name, aside, badge) in pages {
         let name_w = frame.measure(name, font);
@@ -2241,6 +2306,104 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
     }
     scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
 }
+
+/// Recent files' page (see `Block::Recent`) from (`left`, `top`), `width` across, in room `tall` high: the filter's
+/// choices in a row, the chosen marked as its skin marks what is chosen; under them the files it takes, under the day
+/// each came, scrolled through.
+#[allow(clippy::too_many_arguments)]
+fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), rows: &[Lately], filter: crate::station::recent::Filter, tall: f32, hits: &mut Vec<HitBox>) {
+    use crate::station::recent::Filter;
+    let theme = scene.theme;
+    let lang = scene.lang;
+    // The choices.
+    let mut x = left;
+    for choice in Filter::ALL {
+        let name = match choice {
+            Filter::All => lang.pick("全部", "All"),
+            Filter::Downloads => lang.pick("下载", "Downloads"),
+            Filter::Screenshots => lang.pick("截图", "Screenshots"),
+            Filter::Documents => lang.pick("文档", "Documents"),
+            Filter::Pictures => lang.pick("图片和视频", "Pictures"),
+        };
+        let wide = frame.measure(name, theme.small) + 2.0 * CHIP_PAD;
+        if x + wide > left + width {
+            break;
+        }
+        let chosen = choice == filter;
+        let hit = Hit::Tab(Tab::Recent(choice));
+        let radius = if theme.skin == Skin::Glass { CHIP_H / 2.0 } else { theme.control_radius.min(CHIP_H / 2.0) };
+        let (ground, words) = match (chosen, theme.skin) {
+            (true, Skin::Paper) => (theme.text, theme.paper),
+            (true, Skin::Fluent) => (super::theme::accent(theme.dark), ink_on(super::theme::accent(theme.dark))),
+            (true, Skin::Glass) => (ink.trace, ink_on(ink.trace)),
+            (false, _) if scene.hover == Some(hit) => (theme.hover, theme.text),
+            (false, _) => (theme.track, theme.text2),
+        };
+        frame.fill_rounded(ground, x, top, wide, CHIP_H, radius);
+        centred(frame, name, theme.small, words, x, top + (CHIP_H - LINE) / 2.0, wide);
+        hits.push((x, top, wide, CHIP_H, hit));
+        x += wide + 4.0;
+    }
+    let list_top = top + CHIP_H + 6.0;
+    let list_tall = tall - CHIP_H - 6.0;
+    if rows.is_empty() {
+        let middle = list_top + list_tall / 2.0;
+        frame.icon(Icon::File, Point { x: left + width / 2.0, y: middle - 12.0 }, 22.0, theme.text3);
+        let said = if filter == Filter::All { lang.pick("下载、截图和新保存的文件会出现在这里", "Files you download, capture or save show here") } else { lang.pick("这一类没有新文件", "No new files of this kind") };
+        centred(frame, said, theme.small, theme.text2, left, middle + 4.0, width);
+        return;
+    }
+    // Each row's top (and each day's heading's, before its first row), from the list's top.
+    let mut places = Vec::with_capacity(rows.len());
+    let mut headings = Vec::new();
+    let mut y = 0.0;
+    let mut day = "";
+    for row in rows {
+        if row.day != day {
+            day = row.day;
+            headings.push((y, day));
+            y += DAY_ROW;
+        }
+        places.push(y);
+        y += LIST_ROW;
+    }
+    let whole = y;
+    let most = (whole - list_tall).max(0.0);
+    if most > 0.0 {
+        hits.push((left, list_top, width, list_tall, Hit::List(List::Recent, most.to_bits())));
+    }
+    let scroll = scene.scrolls.at(List::Recent).clamp(0.0, most);
+    frame.clip(left - 4.0, list_top, width + 8.0, list_tall);
+    for (at, day) in headings {
+        let hy = list_top + at - scroll;
+        frame.text(day, theme.small, theme.text3, left, hy + (DAY_ROW - LINE) / 2.0 + 1.0, width, Align::Start);
+    }
+    for (row, at) in rows.iter().zip(places) {
+        let y = list_top + at - scroll;
+        if y + LIST_ROW < list_top || y > list_top + list_tall {
+            continue;
+        }
+        let lit = scene.hover == Some(Hit::Recent(row.file));
+        if lit {
+            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, theme.control_radius.max(6.0));
+        }
+        let face = Tile { id: 0, label: String::new(), about: String::new(), face: Face::Picture { path: row.path.clone(), more: 0 }, pinned: false };
+        paint_face(frame, theme, ink, &face, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, TILE_PIXELS);
+        let when_w = frame.measure(&row.when, theme.small);
+        let room = width - LIST_PICTURE - 10.0 - when_w - 8.0;
+        frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
+        frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
+        frame.text(&row.when, theme.small, theme.text3, left + width - when_w, y + (LIST_ROW - LINE) / 2.0, when_w + 1.0, Align::Start);
+        hits.push((left, y, width, LIST_ROW, Hit::Recent(row.file)));
+    }
+    frame.unclip();
+    scroll_thumb(frame, theme, left + width + 6.0, list_top, list_tall, whole, scroll, most);
+}
+
+/// Recent files' filter choices: their height and the room round each name; a day's heading over its files.
+const CHIP_H: f32 = 22.0;
+const CHIP_PAD: f32 = 9.0;
+const DAY_ROW: f32 = 22.0;
 
 /// A thin thumb beside a list `tall` high, its whole `whole` tall, scrolled `scroll` of `most`: where in it the view is.
 #[allow(clippy::too_many_arguments)]
@@ -2622,8 +2785,8 @@ mod tests {
         crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/glass-sliders.png", env!("CARGO_MANIFEST_DIR"))), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
     }
 
-    /// The station's lane in each skin, light and dark (the rows), as cards, a list, pictures, and what was copied
-    /// lately (the columns), holding files of this repository as Explorer pictures them, text and links:
+    /// The station's lane in each skin, light and dark (the rows), as cards, a list, pictures, what was copied lately,
+    /// and Recent files (the columns), holding files of this repository as Explorer pictures them, text and links:
     /// `cargo test --features studio --lib -- --ignored station_pages` writes `target/station-pages.png`.
     #[test]
     #[ignore = "writes a picture to look at"]
@@ -2635,6 +2798,7 @@ mod tests {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
+        let file_at = file;
         let now = crate::station::now_ms();
         let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied, stays_here: false, own_bytes: 0 };
         let items = || vec![
@@ -2651,7 +2815,18 @@ mod tests {
             item(6, What::Files { paths: vec![file("docs/images/banner-zh.webp")], kept: Vec::new() }, false, 1),
         ];
         crate::station::thumbs::start(|| {});
-        let (pages, lanes) = ([ShelfView::Cards, ShelfView::List, ShelfView::Pictures], 4);
+        {
+            use crate::station::recent::{Came, Kind};
+            let came = |file: u128, name: &str, ago_min: u64, bytes: u64, kind: Kind, site: Option<&str>| Came { file, path: file_at(name), came_ms: now - ago_min * 60_000, bytes, kind, downloaded: site.is_some(), site: site.map(str::to_string) };
+            crate::station::recent::pretend(vec![
+                came(1, "docs/images/banner-zh.webp", 3, 182_000, Kind::Screenshot, None),
+                came(2, "Cargo.toml", 25, 6_100_000, Kind::Archive, Some("github.com")),
+                came(3, "docs/station-and-notes.md", 70, 21_000, Kind::Document, None),
+                came(4, "website/apple-touch-icon.png", 26 * 60, 5_600_000, Kind::Picture, Some("wallhaven.cc")),
+                came(5, "README.md", 4 * 24 * 60, 64_000, Kind::Document, None),
+            ]);
+        }
+        let (pages, lanes) = ([ShelfView::Cards, ShelfView::List, ShelfView::Pictures], 5);
         let (lane_w, lane_h) = (COLUMN_WIDTH, 360.0);
         let rows = [(Skin::Glass, false), (Skin::Glass, true), (Skin::Fluent, false), (Skin::Fluent, true), (Skin::Paper, false), (Skin::Paper, true)];
         let (w, h) = (lanes as f32 * (lane_w + 12.0), rows.len() as f32 * (lane_h + 12.0));
@@ -2663,7 +2838,11 @@ mod tests {
                 for column in 0..lanes {
                     let (x, y) = (column as f32 * (lane_w + 12.0) + 6.0, row as f32 * (lane_h + 12.0) + 6.0);
                     crate::station::run::pretend(items(), pages[column.min(2)]);
-                    let tab = if column == 3 { Tab::Copies } else { Tab::Shelf };
+                    let tab = match column {
+                        3 => Tab::Copies,
+                        4 => Tab::Recent(Default::default()),
+                        _ => Tab::Shelf,
+                    };
                     let ground = match skin {
                         Skin::Paper => theme.paper,
                         Skin::Fluent => if *dark { Color::hex(0x24262A, 1.0) } else { Color::hex(0xF3F5F8, 1.0) },
@@ -2673,7 +2852,11 @@ mod tests {
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                     let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
                     let seen = Seen::of(history);
-                    let hover = if column == 0 { Some(Hit::Shelf(3)) } else { None };
+                    let hover = match column {
+                        0 => Some(Hit::Shelf(3)),
+                        4 => Some(Hit::Recent(2)),
+                        _ => None,
+                    };
                     let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
                     let lane = Lane { id: "station".into(), blocks: station_lane(true, true, tab, Lang::Zh), ink: theme.ink("station") };
                     let area = Rect { x, y, w: lane_w, h: lane.height(&theme) };

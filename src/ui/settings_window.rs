@@ -528,7 +528,7 @@ fn module_fields(id: &str) -> &'static [Field] {
     match id {
         "network" => &[Field::RateUnit],
         "processes" => &[Field::ProcessCount, Field::ProcessSort],
-        "station" => &[Field::StationHistory, Field::StationKeep, Field::StationMost, Field::StationCopy, Field::StationAfterDrag],
+        "station" => &[Field::StationHistory, Field::StationRecent, Field::StationHidden, Field::StationKeep, Field::StationMost, Field::StationCopy, Field::StationAfterDrag],
         _ => &[],
     }
 }
@@ -656,8 +656,11 @@ enum Field {
     /// The player music is followed from (see `Ui::sources`).
     MusicSource,
     /// The station's (see `settings::StationSettings`): what is copied kept, how long what is not pinned stays, the
-    /// most it keeps of its own, files kept as a copy too, and what is dragged off it taken off.
+    /// most it keeps of its own, files kept as a copy too, and what is dragged off it taken off; the files come lately
+    /// listed, and the folders they are not listed from (all listed again).
     StationHistory,
+    StationRecent,
+    StationHidden,
     StationKeep,
     StationMost,
     StationCopy,
@@ -2167,6 +2170,11 @@ impl Ui {
             Field::OverlaySize | Field::OverlayClear | Field::PanelSize => (self.slider(field).0, Vec::new(), None),
             Field::LoadAlert => (pick(lang, "负载警示", "Load alert"), vec!["70%".into(), "85%".into(), "95%".into()], at(&[70, 85, 95], prefs.hot_load as u64)),
             Field::StationHistory => (pick(lang, "最近复制", "Recently copied"), vec![s("记录", "Kept"), s("不记录", "Not kept")], Some(usize::from(!settings.station.history))),
+            Field::StationRecent => (pick(lang, "最近文件", "Recent files"), vec![s("列出", "Listed"), s("不列出", "Not listed")], Some(usize::from(!settings.station.recent))),
+            Field::StationHidden => match settings.recent_hidden.len() {
+                0 => (pick(lang, "不列出的文件夹", "Folders not listed"), vec![s("没有", "None")], Some(0)),
+                n => (pick(lang, "不列出的文件夹", "Folders not listed"), vec![if lang == Lang::Zh { format!("{n} 个") } else { format!("{n}") }, s("全部恢复列出", "List them all again")], Some(0)),
+            },
             Field::StationKeep => (
                 pick(lang, "未固定的项目保留", "Unpinned things stay"),
                 vec![s("1 天", "1 day"), s("7 天", "7 days"), s("30 天", "30 days")],
@@ -2207,6 +2215,9 @@ impl Ui {
             Field::OverlaySize | Field::OverlayClear | Field::PanelSize => {}
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
             Field::StationHistory => settings.station.history = index == 0,
+            Field::StationRecent => settings.station.recent = index == 0,
+            Field::StationHidden if index == 1 => settings.recent_hidden.clear(),
+            Field::StationHidden => {}
             Field::StationKeep => settings.station.keep_days = STATION_DAYS[index],
             Field::StationMost => settings.station.most_gb = STATION_GB[index],
             Field::StationCopy => settings.station.always_copy = index == 1,

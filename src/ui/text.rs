@@ -236,6 +236,22 @@ pub fn since(then: u64, now: u64, lang: Lang) -> String {
     }
 }
 
+/// Which day `then` was at `now` (ms since 1970), as a list of things lately come groups them: today, yesterday, or
+/// earlier.
+#[cfg(any(windows, target_os = "macos"))]
+pub fn day_of(then: u64, now: u64, lang: Lang) -> &'static str {
+    const DAY: u64 = 24 * 3_600_000;
+    let (at, today, yesterday) = (Local::at(then), Local::at(now), Local::at(now.saturating_sub(DAY)));
+    let same = |a: Local, b: Local| (a.month, a.day) == (b.month, b.day);
+    if same(at, today) && now.saturating_sub(then) < DAY {
+        lang.pick("今天", "Today")
+    } else if same(at, yesterday) && now.saturating_sub(then) < 2 * DAY {
+        lang.pick("昨天", "Yesterday")
+    } else {
+        lang.pick("更早", "Earlier")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

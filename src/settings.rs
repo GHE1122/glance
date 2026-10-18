@@ -707,6 +707,9 @@ pub struct Settings {
     /// The station's (see `station`).
     #[serde(default)]
     pub station: StationSettings,
+    /// Folders whose files Recent files does not list (see `station::recent`).
+    #[serde(default)]
+    pub recent_hidden: Vec<PathBuf>,
     pub view: serde_json::Value,
 }
 
@@ -727,6 +730,8 @@ pub enum ShelfView {
 pub struct StationSettings {
     /// What is copied kept in Recently copied.
     pub history: bool,
+    /// The files come lately listed (see `station::recent`).
+    pub recent: bool,
     /// How what is on it is shown: as cards, a list, or pictures.
     pub view: ShelfView,
     /// How many days what is not pinned stays.
@@ -741,7 +746,7 @@ pub struct StationSettings {
 
 impl Default for StationSettings {
     fn default() -> Self {
-        StationSettings { history: true, view: ShelfView::Cards, keep_days: 7, most_gb: 2, always_copy: false, remove_after_drag: false }
+        StationSettings { history: true, recent: true, view: ShelfView::Cards, keep_days: 7, most_gb: 2, always_copy: false, remove_after_drag: false }
     }
 }
 
@@ -786,6 +791,7 @@ impl Default for Settings {
             widgets: Vec::new(),
             music_source: None,
             station: StationSettings::default(),
+            recent_hidden: Vec::new(),
             view: serde_json::Value::Null,
         }
     }

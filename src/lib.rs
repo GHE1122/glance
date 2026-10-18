@@ -489,6 +489,7 @@ pub fn run() {
     // The station (its own thread: see `station::run`), the panel woken as what it holds changes.
     station::run::start(|| app().controller.wake());
     station::thumbs::start(|| app().controller.wake());
+    station::recent::start(|| app().controller.wake());
     // The phone remote, if it is on: running from now, whatever stopped it.
     thread::Builder::new().name("glance: phone remote".into()).spawn(phone::keep).expect("a thread started");
     // What touches the PC while the phone remote has the screens out, heard for it.

@@ -891,16 +891,25 @@ impl Controller {
                     // On a thing on the station, its menu; else the widget's.
                     menu = match widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
                         Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Station(id, choices))),
+                        Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
                         _ => widgets.menu(msg.hwnd, panel.lang, panel.is_shown()).map(|open| (open, MenuFor::Widget(msg.hwnd))),
                     };
                     keep_menu_above(&menu, &mut overlay);
                 }
                 // On a thing on the station in the panel, its menu.
                 WM_RBUTTONUP if msg.hwnd == panel.window.hwnd => {
-                    if let Some(Hit::Shelf(id)) = panel.hit_at(lparam_point(msg.lParam)) {
-                        self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
-                        menu = cursor_position().and_then(|at| crate::station::menu(id, at, true)).map(|(open, choices)| (open, MenuFor::Station(id, choices)));
-                        keep_menu_above(&menu, &mut overlay);
+                    match panel.hit_at(lparam_point(msg.lParam)) {
+                        Some(Hit::Shelf(id)) => {
+                            self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
+                            menu = cursor_position().and_then(|at| crate::station::menu(id, at, true)).map(|(open, choices)| (open, MenuFor::Station(id, choices)));
+                            keep_menu_above(&menu, &mut overlay);
+                        }
+                        Some(Hit::Recent(file)) => {
+                            self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
+                            menu = cursor_position().and_then(|at| crate::station::recent_menu(file, at, true)).map(|(open, choices)| (open, MenuFor::Recent(file, choices)));
+                            keep_menu_above(&menu, &mut overlay);
+                        }
+                        _ => {}
                     }
                 }
                 // Let go: the button up, the capture lost, or the pointer moved with the button up (its going up
@@ -1131,6 +1140,8 @@ enum MenuFor {
     Station(u64, Vec<crate::station::Choice>),
     /// The station's head's (see `station::head_menu`).
     StationHead(Vec<crate::station::HeadChoice>),
+    /// A file come lately, by its number, and what each row does (see `station::recent_menu`).
+    Recent(u128, Vec<crate::station::RecentChoice>),
 }
 
 impl Controller {
@@ -1156,6 +1167,11 @@ impl Controller {
             MenuFor::Station(id, choices) => {
                 if let Some(choice) = choice.and_then(|row| choices.get(row)) {
                     crate::station::chose(id, *choice);
+                }
+            }
+            MenuFor::Recent(file, choices) => {
+                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
+                    crate::station::recent_chose(file, *choice);
                 }
             }
             MenuFor::StationHead(choices) => {
@@ -1531,7 +1547,7 @@ struct Panel<'a> {
     music_settle: Option<(Instant, PanelDrag, (f32, f32), (f32, f32))>,
     /// A thing on its station pressed, and where the pointer was: dragged off it once moved far enough (see
     /// `shelf_moved`), else pressed as it is let go.
-    shelf_press: Option<(u64, POINT)>,
+    shelf_press: Option<(Hit, POINT)>,
     /// The sound's track is being slid along.
     sliding: Option<crate::playing::Slider>,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
@@ -2299,8 +2315,8 @@ impl<'a> Panel<'a> {
             return;
         }
         // On a thing on its station: dragged off it, or pressed (see `shelf_press`).
-        if let (Some(Hit::Shelf(id)), Some(from)) = (self.hit_at(client), cursor_position()) {
-            self.shelf_press = Some((id, from));
+        if let (Some(hit), Some(from)) = (self.hit_at(client).filter(|hit| hit.drags()), cursor_position()) {
+            self.shelf_press = Some((hit, from));
             unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd) };
             return;
         }
@@ -2330,11 +2346,11 @@ impl<'a> Panel<'a> {
     /// The pointer moved with a thing on its station pressed: far enough, it is dragged off (by the station, which
     /// takes the pointer from here).
     fn shelf_moved(&mut self) {
-        let (Some((id, from)), Some(now)) = (self.shelf_press, cursor_position()) else { return };
+        let (Some((hit, from)), Some(now)) = (self.shelf_press, cursor_position()) else { return };
         if crate::station::run::drag_begins(from, now) {
             self.shelf_press = None;
             let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
-            crate::station::run::ask(crate::station::run::Ask::DragOut(id, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }));
+            crate::station::drag_off(hit, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() });
         }
     }
 
