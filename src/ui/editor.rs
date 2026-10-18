@@ -58,7 +58,8 @@ pub struct Palette {
 
 /// A box words are written in.
 pub struct Editor {
-    services: ITextServices2,
+    /// (Let go of by `ShutdownTextServices`, as it goes: see `drop`.)
+    services: std::mem::ManuallyDrop<ITextServices2>,
     _host: ITextHost2,
     kept: Rc<Kept>,
 }
@@ -115,7 +116,7 @@ impl Editor {
             let _ = services.OnTxUIActivate();
             let mut result = LRESULT(0);
             let _ = services.TxSendMessage(EM_SETEVENTMASK, WPARAM(0), LPARAM(ENM_CHANGE as isize), &mut result);
-            Some(Editor { services, _host: host, kept })
+            Some(Editor { services: std::mem::ManuallyDrop::new(services), _host: host, kept })
         }
     }
 
@@ -148,7 +149,7 @@ impl Editor {
     pub fn send(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         let mut result = LRESULT(0);
         // (Called through its table, its answer kept whole: the bindings' call takes S_FALSE for done.)
-        let answer = unsafe { (Interface::vtable(&self.services).base__.TxSendMessage)(Interface::as_raw(&self.services), message, wparam, lparam, &mut result) };
+        let answer = unsafe { (Interface::vtable(&*self.services).base__.TxSendMessage)(Interface::as_raw(&*self.services), message, wparam, lparam, &mut result) };
         (answer == windows::Win32::Foundation::S_OK).then_some(result)
     }
 
@@ -239,12 +240,17 @@ impl Editor {
 }
 
 impl Drop for Editor {
-    /// (Not shut down with `ShutdownTextServices`: their host is counted, held as long as they are, so a reference to
-    /// them kept elsewhere finds it still there; shut down, msftedit lets go of the host a second time as the last such
-    /// reference goes.)
+    /// Its text services shut down (`ShutdownTextServices`) while their host and window are there: told to let go of
+    /// the host, which a reference to them kept elsewhere would else call after it is gone.
     fn drop(&mut self) {
         unsafe {
             let _ = self.services.OnTxInPlaceDeactivate();
+            let shutdown = LoadLibraryW(windows::core::w!("msftedit.dll")).ok().and_then(|library| GetProcAddress(library, windows::core::s!("ShutdownTextServices")));
+            if let Some(shutdown) = shutdown {
+                let shutdown: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows::core::HRESULT = std::mem::transmute(shutdown);
+                let services = std::mem::ManuallyDrop::take(&mut self.services);
+                let _ = shutdown(services.into_raw());
+            }
         }
     }
 }
@@ -550,7 +556,11 @@ mod tests {
             editor.set_text("一\r\n二");
             assert_eq!(editor.text().trim_end(), "一\n二");
             drop(editor);
+            // Its text services, held here still, used after the box is gone: their host let go of, nothing faults.
+            let _ = document.Range(0, 1).and_then(|range| range.GetText());
+            let _ = document.Range(0, 0).and_then(|range| range.SetText(&BSTR::from("x")));
             let _ = DestroyWindow(hwnd);
+            drop(document);
         }
     }
 }
