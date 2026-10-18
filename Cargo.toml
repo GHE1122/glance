@@ -42,6 +42,7 @@ features = [
     "Wdk_Graphics_Direct3D",
     "Wdk_System_Threading",
     "Foundation",
+    "Foundation_Metadata",
     "Media_Control",
     "Storage_Streams",
     "Graphics",
