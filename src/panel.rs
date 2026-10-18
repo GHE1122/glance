@@ -1992,6 +1992,7 @@ impl<'a> Panel<'a> {
         if !self.is_shown() {
             return;
         }
+        crate::ui::beside::close();
         self.end_drag();
         // (What it said under what the pointer was on goes with it: a drive's row, the line that switches players.)
         if self.hover.take().is_some_and(|hit| says(hit, self.lang).is_some()) {
@@ -2250,7 +2251,20 @@ impl<'a> Panel<'a> {
     /// from the edge (it lives there until it is closed by hand, or moved
     /// back to the edge).
     fn stays(&self) -> bool {
-        self.pinned || self.floating()
+        // (With the page beside it up: the two are one place, left by the page's own going.)
+        self.pinned || self.floating() || crate::ui::beside::is_up()
+    }
+
+    /// Quick launch's choosing of programs, opened beside it on its inner side (under it at the top edge).
+    fn open_picker(&self) {
+        use crate::ui::beside::{Opening, Page, Side};
+        let Some(placement) = &self.placement else { return };
+        let side = match self.edge {
+            Edge::Left => Side::Right,
+            Edge::Right => Side::Left,
+            Edge::Top => Side::Below,
+        };
+        crate::ui::beside::open(Opening { page: Page::Picker, by: placement.panel, side, skin: self.theme.skin, dark: self.theme.dark });
     }
 
     /// The edges of the panel a point `(x, y)` from its corner (DIPs) is
@@ -3236,6 +3250,7 @@ impl<'a> Panel<'a> {
             Some(Hit::Drive(letter)) => open_drive(letter),
             Some(hit) if crate::station::pressed(hit) => {}
             Some(Hit::Tab(tab)) => self.tab = tab,
+            Some(Hit::AddApp) => self.open_picker(),
             Some(Hit::Sort(sort)) if sort != self.drawn.processes.sort => {
                 self.prefs.processes.sort = sort;
                 self.drawn.processes.sort = sort;

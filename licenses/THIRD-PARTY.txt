@@ -46,6 +46,12 @@ Lucide (icons: cpu, gpu, memory-stick, hard-drive, arrow-down-up,
   Copyright (c) 2013-present Cole Bemis, under the MIT licence in the same
   file. Their path data is built into glance.exe.
 
+Unicode Character Database (Unihan, the first letters of Chinese characters'
+  Mandarin readings, for searching programs by pinyin)
+  Copyright (c) 1991-2026 Unicode, Inc.
+  Licence: Unicode License v3 (Unicode-License-v3.txt). A table derived from
+  Unihan_Readings.txt (scripts/pinyin.py) is built into glance.exe.
+
 OpenRGB, version 1.0 (not shipped with Glance)
   OpenRGB - open source RGB lighting control. Copyright (C) Adam Honse and
   the OpenRGB contributors. Licence: GNU General Public License, version 2

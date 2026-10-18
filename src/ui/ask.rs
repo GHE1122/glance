@@ -6,13 +6,15 @@
 //! answer it; the window it is over takes nothing till it is answered.
 
 use std::cell::RefCell;
+
+use super::typing::{at_point, caret_at, height_of, line_of, Typing};
 use std::rc::Rc;
 
-use windows::core::{w, BOOL, HSTRING, PCWSTR};
+use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_U};
 use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_PARAMETERS1, D2D1_ROUNDED_RECT};
-use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS, DWRITE_TEXT_METRICS};
+use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_HIT_TEST_METRICS};
 use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, MonitorFromWindow, ScreenToClient, ValidateRect, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
@@ -241,118 +243,6 @@ impl Colours {
             }
         }
     }
-}
-
-/// The words being written: UTF-16, as Windows hands them over and
-/// DirectWrite counts them; where the caret is and where the selection
-/// started (the same, with none); how far the box is scrolled; and whether
-/// it is to scroll to show the caret when next drawn.
-#[derive(Default)]
-struct Typing {
-    text: Vec<u16>,
-    caret: usize,
-    anchor: usize,
-    top: f32,
-    follow: bool,
-}
-
-fn high(unit: u16) -> bool {
-    (0xD800..0xDC00).contains(&unit)
-}
-
-fn low(unit: u16) -> bool {
-    (0xDC00..0xE000).contains(&unit)
-}
-
-impl Typing {
-    fn selection(&self) -> std::ops::Range<usize> {
-        self.caret.min(self.anchor)..self.caret.max(self.anchor)
-    }
-
-    fn string(&self) -> String {
-        String::from_utf16_lossy(&self.text)
-    }
-
-    /// The caret at `to`, the selection kept from where it started if `extend`.
-    fn go(&mut self, to: usize, extend: bool) {
-        self.caret = to.min(self.text.len());
-        if !extend {
-            self.anchor = self.caret;
-        }
-        self.follow = true;
-    }
-
-    /// From `at`, one character on (or back): a pair of surrogates is one.
-    fn step(&self, at: usize, forward: bool) -> usize {
-        if forward {
-            if at >= self.text.len() {
-                return at;
-            }
-            if high(self.text[at]) && self.text.get(at + 1).is_some_and(|&next| low(next)) { at + 2 } else { at + 1 }
-        } else {
-            if at == 0 {
-                return 0;
-            }
-            if at >= 2 && low(self.text[at - 1]) && high(self.text[at - 2]) { at - 2 } else { at - 1 }
-        }
-    }
-
-    /// `put` in place of the selection, as much of it as there is room for (no pair of surrogates cut).
-    fn put(&mut self, put: &[u16]) {
-        let selection = self.selection();
-        let room = WORDS_MOST - (self.text.len() - selection.len());
-        let mut taken = put.len().min(room);
-        if taken > 0 && taken < put.len() && high(put[taken - 1]) {
-            taken -= 1;
-        }
-        self.text.splice(selection.clone(), put[..taken].iter().copied());
-        self.go(selection.start + taken, false);
-    }
-
-    /// The selection taken away, or with none, the character before (or after) the caret.
-    fn erase(&mut self, forward: bool) {
-        if self.caret == self.anchor {
-            self.anchor = self.step(self.caret, forward);
-        }
-        self.put(&[]);
-    }
-}
-
-/// Where in `layout` the point `(x, y)` is, as the position a caret put there would have.
-fn at_point(layout: &IDWriteTextLayout, x: f32, y: f32) -> usize {
-    let (mut trailing, mut inside, mut metrics) = (BOOL(0), BOOL(0), DWRITE_HIT_TEST_METRICS::default());
-    let _ = unsafe { layout.HitTestPoint(x, y, &mut trailing, &mut inside, &mut metrics) };
-    (metrics.textPosition + if trailing.as_bool() { metrics.length } else { 0 }) as usize
-}
-
-/// Where a caret at `at` is drawn in `layout`: its left, its top, and how tall.
-fn caret_at(layout: &IDWriteTextLayout, at: usize) -> (f32, f32, f32) {
-    let (mut x, mut y, mut metrics) = (0.0, 0.0, DWRITE_HIT_TEST_METRICS::default());
-    let _ = unsafe { layout.HitTestTextPosition(at as u32, false, &mut x, &mut y, &mut metrics) };
-    (x, metrics.top, metrics.height)
-}
-
-/// The line of `layout` that `at` is on: where it starts and ends (before its line break).
-fn line_of(layout: &IDWriteTextLayout, at: usize) -> (usize, usize) {
-    let mut count = 0;
-    let _ = unsafe { layout.GetLineMetrics(None, &mut count) };
-    let mut lines = vec![DWRITE_LINE_METRICS::default(); count as usize];
-    let _ = unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count) };
-    let mut start = 0;
-    for (index, line) in lines.iter().enumerate() {
-        let end = start + line.length as usize;
-        if at < end || index + 1 == lines.len() {
-            return (start, end - line.newlineLength as usize);
-        }
-        start = end;
-    }
-    (0, 0)
-}
-
-fn height_of(layout: &IDWriteTextLayout) -> f32 {
-    let mut metrics = DWRITE_TEXT_METRICS::default();
-    let _ = unsafe { layout.GetMetrics(&mut metrics) };
-    metrics.height
 }
 
 /// The text on the clipboard, its lines broken by `\n` alone, its tabs as spaces and nothing else unprintable.
@@ -1186,7 +1076,7 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
             sent: asked.sent.map(|(name, text)| (name.into(), text.into())),
             yes: asked.yes.into(),
             no: asked.no.into(),
-            typing: Typing::default(),
+            typing: Typing::most(WORDS_MOST),
             pictures: Vec::new(),
             scroll: 0.0,
             scroll_most: 0.0,
@@ -1285,7 +1175,7 @@ mod tests {
     use super::Typing;
 
     fn typed(text: &str) -> Typing {
-        let mut typing = Typing::default();
+        let mut typing = Typing::most(super::WORDS_MOST);
         typing.put(&text.encode_utf16().collect::<Vec<_>>());
         typing
     }

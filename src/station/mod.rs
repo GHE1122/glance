@@ -6,6 +6,7 @@ pub mod catch;
 pub mod clipboard;
 pub mod drag;
 pub mod drop;
+pub mod found;
 pub mod folder;
 pub mod keep;
 pub mod recent;

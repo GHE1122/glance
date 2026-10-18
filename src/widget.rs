@@ -529,6 +529,8 @@ struct Widget {
     /// A thing on its station pressed, and where the pointer was: dragged off it once moved far enough, else pressed
     /// as it is let go (see `Widgets::hover`, `Widgets::release`).
     shelf_press: Option<(view::Hit, POINT)>,
+    /// The skin it was last drawn in, and whether dark (what opens beside it is drawn alike).
+    drawn_look: (Skin, bool),
     behind: Option<Behind>,
     /// When it is next drawn: at once while it moves, else after a rest (as
     /// its charts step), or sooner as the pointer comes or it is pressed.
@@ -2006,6 +2008,7 @@ impl Widget {
             hits: Vec::new(),
             hits_from: (0.0, 0.0),
             shelf_press: None,
+            drawn_look: (Skin::Paper, false),
             behind: None,
             next_frame: Instant::now(),
             surface_size: (0.0, 0.0),
@@ -2533,6 +2536,15 @@ impl Widget {
                                     }
                                 }
                                 Some(hit) if hit.opens_menu() => return Released::Menu(hit),
+                                // Quick launch's choosing of programs, beside it on the side with more room.
+                                Some(view::Hit::AddApp) => {
+                                    use crate::ui::beside::{Opening, Page, Side};
+                                    let by = self.rect();
+                                    let screen = self.contact.monitor;
+                                    let side = if (by.left + by.right) / 2 > (screen.left + screen.right) / 2 { Side::Left } else { Side::Right };
+                                    let (skin, dark) = self.drawn_look;
+                                    crate::ui::beside::open(Opening { page: Page::Picker, by, side, skin, dark });
+                                }
                                 Some(view::Hit::Line(index)) => {
                                     music::play_line(index);
                                     match &mut self.content {
@@ -2786,6 +2798,7 @@ impl Widget {
         let on_music = self.on_music();
         let dark = on_music || theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| look.skin.sees_backdrop()));
         let theme = Theme::new(look.skin, dark);
+        self.drawn_look = (look.skin, dark);
         // Room round it for its shadow (the skin's; what plays, its own), and above it for its buttons.
         let shadow = if matches!(self.content, Content::Music(_)) || on_music { MUSIC_SHADOW } else { theme.margin };
         self.margin = shadow.max(BUTTON + 2.0 * BUTTON_INSET);
