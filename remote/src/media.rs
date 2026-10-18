@@ -337,8 +337,11 @@ fn read_description(path: &str) -> Option<String> {
         let said_in = std::slice::from_raw_parts(found as *const u16, 2);
         let asked = wide(&format!(r"\StringFileInfo\{:04x}{:04x}\FileDescription", said_in[0], said_in[1]));
         VerQueryValueW(about.as_ptr().cast(), PCWSTR(asked.as_ptr()), &mut found, &mut length).ok().ok()?;
-        let text = String::from_utf16_lossy(std::slice::from_raw_parts(found as *const u16, length as usize));
-        let text = text.trim_end_matches('\0').trim();
+        // To its end (some programs' files say its length in bytes, twice as long: read that far, what came after it
+        // was shown too, "Spotify8FileV").
+        let said = std::slice::from_raw_parts(found as *const u16, length as usize);
+        let text = String::from_utf16_lossy(&said[..said.iter().position(|unit| *unit == 0).unwrap_or(said.len())]);
+        let text = text.trim();
         (!text.is_empty()).then(|| text.to_string())
     }
 }
