@@ -349,7 +349,8 @@ fn follow() {
     let mut kept: Kept = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
     let places = windows_places();
     let mut drives: Vec<os::Drive> = Vec::new();
-    let mut looked_for_drives = std::time::Instant::now() - Duration::from_secs(3600);
+    // (Never yet: an `Instant` counts from the PC's start, and an hour before it is none to be had in its first hour.)
+    let mut looked_for_drives: Option<std::time::Instant> = None;
     let mut saved = std::time::Instant::now();
     let tools = Tools::new(&places, looked_at);
     loop {
@@ -365,9 +366,9 @@ fn follow() {
             continue;
         }
         // The drives looked for again now and then (one put in, or formatted).
-        if looked_for_drives.elapsed() > Duration::from_secs(60) {
+        if looked_for_drives.is_none_or(|looked| looked.elapsed() > Duration::from_secs(60)) {
             drives = os::drives();
-            looked_for_drives = std::time::Instant::now();
+            looked_for_drives = Some(std::time::Instant::now());
             tools.forget();
         }
         let out = |path: &Path| left_out(path, &hidden) || tools.hold(path);

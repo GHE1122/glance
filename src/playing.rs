@@ -325,7 +325,8 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
             });
             let since = before.unwrap_or_else(|| {
                 let late = now.map_or(0.0, |now| ((position + crate::lyrics::EARLY - lines[now].at) / playing.rate).clamp(0.0, GLIDE.as_secs_f64()));
-                std::time::Instant::now() - std::time::Duration::from_secs_f64(late)
+                // (So far back only where the PC has been up that long: just started, from now.)
+                std::time::Instant::now().checked_sub(std::time::Duration::from_secs_f64(late)).unwrap_or_else(std::time::Instant::now)
             });
             if before.is_none() {
                 if let Some(told) = TOLD.get() {

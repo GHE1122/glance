@@ -104,10 +104,11 @@ pub fn start() {
         // Whether it is heard here; what the sensors' process was last asked, and over which link.
         let mut hearing = false;
         let mut asked: Option<(bool, u64)> = None;
-        let mut looked = Instant::now() - ASKED_EVERY;
+        // (Never yet: an `Instant` counts from the PC's start, and none is to be had before it.)
+        let mut looked: Option<Instant> = None;
         loop {
-            if looked.elapsed() >= ASKED_EVERY {
-                looked = Instant::now();
+            if looked.is_none_or(|looked| looked.elapsed() >= ASKED_EVERY) {
+                looked = Some(Instant::now());
                 let wanted = out();
                 match crate::source::link() {
                     Some(link) => {

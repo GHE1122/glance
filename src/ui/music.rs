@@ -506,7 +506,7 @@ fn example(t: f64) -> Moment {
     let length = EXAMPLE.len() as f64 * EXAMPLE_LINE;
     let position = t.rem_euclid(length);
     let now = crate::lyrics::sung_at(&lines, position);
-    let since = now.map(|now| Instant::now() - Duration::from_secs_f64((position - lines[now].at).max(0.0)));
+    let since = now.map(|now| Instant::now().checked_sub(Duration::from_secs_f64((position - lines[now].at).max(0.0))).unwrap_or_else(Instant::now));
     let mut bands = [0.0; crate::sound::BANDS];
     for (i, band) in bands.iter_mut().enumerate() {
         let x = i as f64;
@@ -2660,7 +2660,7 @@ mod pictures {
         Moment {
             lines: Some(Arc::new(lines)),
             now: Some(now),
-            since: Some(Instant::now() - Duration::from_secs(2)),
+            since: Some(Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now)),
             position,
             length: Some((214.0, true)),
             dragged_to: None,
