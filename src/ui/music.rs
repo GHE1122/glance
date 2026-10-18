@@ -215,6 +215,8 @@ const KEY_GAP: f32 = 2.0;
 const KEY_LEAD: f32 = (CONTROL - KEY_ICON) / 2.0 + KEY_ICON * 4.0 / 24.0;
 /// The sound's drawing reaches nearer its box's right side (to 23 of the 24).
 const SOUND_TRAIL: f32 = (CONTROL - KEY_ICON) / 2.0 + KEY_ICON * 1.0 / 24.0;
+/// How far up from the stage's foot its rows along the bottom are (DIPs): as a card's, less than its sides' room.
+const STAGE_FOOT: f32 = 22.0;
 /// How far in from its top and right the buttons set in its corner are (DIPs).
 const CORNER: f32 = 12.0;
 /// How tall the sound's track standing up over its key is, at most (DIPs).
@@ -737,7 +739,7 @@ fn stage_record((w, h): (f32, f32), shows: &Shows) -> ((f32, f32), f32) {
         (false, true) => STAGE_SPECTRUM,
         _ => CONTROL,
     };
-    let above = h - 2.0 * pad - rows - 14.0;
+    let above = h - pad - STAGE_FOOT - rows - 14.0;
     let side = above.min(w * 0.4).max(0.0);
     // (In the middle of the room above the rows along the bottom, where it is narrower than that is tall.)
     ((pad + side / 2.0, pad + above.max(0.0) / 2.0), side)
@@ -1432,7 +1434,9 @@ impl Drawing<'_> {
         self.record(cx, cy, side);
         // Along the bottom, all across: kept showing, the controls and the track, and the spectrum over them; else the
         // spectrum, the controls coming over it as the pointer does (as in every layout).
-        let row = h - pad - CONTROL;
+        // (Nearer its foot than its sides: as near as a card's rows are to its own.)
+        let foot = h - STAGE_FOOT;
+        let row = foot - CONTROL;
         let floor = if self.shows.controls {
             self.bottom_row(pad, w - pad, row, 1.0, None);
             if self.shows.spectrum {
@@ -1442,12 +1446,12 @@ impl Drawing<'_> {
         } else {
             let shown_in = self.music.controls_shown();
             if shown_in < 1.0 && self.shows.spectrum {
-                spectrum(self.frame, self.moment, (self.accent, self.tint), (pad, h - pad - 2.0, w - 2.0 * pad, STAGE_SPECTRUM), 0.85 * (1.0 - shown_in));
+                spectrum(self.frame, self.moment, (self.accent, self.tint), (pad, foot - 2.0, w - 2.0 * pad, STAGE_SPECTRUM), 0.85 * (1.0 - shown_in));
             }
             if shown_in > 0.0 {
                 self.bottom_row(pad, w - pad, row, shown_in, None);
             }
-            h - pad - if self.shows.spectrum { STAGE_SPECTRUM } else { CONTROL } - 10.0
+            foot - if self.shows.spectrum { STAGE_SPECTRUM } else { CONTROL } - 10.0
         };
         // (Down to the rows along the bottom; the line sung now level with the record's middle, as far as the lines
         // next to it stay whole.)
