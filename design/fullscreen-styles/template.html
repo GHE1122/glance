@@ -704,26 +704,39 @@ function buildCuts() {
   };
   for (const l of LYRICS) shotsOf(l).forEach((chars, k) => cuts.push({ line: l, chars, k, t0: k === 0 ? Math.min(chars[0].t, l.t) : chars[0].t, text: chars.map((c) => c.c).join("") }));
   cuts.forEach((c, i) => { c.t1 = i + 1 < cuts.length ? Math.min(cuts[i + 1].t0, c.line.end + 3) : c.line.end + 3; });
-  const sections = {}, recent = { layout: [], ground: [], treat: [], cam: [], trans: [], move: [] }, seen = {};
+  // Each pick the least used so far of what fits (ties broken by the shot's own hash), never one of the last two: over
+  // the song every layout, ground, treatment, camera and transition comes up about as often. A section keeps its own
+  // colours; a section's first shot is a big one, of a few kinds in turn.
+  const used = {}, recent = {};
+  const choose = (name, pool, id, ok = () => true) => {
+    used[name] = used[name] || {}; recent[name] = recent[name] || [];
+    let opts = pool.filter((x) => ok(x) && !recent[name].slice(-2).includes(x));
+    if (!opts.length) opts = pool.filter(ok);
+    const least = Math.min(...opts.map((x) => used[name][x] || 0));
+    const v = pick(opts.filter((x) => (used[name][x] || 0) === least), hash("cut", id, name));
+    used[name][v] = (used[name][v] || 0) + 1; recent[name].push(v);
+    return v;
+  };
+  const schemeOf = {};
+  const BIG = [["huge", "crash", "flash", "burst"], ["grid", "pull", "iris", "speed"], ["center", "spiral", "zoom", "rings"], ["repeat", "crash", "slice", "split"]];
+  let big = 0;
   cuts.forEach((c, i) => {
-    const l = c.line, key = l.chorus ? "chorus" : l.section;
-    if (!sections[key]) {
-      const r = (k) => hash("pvsec", key, k);
-      sections[key] = { scheme: l.chorus ? 2 : [0, 1, 3][Math.floor(r(0) * 3)], layout: shuffled(PV_LAYOUTS, r(1)).slice(0, 5), ground: shuffled(PV_GROUNDS, r(2)).slice(0, 4), treat: shuffled(PV_TREATS, r(3)).slice(0, 3), cam: shuffled(PV_CAMS, r(4)).slice(0, 4), trans: shuffled(PV_TRANS, r(5)).slice(0, 4), move: shuffled(PV_MOVES, r(6)).slice(0, 3) };
-    }
-    const S = sections[key], id = l.text + "|" + c.k;
-    if (seen[id]) { Object.assign(c, seen[id]); return; }
-    const n = c.chars.length;
-    const choose = (name, pool) => {
-      let opts = pool.filter((x) => !recent[name].slice(-2).includes(x));
-      if (name === "layout") opts = opts.filter((x) => !LAYOUT_FITS[x] || LAYOUT_FITS[x](n));
-      if (!opts.length) opts = name === "layout" ? ["center"] : pool;
-      const v = pick(opts, hash("cut", id, name)); recent[name].push(v); return v;
+    const l = c.line, n = c.chars.length, id = l.text + "|" + c.k + "|" + i;
+    const key = l.chorus ? "chorus" : l.section;
+    if (schemeOf[key] === undefined) schemeOf[key] = l.chorus ? 2 : [0, 1, 3][Math.floor(hash("pvsec", key) * 3)];
+    const fits = (x) => !LAYOUT_FITS[x] || LAYOUT_FITS[x](n);
+    const plan = {
+      scheme: schemeOf[key], layout: choose("layout", PV_LAYOUTS, id, fits), ground: choose("ground", PV_GROUNDS, id), treat: choose("treat", PV_TREATS, id),
+      cam: choose("cam", PV_CAMS, id), trans: choose("trans", PV_TRANS, id), move: choose("move", PV_MOVES, id),
+      decor: shuffled(["brackets", "ruler", "frame", "cross", "underline", "number", "tag"], hash("dec", id)).slice(0, hash("decn", id) < 0.4 ? 1 : 2), dir: hash("dir", id) < 0.5 ? 1 : -1,
     };
-    const plan = { scheme: S.scheme, layout: choose("layout", S.layout), ground: choose("ground", S.ground), treat: choose("treat", S.treat), cam: choose("cam", S.cam), trans: choose("trans", S.trans), move: choose("move", S.move), decor: shuffled(["brackets", "ruler", "frame", "cross", "underline", "number", "tag"], hash("dec", id)).slice(0, hash("decn", id) < 0.4 ? 1 : 2), dir: hash("dir", id) < 0.5 ? 1 : -1 };
-    // A section's first shot is the big one.
-    if (c.k === 0 && l.key) Object.assign(plan, { layout: n <= 3 ? "huge" : "center", cam: "crash", trans: "flash", ground: "burst" });
-    Object.assign(c, plan); seen[id] = plan;
+    // A section's first shot (after a pause of the song, or where the chorus begins): one of the big ones, in turn.
+    const opens = c.k === 0 && (i === 0 || l.t - cuts[i - 1].line.end > 6 || (l.chorus && !cuts[i - 1].line.chorus));
+    if (opens) {
+      const [layout, cam, trans, ground] = BIG[big++ % BIG.length];
+      Object.assign(plan, { layout: fits(layout) ? layout : "center", cam, trans, ground });
+    }
+    Object.assign(c, plan);
   });
   return cuts;
 }
