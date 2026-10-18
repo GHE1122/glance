@@ -160,8 +160,25 @@ struct Writing {
     colour: crate::notes::Colour,
     written_ms: u64,
     editor: super::editor::Editor,
+    /// What its Markdown is dressed in (see `editor::Editor::dress`), and whether the input method is composing (its
+    /// words not dressed meanwhile).
+    palette: super::editor::Palette,
+    composing: bool,
     unkept: bool,
     said: Option<String>,
+}
+
+/// `color` as Windows' GDI writes one.
+fn colorref(color: Color) -> windows::Win32::Foundation::COLORREF {
+    windows::Win32::Foundation::COLORREF(((color.b * 255.0).round() as u32) << 16 | ((color.g * 255.0).round() as u32) << 8 | (color.r * 255.0).round() as u32)
+}
+
+impl Writing {
+    /// Its words dressed as their Markdown reads.
+    fn dress(&self) {
+        let text = self.editor.text();
+        self.editor.dress(&crate::notes::markdown::looks(&text), &self.palette);
+    }
 }
 
 /// What a note's menu does: its colour chosen, it taken to the Recycle Bin.
@@ -314,15 +331,20 @@ fn show(opening: Opening) {
                 None => crate::notes::Colour::ALL[shown.len() % crate::notes::Colour::ALL.len()],
             };
             let rect = RECT { left: (PAD * scale) as i32, top: ((HEAD + 4.0) * scale) as i32, right: wide - (PAD * scale) as i32, bottom: tall - (FOOT * scale) as i32 };
-            let ink = theme.text;
-            let color = windows::Win32::Foundation::COLORREF(((ink.b * 255.0) as u32) << 16 | ((ink.g * 255.0) as u32) << 8 | (ink.r * 255.0) as u32);
-            if let Some(editor) = super::editor::Editor::new(hwnd, rect, "Microsoft YaHei UI", 15.0 * scale, color) {
+            let pixels = 15.0 * scale;
+            let accent = match theme.skin {
+                Skin::Paper => theme.text,
+                _ => super::theme::accent(theme.dark),
+            };
+            let palette = super::editor::Palette { text: colorref(theme.text), faint: colorref(theme.text3), accent: colorref(accent), points: pixels * 0.75, face: "Microsoft YaHei UI".into(), code_face: "Cascadia Mono".into() };
+            if let Some(editor) = super::editor::Editor::new(hwnd, rect, &palette.face, pixels, palette.text) {
                 if let Some((text, _)) = &read {
                     editor.set_text(text);
                 }
                 let _ = editor.send(WM_SETFOCUS, WPARAM(0), LPARAM(0));
                 let written_ms = read.as_ref().map_or_else(crate::station::now_ms, |(_, stamp)| stamp.written_ms);
-                let writing = Writing { name, stamp: read.map(|(_, stamp)| stamp), colour, written_ms, editor, unkept: false, said: None };
+                let writing = Writing { name, stamp: read.map(|(_, stamp)| stamp), colour, written_ms, editor, palette, composing: false, unkept: false, said: None };
+                writing.dress();
                 with(|beside| beside.writing = Some(writing));
             }
         }
@@ -473,7 +495,20 @@ impl Beside {
             return None;
         }
         let answered = writing.editor.send(message, wparam, lparam);
-        if writing.editor.take_changed() {
+        // (Dressed as it is written, not while the input method composes: its words are its till they are written.)
+        match message {
+            WM_IME_STARTCOMPOSITION => writing.composing = true,
+            WM_IME_ENDCOMPOSITION => {
+                writing.composing = false;
+                writing.dress();
+            }
+            _ => {}
+        }
+        let changed = writing.editor.take_changed();
+        if changed && !writing.composing {
+            writing.dress();
+        }
+        if changed {
             writing.unkept = true;
             writing.said = None;
             unsafe {
