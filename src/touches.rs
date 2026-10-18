@@ -138,7 +138,7 @@ pub fn start() {
                     }
                 }
             }
-            MsgWaitForMultipleObjects(None, false, ASKED_EVERY.saturating_sub(looked.elapsed()).as_millis() as u32, QS_ALLINPUT);
+            MsgWaitForMultipleObjects(None, false, ASKED_EVERY.saturating_sub(looked.map_or(Duration::ZERO, |looked| looked.elapsed())).as_millis() as u32, QS_ALLINPUT);
             let mut message = MSG::default();
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
                 DispatchMessageW(&message);
