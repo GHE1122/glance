@@ -1445,6 +1445,8 @@ struct Panel<'a> {
     sized_room: Option<(f32, f32)>,
     /// The sound's track is being slid along.
     sliding: Option<crate::playing::Slider>,
+    /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
+    thumbs: crate::ui::thumb::Dots<Hit>,
     /// The desktop behind the glass is to be taken again (the panel moved
     /// or grew past what was taken).
     recapture: bool,
@@ -1536,6 +1538,7 @@ impl<'a> Panel<'a> {
             sizing: None,
             sized_room: None,
             sliding: None,
+            thumbs: crate::ui::thumb::Dots::new(),
             recapture: false,
             capturing: None,
             look_again: None,
@@ -2703,7 +2706,10 @@ impl<'a> Panel<'a> {
         let controller = self.controller;
         let history = controller.history.read().unwrap();
         let seen = &self.opening.as_ref().unwrap().seen;
-        let scene = scene(controller, &self.drawn, &self.theme, self.lang, self.scroll, self.hover, self.pinned, crate::panel::contiguous(&history), seen);
+        // The knob under the pointer, and the one held (the slider in hand's).
+        let held = self.sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
+        let thumbs_moving = self.thumbs.step(now, self.hover.filter(|hit| hit.slider().is_some()), held);
+        let scene = Scene { thumbs: &self.thumbs, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scroll, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -2818,7 +2824,7 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel.
-        let moving = !self.shift.done(now) || !self.opacity.done(now) || (self.scroll_target - self.scroll).abs() > 0.05 || crate::playing::gliding() || self.turning.is_some();
+        let moving = thumbs_moving || !self.shift.done(now) || !self.opacity.done(now) || (self.scroll_target - self.scroll).abs() > 0.05 || crate::playing::gliding() || self.turning.is_some();
         self.next_frame = if moving {
             now
         } else {
@@ -3043,6 +3049,7 @@ fn scene<'s>(
     let overlay = controller.overlay_wanted();
     let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
     Scene {
+        thumbs: &crate::ui::view::RESTING,
         info: &controller.info,
         prefs,
         theme,

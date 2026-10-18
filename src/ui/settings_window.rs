@@ -100,7 +100,7 @@ const CHOICE_LINE: f32 = 40.0;
 /// A slider's track, the room for its value, and its thumb's radius.
 const SLIDER_WIDTH: f32 = 160.0;
 const SLIDER_VALUE: f32 = 44.0;
-const SLIDER_THUMB: f32 = 10.0;
+const SLIDER_THUMB: f32 = crate::ui::thumb::FACE;
 /// The narrowest a row's word may be beside its choices.
 const MIN_WORDS: f32 = 140.0;
 /// The page's name, at the top of the page.
@@ -998,6 +998,9 @@ struct Ui {
     drag: Option<Drag>,
     /// A slider being slid, and where its track is.
     sliding: Option<(Field, Rect)>,
+    /// The sliders' thumbs' dots, easing (see `thumb::Dots`), and whether one was on its way at the last frame.
+    slider_dots: crate::ui::thumb::Dots<Field>,
+    dots_moving: bool,
     /// The modules whose cards are open (all closed as the window opens).
     expanded: HashSet<String>,
     /// The modules of `MORE` listed with the rest (those on as the page was
@@ -1177,6 +1180,8 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             keyboard: false,
             drag: None,
             sliding: None,
+            slider_dots: crate::ui::thumb::Dots::new(),
+            dots_moving: false,
             expanded: HashSet::new(),
             raised: HashSet::new(),
             more_open: false,
@@ -3392,7 +3397,7 @@ impl Ui {
             self.gfx.settle();
         }
         // (A row held still moves only as the pointer does, which asks for a frame itself.)
-        let moving = self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target;
+        let moving = self.dots_moving || self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target;
         self.settle_thumbs = false;
         self.next_frame = if moving {
             now
@@ -3457,6 +3462,11 @@ impl Ui {
         let width = PANE - 2.0 * PAD_SIDE - GUTTER;
         let scroll = self.scroll;
         let hovered = self.hovered();
+        let over = match hovered {
+            Some(Target::Slider(field)) => Some(field),
+            _ => None,
+        };
+        self.dots_moving = self.slider_dots.step(now, over, self.sliding.map(|(field, _)| field));
         let label = Font::new(Family::Segoe, 14.0, 400.0);
         let hint = Font::new(Family::Segoe, 12.0, 400.0);
         let mut dragged = None;
@@ -3645,14 +3655,9 @@ impl Ui {
                     let at = start + if max > min { (value - min) / (max - min) * (end - start) } else { 0.0 };
                     fill(frame, palette.switch_stroke.alpha(0.45), start, cy - 2.0, end - start, 4.0, 2.0);
                     fill(frame, palette.switch_on, start, cy - 2.0, at - start, 4.0, 2.0);
-                    // As Windows' own: a ring around a dot in the accent, the
-                    // dot larger under the pointer.
-                    let lit = hovered == Some(Target::Slider(field)) || self.sliding.is_some_and(|(f, _)| f == field);
-                    let ring = SLIDER_THUMB;
-                    fill(frame, palette.card_stroke, at - ring - 1.0, cy - ring - 1.0, 2.0 * ring + 2.0, 2.0 * ring + 2.0, ring + 1.0);
-                    fill(frame, palette.switch_knob_ring, at - ring, cy - ring, 2.0 * ring, 2.0 * ring, ring);
-                    let dot = if lit { 7.0 } else { 5.0 };
-                    fill(frame, palette.switch_on, at - dot, cy - dot, 2.0 * dot, 2.0 * dot, dot);
+                    // As Windows' own (see `thumb`): a ring around a dot in the accent, the dot growing under the
+                    // pointer and shrinking as it is held.
+                    crate::ui::thumb::draw(frame, Point { x: at, y: cy }, self.slider_dots.of(field), palette.switch_knob_ring, palette.card_stroke, palette.switch_on);
                     self.targets.push((track, Target::Slider(field)));
                 }
                 Row::Skins => {
@@ -4478,7 +4483,7 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { music_apart: false, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
+        let probe = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let heights: Vec<f32> = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), self.settings.columns, SIZES.1);
         let size = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
@@ -4499,7 +4504,7 @@ impl Ui {
         let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { music_apart: false, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
+        let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some() };
         let lanes = view::lanes(&scene);
 
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);

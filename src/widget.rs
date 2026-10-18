@@ -493,6 +493,8 @@ struct Widget {
     hover: bool,
     /// What a press would do something with under the pointer (see `view::Hit::takes_press`): lit as it is drawn.
     hit_hover: Option<view::Hit>,
+    /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
+    thumbs: crate::ui::thumb::Dots<view::Hit>,
     /// Letting clicks through: since when the pointer has been over it, and
     /// whether it is on the button that ends that (the window then takes
     /// the click).
@@ -1887,6 +1889,7 @@ impl Widget {
             split: None,
             hover: false,
             hit_hover: None,
+            thumbs: crate::ui::thumb::Dots::new(),
             lingered: None,
             reached: false,
             tip: None,
@@ -2559,6 +2562,15 @@ impl Widget {
         // Each part of a frame timed, and a slow one noted.
         let started = Instant::now();
         let mut moving = self.drag.is_some() || self.settle.is_some();
+        // The knob under the pointer, and the one held (the slider in hand's). (A copy drawn with: the widget is
+        // drawn meanwhile.)
+        let sliding = match self.drag {
+            Some(Drag::Slide { slider, .. }) => Some(slider),
+            _ => None,
+        };
+        let held = sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
+        moving |= self.thumbs.step(now, self.hit_hover.filter(|hit| hit.slider().is_some()), held);
+        let thumbs = self.thumbs.clone();
         // Its process list turned on toward where the wheel turned it, as the panel's is.
         let readings: Vec<&mut Readings> = match &mut self.content {
             Content::Readings(readings) => vec![readings],
@@ -2628,7 +2640,7 @@ impl Widget {
         // Merged with what plays, the readings without the music lane (what plays shows itself).
         let prefs = self.content.prefs(look.prefs);
         let prefs = prefs.as_ref().unwrap_or(look.prefs);
-        let scene = view::Scene { hover: self.hit_hover, process_scroll, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, process_scroll, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -2932,7 +2944,7 @@ impl Widget {
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| sees));
         let dark = dark || on_music;
         let theme = if dark == theme.dark { theme } else { Theme::new(look.skin, dark) };
-        let scene = view::Scene { hover: self.hit_hover, process_scroll, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, process_scroll, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, now);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).

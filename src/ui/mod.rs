@@ -37,6 +37,7 @@ pub mod skins;
 pub mod smoke;
 pub mod text;
 pub mod theme;
+pub mod thumb;
 #[cfg(windows)]
 pub mod tip;
 pub mod view;

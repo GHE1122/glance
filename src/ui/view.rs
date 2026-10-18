@@ -198,6 +198,9 @@ impl Hit {
     }
 }
 
+/// Sliders' knobs all at rest (for what keeps none of its own).
+pub static RESTING: super::thumb::Dots<Hit> = super::thumb::Dots::new();
+
 /// A region of the panel and what lands on it, in DIPs from its corner.
 pub type HitBox = (f32, f32, f32, f32, Hit);
 
@@ -216,6 +219,8 @@ pub struct Scene<'a> {
     pub process_scroll: f32,
     /// What the pointer is over.
     pub hover: Option<Hit>,
+    /// Its sliders' knobs' dots, as they ease (see `thumb::Dots`).
+    pub thumbs: &'a super::thumb::Dots<Hit>,
     /// The panel is pinned open.
     pub pinned: bool,
     /// The overlay is on.
@@ -1547,7 +1552,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let mute = left + width - MEDIA_ROW;
                 let track = (mute - 6.0 - said_width - LABEL_GAP - plot_left).max(0.0);
                 part("track");
-                slider(frame, theme, if *muted { theme.text3 } else { ink.trace }, plot_left, middle, track, *level as f32 / 100.0, true);
+                slider(frame, theme, if *muted { theme.text3 } else { ink.trace }, plot_left, middle, track, *level as f32 / 100.0, Some(scene.thumbs.of(Hit::Volume)));
                 hits.push((plot_left, row, track, MEDIA_ROW, Hit::Volume));
                 part("level");
                 frame.text(&said, theme.small, if *muted { theme.text3 } else { theme.text2 }, mute - 6.0 - said_width, middle - LINE / 2.0, said_width, Align::End);
@@ -1565,7 +1570,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let track = (left + width - long_width - LABEL_GAP - plot_left).max(0.0);
                 part("track");
                 let fraction = if *length > 0 { *at as f32 / *length as f32 } else { 0.0 };
-                slider(frame, theme, ink.trace, plot_left, middle, track, fraction, *seekable);
+                slider(frame, theme, ink.trace, plot_left, middle, track, fraction, seekable.then(|| scene.thumbs.of(Hit::Seek(crate::playing::Follow::Any))));
                 if *seekable {
                     hits.push((plot_left, y, track, MEDIA_ROW, Hit::Seek(crate::playing::Follow::Any)));
                 }
@@ -1797,15 +1802,27 @@ fn paint_plot(frame: &dyn Canvas, scene: &Scene, ink: Ink, plot: &Plot, left: f3
 }
 
 /// A track `track` wide from `from` along `middle`, filled `fraction` of the way in `colour`; with a knob where
-/// the filling ends, where it is dragged along (`knob`). What is filled, its knob and the rest of the track are
-/// each beside the next, none over another (their colours are not solid: where two lay over each other, it would
-/// show).
+/// the filling ends, where it is dragged along (`knob`: its dot's radius in the Windows 11 look, see `thumb`). In
+/// that look the knob is Windows 11's own (see `thumb`); in the others, one shape with what is filled. What is filled,
+/// its knob and the rest of the track are each beside the next, none over another (their colours are not solid: where
+/// two lay over each other, it would show); Windows 11's knob is solid, over both.
 #[allow(clippy::too_many_arguments)]
-fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f32, track: f32, fraction: f32, knob: bool) {
+fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f32, track: f32, fraction: f32, knob: Option<f32>) {
     let (tall, radius) = (theme.meter_height, theme.meter_radius);
     let filled = track * fraction.clamp(0.0, 1.0);
     let half = tall / 2.0;
-    if !knob {
+    if let (Some(dot), Skin::Fluent) = (knob, theme.skin) {
+        frame.clip(from, middle - half, filled, tall);
+        frame.fill_rounded(colour, from, middle - half, track, tall, radius);
+        frame.unclip();
+        frame.clip(from + filled, middle - half, track - filled, tall);
+        frame.fill_rounded(theme.track, from, middle - half, track, tall, radius);
+        frame.unclip();
+        let (face, edge) = if theme.dark { (Color::hex(0x454545, 1.0), Color::hex(0xffffff, 0.09)) } else { (Color::hex(0xffffff, 1.0), Color::hex(0x000000, 0.10)) };
+        super::thumb::draw(frame, Point { x: from + filled, y: middle }, dot, face, edge, colour);
+        return;
+    }
+    if knob.is_none() {
         frame.fill_rounded(theme.track, from, middle - half, track, tall, radius);
         if filled > 0.0 {
             frame.clip(from, middle - half, filled, tall);
@@ -2033,7 +2050,7 @@ mod tests {
         read.threads_ghz = vec![Some(5.0), Some(4.5), Some(5.4), Some(4.2)];
         let history = leak(vec![read]);
         let seen = Box::leak(Box::new(Seen::of(history)));
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let cpu = lane(&scene, "cpu", Detail::Full).unwrap();
         let tags: Vec<&String> = cpu.iter().filter_map(|block| if let Block::Threads(cells) = block { Some(cells.iter().map(|(_, _, tag)| tag)) } else { None }).flatten().collect();
         assert_eq!(tags[2], "Thread 3 · 5.40 GHz · 10%");
@@ -2043,7 +2060,7 @@ mod tests {
     fn shows_each_kind_of_cores_clock() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         // Big and little cores: each kind's clock, in place of the one clock.
         let mut hybrid = sample(None, None, None);
         hybrid.kinds_ghz = vec![Some(5.2), None];
@@ -2056,7 +2073,7 @@ mod tests {
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
@@ -2080,7 +2097,7 @@ mod tests {
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
@@ -2098,7 +2115,7 @@ mod tests {
         two.drives = vec!["NVMe".into(), "SATA".into()];
         two.drive_ids = vec![0, 1];
         let history = leak(vec![with(Vec::new(), vec![(0, 35.0)])]);
-        let scene_two = Scene { music_apart: false, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene_two = Scene { music_apart: false, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let disk = facts(&lane(&scene_two, "disk", Detail::Full).unwrap());
         assert_eq!(&disk[..2], [("NVMe".to_string(), "35 °C".to_string()), ("SATA".to_string(), UNREAD.to_string())]);
         // The first chiplet missed this time: the second's reading stays its own.
