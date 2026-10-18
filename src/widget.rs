@@ -1,8 +1,8 @@
 //! Desktop widgets: the panel's readings torn off onto the desktop, each in
 //! a window of its own above the others. Sized by its edges, a widget shows
 //! as much as fits (see `arrange::Ladder`), each reading moving from its
-//! place in one layout to its place in the next (see `morph`); let go near the edge of its screen, it sticks to it as a rail or a
-//! strip; flung, it slides away and is put away. Pinned, it is neither moved
+//! place in one layout to its place in the next (see `morph`); let go near the edge of its screen, it sticks to it as it
+//! is; flung, it slides away and is put away. Pinned, it is neither moved
 //! nor sized; letting clicks through, Ctrl held lets it take them again.
 //! Moved near an edge, where it would stick shows before it is let go.
 //! What a widget shows is its content (see `Content`): the panel's readings,
@@ -505,9 +505,6 @@ struct Widget {
     /// When it is next drawn: at once while it moves, else after a rest (as
     /// its charts step), or sooner as the pointer comes or it is pressed.
     next_frame: Instant,
-    /// The size its window would have stuck to `Side` (physical px), while
-    /// it is moved near that edge (see `show_hint`).
-    hint_size: Option<(Side, (i32, i32))>,
     /// Its surface, and what it shows, as last laid out (DIPs, its own at
     /// its zoom), and the zoom.
     surface_size: (f32, f32),
@@ -903,10 +900,6 @@ fn paint_readings(frame: &gfx::Frame, readings: &mut Readings, scene: &Scene, pi
 struct Readings {
     layers: PanelLayers,
     choice: Choice,
-    /// What it showed before it was stuck to an edge, and how large it was
-    /// then (DIPs on the screen; none, restored).
-    before: Option<Choice>,
-    before_size: Option<(f32, f32)>,
     /// What it showed last frame.
     last: Option<Shown>,
     /// Turning from one layout into the one it shows: since when, from
@@ -926,7 +919,7 @@ struct Readings {
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, before: None, before_size: None, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scroll: 0.0, scroll_target: 0.0, workbench: false }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scroll: 0.0, scroll_target: 0.0, workbench: false }
     }
 
     /// What it shows, as the settings keep it.
@@ -1232,7 +1225,6 @@ impl Widgets {
             if widget.behind.is_some() {
                 widget.replace = Some(true);
             }
-            widget.hint_size = None;
             widget.next_frame = Instant::now();
         }
     }
@@ -1891,7 +1883,6 @@ impl Widget {
             hits_from: (0.0, 0.0),
             behind: None,
             next_frame: Instant::now(),
-            hint_size: None,
             surface_size: (0.0, 0.0),
             shown: (0.0, 0.0),
             zoom: 1.0,
@@ -1906,7 +1897,7 @@ impl Widget {
         let one = |layout: &crate::settings::PanelLayout| -> Option<Content> {
             Some(match layout.form.as_str() {
                 MUSIC_FORM => Content::Music(MusicShown::new(kept.size.unwrap_or(music::LEAST))),
-                _ => Content::Readings(Readings { before: kept.before.as_ref().and_then(Choice::from_kept), workbench: layout.workbench, ..Readings::new(Choice::from_kept(layout)?) }),
+                _ => Content::Readings(Readings { workbench: layout.workbench, ..Readings::new(Choice::from_kept(layout)?) }),
             })
         };
         let content = match &kept.parts {
@@ -1932,10 +1923,10 @@ impl Widget {
             Content::Readings(readings) => readings.kept(),
             _ => crate::settings::PanelLayout { form: MUSIC_FORM.into(), scale: 1.0, extra: (0.0, 0.0), workbench: false },
         };
-        let (layout, before, size, parts, beside) = match &self.content {
-            Content::Readings(readings) => (readings.kept(), readings.before.map(Choice::kept), None, None, false),
-            Content::Music(shown) => (layout_of(&self.content), None, Some(shown.size), None, false),
-            Content::Merged(merged) => (layout_of(&merged.parts[0]), None, Some(merged.size), Some(merged.parts.iter().map(layout_of).collect()), merged.beside),
+        let (layout, size, parts, beside) = match &self.content {
+            Content::Readings(readings) => (readings.kept(), None, None, false),
+            Content::Music(shown) => (layout_of(&self.content), Some(shown.size), None, false),
+            Content::Merged(merged) => (layout_of(&merged.parts[0]), Some(merged.size), Some(merged.parts.iter().map(layout_of).collect()), merged.beside),
         };
         WidgetAt {
             at: (self.at.x, self.at.y),
@@ -1945,7 +1936,6 @@ impl Widget {
             game_only: self.game_only,
             on_desktop: self.on_desktop,
             stuck: self.stuck.map(Side::kept),
-            before,
             size,
             parts,
             beside,
@@ -2263,20 +2253,9 @@ impl Widget {
                     } as f32
                         / scale;
                     if away > UNSTICK {
-                        let (gx, gy) = (grab.x as f32 / w, grab.y as f32 / h);
                         self.stuck = None;
                         self.along = None;
                         self.keeps_to = (false, false);
-                        // The readings as they were before (what plays is as it was all along), the grab at the same
-                        // share of the size they had.
-                        if let Content::Readings(readings) = &mut self.content {
-                            if let Some(before) = readings.before.take() {
-                                readings.choice = before;
-                            }
-                            if let Some(size) = readings.before_size.take() {
-                                *grab = POINT { x: (gx * size.0 * scale) as i32, y: (gy * size.1 * scale) as i32 };
-                            }
-                        }
                     }
                 }
                 self.at = POINT { x: cursor.x - grab.x, y: cursor.y - grab.y };
@@ -2416,34 +2395,22 @@ impl Widget {
                 self.retone();
                 // Torn off the panel and still at its edge, it is put down where it is let go.
                 if !torn {
-                    self.stick(now);
+                    self.stick();
                 }
                 Released::Changed
             }
         }
     }
 
-    /// Let go near an edge of its screen's work area: stuck to it (the readings
-    /// as a rail on a side, a strip at the top or bottom; what plays as it
-    /// is); already stuck, flush with its edge again.
-    fn stick(&mut self, now: Instant) {
+    /// Let go near an edge of its screen's work area: stuck to it, as it is (sticking only says where it is, never
+    /// what it shows or how large); already stuck, flush with its edge again.
+    fn stick(&mut self) {
         let near = self.nearest_side().filter(|(_, away)| *away < STICK).map(|(side, _)| side);
         let Some(side) = near.or(self.stuck) else { return };
         if self.stuck.is_none() {
             self.along = Some(self.middle_along(side));
-            let size = (self.surface_size.0 * self.zoom, self.surface_size.1 * self.zoom);
-            if let Content::Readings(readings) = &mut self.content {
-                readings.before = Some(readings.choice);
-                readings.before_size = Some(size);
-                let small = match side {
-                    Side::Left | Side::Right => Small::Rail,
-                    Side::Top | Side::Bottom => Small::Strip { rich: false },
-                };
-                readings.choice = Choice { form: Form::Small(small), scale: 1.0, extra: (0.0, 0.0) };
-            }
             note(format!("widget: stuck to the {side:?} edge"));
             self.stuck = Some(side);
-            self.settle = Some((now, self.surface_size));
         }
         self.keeps_to = (side == Side::Right, side == Side::Bottom);
     }
@@ -2536,7 +2503,6 @@ impl Widget {
             crate::ui::scene::leave_out(hint.window.hwnd, false);
             hint.window.destroy();
         }
-        self.hint_size = None;
     }
 
     /// Let go somewhere else on its screen: the desktop taken behind it
@@ -2811,30 +2777,9 @@ impl Widget {
         };
         match near {
             Some((side, away)) => {
-                let small = match side {
-                    Side::Left | Side::Right => Small::Rail,
-                    Side::Top | Side::Bottom => Small::Strip { rich: false },
-                };
-                // Laid out once for the side it nears (what plays, as large as it is).
-                let size = match self.hint_size.filter(|(near, _)| *near == side) {
-                    Some((_, size)) => size,
-                    None => {
-                        let scale = self.contact.scale;
-                        let size = match &self.content {
-                            Content::Readings(_) => {
-                                let heights = view::heights(&scene);
-                                let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
-                                let stuck = Want::Kept(Choice { form: Form::Small(small), scale: 1.0, extra: (0.0, 0.0) });
-                                let there = arrange::Opening::new(&theme, Edge::Right, &lanes, forms::count(&scene), work, None, 1.0, stuck, seen.clone());
-                                ((there.size.0 * there.zoom * scale) as i32, (there.size.1 * there.zoom * scale) as i32)
-                            }
-                            Content::Music(shown) => ((shown.size.0 * scale) as i32, (shown.size.1 * scale) as i32),
-                            Content::Merged(merged) => ((merged.size.0 * scale) as i32, (merged.size.1 * scale) as i32),
-                        };
-                        self.hint_size = Some((side, size));
-                        size
-                    }
-                };
+                // As large as it is: it sticks as it is.
+                let rect = self.rect();
+                let size = (rect.right - rect.left, rect.bottom - rect.top);
                 let POINT { x, y } = self.stuck_at(side, Some(self.middle_along(side)), size);
                 let firm = away < STICK;
                 // In steps: drawn again as it changes visibly, not each frame.

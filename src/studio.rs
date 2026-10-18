@@ -223,14 +223,6 @@ fn stuck(keys: &[Key], t: f32) -> Option<&str> {
     keys.iter().take_while(|key| key.t <= t).filter_map(|key| key.stick.as_deref()).last()
 }
 
-/// The small layout a widget stuck to `side` shows, as the widget's own.
-fn stuck_form(side: &str) -> Form {
-    match side {
-        "left" | "right" => Form::Small(Small::Rail),
-        _ => Form::Small(Small::Strip { rich: false }),
-    }
-}
-
 /// Where a widget `size` DIPs large stuck to `side` of `work` has its
 /// corner, its middle `along` the edge where it was (as `Widget::stuck_at`).
 fn stuck_at(side: &str, along: f32, size: (f32, f32), work: (f32, f32)) -> (f32, f32) {
@@ -309,16 +301,13 @@ impl Filming {
     fn follow(&mut self, t: f32, track: &Track, scene: &Scene, theme: &Theme, seen: &Seen, work: (f32, f32)) {
         let (offset, room) = keyed(&track.keys, t);
         if let Some(side) = stuck(&track.keys, t).filter(|_| self.stuck.is_none()) {
-            // Stuck: the small layout of its edge, settling from what it
-            // showed, its middle where it was along the edge.
+            // Stuck: as it is, its middle where it was along the edge.
             let zoom = self.last.as_ref().map_or(1.0, |shown| shown.zoom);
             let middle = match side {
                 "left" | "right" => self.at.1 + self.surface.1 * zoom / 2.0,
                 _ => self.at.0 + self.surface.0 * zoom / 2.0,
             };
             self.stuck = Some((side.to_string(), middle));
-            self.choice = Choice { form: stuck_form(side), scale: 1.0, extra: (0.0, 0.0) };
-            self.settle = Some((t, self.surface));
         }
         let room = room.filter(|_| self.stuck.is_none());
         let shown = self.lay_out(t, scene, theme, seen, work, room);
@@ -330,14 +319,10 @@ impl Filming {
     }
 
     /// Where it would stick to `side` of `work` (DIPs on the screen): as
-    /// large as it would be there, its middle where its middle is now.
-    fn would_stick(&self, side: &str, scene: &Scene, theme: &Theme, seen: &Seen, work: (f32, f32)) -> (f32, f32, f32, f32) {
-        let heights = view::heights(scene);
-        let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
-        let kept = Want::Kept(Choice { form: stuck_form(side), scale: 1.0, extra: (0.0, 0.0) });
-        let there = arrange::Opening::new(theme, Edge::Right, &lanes, forms::count(scene), work, None, 1.0, kept, seen.clone());
-        let size = (there.size.0 * there.zoom, there.size.1 * there.zoom);
+    /// large as it is, its middle where its middle is now.
+    fn would_stick(&self, side: &str, work: (f32, f32)) -> (f32, f32, f32, f32) {
         let zoom = self.last.as_ref().map_or(1.0, |shown| shown.zoom);
+        let size = (self.surface.0 * zoom, self.surface.1 * zoom);
         let middle = match side {
             "left" | "right" => self.at.1 + self.surface.1 * zoom / 2.0,
             _ => self.at.0 + self.surface.0 * zoom / 2.0,
@@ -611,7 +596,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             filming.follow(t, track, &fresh, &theme, &seen, work);
             let still = keyed(&track.keys, t).0 == keyed(&track.keys, t + 1.0 / script.fps).0;
             let hint = track.hint.as_ref().filter(|hint| t >= hint.from && filming.stuck.is_none()).map(|hint| {
-                let (x, y, w, h) = filming.would_stick(&hint.side, &fresh, &theme, &seen, work);
+                let (x, y, w, h) = filming.would_stick(&hint.side, work);
                 let firm = t >= hint.firm;
                 // Nearer and firmer, as the widget's own (see `Widget::frame`).
                 let strength = if firm { 1.0 } else { 0.25 + 0.5 * ((t - hint.from) / (hint.firm - hint.from)).clamp(0.0, 1.0) };

@@ -398,8 +398,8 @@ impl WidgetAt {
 
 /// A desktop widget as it is kept: its surface's corner on the screen
 /// (physical px), what it shows, whether it is pinned (not moved or sized),
-/// lets clicks through and shows only while a game runs, the side of its
-/// screen it is stuck to, if it is, and what it showed before it was.
+/// lets clicks through and shows only while a game runs, and the side of its
+/// screen it is stuck to, if it is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WidgetAt {
     pub at: (i32, i32),
@@ -417,8 +417,6 @@ pub struct WidgetAt {
     pub on_desktop: bool,
     #[serde(default)]
     pub stuck: Option<WidgetSide>,
-    #[serde(default)]
-    pub before: Option<PanelLayout>,
     /// How large it is (DIPs), where its size is its own (what plays) rather than its form's.
     #[serde(default)]
     pub size: Option<(f32, f32)>,
