@@ -710,7 +710,8 @@ impl Gfx {
     }
 
     /// As `draw_offscreen`, the picture drawn as a frame handed a region `size` large at `offset` (physical pixels)
-    /// of a larger atlas is (see `Frame::begun`): that region's pixels, as `draw_offscreen` gives them.
+    /// of a larger atlas is (see `Frame::begun`): that region's pixels, as `draw_offscreen` gives them. (For tests.)
+    #[cfg(test)]
     pub fn draw_in_atlas(&self, size: (u32, u32), offset: (i32, i32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<Vec<u8>> {
         use windows::Win32::Graphics::Direct2D::{
             D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_MAP_OPTIONS_READ,
