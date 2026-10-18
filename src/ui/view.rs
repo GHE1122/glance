@@ -1859,6 +1859,43 @@ fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f
         super::thumb::draw(frame, Point { x: from + filled, y: middle }, 8.0, dot, face, edge, colour);
         return;
     }
+    // The frosted glass's: a capsule of glass across the end of what is filled, as the system's liquid glass draws its
+    // sliders' (a solid dot of the ink, one with the filling, stood apart from the glass round it), a little larger
+    // under the pointer and smaller held (see `thumb::Dots`).
+    if let (Some(dot), Skin::Glass) = (knob, theme.skin) {
+        frame.clip_part(from, top, track, tall, fraction, false);
+        frame.fill_rounded(colour, from, top, track, tall, radius);
+        frame.unclip();
+        frame.clip(from + filled, top, track - filled, tall);
+        frame.fill_rounded(theme.track, from, top, track, tall, radius);
+        frame.unclip();
+        // Its knob as liquid glass's: a white capsule at rest, a little larger under the pointer, and held, a clear
+        // lens larger again, the bar through it and light along its rim (`dot` past 1 under the pointer, under 1 held).
+        let hover = ((dot - 1.0) / 0.4).clamp(0.0, 1.0);
+        let lens = ((1.0 - dot) / 0.15).clamp(0.0, 1.0);
+        let grown = 1.0 + 0.1 * hover + 0.3 * lens;
+        let (w, h) = (24.0 * grown, 14.0 * grown);
+        let (x, y) = (from + filled - w / 2.0, middle - h / 2.0);
+        frame.shadow(Color::hex(0x000000, (if theme.dark { 0.4 } else { 0.2 }) * (1.0 - 0.6 * lens)), x, y, w, h, h / 2.0, 5.0, 1.5);
+        if lens > 0.0 {
+            // (Through the lens the bar is seen larger.)
+            let big = tall * (1.0 + 0.6 * lens);
+            let (inset, top) = (h / 2.0 - 0.5 * big, middle - big / 2.0);
+            frame.clip(x + inset * 0.4, y, w - inset * 0.8, h);
+            frame.fill(colour, x, top, from + filled - x, big);
+            frame.fill(theme.track, from + filled, top, x + w - from - filled, big);
+            frame.unclip();
+        }
+        frame.fill_rounded(Color::hex(0xFFFFFF, 1.0 - 0.88 * lens), x, y, w, h, h / 2.0);
+        let rim = Fill::Down { top: y, from: Color::hex(0xFFFFFF, 0.25 + 0.6 * lens), bottom: y + h, to: Color::hex(0xFFFFFF, 0.1 + 0.25 * lens) };
+        frame.stroke_rounded(rim, x, y, w, h, h / 2.0, 1.0);
+        if lens > 0.0 {
+            // (Its far side's light, inside it below.)
+            let inner = Fill::Down { top: y, from: Color::hex(0xFFFFFF, 0.0), bottom: y + h, to: Color::hex(0xFFFFFF, 0.45 * lens) };
+            frame.stroke_rounded(inner, x + 1.5, y + 1.5, w - 3.0, h - 3.0, h / 2.0 - 1.5, 1.0);
+        }
+        return;
+    }
     if knob.is_none() {
         frame.fill_rounded(theme.track, from, top, track, tall, radius);
         if filled > 0.0 {
@@ -1980,6 +2017,30 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
 
 #[cfg(test)]
 mod tests {
+
+    /// The frosted glass's sliders, at rest, under the pointer and held, on a light and a dark ground:
+    /// `cargo test --features studio --lib -- --ignored glass_sliders` writes `target/glass-sliders.png`.
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    #[cfg(feature = "studio")]
+    fn glass_sliders() {
+        use crate::ui::theme::{Skin, Theme};
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let (w, h) = (360.0f32, 200.0f32);
+        let pixels = gfx
+            .draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+                for (row, dark) in [false, true].into_iter().enumerate() {
+                    let theme = Theme::new(Skin::Glass, dark);
+                    let y0 = row as f32 * 100.0;
+                    frame.fill(if dark { Color::hex(0x2A3550, 1.0) } else { Color::hex(0xC9D6E8, 1.0) }, 0.0, y0, w, 100.0);
+                    for (i, dot) in [1.0f32, 1.4, 0.85].into_iter().enumerate() {
+                        super::slider(frame, &theme, super::super::theme::accent(dark), 20.0, y0 + 25.0 + i as f32 * 25.0, 320.0, 0.3 + 0.2 * i as f32, Some(dot));
+                    }
+                }
+            })
+            .expect("drawn");
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/glass-sliders.png", env!("CARGO_MANIFEST_DIR"))), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+    }
     use super::*;
 
     #[test]
