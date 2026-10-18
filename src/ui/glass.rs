@@ -186,13 +186,14 @@ impl Frosted {
         let interop: ICompositionDrawingSurfaceInterop = surface.cast()?;
         let mut offset = POINT::default();
         let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, &mut offset)? };
-        let frame = Frame::begun(gfx, dc, offset, size, scale);
-        if let Ok(frame) = &frame {
-            paint(frame);
-            frame.finish()?;
-        }
-        unsafe { interop.EndDraw()? };
-        frame.map(|_| ())
+        // (The surface's drawing ended whatever became of the frame's: left begun, nothing more was drawn on it.)
+        let drawn = Frame::begun(gfx, dc, offset, size, scale).and_then(|frame| {
+            paint(&frame);
+            frame.finish()
+        });
+        let ended = unsafe { interop.EndDraw() };
+        drawn?;
+        ended
     }
 
     /// How frosted the glass is: 1, the screen behind blurred; 0, as it

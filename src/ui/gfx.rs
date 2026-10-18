@@ -1113,7 +1113,19 @@ impl<'a> Frame<'a> {
             dc.SetTextRenderingParams(None);
             dc.Clear(Some(&D2D1_COLOR_F::default()));
         }
-        let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)? };
+        let brush = match unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None) } {
+            Ok(brush) => brush,
+            Err(error) => {
+                // (Its own context's drawing ended, its bitmap let go: left begun, the next frame could not begin it.)
+                if atlas.is_some() {
+                    unsafe {
+                        let _ = dc.EndDraw(None, None);
+                        dc.SetTarget(None);
+                    }
+                }
+                return Err(error);
+            }
+        };
         Ok(Frame { gfx, dc, brush, base, atlas, moving: Cell::new(false) })
     }
 
@@ -1124,15 +1136,17 @@ impl<'a> Frame<'a> {
         use windows::Win32::Graphics::Direct2D::Common::D2D1_COMPOSITE_MODE_SOURCE_COPY;
         use windows::Win32::Graphics::Direct2D::{D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_UNIT_MODE_DIPS, D2D1_UNIT_MODE_PIXELS};
         unsafe {
-            // What was drawn on the bitmap done (handed to the card), then copied by the compositor's context.
-            self.dc.EndDraw(None, None)?;
+            // What was drawn on the bitmap done (handed to the card), then copied by the compositor's context. (Its
+            // bitmap let go of either way.)
+            let ended = self.dc.EndDraw(None, None);
             self.dc.SetTarget(None);
+            ended?;
+            let image: ID2D1Image = scratch.cast()?;
             let mut was = Matrix3x2::default();
             dc.GetTransform(&mut was);
             dc.SetUnitMode(D2D1_UNIT_MODE_PIXELS);
             dc.SetTransform(&Matrix3x2::identity());
             let from = D2D_RECT_F { left: 0.0, top: 0.0, right: size.0 as f32, bottom: size.1 as f32 };
-            let image: ID2D1Image = scratch.cast()?;
             dc.DrawImage(&image, Some(&Vector2 { X: offset.x as f32, Y: offset.y as f32 }), Some(&from), D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
             dc.SetUnitMode(D2D1_UNIT_MODE_DIPS);
             dc.SetTransform(&was);
@@ -1586,13 +1600,18 @@ impl Surface {
         let mut offset = POINT::default();
         let began = std::time::Instant::now();
         let dc: ID2D1DeviceContext = unsafe { surface.BeginDraw(None, &mut offset)? };
-        let frame = Frame::begun(gfx, dc, offset, self.size, scale)?;
-        let given = began.elapsed();
-        paint(&frame);
-        frame.finish()?;
+        // (The surface's drawing ended whatever became of the frame's: left begun, nothing more was drawn on it.)
+        let mut given = std::time::Duration::ZERO;
+        let drawn = Frame::begun(gfx, dc, offset, self.size, scale).and_then(|frame| {
+            given = began.elapsed();
+            paint(&frame);
+            frame.finish()
+        });
         let painted = began.elapsed();
+        let ended = unsafe { surface.EndDraw() };
+        drawn?;
+        ended?;
         unsafe {
-            surface.EndDraw()?;
             if !self.shown {
                 self.visual.SetContent(surface)?;
                 self.shown = true;
