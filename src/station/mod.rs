@@ -8,6 +8,8 @@ pub mod folder;
 pub mod keep;
 pub mod run;
 pub mod shelf;
+#[cfg(test)]
+mod spike;
 
 /// Now, in ms since 1970 (as the shelf keeps when things were put on it).
 pub fn now_ms() -> u64 {
