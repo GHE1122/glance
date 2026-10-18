@@ -1158,12 +1158,20 @@ impl<'a> Frame<'a> {
     /// a side that had length keeps at least a pixel's.
     pub fn on_pixels(&self, x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
         let Some((t, device)) = self.grid() else { return (x, y, width, height) };
+        // Its corner put on a whole pixel, and its size made whole pixels apart: as large wherever it is. (Its far
+        // edges put on whole pixels as its near ones are, two bars as tall came out a pixel apart in height where a
+        // DIP is not whole pixels, at a panel size of 90%, as the screen's pixels fell under each.)
         let (left, top) = self.on_pixel(x, y);
-        let (right, bottom) = self.on_pixel(x + width, y + height);
-        let (one_x, one_y) = (1.0 / (device * t.M11), 1.0 / (device * t.M22));
-        let width = if width > 0.0 { (right - left).max(one_x.min(width)) } else { right - left };
-        let height = if height > 0.0 { (bottom - top).max(one_y.min(height)) } else { bottom - top };
-        (left, top, width, height)
+        let whole = |length: f32, scale: f32| {
+            let pixels = length * scale * device;
+            if !pixels.is_finite() || pixels.abs() > 1.0e6 {
+                return length;
+            }
+            // (A side that had length keeps at least a pixel's.)
+            let pixels = if length > 0.0 { whole_pixel(pixels).max(1.0) } else { whole_pixel(pixels) };
+            pixels / (scale * device)
+        };
+        (left, top, whole(width, t.M11), whole(height, t.M22))
     }
 
     /// Draws from here on with `(x, y)`, in DIPs from the surface's corner, as the origin.
@@ -1745,6 +1753,32 @@ mod tests {
             })
             .expect("drawn");
         }
+    }
+
+    /// Bars as tall come out as many pixels tall wherever they are, where a DIP is not whole pixels (a 150% screen,
+    /// the panel at 90%): the storage's two bars were a pixel apart in height.
+    #[test]
+    #[cfg(feature = "studio")]
+    fn bars_as_tall_are_as_tall_anywhere() {
+        use super::super::canvas::{Canvas, Color};
+        for scale in [1.35f32, 1.125, 1.575] {
+            let tall: std::collections::BTreeSet<usize> = [3.0f32, 3.2, 3.37, 3.5, 3.71, 3.9]
+                .into_iter()
+                .map(|y| {
+                    let seen = alphas_at(24, scale, |frame| frame.fill_rounded(Color::hex(0xffffff, 1.0), 2.0, y, 10.0, 4.0, 2.0));
+                    seen.iter().filter(|row| row[8] > 128).count()
+                })
+                .collect();
+            assert_eq!(tall.len(), 1, "at {scale}, bars 4 DIPs tall came out {tall:?} pixels tall");
+        }
+    }
+
+    /// As `alphas`, at `scale`.
+    #[cfg(feature = "studio")]
+    fn alphas_at(size: u32, scale: f32, paint: impl FnOnce(&super::Frame)) -> Vec<Vec<u8>> {
+        let gfx = super::Gfx::new().expect("graphics");
+        let pixels = gfx.draw_offscreen((size, size), scale, paint).expect("drawn");
+        pixels.chunks(size as usize * 4).map(|row| row.chunks(4).map(|pixel| pixel[3]).collect()).collect()
     }
 
     /// A fill clipped to a box half a pixel off the grid covers what the same fill unclipped does at that edge (both

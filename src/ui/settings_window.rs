@@ -969,6 +969,9 @@ struct Ui {
     needs_modifier: bool,
     pointer: Option<(f32, f32)>,
     pressed: Option<Target>,
+    /// What the pointer is over as the frame being drawn is drawn: found among the last frame's targets before they
+    /// are made anew (found among those being made, it was none, and nothing lit under the pointer).
+    hovered_now: Option<Target>,
     /// The screens, as the map shows them.
     screens: Vec<crate::screens::Screen>,
     /// The edge last pressed in the layout's editor: the panel it opens slides out from it there.
@@ -1165,6 +1168,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             needs_modifier: false,
             pointer: None,
             pressed: None,
+            hovered_now: None,
             screens: crate::screens::all(),
             shown_edge: None,
             view: None,
@@ -3415,6 +3419,7 @@ impl Ui {
         if !self.mica {
             fill(frame, palette.window, 0.0, 0.0, width, height, 0.0);
         }
+        self.hovered_now = self.hovered();
         self.targets.clear();
         self.paint_nav(frame, &palette);
         unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, PANE, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
@@ -3427,7 +3432,7 @@ impl Ui {
     /// and marked in the accent.
     fn paint_nav(&mut self, frame: &Frame, palette: &Palette) {
         let lang = self.lang;
-        let hovered = self.hovered();
+        let hovered = self.hovered_now.clone();
         let left = 16.0;
         let width = NAV - 2.0 * left + 8.0;
         let title = Font::new(Family::SegoeDisplay, 20.0, 600.0);
@@ -3461,7 +3466,7 @@ impl Ui {
         let left = NAV + PAD_SIDE;
         let width = PANE - 2.0 * PAD_SIDE - GUTTER;
         let scroll = self.scroll;
-        let hovered = self.hovered();
+        let hovered = self.hovered_now.clone();
         let over = match hovered {
             Some(Target::Slider(field)) => Some(field),
             _ => None,

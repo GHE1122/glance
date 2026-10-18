@@ -212,7 +212,7 @@ impl Ui {
     /// The editor, in the preview's room: its head (the screens to show, every screen alike), the screens, and the
     /// words under them. Returns how soon to draw again (see `paint`), while the real panel shows.
     pub(super) fn paint_layout(&mut self, frame: &Frame, palette: &Palette, area: Rect, now: Instant) -> Option<f32> {
-        let hovered = self.hovered();
+        let hovered = self.hovered_now.clone();
         let lang = self.lang;
         self.zones.clear();
         let places = self.settings.places().clone();
