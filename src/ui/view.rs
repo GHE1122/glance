@@ -637,7 +637,7 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
     for at in 0..=apps.len() {
         let (x, y) = cell(at);
         let (x, y) = if across { (x - scroll, y) } else { (x, y - scroll) };
-        if (if across { x + RAIL_CELL < view_x || x > view_x + view_w } else { y + RAIL_CELL < view_y || y > view_y + view_h }) {
+        if if across { x + RAIL_CELL < view_x || x > view_x + view_w } else { y + RAIL_CELL < view_y || y > view_y + view_h } {
             continue;
         }
         let inset = (RAIL_CELL - RAIL_SIDE) / 2.0;

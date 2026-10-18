@@ -466,9 +466,9 @@ mod tests {
         let stored = serde_json::json!({ "modules": [{ "id": "cpu", "on": true }, { "id": "lyrics", "on": true }, { "id": "time", "on": false }] });
         let mut prefs = super::Prefs::resolve(&stored, &known);
         let on = |prefs: &super::Prefs| prefs.modules.iter().filter(|module| module.on).map(|module| module.id.clone()).collect::<Vec<_>>();
-        // The readings without what plays; the workbench its time and its station, on, on their own.
+        // The readings without what plays; the workbench its time, its station and quick launch, on, on their own.
         assert_eq!(on(&prefs.clone().holding(Monitor)), ["cpu", "memory"]);
-        assert_eq!(on(&prefs.clone().holding(Workbench)), ["time", "station"]);
+        assert_eq!(on(&prefs.clone().holding(Workbench)), ["time", "station", "apps"]);
         // Its items its own: the workbench's time switched, the readings' as it was.
         super::set_item_in(&mut prefs.workbench, "time", "lyrics", true);
         assert!(prefs.clone().holding(Workbench).shows("time", "lyrics"));
