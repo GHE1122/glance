@@ -222,19 +222,7 @@ unsafe fn png(image: &IWICBitmapSource) -> windows::core::Result<Vec<u8>> {
 /// clipboard was held by another, or what was to go there could not be made.
 pub fn put(owner: HWND, content: &Content, stays_here: bool) -> Option<u32> {
     // Made before the clipboard is opened (a picture decoded): it is held no longer than it takes to hand it over.
-    let mut formats: Vec<(u32, Vec<u8>)> = match content {
-        Content::Text(text) => vec![(TEXT, utf16_z(text))],
-        Content::Files(paths) => vec![(FILES, dropped(paths))],
-        // (Given back as the file the station keeps of it: see `keep::Keep::content_of`.)
-        Content::Saved { .. } => return None,
-        Content::Png(png) => {
-            let dib = unsafe { dib_of(png).ok()? };
-            vec![(unsafe { RegisterClipboardFormatW(w!("PNG")) }, png.clone()), (DIB, dib)]
-        }
-    };
-    if stays_here {
-        formats.push((unsafe { RegisterClipboardFormatW(w!("CanUploadToCloudClipboard")) }, 0u32.to_le_bytes().to_vec()));
-    }
+    let formats = formats_of(content, stays_here)?;
     unsafe {
         OpenClipboard(Some(owner)).ok()?;
         let _ = EmptyClipboard();
@@ -245,6 +233,27 @@ pub fn put(owner: HWND, content: &Content, stays_here: bool) -> Option<u32> {
         let _ = CloseClipboard();
         all.then(|| GetClipboardSequenceNumber())
     }
+}
+
+/// `content` in the formats it is given in, copied or dragged (see `put`), each format's number and bytes: none where
+/// it cannot be made.
+pub(super) fn formats_of(content: &Content, stays_here: bool) -> Option<Vec<(u32, Vec<u8>)>> {
+    let registered = |name: PCWSTR| unsafe { RegisterClipboardFormatW(name) };
+    let mut formats: Vec<(u32, Vec<u8>)> = match content {
+        Content::Text(text) => vec![(TEXT, utf16_z(text))],
+        // (Copied where they are dropped: see `drop`, and moved only by hand.)
+        Content::Files(paths) => vec![(FILES, dropped(paths)), (registered(w!("Preferred DropEffect")), 1u32.to_le_bytes().to_vec())],
+        Content::Png(png) => {
+            let dib = unsafe { dib_of(png).ok()? };
+            vec![(registered(w!("PNG")), png.clone()), (DIB, dib)]
+        }
+        // (Given back as the file the station keeps of it: see `keep::Keep::content_of`.)
+        Content::Saved { .. } => return None,
+    };
+    if stays_here {
+        formats.push((registered(w!("CanUploadToCloudClipboard")), 0u32.to_le_bytes().to_vec()));
+    }
+    Some(formats)
 }
 
 /// The clipboard's device-independent bitmap format.

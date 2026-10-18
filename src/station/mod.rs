@@ -2,6 +2,7 @@
 //! another program, and what was copied lately (see docs/station-and-notes.md).
 
 pub mod clipboard;
+pub mod drag;
 pub mod drop;
 pub mod folder;
 pub mod keep;
