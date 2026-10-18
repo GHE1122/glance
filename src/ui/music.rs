@@ -699,6 +699,7 @@ impl Music {
         let ink = if light { 0x1A1A1A } else { 0xFFFFFF };
         let mut drawing = Drawing { music: self, frame, moment: &moment, shows, ground, ink, edged: ground == Ground::Clear, light, tint, accent, fonts: Fonts::in_family(family), scale, pointer, size, turn, hits: Vec::new() };
         drawing.ground(layout);
+        drawing.disc(layout);
         // Turning into this layout: what is not on its ground comes in as its parts move.
         if let Some((_, t)) = turn {
             let everything = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
@@ -756,6 +757,14 @@ fn stage_line(h: f32) -> f32 {
     (h / 16.0).clamp(18.0, NOW_FONT.size)
 }
 
+/// How far across the record its label is, of its own (the cover on it, in the stage).
+const RECORD_LABEL: f32 = 0.62;
+
+/// The corners of a cover `side` across, on a card or beside what plays.
+fn cover_corner(side: f32) -> f32 {
+    if side < 50.0 { 6.0 } else { 9.0 }
+}
+
 fn tween(from: Placed, to: Placed, t: f32) -> Placed {
     let at = |a: f32, b: f32| a + (b - a) * t;
     Placed {
@@ -767,6 +776,8 @@ fn tween(from: Placed, to: Placed, t: f32) -> Placed {
             (Some(a), Some(b)) => Some((at(a.0, b.0), at(a.1, b.1), at(a.2, b.2), b.3)),
             (_, b) => b,
         },
+        round: at(from.round, to.round),
+        record: at(from.record, to.record),
         title_zoom: at(from.title_zoom, to.title_zoom),
         below: at(from.below, to.below),
         left: at(from.left, to.left),
@@ -839,6 +850,11 @@ const CARD_COVER: f32 = 64.0;
 #[derive(Clone, Copy)]
 struct Placed {
     cover: Option<(f32, f32, f32)>,
+    /// How round the cover is (0: a card's corners, 1: round, the record's label), and how much of the record round
+    /// it shows (0 to 1): a layout turning into the stage or out of it, the cover moves into the record's middle or
+    /// out of it, rounding as it goes, and the record grows in round it or goes.
+    round: f32,
+    record: f32,
     title: Option<(f32, f32, f32, bool)>,
     /// How large what plays is drawn, of its size (the stage's, larger as it is taller, as its lines are).
     title_zoom: f32,
@@ -866,7 +882,7 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             let side = (h - 2.0 * pad).min(if shows.inset.is_some() { HOSTED_COVER } else { f32::MAX }).min(player_side((w, PLAYER_FROM + more), shows)).max(0.0);
             let cover = shows.cover.then_some((pad, (h - side) / 2.0, side));
             let left = if shows.cover { pad + side + 12.0 } else { pad + 4.0 };
-            Placed { cover, title: None, title_zoom: 1.0, below: 0.0, left, width: (w - pad - left).max(0.0) }
+            Placed { cover, round: 0.0, record: 0.0, title: None, title_zoom: 1.0, below: 0.0, left, width: (w - pad - left).max(0.0) }
         }
         // The cover as tall as the room above the rows along the bottom (which go all across), no wider than a third.
         // (Narrower than the room above the rows is tall, the cover and the column beside it, level with its top,
@@ -879,26 +895,29 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             let left = if shows.cover { pad + side + 16.0 } else { pad };
             let width = (w - left - pad).max(0.0);
             let title = shows.title.then_some((left, top - 2.0, width, false));
-            Placed { cover, title, title_zoom: 1.0, below: if shows.title { top + 46.0 } else { top + 4.0 }, left, width }
+            Placed { cover, round: 0.0, record: 0.0, title, title_zoom: 1.0, below: if shows.title { top + 46.0 } else { top + 4.0 }, left, width }
         }
         Layout::Card => {
             let cover = shows.cover.then_some((pad, pad, CARD_COVER));
             let tx = if shows.cover { pad + CARD_COVER + 14.0 } else { pad };
             let title = shows.title.then_some((tx, pad + if shows.cover { 12.0 } else { 0.0 }, (w - tx - pad).max(0.0), false));
             let below = pad + if shows.cover { CARD_COVER + 12.0 } else if shows.title { 44.0 } else { 0.0 };
-            Placed { cover, title, title_zoom: 1.0, below, left: pad, width: (w - 2.0 * pad).max(0.0) }
+            Placed { cover, round: 0.0, record: 0.0, title, title_zoom: 1.0, below, left: pad, width: (w - 2.0 * pad).max(0.0) }
         }
         // The record drawn as it turns (not on the ground); what plays at the top of the column beside it.
         // (Level with the record's top: the record and the column beside it together in the middle.)
         Layout::Stage => {
-            let ((_, cy), side) = stage_record((w, h), shows);
+            let ((cx, cy), side) = stage_record((w, h), shows);
             let top = cy - side / 2.0;
+            // The cover the record's label (see `RECORD_LABEL`), round, the record round it.
+            let label = side / 2.0 * RECORD_LABEL;
+            let cover = Some((cx - label, cy - label, 2.0 * label));
             let left = pad + side + side * 0.28 + 12.0;
             let width = (w - left - pad).max(0.0);
             let title = shows.title.then_some((left, top + 6.0, width, false));
             // (As large as its lines are, of theirs at the least: see `stage`.)
             let title_zoom = stage_line(h) / 18.0;
-            Placed { cover: None, title, title_zoom, below: top + if shows.title { 58.0 * title_zoom } else { 0.0 }, left, width }
+            Placed { cover, round: 1.0, record: 1.0, title, title_zoom, below: top + if shows.title { 58.0 * title_zoom } else { 0.0 }, left, width }
         }
         Layout::Tall => {
             let wide = (w - 2.0 * pad).max(0.0);
@@ -909,7 +928,7 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             if shows.title {
                 y += 44.0;
             }
-            Placed { cover, title, title_zoom: 1.0, below: y, left: pad, width: wide }
+            Placed { cover, round: 0.0, record: 0.0, title, title_zoom: 1.0, below: y, left: pad, width: wide }
         }
     }
 }
@@ -957,8 +976,9 @@ impl Drawing<'_> {
         let room = 24.0;
         let _ = self.music.ground.draw(frame, key, windows_numerics::Matrix3x2::identity(), (-room, -room, w + 2.0 * room, h + 2.0 * room), self.scale, None, |frame| {
             ground.paint(frame, |frame| {
-                if let Some((x, y, side)) = at.cover {
-                    let corner = if side < 50.0 { 6.0 } else { 9.0 };
+                // (With the record round it, drawn over the record: see `disc`.)
+                if let Some((x, y, side)) = at.cover.filter(|_| at.record <= 0.0) {
+                    let corner = cover_corner(side);
                     // (Inside another widget, flat as what it shows is.)
                     if shows.inset.is_none() {
                         frame.shadow(Color::hex(0x000000, 0.35), x, y, side, side, corner, 10.0, 3.0);
@@ -1585,8 +1605,8 @@ impl Drawing<'_> {
         let (w, h) = self.size;
         let pad = pad_of(Layout::Stage, self.shows);
         let at = self.placed(Layout::Stage);
-        let ((cx, cy), side) = stage_record(self.size, self.shows);
-        self.record(cx, cy, side);
+        // (The record: see `disc`.)
+        let ((_, cy), _) = stage_record(self.size, self.shows);
         // Along the bottom, all across: kept showing, the controls and the track, and the spectrum over them; else the
         // spectrum, the controls coming over it as the pointer does (as in every layout).
         // (Nearer its foot than its sides: as near as a card's rows are to its own.)
@@ -1626,15 +1646,54 @@ impl Drawing<'_> {
         }
     }
 
-    /// The record, `side` across round `(cx, cy)`: black, its grooves catching the light, the cover in its middle,
-    /// turned as far as it has turned.
-    fn record(&self, cx: f32, cy: f32, side: f32) {
+    /// The record round the cover, as much of it as the layout shows (see `Placed::record`): the stage's, or the
+    /// record growing in round the cover or going as a layout turns into the stage or out of it, the cover moving
+    /// into its middle or out of it, rounding as it goes, and turned as the record has turned, as far as it is round
+    /// (so as it comes to rest in the record's middle it is turned as the record is, and nothing jumps).
+    fn disc(&mut self, layout: Layout) {
+        let at = self.placed(layout);
+        let Some((x, y, side)) = at.cover.filter(|_| at.record > 0.0) else { return };
         let frame = self.frame;
-        let r = side / 2.0;
+        let (cx, cy, label) = (x + side / 2.0, y + side / 2.0, side / 2.0);
+        let r = label / RECORD_LABEL;
+        let faded = |paint: &dyn Fn()| {
+            if at.record < 1.0 {
+                let everything = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+                let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: at.record, ..Default::default() };
+                unsafe { frame.dc.PushLayer(&layer, None) };
+                paint();
+                unsafe { frame.dc.PopLayer() };
+            } else {
+                paint();
+            }
+        };
+        faded(&|| self.record_under(cx, cy, r));
+        // The cover over it: its corners from a card's to round, turned as the record is as far as it is round.
+        let corner = cover_corner(side) + (label - cover_corner(side)) * at.round;
+        // (`turned_by` in degrees, as the record's turn is kept; turned in radians.)
+        let angle = (self.music.turned_by * at.round).to_radians();
+        let (ink, edged) = (self.ink, self.edged);
+        frame.turned(cx, cy, angle, (1.0, 1.0), |frame| match &self.moment.cover {
+            Some(cover) => {
+                let picture = super::canvas::Picture { key: cover.key, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
+                frame.picture(&picture, x, y, side, corner, 1.0);
+            }
+            None => {
+                frame.fill_rounded(Color::hex(0x2A2A30, 1.0), x, y, side, side, corner);
+                frame.icon(Icon::Music, Point { x: cx, y: cy }, side * 0.42, Color::hex(ink, if edged { 0.6 } else { 0.5 }));
+            }
+        });
+        faded(&|| self.record_over(cx, cy, r));
+    }
+
+    /// The record `r` in radius round `(cx, cy)`, under its label: black, its grooves catching the light.
+    fn record_under(&self, cx: f32, cy: f32, r: f32) {
+        let frame = self.frame;
+        let side = 2.0 * r;
         frame.shadow(Color::hex(0x000000, 0.45), cx - r, cy - r, side, side, r, 14.0, 5.0);
         frame.fill_circle(Color::hex(0x0E0E10, 1.0), Point { x: cx, y: cy }, r);
         // Its grooves: fine rings, lighter toward its edge.
-        let label = r * 0.62;
+        let label = r * RECORD_LABEL;
         let mut ring = label + 3.0;
         while ring < r - 3.0 {
             let shade = 0.035 + 0.05 * (ring - label) / (r - label);
@@ -1642,20 +1701,13 @@ impl Drawing<'_> {
             ring += 4.0;
         }
         frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, 0.12)), cx - r, cy - r, side, side, r, 1.0);
-        // The cover in its middle, turned with it.
-        let mut parent = windows_numerics::Matrix3x2::default();
-        unsafe { frame.dc.GetTransform(&mut parent) };
-        let turned = windows_numerics::Matrix3x2::rotation_around(self.music.turned_by, windows_numerics::Vector2 { X: cx, Y: cy });
-        unsafe { frame.dc.SetTransform(&(turned * parent)) };
-        match &self.moment.cover {
-            Some(cover) => {
-                let picture = super::canvas::Picture { key: cover.key, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
-                frame.picture(&picture, cx - label, cy - label, 2.0 * label, label, 1.0);
-            }
-            None => frame.fill_circle(Color::hex(0x2A2A30, 1.0), Point { x: cx, y: cy }, label),
-        }
-        unsafe { frame.dc.SetTransform(&parent) };
-        // Round the cover, a ring of the cover's colour; over the record, a sheen of it catching the light.
+    }
+
+    /// Over the record's label: a ring of the cover's colour round it, a sheen of it catching the light over the
+    /// record, its hole, and its arm.
+    fn record_over(&self, cx: f32, cy: f32, r: f32) {
+        let frame = self.frame;
+        let label = r * RECORD_LABEL;
         frame.stroke_rounded(Fill::Solid(colour(self.accent, 0.9)), cx - label - 3.25, cy - label - 3.25, 2.0 * label + 6.5, 2.0 * label + 6.5, label + 3.25, 2.5);
         let mut sheen = r - 6.0;
         while sheen > label + 8.0 {
@@ -2849,6 +2901,35 @@ mod pictures {
             let path = std::path::PathBuf::from(format!("{out}/{name}.png"));
             crate::studio::save_png(&path, size.0, size.1, &pixels).unwrap();
             println!("{}", path.display());
+        }
+        // Turning from the card into the stage and back, at moments on the way: the cover moving into the record's
+        // middle, rounding, the record growing in round it (`turn-…-<ms>.png`).
+        let shows = all;
+        for (name, from, to) in [("card-stage", (480.0, 420.0), (900.0, 470.0)), ("stage-card", (900.0, 470.0), (480.0, 420.0))] {
+            let mut music = Music { controls_in: 0.0, turned_by: 30.0, arm: 1.0, ..Music::default() };
+            let moment = playing(false);
+            music.bands = moment.sound.bands;
+            music.rail = moment.now.map_or(-1.0, |now| now as f32);
+            music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+            let margin = 30.0;
+            let (w, h) = (900.0f32, 470.0f32);
+            let size = (((w + 2.0 * margin) * 1.5) as u32, ((h + 2.0 * margin) * 1.5) as u32);
+            let start = Instant::now();
+            let mut paint = |music: &mut Music, room: (f32, f32), at: Instant| {
+                gfx.draw_offscreen(size, 1.5, |frame| {
+                    frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
+                    frame.origin(margin, margin);
+                    music.paint_moment(frame, room, &shows, Ground::of(&shows), 1.5, None, at, playing(false));
+                })
+                .unwrap()
+            };
+            paint(&mut music, from, start);
+            for ms in [0u64, 60, 130, 200, 300] {
+                let pixels = paint(&mut music, to, start + std::time::Duration::from_millis(ms + 1));
+                let path = std::path::PathBuf::from(format!("{out}/turn-{name}-{ms:03}.png"));
+                crate::studio::save_png(&path, size.0, size.1, &pixels).unwrap();
+                println!("{}", path.display());
+            }
         }
     }
 }
