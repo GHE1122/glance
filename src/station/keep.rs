@@ -127,9 +127,9 @@ impl Keep {
         }
     }
 
-    /// Takes off all that is not pinned.
-    pub fn clear(&mut self) {
-        let loose: Vec<u64> = self.shelf.items.iter().filter(|item| !item.pinned).map(|item| item.id).collect();
+    /// All that is not pinned taken off: of what was put on it, or (`copied`) of what was copied lately.
+    pub fn clear(&mut self, copied: bool) {
+        let loose: Vec<u64> = self.shelf.items.iter().filter(|item| !item.pinned && item.copied == copied).map(|item| item.id).collect();
         for id in loose {
             self.remove(id);
         }

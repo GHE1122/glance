@@ -921,13 +921,15 @@ struct Readings {
     /// How far its process list is turned (DIPs), and where the wheel turns it to (see `Widgets::wheel`).
     /// How far its lists are scrolled (see `view::Scrolls`).
     scrolls: view::Scrolls,
+    /// Its station's page shown (see `view::Tab`).
+    tab: view::Tab,
     /// Its lanes the workbench's (torn off a workbench's panel), not the readings'.
     workbench: bool,
 }
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scrolls: view::Scrolls::default(), workbench: false }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false }
     }
 
     /// What it shows, as the settings keep it.
@@ -973,6 +975,24 @@ impl Content {
                 shown.layer.release();
             }
             Content::Merged(merged) => merged.parts.iter_mut().for_each(Content::release),
+        }
+    }
+
+    /// Its readings (merged, the first readings part).
+    fn readings_mut(&mut self) -> Option<&mut Readings> {
+        match self {
+            Content::Readings(readings) => Some(readings),
+            Content::Music(_) => None,
+            Content::Merged(merged) => merged.parts.iter_mut().find_map(Content::readings_mut),
+        }
+    }
+
+    /// Its station's page shown: its readings' (merged, the first readings part's).
+    fn tab(&self) -> view::Tab {
+        match self {
+            Content::Readings(readings) => readings.tab,
+            Content::Music(_) => view::Tab::default(),
+            Content::Merged(merged) => merged.parts.iter().find(|part| matches!(part, Content::Readings(_))).map_or_else(view::Tab::default, Content::tab),
         }
     }
 
@@ -1074,6 +1094,8 @@ pub struct Widgets {
     live: bool,
     /// A widget in hand held over another, to be merged into it as it is let go (see `look_for_a_drop`).
     dropping: Option<Dropping>,
+    /// The menu a press on a widget's station asked for (see `take_menu_asked`): the button, the page its station shows.
+    menu_asked: Option<(view::Hit, view::Tab)>,
     /// The music shown over the whole of a screen, while it is (asked for by a music widget's button).
     full: Option<crate::fullscreen::FullMusic>,
 }
@@ -1486,9 +1508,19 @@ impl Widgets {
                 self.open_full(contact.monitor, contact.scale);
                 return;
             }
+            Released::Menu(hit) => {
+                self.menu_asked = Some((hit, self.list[index].content.tab()));
+                return;
+            }
             Released::Nothing => return,
         }
         self.save();
+    }
+
+    /// The menu a press on a widget's station asked for (see `Released::Menu`), taken: the button pressed, and the page
+    /// its station shows.
+    pub fn take_menu_asked(&mut self) -> Option<(view::Hit, view::Tab)> {
+        self.menu_asked.take()
     }
 
     /// The music shown over the whole of the screen `monitor` (physical px) at `scale`.
@@ -1851,6 +1883,8 @@ enum Released {
     Settings,
     /// Its music asked to be shown over the whole of its screen.
     Full,
+    /// One of its station's head's buttons pressed: its menu asked for.
+    Menu(view::Hit),
 }
 
 enum Frame {
@@ -2451,6 +2485,12 @@ impl Widget {
                                 Some(view::Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
                                 Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter),
                                 Some(hit) if crate::station::pressed(hit) => {}
+                                Some(view::Hit::Tab(tab)) => {
+                                    if let Some(readings) = self.content.readings_mut() {
+                                        readings.tab = tab;
+                                    }
+                                }
+                                Some(hit) if hit.opens_menu() => return Released::Menu(hit),
                                 Some(view::Hit::Line(index)) => {
                                     music::play_line(index);
                                     match &mut self.content {
@@ -2708,11 +2748,12 @@ impl Widget {
         let shadow = if matches!(self.content, Content::Music(_)) || on_music { MUSIC_SHADOW } else { theme.margin };
         self.margin = shadow.max(BUTTON + 2.0 * BUTTON_INSET);
         let scrolls = self.content.scrolls();
+        let tab = self.content.tab();
         let music_apart = self.content.music_apart();
         // Merged with what plays, the readings without the music lane (what plays shows itself).
         let prefs = self.content.prefs(look.prefs);
         let prefs = prefs.as_ref().unwrap_or(look.prefs);
-        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, scrolls, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -3017,7 +3058,7 @@ impl Widget {
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| sees));
         let dark = dark || on_music;
         let theme = if dark == theme.dark { theme } else { Theme::new(look.skin, dark) };
-        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, scrolls, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, now);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).

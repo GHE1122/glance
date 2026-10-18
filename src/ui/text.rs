@@ -203,6 +203,39 @@ impl Local {
     }
 }
 
+/// How long ago `then` was at `now` (ms since 1970), as a list of things lately come says it: just now; minutes ago,
+/// within the hour; the time of day, today; yesterday; else the day.
+#[cfg(any(windows, target_os = "macos"))]
+pub fn since(then: u64, now: u64, lang: Lang) -> String {
+    const MINUTE: u64 = 60_000;
+    const DAY: u64 = 24 * 60 * MINUTE;
+    let ago = now.saturating_sub(then);
+    if ago < MINUTE {
+        return lang.pick("刚刚", "Just now").into();
+    }
+    if ago < 60 * MINUTE {
+        let minutes = ago / MINUTE;
+        return match lang {
+            Lang::Zh => format!("{minutes} 分钟前"),
+            Lang::En => format!("{minutes} min ago"),
+        };
+    }
+    let (at, today, yesterday) = (Local::at(then), Local::at(now), Local::at(now.saturating_sub(DAY)));
+    let same = |a: Local, b: Local| (a.month, a.day) == (b.month, b.day);
+    if same(at, today) && ago < DAY {
+        at.time(false, lang).0
+    } else if same(at, yesterday) && ago < 2 * DAY {
+        lang.pick("昨天", "Yesterday").into()
+    } else {
+        let date = at.date(lang);
+        // (The day without its weekday: "10月16日", "Oct 16".)
+        match lang {
+            Lang::Zh => date.split(' ').next().unwrap_or_default().to_string(),
+            Lang::En => date.split(", ").nth(1).unwrap_or_default().to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +255,16 @@ mod tests {
         assert_eq!(noon.time(true, Lang::En), ("9:05".to_string(), "AM"));
         assert_eq!(Local { hour: 0, ..noon }.time(true, Lang::Zh), ("12:05".to_string(), "上午"));
         assert_eq!(Local { hour: 15, ..noon }.time(true, Lang::En), ("3:05".to_string(), "PM"));
+    }
+
+    #[test]
+    fn says_how_long_ago() {
+        let now = 1_760_800_000_000;
+        assert_eq!(since(now - 30_000, now, Lang::Zh), "刚刚");
+        assert_eq!(since(now - 5 * 60_000, now, Lang::Zh), "5 分钟前");
+        assert_eq!(since(now - 59 * 60_000, now, Lang::En), "59 min ago");
+        // A week ago: its day, as the date says it without its weekday.
+        let week = now - 7 * 24 * 3_600_000;
+        assert_eq!(since(week, now, Lang::Zh), format!("{}月{}日", Local::at(week).month, Local::at(week).day));
     }
 }

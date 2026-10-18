@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Gdi::{DeleteObject, GetDIBits, GetObjectW, BITMAP,
 use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_RESIZETOFIT};
 
 /// A picture: its pixels (BGRA, premultiplied, top row first) and how many across and down.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Thumb {
     pixels: Vec<u8>,
     size: (u32, u32),
@@ -100,9 +100,44 @@ fn make(asks: Receiver<Key>) {
     }
 }
 
-/// `thumb` in the middle of a square `side` across, clear round it, as a picture known by `key`.
+/// `thumb` made no larger than `side` square, its shape kept: each pixel of the smaller the mean of those of the larger
+/// in its box (the shell, asked for one size, may give a larger).
+fn fitted(thumb: &Thumb, side: u32) -> std::borrow::Cow<'_, Thumb> {
+    let (w, h) = thumb.size;
+    if w <= side && h <= side {
+        return std::borrow::Cow::Borrowed(thumb);
+    }
+    let k = side as f64 / w.max(h) as f64;
+    let (to_w, to_h) = (((w as f64 * k).round() as u32).clamp(1, side), ((h as f64 * k).round() as u32).clamp(1, side));
+    let mut pixels = vec![0u8; (to_w * to_h * 4) as usize];
+    for ty in 0..to_h {
+        let (y0, y1) = (ty * h / to_h, ((ty + 1) * h / to_h).max(ty * h / to_h + 1));
+        for tx in 0..to_w {
+            let (x0, x1) = (tx * w / to_w, ((tx + 1) * w / to_w).max(tx * w / to_w + 1));
+            let mut sum = [0u32; 4];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let at = ((y * w + x) * 4) as usize;
+                    for (channel, total) in sum.iter_mut().enumerate() {
+                        *total += u32::from(thumb.pixels[at + channel]);
+                    }
+                }
+            }
+            let count = (y1 - y0) * (x1 - x0);
+            let to = ((ty * to_w + tx) * 4) as usize;
+            for (channel, total) in sum.into_iter().enumerate() {
+                pixels[to + channel] = ((total + count / 2) / count) as u8;
+            }
+        }
+    }
+    std::borrow::Cow::Owned(Thumb { pixels, size: (to_w, to_h) })
+}
+
+/// `thumb` in the middle of a square `side` across (made smaller to fit where it is larger), clear round it, as a
+/// picture known by `key`.
 fn squared(thumb: &Thumb, side: u32, key: u64) -> Picture {
-    let (w, h) = (thumb.size.0.min(side), thumb.size.1.min(side));
+    let thumb = fitted(thumb, side);
+    let (w, h) = thumb.size;
     let (left, top) = ((side - w) / 2, (side - h) / 2);
     let mut pixels = vec![0u8; (side * side * 4) as usize];
     for row in 0..h {
@@ -148,6 +183,26 @@ unsafe fn pixels_of(bitmap: HBITMAP) -> Option<Thumb> {
             pixels.chunks_exact_mut(4).for_each(|pixel| pixel[3] = 255);
         }
         Some(Thumb { pixels, size: (w as u32, h as u32) })
+    }
+}
+
+#[cfg(test)]
+mod made {
+    use super::*;
+
+    /// A thumbnail larger than the side asked for is made smaller to fit, its shape and colours kept, and centred:
+    /// never cut down to its corner.
+    #[test]
+    fn a_larger_thumbnail_is_fitted_whole() {
+        // 256 × 128: its left half red, its right half blue (BGRA).
+        let pixels = (0..128).flat_map(|_| (0..256).flat_map(|x| if x < 128 { [0, 0, 255, 255] } else { [255, 0, 0, 255] })).collect();
+        let picture = squared(&Thumb { pixels, size: (256, 128) }, 128, 7);
+        let at = |x: u32, y: u32| &picture.pixels[((y * 128 + x) * 4) as usize..((y * 128 + x) * 4 + 4) as usize];
+        // 128 × 64 in the middle: clear above and below, red on its left, blue on its right.
+        assert_eq!(at(10, 10), [0, 0, 0, 0]);
+        assert_eq!(at(10, 64), [0, 0, 255, 255]);
+        assert_eq!(at(120, 64), [255, 0, 0, 255]);
+        assert_eq!(at(120, 120), [0, 0, 0, 0]);
     }
 }
 

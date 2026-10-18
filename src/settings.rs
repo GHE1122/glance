@@ -710,14 +710,25 @@ pub struct Settings {
     pub view: serde_json::Value,
 }
 
+/// How the station shows what is on it: as cards (a picture and its name), a list (a line each), or pictures alone,
+/// larger.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShelfView {
+    #[default]
+    Cards,
+    List,
+    Pictures,
+}
+
 /// How the station keeps what is put on it, and what is copied.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StationSettings {
     /// What is copied kept in Recently copied.
     pub history: bool,
-    /// Recently copied paused: nothing copied meanwhile is kept.
-    pub paused: bool,
+    /// How what is on it is shown: as cards, a list, or pictures.
+    pub view: ShelfView,
     /// How many days what is not pinned stays.
     pub keep_days: u32,
     /// The most the station keeps of its own (GB).
@@ -730,7 +741,7 @@ pub struct StationSettings {
 
 impl Default for StationSettings {
     fn default() -> Self {
-        StationSettings { history: true, paused: false, keep_days: 7, most_gb: 2, always_copy: false, remove_after_drag: false }
+        StationSettings { history: true, view: ShelfView::Cards, keep_days: 7, most_gb: 2, always_copy: false, remove_after_drag: false }
     }
 }
 

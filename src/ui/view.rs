@@ -9,6 +9,7 @@ use super::prefs::{Prefs, ProcessSort};
 use super::seen::Seen;
 use super::text::{self, Lang};
 use super::theme::{Ink, Skin, Theme};
+use crate::settings::ShelfView;
 use crate::reading::{GpuLimit, ProcessSample, Sample, StaticInfo};
 
 /// A column's width (DIPs), whatever the skin.
@@ -174,11 +175,13 @@ pub enum Hit {
     Drive(char),
     /// A line of the lyrics turned to by the wheel (by its place among them): played from its start.
     Line(u16),
-    /// A thing on the station, by its number (see `station::shelf::Item`); something copied lately, by its; all
-    /// that is not pinned taken off it.
+    /// A thing on the station, by its number (see `station::shelf::Item`); something copied lately, by its.
     Shelf(u64),
     Copied(u64),
-    ShelfClear,
+    /// One of the station's pages chosen (see `Tab`); the menu of how what is on it shows; its menu of the rest.
+    Tab(Tab),
+    StationView,
+    StationMore,
     /// Where a station is: what is dragged there may be dropped on it (see `station::run::shows_at`).
     Station,
 }
@@ -197,6 +200,11 @@ impl Hit {
             Hit::Seek(follow) => Some(crate::playing::Slider::Seek(follow)),
             _ => None,
         }
+    }
+
+    /// Whether a press on it opens a menu (the station's head's buttons: see `station::head_menu`).
+    pub fn opens_menu(self) -> bool {
+        matches!(self, Hit::StationView | Hit::StationMore)
     }
 
     /// Whether it is the sound's: its key, or its slider (the wheel over it turns the sound).
@@ -223,6 +231,14 @@ impl Hit {
 pub enum List {
     Processes,
     /// What is on the station, and what was copied lately.
+    Shelf,
+    Copies,
+}
+
+/// Which of its pages the station's lane shows: what is on it, or what was copied lately.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum Tab {
+    #[default]
     Shelf,
     Copies,
 }
@@ -288,6 +304,8 @@ pub struct Scene<'a> {
     pub pen_ms: f64,
     /// How far each list is scrolled (see `Scrolls`).
     pub scrolls: Scrolls,
+    /// The station's page shown (see `Tab`).
+    pub tab: Tab,
     /// What the pointer is over.
     pub hover: Option<Hit>,
     /// Its sliders' knobs' dots, as they ease (see `thumb::Dots`).
@@ -371,20 +389,32 @@ enum Block {
     Table { headings: Vec<(String, Option<ProcessSort>)>, sort: Option<ProcessSort>, rows: Vec<[String; 5]>, visible: usize, scrolls: bool, widths: [f32; 4] },
     /// Room this tall left empty, for what is drawn there apart (see `Scene::music_apart`).
     Room(f32),
-    /// What is on the station, the newest first, as tiles in `rows` rows, scrolled through past them; `said`, what
-    /// it says instead of them (nothing on it), or over them (no room left); `over`, something dragged over it, to
-    /// be dropped.
-    Shelf { tiles: Vec<Tile>, rows: usize, said: Option<String>, over: bool },
-    /// What was copied lately, the newest first, a line each, scrolled through past `COPIES_SHOWN`; `paused`, so
-    /// said over them.
-    Copies { rows: Vec<(u64, String)>, paused: bool },
+    /// The station's head: its pages as tabs (`tab` the one shown; how many things are on it; how many were copied
+    /// since its copies were last shown, where they are a page of it), and its buttons (how what is on it shows, while
+    /// that is shown; the rest).
+    Tabs { tab: Tab, count: usize, copies: Option<usize>, view: ShelfView },
+    /// What is on the station, the newest first, as `shows` lays it out in room `tall` high, scrolled through past
+    /// it; `said`, what it says instead of them (nothing on it), or over them (no room left); `over`, something
+    /// dragged over it, to be dropped.
+    Shelf { tiles: Vec<Tile>, shows: Shows, tall: f32, said: Option<String>, over: bool },
+    /// What was copied lately, the newest first, a row each, in room `tall` high, scrolled through past it.
+    Copies { rows: Vec<Tile>, tall: f32 },
 }
 
-/// A thing on the station as its tile shows it: its number, its name under it, its face, and whether it is pinned.
+/// How the station's things are laid out: as `ShelfView` says, or (a small lane) in one row of pictures, named.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Shows {
+    View(ShelfView),
+    Row,
+}
+
+/// A thing on the station as its tile shows it: its number, its name, what it is and when it came (said under it),
+/// its face, and whether it is pinned.
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Tile {
     id: u64,
     label: String,
+    about: String,
     face: Face,
     pinned: bool,
 }
@@ -399,10 +429,10 @@ enum Face {
 }
 
 impl Tile {
-    /// `item` as its tile shows it (its own files in `folder`).
-    fn of(item: &crate::station::shelf::Item, folder: &crate::station::folder::Folder, lang: Lang) -> Tile {
+    /// `item` as its tile shows it (its own files in `folder`), `now` (ms since 1970).
+    fn of(item: &crate::station::shelf::Item, folder: &crate::station::folder::Folder, lang: Lang, now: u64) -> Tile {
         use crate::station::shelf::What;
-        let (label, face) = match &item.what {
+        let (label, kind, face) = match &item.what {
             What::Files { paths, kept } => {
                 // (A file gone from where it was, by its copy where one is kept.)
                 let first = match kept.first().filter(|name| !name.is_empty() && !paths[0].exists()) {
@@ -410,86 +440,94 @@ impl Tile {
                     None => paths.first().cloned().unwrap_or_default(),
                 };
                 let name = paths.first().and_then(|path| path.file_name()).map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-                (name, Face::Picture { path: first, more: paths.len().saturating_sub(1) })
+                let kind = match paths.len() {
+                    1 => lang.pick("文件", "File").to_string(),
+                    n => format!("{n} {}", lang.pick("个文件", "files")),
+                };
+                (name, kind, Face::Picture { path: first, more: paths.len().saturating_sub(1) })
             }
-            What::Text { text } => (lang.pick("文字", "Text").into(), Face::Text(text.lines().filter(|line| !line.trim().is_empty()).take(4).collect::<Vec<_>>().join("\n"))),
-            What::Link { url } => (url.split("://").nth(1).unwrap_or(url).split(['/', '?', '#']).next().unwrap_or_default().to_string(), Face::Link),
-            What::Picture { file } => (lang.pick("图片", "Picture").into(), Face::Picture { path: folder.path(file), more: 0 }),
-            What::Saved { file, name } => (name.clone(), Face::Picture { path: folder.path(file), more: 0 }),
+            What::Text { text } => (
+                text.split_whitespace().collect::<Vec<_>>().join(" "),
+                format!("{} {}", text.chars().filter(|c| !c.is_whitespace()).count(), lang.pick("字", "characters")),
+                Face::Text(text.lines().filter(|line| !line.trim().is_empty()).take(6).collect::<Vec<_>>().join("\n")),
+            ),
+            What::Link { url } => (url.split("://").nth(1).unwrap_or(url).trim_end_matches('/').to_string(), lang.pick("链接", "Link").into(), Face::Link),
+            What::Picture { file } => (lang.pick("图片", "Picture").into(), lang.pick("图片", "Picture").into(), Face::Picture { path: folder.path(file), more: 0 }),
+            What::Saved { file, name } => (name.clone(), lang.pick("文件", "File").into(), Face::Picture { path: folder.path(file), more: 0 }),
         };
-        Tile { id: item.id, label, face, pinned: item.pinned }
+        let about = format!("{kind} · {}", text::since(item.added_ms, now, lang));
+        Tile { id: item.id, label, about, face, pinned: item.pinned }
     }
 }
 
-/// What a thing copied lately is, in a line.
-fn copied_line(what: &crate::station::shelf::What, lang: Lang) -> String {
-    use crate::station::shelf::What;
-    match what {
-        What::Text { text } => text.split_whitespace().collect::<Vec<_>>().join(" "),
-        What::Link { url } => url.clone(),
-        What::Files { paths, .. } => match paths.as_slice() {
-            [one] => one.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
-            many => format!("{} {}", many.len(), lang.pick("个文件", "files")),
-        },
-        What::Picture { .. } => lang.pick("图片", "Picture").into(),
-        What::Saved { name, .. } => name.clone(),
-    }
-}
-
-/// The station's tiles: each one's room across, its picture's side, its room down (the picture, its name under it),
-/// the gap between them, and the room above them.
+/// The station's tiles laid out as cards: each one's room across, its picture's side, its room down (the picture, its
+/// name and what it is under it), the gap between them; and as one row (a small lane), named only.
 const TILE_W: f32 = 72.0;
 const TILE_PICTURE: f32 = 56.0;
 const TILE_H: f32 = TILE_PICTURE + 4.0 + 16.0;
+const CARD_H: f32 = TILE_H + 14.0;
 const TILE_GAP: f32 = 8.0;
+/// The room between the station's head and what is under it.
 const SHELF_GAP: f32 = 6.0;
-/// How many rows of tiles a whole station lane shows.
-const SHELF_ROWS: usize = 2;
-/// The side of a tile's picture as it is asked for (physical px: as large as it is drawn up to 225%).
+/// How tall the room under a whole station lane's head is, whichever page it shows.
+const STATION_TALL: f32 = 284.0;
+/// A row of the station's list, and of what was copied lately; the side of the picture at its start.
+const LIST_ROW: f32 = 40.0;
+const LIST_PICTURE: f32 = 30.0;
+/// How many pictures go across the pictures' view.
+const PICTURES_ACROSS: usize = 3;
+/// A tab's height, and the room round its name.
+const TAB_H: f32 = 24.0;
+const TAB_PAD: f32 = 8.0;
+/// The side of a picture as it is asked for (physical px: as large as it is drawn up to 225%): a tile's, and one of
+/// the pictures' view.
 const TILE_PIXELS: u32 = 128;
-/// What was copied lately: a row's height, the room above them and their heading, and how many show.
-const COPY_ROW: f32 = 24.0;
-const COPIES_GAP: f32 = 12.0;
-const COPIES_SHOWN: usize = 4;
+const LARGE_PIXELS: u32 = 256;
 
 /// How many tiles go across `width`.
 fn tiles_across(width: f32) -> usize {
     (((width + TILE_GAP) / (TILE_W + TILE_GAP)) as usize).max(1)
 }
 
-/// How tall `rows` rows of tiles are.
-fn shelf_tall(rows: usize) -> f32 {
-    rows as f32 * TILE_H + rows.saturating_sub(1) as f32 * TILE_GAP
-}
+/// The newest copied thing the station's copies were shown with (none yet: the newest there is, as they are first
+/// laid out): how many were copied since is said on their tab.
+static COPIES_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
-/// The station's lane: what is on it (in as many rows as it takes, up to `SHELF_ROWS`, a lane `pad_x` in at each
-/// side, as wide as a column), and (`full`, with `copies` switched on and Recently copied on) what was copied lately.
-fn station_lane(full: bool, copies: bool, lang: Lang, pad_x: f32) -> Vec<Block> {
+/// The station's lane: whole (`full`), its head's pages (what is on it, and with `copies` switched on and Recently
+/// copied on, what was copied lately) over the page `tab` (as far as there is one); else what is on it in a row
+/// under its name.
+fn station_lane(full: bool, copies: bool, tab: Tab, lang: Lang) -> Vec<Block> {
+    use std::sync::atomic::Ordering;
     let shown = crate::station::run::shown();
     let folder = crate::station::folder::Folder::own();
-    let tiles: Vec<Tile> = shown.items.iter().rev().filter(|item| !item.copied).map(|item| Tile::of(item, &folder, lang)).collect();
-    let loose = tiles.iter().any(|tile| !tile.pinned);
-    let count = match tiles.len() {
-        0 => String::new(),
-        n if lang == Lang::Zh => format!("{n} 项"),
-        1 => "1 item".into(),
-        n => format!("{n} items"),
-    };
+    let now = crate::station::now_ms();
+    let tiles: Vec<Tile> = shown.items.iter().rev().filter(|item| !item.copied).map(|item| Tile::of(item, &folder, lang, now)).collect();
     let said = if shown.full {
-        Some(lang.pick("空间已满：请取消一些固定，或在设置里调大上限", "No room left: unpin some, or allow more in the settings").to_string())
+        Some(lang.pick("空间已满：请取消一些固定，或在设置中调大上限", "No room left: unpin some, or allow more in the settings").to_string())
     } else if tiles.is_empty() {
         Some(lang.pick("把文件、图片或文字拖到这里", "Drag files, pictures or text here").to_string())
     } else {
         None
     };
-    let mut blocks = vec![
-        head(lang.pick("中转站", "Station"), count, if loose { lang.pick("全部清空", "Clear all") } else { "" }, false),
-        Block::Shelf { rows: tiles.len().div_ceil(tiles_across(COLUMN_WIDTH - 2.0 * pad_x)).clamp(1, if full { SHELF_ROWS } else { 1 }), tiles, said, over: shown.over },
-    ];
-    if full && copies && shown.history {
-        let rows = shown.items.iter().rev().filter(|item| item.copied).map(|item| (item.id, copied_line(&item.what, lang))).collect();
-        blocks.push(Block::Copies { rows, paused: shown.paused });
+    if !full {
+        let count = if tiles.is_empty() { String::new() } else { tiles.len().to_string() };
+        return vec![head(lang.pick("中转站", "Station"), count, "", false), Block::Shelf { tiles, shows: Shows::Row, tall: TILE_H, said, over: shown.over }];
     }
+    let copies = copies && shown.history;
+    let tab = if copies { tab } else { Tab::Shelf };
+    let newest = shown.items.iter().filter(|item| item.copied).map(|item| item.id).max().unwrap_or(0);
+    // (Their first showing takes all there are for seen.)
+    let _ = COPIES_SEEN.compare_exchange(u64::MAX, newest, Ordering::Relaxed, Ordering::Relaxed);
+    if tab == Tab::Copies {
+        COPIES_SEEN.fetch_max(newest, Ordering::Relaxed);
+    }
+    let seen = COPIES_SEEN.load(Ordering::Relaxed);
+    let fresh = shown.items.iter().filter(|item| item.copied && item.id > seen).count();
+    let mut blocks = vec![Block::Tabs { tab, count: tiles.len(), copies: copies.then_some(fresh), view: shown.view }];
+    blocks.push(match tab {
+        Tab::Shelf => Block::Shelf { tiles, shows: Shows::View(shown.view), tall: STATION_TALL, said, over: shown.over },
+        Tab::Copies => Block::Copies { rows: shown.items.iter().rev().filter(|item| item.copied).map(|item| Tile::of(item, &folder, lang, now)).collect(), tall: STATION_TALL },
+    });
     blocks
 }
 
@@ -510,8 +548,8 @@ impl Block {
             Block::Lyric { .. } => MEDIA_GAP + 2.0 * LINE,
             Block::Table { visible, .. } => *visible as f32 * TABLE_ROW,
             Block::Room(tall) => *tall,
-            Block::Shelf { rows, .. } => SHELF_GAP + shelf_tall(*rows),
-            Block::Copies { .. } => COPIES_GAP + LINE + COPIES_SHOWN as f32 * COPY_ROW,
+            Block::Tabs { .. } => HEAD + HEAD_GAP,
+            Block::Shelf { tall, .. } | Block::Copies { tall, .. } => SHELF_GAP + tall,
         }
     }
 }
@@ -538,16 +576,24 @@ impl Hash for Block {
                 headings.iter().for_each(|(label, key)| (label, key.map(|key| key as u8)).hash(state));
                 (sort.map(|sort| sort as u8), rows, visible, scrolls, widths.map(f32::to_bits)).hash(state);
             }
-            Block::Shelf { tiles, rows, said, over } => {
-                (tiles, rows, said, over).hash(state);
-                // (Each picture as it is now: one made since is drawn.)
-                tiles.iter().for_each(|tile| if let Face::Picture { path, .. } = &tile.face {
-                    crate::station::thumbs::of(path, TILE_PIXELS).map(|picture| picture.key).hash(state);
-                });
+            Block::Tabs { tab, count, copies, view } => (tab, count, copies, view).hash(state),
+            Block::Shelf { tiles, shows, tall, said, over } => {
+                (tiles, shows, tall.to_bits(), said, over).hash(state);
+                pictures_made(tiles, if *shows == Shows::View(ShelfView::Pictures) { LARGE_PIXELS } else { TILE_PIXELS }, state);
             }
-            Block::Copies { rows, paused } => (rows, paused).hash(state),
+            Block::Copies { rows, tall } => {
+                (rows, tall.to_bits()).hash(state);
+                pictures_made(rows, TILE_PIXELS, state);
+            }
         }
     }
+}
+
+/// Each of `tiles`' pictures as it is now (`side` px), for a drawing to tell one made since.
+fn pictures_made<H: Hasher>(tiles: &[Tile], side: u32, state: &mut H) {
+    tiles.iter().for_each(|tile| if let Face::Picture { path, .. } = &tile.face {
+        crate::station::thumbs::of(path, side).map(|picture| picture.key).hash(state);
+    });
 }
 
 /// How much of its module a lane shows (see `arrange::Form`).
@@ -1333,7 +1379,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             blocks
         }
-        "station" => station_lane(full, on("copies"), lang, scene.theme.pad_x),
+        "station" => station_lane(full, on("copies"), scene.tab, lang),
         // What plays, in a widget merged with readings: drawn apart (see `Scene::music_apart`), its lane its head and
         // room under it (a player's, full; a strip's, compact).
         "lyrics" if scene.music_apart => {
@@ -1658,6 +1704,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Progress { .. } => "progress",
             Block::Lyric { .. } => "lyric",
             Block::Table { .. } => "table",
+            Block::Tabs { .. } => "tabs",
             Block::Shelf { .. } => "shelf",
             Block::Copies { .. } => "copies",
         };
@@ -1934,11 +1981,14 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
                 }
             }
-            (Block::Shelf { tiles, rows, said, over }, Pass::Content) => {
-                paint_shelf(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, *rows, said.as_deref(), *over, hits);
+            (Block::Tabs { tab, count, copies, view }, Pass::Content) => {
+                paint_tabs(frame, scene, ink, (left, y, width), *tab, *count, *copies, *view, hits);
             }
-            (Block::Copies { rows, paused }, Pass::Content) => {
-                paint_copies(frame, scene, (left, y + COPIES_GAP, width), rows, *paused, hits);
+            (Block::Shelf { tiles, shows, tall, said, over }, Pass::Content) => {
+                paint_shelf(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, *shows, *tall, said.as_deref(), *over, hits);
+            }
+            (Block::Copies { rows, tall }, Pass::Content) => {
+                paint_copies(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *tall, hits);
             }
         }
         frame.key("");
@@ -1946,18 +1996,166 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
     }
 }
 
-/// The station's tiles (see `Block::Shelf`) from (`left`, `top`), `width` across, `rows` rows of them shown and
-/// scrolled through past them; the press on its head's word that clears it (drawn as the head's aside).
+/// The station's head (see `Block::Tabs`) on the head row at `top`, from `left`, `width` across: its pages' tabs,
+/// the one shown marked as its skin marks what is chosen, and its buttons at the end.
 #[allow(clippy::too_many_arguments)]
-fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], rows: usize, said: Option<&str>, over: bool, hits: &mut Vec<HitBox>) {
+fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tab: Tab, count: usize, copies: Option<usize>, view: ShelfView, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
-    let tall = shelf_tall(rows);
-    // Its head's word that clears it, pressed there.
-    if tiles.iter().any(|tile| !tile.pinned) {
-        let clear = scene.lang.pick("全部清空", "Clear all");
-        let wide = frame.measure(clear, theme.body);
-        hits.push((left + width - wide, top - SHELF_GAP - HEAD - HEAD_GAP, wide, HEAD, Hit::ShelfClear));
+    let lang = scene.lang;
+    let row = top + (HEAD - TAB_H) / 2.0;
+    let font = theme.title;
+    let small = theme.small;
+    // (Paper underlines the one chosen under its name, as its rules are drawn: no room round it.)
+    let pad = if theme.skin == Skin::Paper { 0.0 } else { TAB_PAD };
+    let mut x = left - pad;
+    let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), if count > 0 { count.to_string() } else { String::new() }, false)];
+    if let Some(fresh) = copies {
+        pages.push((Tab::Copies, lang.pick("最近复制", "Recently copied"), if fresh > 0 && tab != Tab::Copies { fresh.to_string() } else { String::new() }, true));
     }
+    for (page, name, aside, badge) in pages {
+        let name_w = frame.measure(name, font);
+        let aside_w = if aside.is_empty() { 0.0 } else if badge { frame.measure(&aside, small) + 10.0 } else { frame.measure(&aside, small) };
+        let wide = pad + name_w + if aside_w > 0.0 { 5.0 + aside_w } else { 0.0 } + pad;
+        let chosen = page == tab;
+        let hovered = scene.hover == Some(Hit::Tab(page));
+        match theme.skin {
+            Skin::Glass if chosen => frame.fill_rounded(theme.hover, x, row, wide, TAB_H, TAB_H / 2.0),
+            Skin::Glass | Skin::Fluent if hovered => frame.fill_rounded(theme.hover.alpha(0.6), x, row, wide, TAB_H, theme.control_radius.min(TAB_H / 2.0)),
+            _ => {}
+        }
+        if chosen {
+            match theme.skin {
+                Skin::Fluent => frame.fill_rounded(super::theme::accent(theme.dark), x + wide / 2.0 - 8.0, row + TAB_H - 3.0, 16.0, 3.0, 1.5),
+                Skin::Paper => frame.fill(theme.text, x, row + TAB_H - 2.0, wide, 2.0),
+                Skin::Glass => {}
+            }
+        }
+        let name_top = top + (HEAD - font.size) / 2.0 - 1.0;
+        frame.text(name, font, if chosen || hovered { theme.text } else { theme.text3 }, x + pad, name_top, name_w + 1.0, Align::Start);
+        if aside_w > 0.0 {
+            let ax = x + pad + name_w + 5.0;
+            if badge {
+                // What was copied since its page was last shown: how many, on a mark of the lane's ink.
+                frame.fill_rounded(ink.trace, ax, top + (HEAD - 16.0) / 2.0, aside_w, 16.0, 8.0);
+                centred(frame, &aside, small, ink_on(ink.trace), ax, top + (HEAD - 16.0) / 2.0 + 1.0, aside_w);
+            } else {
+                frame.text(&aside, small, theme.text3, ax, name_top + 2.0, aside_w + 1.0, Align::Start);
+            }
+        }
+        hits.push((x, row, wide, TAB_H, Hit::Tab(page)));
+        x += wide + if theme.skin == Skin::Paper { 16.0 } else { 2.0 };
+    }
+    // At the end, the rest's menu; before it, while what is on it shows, how it shows (its view's mark, and a chevron).
+    let more = left + width - MEDIA_ROW;
+    pressed(frame, scene, hits, Hit::StationMore, Icon::Ellipsis, more, row, false);
+    if tab == Tab::Shelf {
+        let wide = MEDIA_ROW + 12.0;
+        let vx = more - 2.0 - wide;
+        let lit = scene.hover == Some(Hit::StationView);
+        if lit {
+            frame.fill_rounded(theme.hover, vx, row, wide, MEDIA_ROW, theme.control_radius.min(MEDIA_ROW / 2.0));
+        }
+        let color = if lit { theme.text } else { theme.text2 };
+        let icon = match view {
+            ShelfView::Cards => Icon::LayoutGrid,
+            ShelfView::List => Icon::List,
+            ShelfView::Pictures => Icon::Image,
+        };
+        frame.icon(icon, Point { x: vx + MEDIA_ROW / 2.0, y: row + MEDIA_ROW / 2.0 }, 15.0, color);
+        frame.icon(Icon::ChevronDown, Point { x: vx + MEDIA_ROW + 3.0, y: row + MEDIA_ROW / 2.0 + 0.5 }, 10.0, color);
+        hits.push((vx, row, wide, MEDIA_ROW, Hit::StationView));
+    }
+}
+
+/// What is written or drawn on a mark of `ground`: white on a dark one, near black on a light one (chart paper's dark
+/// ink is light).
+fn ink_on(ground: Color) -> Color {
+    let light = 0.2126 * ground.r + 0.7152 * ground.g + 0.0722 * ground.b;
+    if light > 0.6 { Color::hex(0x111111, 1.0) } else { Color::hex(0xFFFFFF, 1.0) }
+}
+
+/// Where each of the station's `count` things is laid out as `shows` says, `width` across: each one's room (from the
+/// list's top, unscrolled), and how tall they all are.
+fn shelf_places(shows: Shows, count: usize, width: f32) -> (Vec<Rect>, f32) {
+    let grid = |across: usize, w: f32, h: f32, gap: f32| {
+        // (Spread over the width: the gaps share what is left over.)
+        let gap_x = if across > 1 { (width - across as f32 * w) / (across - 1) as f32 } else { 0.0 };
+        let places: Vec<Rect> = (0..count).map(|at| Rect { x: (at % across) as f32 * (w + gap_x), y: (at / across) as f32 * (h + gap), w, h }).collect();
+        let lines = count.div_ceil(across);
+        (places, lines as f32 * (h + gap) - if lines > 0 { gap } else { 0.0 })
+    };
+    match shows {
+        Shows::View(ShelfView::Cards) => grid(tiles_across(width), TILE_W, CARD_H, TILE_GAP),
+        Shows::Row => {
+            let (mut places, _) = grid(tiles_across(width), TILE_W, TILE_H, TILE_GAP);
+            // (One row: as many as fit, the rest left out.)
+            places.truncate(tiles_across(width));
+            (places, TILE_H)
+        }
+        Shows::View(ShelfView::List) => grid(1, width, LIST_ROW, 0.0),
+        Shows::View(ShelfView::Pictures) => {
+            let side = (width - (PICTURES_ACROSS - 1) as f32 * TILE_GAP) / PICTURES_ACROSS as f32;
+            grid(PICTURES_ACROSS, side, side, TILE_GAP)
+        }
+    }
+}
+
+/// A tile's face (see `Face`) in the square `side` wide at (`x`, `y`): its picture (`pixels` as asked for), its first
+/// lines, or a web address's mark; how many more files are with it, and a pin where it is pinned.
+#[allow(clippy::too_many_arguments)]
+fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &Tile, x: f32, y: f32, side: f32, pixels: u32) {
+    let radius = (side / 9.0).clamp(4.0, 10.0);
+    match &tile.face {
+        Face::Picture { path, more } => {
+            match crate::station::thumbs::of(path, pixels) {
+                Some(picture) => frame.picture(&picture, x, y, side, radius, 1.0),
+                None => {
+                    frame.fill_rounded(theme.track, x, y, side, side, radius);
+                    frame.icon(Icon::File, Point { x: x + side / 2.0, y: y + side / 2.0 }, side / 2.0, theme.text3);
+                }
+            }
+            // Files put on it together: how many more.
+            if *more > 0 && side >= 40.0 {
+                let badge = format!("+{more}");
+                let wide = frame.measure(&badge, theme.small) + 10.0;
+                frame.fill_rounded(ink.trace, x + side - wide + 4.0, y + side - 14.0, wide, 18.0, 9.0);
+                centred(frame, &badge, theme.small, ink_on(ink.trace), x + side - wide + 4.0, y + side - 13.0, wide);
+            }
+        }
+        Face::Text(text) => {
+            frame.fill_rounded(theme.track, x, y, side, side, radius);
+            if side < 40.0 {
+                frame.icon(Icon::Clipboard, Point { x: x + side / 2.0, y: y + side / 2.0 }, side / 2.0, theme.text3);
+            } else {
+                // Its first lines, each cut short where it is longer than the tile is wide.
+                let small = Font { size: if side > 80.0 { 11.0 } else { 9.0 }, ..theme.small };
+                let line = small.size * 1.28;
+                let lines = ((side - 10.0) / line) as usize;
+                for (at, words) in text.lines().take(lines).enumerate() {
+                    // (The first short of a pin in the corner.)
+                    let room = side - 10.0 - if at == 0 && tile.pinned { 14.0 } else { 0.0 };
+                    frame.text(&fitted(frame, words.trim(), small, room), small, theme.text2, x + 5.0, y + 5.0 + at as f32 * line, room, Align::Start);
+                }
+            }
+        }
+        Face::Link => {
+            frame.fill_rounded(theme.track, x, y, side, side, radius);
+            frame.icon(Icon::Link, Point { x: x + side / 2.0, y: y + side / 2.0 }, (side * 0.42).min(28.0), ink.trace);
+        }
+    }
+    // Pinned: a pin in its corner.
+    if tile.pinned && side >= 40.0 {
+        let corner = Point { x: x + side - 9.0, y: y + 9.0 };
+        frame.fill_circle(ink.trace, corner, 8.0);
+        frame.icon(Icon::Pin, corner, 10.0, ink_on(ink.trace));
+    }
+}
+
+/// What is on the station (see `Block::Shelf`) from (`left`, `top`), `width` across, in room `tall` high and scrolled
+/// through past it, as `shows` lays it out.
+#[allow(clippy::too_many_arguments)]
+fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], shows: Shows, tall: f32, said: Option<&str>, over: bool, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
     // Something dragged over it: where it goes, lit.
     if over {
         frame.fill_rounded(ink.trace.alpha(0.12), left - 4.0, top - 4.0, width + 8.0, tall + 8.0, 10.0);
@@ -1974,64 +2172,62 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         centred(frame, said.unwrap_or_default(), theme.small, theme.text2, left, middle + 4.0, width);
         return;
     }
-    let across = tiles_across(width);
-    // (Spread over the width: the gaps share what is left over.)
-    let gap = if across > 1 { (width - across as f32 * TILE_W) / (across - 1) as f32 } else { 0.0 };
-    let lines = tiles.len().div_ceil(across);
-    let most = lines.saturating_sub(rows) as f32 * (TILE_H + TILE_GAP);
+    let (places, whole) = shelf_places(shows, tiles.len(), width);
+    let most = (whole - tall).max(0.0);
     if most > 0.0 {
         hits.push((left, top, width, tall, Hit::List(List::Shelf, most.to_bits())));
     }
     let scroll = scene.scrolls.at(List::Shelf).clamp(0.0, most);
     frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
-    for (at, tile) in tiles.iter().enumerate() {
-        let x = left + (at % across) as f32 * (TILE_W + gap);
-        let y = top + (at / across) as f32 * (TILE_H + TILE_GAP) - scroll;
-        if y + TILE_H < top || y > top + tall {
+    for (tile, place) in tiles.iter().zip(&places) {
+        let (x, y) = (left + place.x, top + place.y - scroll);
+        if y + place.h < top || y > top + tall {
             continue;
         }
         let lit = scene.hover == Some(Hit::Shelf(tile.id));
-        let (px, py) = (x + (TILE_W - TILE_PICTURE) / 2.0, y);
-        if lit {
-            frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, TILE_W + 4.0, TILE_H + 4.0, 8.0);
-        }
-        match &tile.face {
-            Face::Picture { path, more } => {
-                match crate::station::thumbs::of(path, TILE_PIXELS) {
-                    Some(picture) => frame.picture(&picture, px, py, TILE_PICTURE, 6.0, 1.0),
-                    None => frame.icon(Icon::File, Point { x: px + TILE_PICTURE / 2.0, y: py + TILE_PICTURE / 2.0 }, 28.0, theme.text3),
+        let words = if lit { theme.text } else { theme.text2 };
+        match shows {
+            Shows::View(ShelfView::Cards) | Shows::Row => {
+                if lit {
+                    frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, place.w + 4.0, place.h + 4.0, 8.0);
                 }
-                // Files put on it together: how many more.
-                if *more > 0 {
-                    let badge = format!("+{more}");
-                    let wide = frame.measure(&badge, theme.small) + 10.0;
-                    frame.fill_rounded(ink.trace, px + TILE_PICTURE - wide + 4.0, py + TILE_PICTURE - 14.0, wide, 18.0, 9.0);
-                    centred(frame, &badge, theme.small, Color::hex(0xFFFFFF, 1.0), px + TILE_PICTURE - wide + 4.0, py + TILE_PICTURE - 13.0, wide);
+                let px = x + (TILE_W - TILE_PICTURE) / 2.0;
+                paint_face(frame, theme, ink, tile, px, y, TILE_PICTURE, TILE_PIXELS);
+                centred(frame, &fitted(frame, &tile.label, theme.small, TILE_W), theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
+                if shows != Shows::Row {
+                    let tiny = Font { size: theme.small.size - 1.5, ..theme.small };
+                    centred(frame, &fitted(frame, &tile.about, tiny, TILE_W), tiny, theme.text3, x, y + TILE_H, TILE_W);
                 }
             }
-            Face::Text(text) => {
-                frame.fill_rounded(theme.track, px, py, TILE_PICTURE, TILE_PICTURE, 6.0);
-                // Its first lines, each cut short where it is longer than the tile is wide.
-                let small = Font { size: 9.0, ..theme.small };
-                for (at, line) in text.lines().take(4).enumerate() {
-                    // (The first short of a pin in the corner.)
-                    let room = TILE_PICTURE - 10.0 - if at == 0 && tile.pinned { 14.0 } else { 0.0 };
-                    frame.text(&fitted(frame, line.trim(), small, room), small, theme.text2, px + 5.0, py + 5.0 + at as f32 * 11.5, room, Align::Start);
+            Shows::View(ShelfView::List) => {
+                if lit {
+                    frame.fill_rounded(theme.hover, x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0, theme.control_radius.max(6.0));
+                }
+                let py = y + (LIST_ROW - LIST_PICTURE) / 2.0;
+                paint_face(frame, theme, ink, tile, x, py, LIST_PICTURE, TILE_PIXELS);
+                let room = width - LIST_PICTURE - 10.0 - if tile.pinned { 18.0 } else { 0.0 };
+                frame.text(&fitted(frame, &tile.label, theme.body, room), theme.body, theme.text, x + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
+                frame.text(&fitted(frame, &tile.about, theme.small, room), theme.small, theme.text3, x + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
+                if tile.pinned {
+                    frame.icon(Icon::Pin, Point { x: x + width - 7.0, y: y + LIST_ROW / 2.0 }, 12.0, ink.trace);
                 }
             }
-            Face::Link => {
-                frame.fill_rounded(theme.track, px, py, TILE_PICTURE, TILE_PICTURE, 6.0);
-                frame.icon(Icon::Link, Point { x: px + TILE_PICTURE / 2.0, y: py + TILE_PICTURE / 2.0 }, 24.0, ink.trace);
+            Shows::View(ShelfView::Pictures) => {
+                paint_face(frame, theme, ink, tile, x, y, place.w, LARGE_PIXELS);
+                // A picture's or a file's name over its foot; under the pointer, the whole lit.
+                if matches!(tile.face, Face::Picture { .. }) {
+                    let band = LINE + 6.0;
+                    frame.clip(x, y + place.h - band, place.w, band);
+                    frame.fill_rounded(Color::hex(0x000000, 0.45), x, y, place.w, place.h, (place.w / 9.0).clamp(4.0, 10.0));
+                    frame.unclip();
+                    frame.text(&fitted(frame, &tile.label, theme.small, place.w - 12.0), theme.small, Color::hex(0xFFFFFF, 1.0), x + 6.0, y + place.h - band + 3.0, place.w - 12.0, Align::Start);
+                }
+                if lit {
+                    frame.stroke_rounded(Fill::Solid(ink.trace), x, y, place.w, place.h, (place.w / 9.0).clamp(4.0, 10.0), 2.0);
+                }
             }
         }
-        // Pinned: a pin in its corner.
-        if tile.pinned {
-            let corner = Point { x: px + TILE_PICTURE - 9.0, y: py + 9.0 };
-            frame.fill_circle(ink.trace, corner, 8.0);
-            frame.icon(Icon::Pin, corner, 10.0, Color::hex(0xFFFFFF, 1.0));
-        }
-        centred(frame, &fitted(frame, &tile.label, theme.small, TILE_W), theme.small, if lit { theme.text } else { theme.text2 }, x, y + TILE_PICTURE + 4.0, TILE_W);
-        hits.push((x, y, TILE_W, TILE_H, Hit::Shelf(tile.id)));
+        hits.push((x, y, place.w, place.h, Hit::Shelf(tile.id)));
     }
     frame.unclip();
     // Where something dragged may be dropped: all of its lane, its head too (after its things: a press finds a thing
@@ -2043,14 +2239,20 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         frame.fill_rounded(theme.signal, left + (width - wide) / 2.0, top + tall - 24.0, wide, 22.0, 11.0);
         centred(frame, said, theme.small, Color::hex(0xFFFFFF, 1.0), left + (width - wide) / 2.0, top + tall - 21.0, wide);
     }
+    scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
+}
+
+/// A thin thumb beside a list `tall` high, its whole `whole` tall, scrolled `scroll` of `most`: where in it the view is.
+#[allow(clippy::too_many_arguments)]
+fn scroll_thumb(frame: &dyn Canvas, theme: &Theme, x: f32, top: f32, tall: f32, whole: f32, scroll: f32, most: f32) {
     if most > 0.0 {
-        let thumb = (tall * rows as f32 / lines as f32).max(12.0);
+        let thumb = (tall * tall / whole).max(12.0);
         let at = top + (tall - thumb) * scroll / most;
-        frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
+        frame.fill_rounded(theme.text3.alpha(0.6), x, at, 2.0, thumb, 1.0);
     }
 }
 
-/// Where something dragged may be dropped on a station whose tiles are `width` × `tall` from (`left`, `top`): its
+/// Where something dragged may be dropped on a station whose things are `width` × `tall` from (`left`, `top`): its
 /// lane from its head down.
 fn drop_area(left: f32, top: f32, width: f32, tall: f32) -> HitBox {
     let head = top - SHELF_GAP - HEAD - HEAD_GAP;
@@ -2079,46 +2281,42 @@ fn fitted<'t>(frame: &dyn Canvas, text: &'t str, font: Font, room: f32) -> std::
     }
 }
 
-/// What was copied lately (see `Block::Copies`) from (`left`, `top`), `width` across: its heading, then a line each,
-/// pressed to be copied again.
-fn paint_copies(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), rows: &[(u64, String)], paused: bool, hits: &mut Vec<HitBox>) {
+/// What was copied lately (see `Block::Copies`) from (`left`, `top`), `width` across, in room `tall` high: a row each
+/// (what it is, its first words, and what and when under them), pressed to be copied again.
+#[allow(clippy::too_many_arguments)]
+fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), rows: &[Tile], tall: f32, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let lang = scene.lang;
-    frame.text(lang.pick("最近复制", "Recently copied"), theme.small, theme.text2, left, top, width, Align::Start);
-    if paused {
-        frame.text(lang.pick("已暂停", "Paused"), theme.small, theme.signal, left, top, width, Align::End);
-    }
-    let list_top = top + LINE;
-    let tall = COPIES_SHOWN as f32 * COPY_ROW;
     if rows.is_empty() {
-        frame.text(lang.pick("复制的文字、图片和文件会出现在这里", "What you copy shows here"), theme.small, theme.text3, left, list_top + 4.0, width, Align::Start);
+        let middle = top + tall / 2.0;
+        frame.icon(Icon::Clipboard, Point { x: left + width / 2.0, y: middle - 12.0 }, 22.0, theme.text3);
+        centred(frame, lang.pick("复制的文字、图片和文件会出现在这里", "What you copy shows here"), theme.small, theme.text2, left, middle + 4.0, width);
         return;
     }
-    let most = rows.len().saturating_sub(COPIES_SHOWN) as f32 * COPY_ROW;
+    let whole = rows.len() as f32 * LIST_ROW;
+    let most = (whole - tall).max(0.0);
     if most > 0.0 {
-        hits.push((left, list_top, width, tall, Hit::List(List::Copies, most.to_bits())));
+        hits.push((left, top, width, tall, Hit::List(List::Copies, most.to_bits())));
     }
     let scroll = scene.scrolls.at(List::Copies).clamp(0.0, most);
-    frame.clip(left - 4.0, list_top, width + 8.0, tall);
-    for (at, (id, line)) in rows.iter().enumerate() {
-        let y = list_top + at as f32 * COPY_ROW - scroll;
-        if y + COPY_ROW < list_top || y > list_top + tall {
+    frame.clip(left - 4.0, top, width + 8.0, tall);
+    for (at, row) in rows.iter().enumerate() {
+        let y = top + at as f32 * LIST_ROW - scroll;
+        if y + LIST_ROW < top || y > top + tall {
             continue;
         }
-        let lit = scene.hover == Some(Hit::Copied(*id));
+        let lit = scene.hover == Some(Hit::Copied(row.id));
         if lit {
-            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, COPY_ROW - 2.0, 6.0);
+            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, theme.control_radius.max(6.0));
         }
-        frame.icon(Icon::Clipboard, Point { x: left + 7.0, y: y + COPY_ROW / 2.0 }, 12.0, theme.text3);
-        frame.text(&fitted(frame, line, theme.body, width - 20.0), theme.body, if lit { theme.text } else { theme.text2 }, left + 20.0, y + (COPY_ROW - LINE) / 2.0, width - 20.0, Align::Start);
-        hits.push((left, y, width, COPY_ROW, Hit::Copied(*id)));
+        paint_face(frame, theme, ink, row, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, TILE_PIXELS);
+        let room = width - LIST_PICTURE - 10.0;
+        frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
+        frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
+        hits.push((left, y, width, LIST_ROW, Hit::Copied(row.id)));
     }
     frame.unclip();
-    if most > 0.0 {
-        let thumb = (tall * COPIES_SHOWN as f32 / rows.len() as f32).max(12.0);
-        let at = list_top + (tall - thumb) * scroll / most;
-        frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
-    }
+    scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
 }
 
 /// The widths of the process table's four measures: a share, a size, a
@@ -2423,6 +2621,72 @@ mod tests {
             .expect("drawn");
         crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/glass-sliders.png", env!("CARGO_MANIFEST_DIR"))), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
     }
+
+    /// The station's lane in each skin, light and dark (the rows), as cards, a list, pictures, and what was copied
+    /// lately (the columns), holding files of this repository as Explorer pictures them, text and links:
+    /// `cargo test --features studio --lib -- --ignored station_pages` writes `target/station-pages.png`.
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    #[cfg(feature = "studio")]
+    fn station_pages() {
+        use super::*;
+        use crate::station::shelf::{Item, What};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
+        let now = crate::station::now_ms();
+        let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied, stays_here: false, own_bytes: 0 };
+        let items = || vec![
+            item(10, What::Files { paths: vec![file("docs/station-and-notes.md")], kept: Vec::new() }, true, 2),
+            item(11, What::Link { url: "https://glancepc.com/app".into() }, true, 9),
+            item(12, What::Text { text: "cargo build --profile fast".into() }, true, 30),
+            item(1, What::Files { paths: vec![file("website/apple-touch-icon.png")], kept: Vec::new() }, false, 400),
+            item(2, What::Text { text: "会议改到周四下午三点
+地点：二楼小会议室
+记得带上季度报表".into() }, false, 180),
+            item(3, What::Link { url: "https://github.com/lulu-loopp/glance/releases".into() }, false, 60),
+            item(4, What::Files { paths: vec![file("Cargo.toml"), file("README.md"), file("LICENSE")], kept: Vec::new() }, false, 20),
+            item(5, What::Files { paths: vec![file("docs/images")], kept: Vec::new() }, false, 3),
+            item(6, What::Files { paths: vec![file("docs/images/banner-zh.webp")], kept: Vec::new() }, false, 1),
+        ];
+        crate::station::thumbs::start(|| {});
+        let (pages, lanes) = ([ShelfView::Cards, ShelfView::List, ShelfView::Pictures], 4);
+        let (lane_w, lane_h) = (COLUMN_WIDTH, 360.0);
+        let rows = [(Skin::Glass, false), (Skin::Glass, true), (Skin::Fluent, false), (Skin::Fluent, true), (Skin::Paper, false), (Skin::Paper, true)];
+        let (w, h) = (lanes as f32 * (lane_w + 12.0), rows.len() as f32 * (lane_h + 12.0));
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let draw = || gfx.draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+            frame.fill(Color::hex(0x7A8CA6, 1.0), 0.0, 0.0, w, h);
+            for (row, (skin, dark)) in rows.iter().enumerate() {
+                let theme = Theme::new(*skin, *dark);
+                for column in 0..lanes {
+                    let (x, y) = (column as f32 * (lane_w + 12.0) + 6.0, row as f32 * (lane_h + 12.0) + 6.0);
+                    crate::station::run::pretend(items(), pages[column.min(2)]);
+                    let tab = if column == 3 { Tab::Copies } else { Tab::Shelf };
+                    let ground = match skin {
+                        Skin::Paper => theme.paper,
+                        Skin::Fluent => if *dark { Color::hex(0x24262A, 1.0) } else { Color::hex(0xF3F5F8, 1.0) },
+                        Skin::Glass => if *dark { Color::hex(0x2A3550, 0.92) } else { Color::hex(0xE4EAF2, 0.9) },
+                    };
+                    frame.fill_rounded(ground, x, y, lane_w, lane_h, theme.radius);
+                    let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+                    let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+                    let seen = Seen::of(history);
+                    let hover = if column == 0 { Some(Hit::Shelf(3)) } else { None };
+                    let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+                    let lane = Lane { id: "station".into(), blocks: station_lane(true, true, tab, Lang::Zh), ink: theme.ink("station") };
+                    let area = Rect { x, y, w: lane_w, h: lane.height(&theme) };
+                    paint_lane(frame, &scene, &lane, area, 0.0, Pass::Content, &mut Vec::new());
+                }
+            }
+        }).expect("drawn");
+        // (The pictures made meanwhile, on the station's own thread: drawn again with them.)
+        let _ = draw();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let pixels = draw();
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/station-pages.png", env!("CARGO_MANIFEST_DIR"))), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+    }
     use super::*;
 
     #[test]
@@ -2541,7 +2805,7 @@ mod tests {
         read.threads_ghz = vec![Some(5.0), Some(4.5), Some(5.4), Some(4.2)];
         let history = leak(vec![read]);
         let seen = Box::leak(Box::new(Seen::of(history)));
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let cpu = lane(&scene, "cpu", Detail::Full).unwrap();
         let tags: Vec<&String> = cpu.iter().filter_map(|block| if let Block::Threads(cells) = block { Some(cells.iter().map(|(_, _, tag)| tag)) } else { None }).flatten().collect();
         assert_eq!(tags[2], "Thread 3 · 5.40 GHz · 10%");
@@ -2551,7 +2815,7 @@ mod tests {
     fn shows_each_kind_of_cores_clock() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         // Big and little cores: each kind's clock, in place of the one clock.
         let mut hybrid = sample(None, None, None);
         hybrid.kinds_ghz = vec![Some(5.2), None];
@@ -2564,7 +2828,7 @@ mod tests {
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
@@ -2588,7 +2852,7 @@ mod tests {
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
@@ -2606,7 +2870,7 @@ mod tests {
         two.drives = vec!["NVMe".into(), "SATA".into()];
         two.drive_ids = vec![0, 1];
         let history = leak(vec![with(Vec::new(), vec![(0, 35.0)])]);
-        let scene_two = Scene { music_apart: false, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let scene_two = Scene { music_apart: false, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let disk = facts(&lane(&scene_two, "disk", Detail::Full).unwrap());
         assert_eq!(&disk[..2], [("NVMe".to_string(), "35 °C".to_string()), ("SATA".to_string(), UNREAD.to_string())]);
         // The first chiplet missed this time: the second's reading stays its own.
@@ -2627,7 +2891,7 @@ mod tests {
             s
         };
         let cpu_fans = |prefs: &Prefs, history: &'static [Sample]| {
-            let scene = Scene { music_apart: false, info: &info, prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+            let scene = Scene { music_apart: false, info: &info, prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
             facts(&lane(&scene, "cpu", Detail::Full).unwrap()).into_iter().filter(|(_, value)| value.ends_with("RPM") || value == UNREAD).collect::<Vec<_>>()
         };
         let prefs = Prefs::default();
@@ -2647,31 +2911,53 @@ mod tests {
         assert!(cpu_fans(&prefs, history).is_empty());
     }
 
-    /// What is on the station as its tiles show it: a web address by its site, files by the first's name with how
-    /// many more, text by its first lines; copied lately, each in a line.
+    /// What is on the station as its tiles show it: a web address by its site and path, files by the first's name with
+    /// how many more, text by its words in a line and its first lines on its face; under each, what it is and when.
     #[test]
     fn the_station_shows_what_it_holds() {
         use crate::station::shelf::{Item, What};
         let folder = crate::station::folder::Folder::at(std::path::PathBuf::from("C:/station"));
-        let item = |what: What| Item { id: 1, what, added_ms: 0, pinned: false, copied: false, stays_here: false, own_bytes: 0 };
-        let link = Tile::of(&item(What::Link { url: "https://example.com/a/b?c".into() }), &folder, Lang::En);
-        assert_eq!((link.label.as_str(), &link.face), ("example.com", &Face::Link));
-        let files = Tile::of(&item(What::Files { paths: vec!["D:/x/report.pdf".into(), "D:/x/b.txt".into()], kept: Vec::new() }), &folder, Lang::En);
-        assert_eq!(files.label, "report.pdf");
+        let now = 1_760_800_000_000;
+        let item = |what: What| Item { id: 1, what, added_ms: now - 5 * 60_000, pinned: false, copied: false, stays_here: false, own_bytes: 0 };
+        let link = Tile::of(&item(What::Link { url: "https://example.com/a/b?c".into() }), &folder, Lang::En, now);
+        assert_eq!((link.label.as_str(), &link.face, link.about.as_str()), ("example.com/a/b?c", &Face::Link, "Link · 5 min ago"));
+        let files = Tile::of(&item(What::Files { paths: vec!["D:/x/report.pdf".into(), "D:/x/b.txt".into()], kept: Vec::new() }), &folder, Lang::Zh, now);
+        assert_eq!((files.label.as_str(), files.about.as_str()), ("report.pdf", "2 个文件 · 5 分钟前"));
         assert!(matches!(files.face, Face::Picture { more: 1, .. }));
         let text = Tile::of(&item(What::Text { text: "one
 
  two 
 three
 four
-five".into() }), &folder, Lang::Zh);
-        assert_eq!((text.label.as_str(), &text.face), ("文字", &Face::Text("one
+five
+six
+seven".into() }), &folder, Lang::Zh, now);
+        assert_eq!((text.label.as_str(), text.about.as_str()), ("one two three four five six seven", "27 字 · 5 分钟前"));
+        assert_eq!(text.face, Face::Text("one
  two 
 three
-four".into())));
-        assert_eq!(copied_line(&What::Text { text: "a
-  b	c".into() }, Lang::En), "a b c");
-        assert_eq!(copied_line(&What::Files { paths: vec!["a".into(), "b".into(), "c".into()], kept: Vec::new() }, Lang::Zh), "3 个文件");
+four
+five
+six".into()));
+    }
+
+    /// The station's places as each view lays them out: cards across the column, spread over it; a list a row each;
+    /// three pictures across, square; a small lane's one row, as many as fit.
+    #[test]
+    fn lays_the_station_out_as_its_view_says() {
+        let width = COLUMN_WIDTH - 32.0;
+        let (cards, tall) = shelf_places(Shows::View(ShelfView::Cards), 9, width);
+        let across = tiles_across(width);
+        assert_eq!(across, 4);
+        assert_eq!((cards[across].x, cards[across].y), (0.0, CARD_H + TILE_GAP));
+        assert!((cards[across - 1].x + TILE_W - width).abs() < 0.01);
+        assert_eq!(tall, 3.0 * CARD_H + 2.0 * TILE_GAP);
+        let (list, tall) = shelf_places(Shows::View(ShelfView::List), 3, width);
+        assert_eq!((list[2].y, list[2].w, tall), (2.0 * LIST_ROW, width, 3.0 * LIST_ROW));
+        let (pictures, _) = shelf_places(Shows::View(ShelfView::Pictures), 4, width);
+        assert_eq!((pictures[3].x, pictures[3].w, pictures[3].h), (0.0, pictures[0].w, pictures[0].w));
+        let (row, tall) = shelf_places(Shows::Row, 9, width);
+        assert_eq!((row.len(), tall), (across, TILE_H));
     }
 
     #[test]

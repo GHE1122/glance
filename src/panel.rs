@@ -872,7 +872,15 @@ impl Controller {
                 // The desktop widgets: pressed, let go (or found let go as the pointer moves: the button up unheard,
                 // let go before it was torn off), their menu.
                 WM_LBUTTONDOWN if widgets.owns(msg.hwnd) => widgets.press(msg.hwnd, lparam_point(msg.lParam)),
-                WM_LBUTTONUP if widgets.owns(msg.hwnd) => widgets.release(msg.hwnd, now, false),
+                WM_LBUTTONUP if widgets.owns(msg.hwnd) => {
+                    widgets.release(msg.hwnd, now, false);
+                    // A button of its station's head: its menu.
+                    if let Some((hit, tab)) = widgets.take_menu_asked() {
+                        self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
+                        menu = cursor_position().and_then(|at| crate::station::head_menu(hit, tab, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
+                        keep_menu_above(&menu, &mut overlay);
+                    }
+                }
                 // Its capture taken (a UAC prompt, the lock screen, another program): no press completed, nothing
                 // pressed is done.
                 crate::ui::window::CAPTURE_LOST if widgets.owns(msg.hwnd) => widgets.release(msg.hwnd, now, true),
@@ -955,6 +963,14 @@ impl Controller {
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd && widgets.torn_in_hand().is_some() => {
                     let torn = widgets.torn_in_hand().unwrap();
                     widgets.release(torn, now, false)
+                }
+                // The station's head's buttons: their menus.
+                WM_LBUTTONUP if msg.hwnd == panel.window.hwnd && panel.hit_at(lparam_point(msg.lParam)).is_some_and(Hit::opens_menu) => {
+                    let hit = panel.hit_at(lparam_point(msg.lParam)).unwrap();
+                    panel.click(lparam_point(msg.lParam));
+                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
+                    menu = cursor_position().and_then(|at| crate::station::head_menu(hit, panel.tab, at, true)).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
+                    keep_menu_above(&menu, &mut overlay);
                 }
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => {
                     panel.click(lparam_point(msg.lParam));
@@ -1113,6 +1129,8 @@ enum MenuFor {
     Overlay,
     /// A thing on the station, by its number, and what each row does.
     Station(u64, Vec<crate::station::Choice>),
+    /// The station's head's (see `station::head_menu`).
+    StationHead(Vec<crate::station::HeadChoice>),
 }
 
 impl Controller {
@@ -1138,6 +1156,11 @@ impl Controller {
             MenuFor::Station(id, choices) => {
                 if let Some(choice) = choice.and_then(|row| choices.get(row)) {
                     crate::station::chose(id, *choice);
+                }
+            }
+            MenuFor::StationHead(choices) => {
+                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
+                    crate::station::head_chose(*choice);
                 }
             }
         }
@@ -1443,6 +1466,8 @@ struct Panel<'a> {
     frost: f32,
     /// How far its lists are scrolled (see `view::Scrolls`).
     scrolls: view::Scrolls,
+    /// Its station's page shown (see `view::Tab`).
+    tab: view::Tab,
     hover: Option<Hit>,
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
@@ -1575,6 +1600,7 @@ impl<'a> Panel<'a> {
             tried_behind: Instant::now(),
             frost: 0.0,
             scrolls: view::Scrolls::default(),
+            tab: view::Tab::default(),
             hover: None,
             pinned: false,
             full_asked: None,
@@ -2810,7 +2836,7 @@ impl<'a> Panel<'a> {
         // The knob under the pointer, and the one held (the slider in hand's).
         let held = self.sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
         let thumbs_moving = self.thumbs.step(now, self.hover.filter(|hit| hit.slider().is_some()), held);
-        let scene = Scene { thumbs: &self.thumbs, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
+        let scene = Scene { thumbs: &self.thumbs, tab: self.tab, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -3151,6 +3177,7 @@ impl<'a> Panel<'a> {
             }
             Some(Hit::Drive(letter)) => open_drive(letter),
             Some(hit) if crate::station::pressed(hit) => {}
+            Some(Hit::Tab(tab)) => self.tab = tab,
             Some(Hit::Sort(sort)) if sort != self.drawn.processes.sort => {
                 self.prefs.processes.sort = sort;
                 self.drawn.processes.sort = sort;
@@ -3215,6 +3242,7 @@ fn scene<'s>(
         seen,
         pen_ms: wall - interval.as_secs_f64() * 1000.0 - PEN_LAG_MS,
         scrolls,
+        tab: view::Tab::default(),
         hover,
         pinned,
         overlay,

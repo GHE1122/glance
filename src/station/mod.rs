@@ -15,7 +15,7 @@ mod spike;
 
 /// A press on what a station's lane shows (see `view::Hit`), in the panel and in a widget alike: done; whether it was
 /// one. A thing on it, or copied lately, is put on the clipboard (pressed again within a double click's time, a thing
-/// on it is opened); its head's word clears it.
+/// on it is opened).
 pub fn pressed(hit: crate::ui::view::Hit) -> bool {
     use crate::ui::view::Hit;
     /// The thing on it last pressed, and when.
@@ -29,7 +29,6 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
             run::ask(if again { run::Ask::Open(id) } else { run::Ask::Copy(id) });
         }
         Hit::Copied(id) => run::ask(run::Ask::Copy(id)),
-        Hit::ShelfClear => run::ask(run::Ask::Clear),
         _ => return false,
     }
     true
@@ -84,6 +83,64 @@ pub fn chose(id: u64, choice: Choice) {
         Choice::Pin => run::Ask::Pin(id, !pinned),
         Choice::Remove => run::Ask::Remove(id),
     });
+}
+
+/// What a row of the station's head's menus does: shows what is on it so; takes off what is not pinned, of what is on
+/// it or of what was copied lately; keeps no more of what is copied; opens the settings.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HeadChoice {
+    View(crate::settings::ShelfView),
+    Clear,
+    ClearCopies,
+    StopCopies,
+    Settings,
+}
+
+/// The menu a press on the station's head opens (`hit`: the button of how what is on it shows, or of the rest, the
+/// page `tab` shown), at `at` on the screen (`over_the_panel`: as `Menu::open_at` says): up, with what its rows do.
+pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<HeadChoice>)> {
+    use crate::settings::ShelfView;
+    use crate::ui::icons::Icon;
+    use crate::ui::menu::{Item, Menu};
+    use crate::ui::view::{Hit, Tab};
+    let lang = crate::update::language();
+    let view = run::shown().view;
+    // Each row: what it does, its name, its icon, whether it is ticked, and whether a rule sets it off.
+    let rows: Vec<(HeadChoice, &'static str, Icon, bool, bool)> = match (hit, tab) {
+        (Hit::StationView, _) => [(ShelfView::Cards, lang.pick("卡片", "Cards"), Icon::LayoutGrid), (ShelfView::List, lang.pick("列表", "List"), Icon::List), (ShelfView::Pictures, lang.pick("图片", "Pictures"), Icon::Image)]
+            .into_iter()
+            .map(|(shows, label, icon)| (HeadChoice::View(shows), label, icon, shows == view, false))
+            .collect(),
+        (Hit::StationMore, Tab::Shelf) => vec![
+            (HeadChoice::Clear, lang.pick("全部清空（保留固定的项目）", "Clear all but the pinned"), Icon::Close, false, false),
+            (HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true),
+        ],
+        (Hit::StationMore, Tab::Copies) => vec![
+            (HeadChoice::ClearCopies, lang.pick("清空最近复制（保留固定的项目）", "Clear Recently copied but the pinned"), Icon::Close, false, false),
+            (HeadChoice::StopCopies, lang.pick("不再记录复制的内容", "Stop keeping what is copied"), Icon::Clipboard, false, false),
+            (HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true),
+        ],
+        _ => return None,
+    };
+    let items = rows.iter().map(|(_, label, icon, checked, rule_before)| Item { label, icon: Some(*icon), checked: *checked, rule_before: *rule_before }).collect();
+    let menu = Menu::open_at(items, crate::os::apps_dark(), at, false, over_the_panel)?;
+    Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
+}
+
+/// `choice` made in a menu of the station's head (see `head_menu`): done (the settings changed off the calling thread,
+/// which they tell to restyle).
+pub fn head_chose(choice: HeadChoice) {
+    match choice {
+        HeadChoice::View(view) => {
+            std::thread::spawn(move || crate::app().change(|settings| settings.station.view = view));
+        }
+        HeadChoice::Clear => run::ask(run::Ask::Clear(false)),
+        HeadChoice::ClearCopies => run::ask(run::Ask::Clear(true)),
+        HeadChoice::StopCopies => {
+            std::thread::spawn(|| crate::app().change(|settings| settings.station.history = false));
+        }
+        HeadChoice::Settings => crate::show_settings(),
+    }
 }
 
 /// Now, in ms since 1970 (as the shelf keeps when things were put on it).

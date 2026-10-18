@@ -31,8 +31,8 @@ pub enum Ask {
     Take(Content),
     Pin(u64, bool),
     Remove(u64),
-    /// All that is not pinned taken off.
-    Clear,
+    /// All that is not pinned taken off: of what was put on it, or (with `true`) of what was copied lately.
+    Clear(bool),
     /// What `id` holds put on the clipboard.
     Copy(u64),
     /// What `id` holds opened as Explorer opens it (a web address in the browser); shown in Explorer, selected there.
@@ -51,9 +51,10 @@ pub enum Ask {
 #[derive(Clone, Debug, Default)]
 pub struct Shown {
     pub items: Vec<Item>,
-    /// Recently copied on, and paused.
+    /// Recently copied on.
     pub history: bool,
-    pub paused: bool,
+    /// How what is on it shows.
+    pub view: crate::settings::ShelfView,
     /// What was last given could not be taken: no room but what is pinned holds.
     pub full: bool,
     /// Something is dragged over a station, to be dropped.
@@ -143,10 +144,10 @@ pub fn shown() -> Arc<Shown> {
     SHOWN.lock().unwrap().clone().unwrap_or_default()
 }
 
-/// For pictures: as if the station held `items` (its thread not started).
+/// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(all(test, feature = "studio"))]
-pub fn pretend(items: Vec<Item>) {
-    *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, paused: false, full: false, over: false }));
+pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
+    *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, view, full: false, over: false }));
 }
 
 /// `given` opened as Explorer opens it: each file (a folder in Explorer), or a web address in the browser.
@@ -336,7 +337,7 @@ impl Station {
                 }
                 Ask::Pin(id, pinned) => self.keep.pin(id, pinned),
                 Ask::Remove(id) => self.keep.remove(id),
-                Ask::Clear => self.keep.clear(),
+                Ask::Clear(copied) => self.keep.clear(copied),
                 Ask::Copy(id) => {
                     let given = self.keep.shelf.get(id).and_then(|item| Some((self.keep.content_of(item)?, item.stays_here)));
                     if let Some((content, stays_here)) = given {
@@ -396,13 +397,15 @@ impl Station {
         }
         // Rules made tighter: what is past them goes now.
         self.keep.expire(super::now_ms());
+        // (How it shows, and whether its copies do, shown as they are now.)
+        self.show();
     }
 
     /// The clipboard changed (or was held by another as it did, and is read again): what is on it taken into Recently
-    /// copied, unless it is paused, was taken already, or the station put it there itself.
+    /// copied, unless it was taken already or the station put it there itself.
     fn copied(&mut self) {
         let settings = crate::app().settings.lock().unwrap().station;
-        if !settings.history || settings.paused {
+        if !settings.history {
             return;
         }
         let sequence = clipboard::sequence();
@@ -431,7 +434,7 @@ impl Station {
     /// What it shows now, for the other threads, who are told.
     fn show(&self) {
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, paused: settings.paused, full: self.keep.full, over: self.over };
+        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, full: self.keep.full, over: self.over };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();
