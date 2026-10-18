@@ -228,7 +228,7 @@ impl FullMusic {
         self.now = sung_now;
         let position = crate::playing::position(Follow::Music).unwrap_or(0.0);
         let playing = heard_now.as_ref().is_some_and(|playing| playing.playing);
-        let length = heard_now.as_ref().and_then(|playing| playing.timeline).map(|timeline| timeline.length);
+        let length = heard_now.as_ref().and_then(|playing| playing.timeline).map(|timeline| (timeline.length, timeline.seekable));
         let (w, h) = self.size();
         let pixels = ((self.screen.right - self.screen.left).max(1) as u32, (self.screen.bottom - self.screen.top).max(1) as u32);
         // On the device that draws now, if it is not (a driver reset, a device lost): made anew on it. (A window has
@@ -390,7 +390,7 @@ impl FullMusic {
         match key {
             0x1B => return Asked::Leave,
             0x20 => crate::playing::act_on(Follow::Music, crate::playing::Act::Key(crate::playing::Key::Toggle)),
-            0x25 | 0x27 => {
+            0x25 | 0x27 if crate::playing::music().and_then(|playing| playing.timeline).is_some_and(|timeline| timeline.seekable) => {
                 let position = crate::playing::position(Follow::Music).unwrap_or(0.0);
                 let to = position + if key == 0x27 { 5.0 } else { -5.0 };
                 crate::playing::act_on(Follow::Music, crate::playing::Act::Seek(to.max(0.0)));
@@ -614,7 +614,7 @@ fn draw_said(frame: &Frame, (w, h): (f32, f32), title: &str, artist: &str, why: 
 /// ends, the keys under it, the volume and the way out at the right; each lit under the pointer. What they are is
 /// put in `hits`.
 #[allow(clippy::too_many_arguments)]
-fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<(f32, f32)>, dragging: Option<Hit>, volume_open: &mut bool, flash: bool, playing: bool, position: f64, length: Option<f64>, hits: &mut Vec<((f32, f32, f32, f32), Hit)>) {
+fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<(f32, f32)>, dragging: Option<Hit>, volume_open: &mut bool, flash: bool, playing: bool, position: f64, length: Option<(f64, bool)>, hits: &mut Vec<((f32, f32, f32, f32), Hit)>) {
     let under = |x: f32, y: f32, wide: f32, tall: f32| pointer.is_some_and(|(px, py)| px >= x && px < x + wide && py >= y && py < y + tall);
     // A darkening along the bottom for them to be read on.
     frame.fill_shape(
@@ -633,12 +633,13 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
         x += cell + 18.0;
     }
     // The track, short, above them; its times at its ends. Under the pointer (or dragged), thicker, its knob on it,
-    // and over the pointer the time it is at.
-    if let Some(length) = length.filter(|length| *length > 0.0) {
+    // and over the pointer the time it is at: where its player lets it be moved along (QQ Music does not), else only
+    // how far it is.
+    if let Some((length, seekable)) = length.filter(|(length, _)| *length > 0.0) {
         let time = Font::new(Family::Segoe, 12.0, 500.0);
         let wide = (w * 0.42).min(420.0);
         let (from, y) = (w / 2.0 - wide / 2.0, row - 22.0);
-        let lit = under(from - 8.0, y - 10.0, wide + 16.0, 20.0) || dragging == Some(Hit::Track);
+        let lit = seekable && (under(from - 8.0, y - 10.0, wide + 16.0, 20.0) || dragging == Some(Hit::Track));
         let fraction = (position / length).clamp(0.0, 1.0) as f32;
         slider(frame, (from, y, wide), fraction, lit, shown);
         let clock = |seconds: f64| crate::ui::text::clock(seconds.max(0.0).round() as u32);
@@ -652,7 +653,9 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
             frame.fill_rounded(Color::hex(0x000000, 0.6 * shown), x, y - 36.0, pill, 22.0, 6.0);
             frame.text(&said, time, Color::hex(0xFFFFFF, 0.95 * shown), x + 8.0, y - 33.0, pill, Align::Start);
         }
-        hits.push(((from - 8.0, y - 10.0, wide + 16.0, 20.0), Hit::Track));
+        if seekable {
+            hits.push(((from - 8.0, y - 10.0, wide + 16.0, 20.0), Hit::Track));
+        }
     }
     // At the right, the way out, and the sound's icon beside it; over the icon, while the pointer is over it or the
     // bar (or the sound was just turned by the wheel or a key: `flash`), a bar standing up, filled as loud as the sound

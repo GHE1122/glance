@@ -991,11 +991,22 @@ impl Drawing<'_> {
         }
     }
 
+    /// Whether its player lets what plays be moved along (see `Timeline::seekable`).
+    fn seekable(&self) -> bool {
+        self.moment.length.is_some_and(|(_, seekable)| seekable)
+    }
+
     /// The line at `index`, turned to by the wheel: whole, its time beside it to be played from (pressed there, or
     /// on it), in one row from `(x, y)` at most `width` wide, in `font`.
     fn turned_to(&mut self, lines: &[Line], index: usize, x: f32, y: f32, width: f32, font: Font) {
         let frame = self.frame;
         let line = &lines[index];
+        // (A player that lets no one move it along, QQ Music: the line alone, nothing that offers to play from it.)
+        if !self.seekable() {
+            let text = if line.text.trim().is_empty() { "…".to_string() } else { line.text.clone() };
+            words(frame, &fitted(frame, &text, font, width), font, Color::hex(self.ink, 0.92), x, y, width + 2.0, Align::Start, self.edged);
+            return;
+        }
         let chip = super::text::clock(line.at.max(0.0) as u32);
         let chip_wide = frame.measure(&chip, self.fonts.time) + 26.0;
         let text = if line.text.trim().is_empty() { "…".to_string() } else { line.text.clone() };
@@ -1623,7 +1634,7 @@ impl Drawing<'_> {
                     words(frame, &fitted(frame, translation, small, width), small, Color::hex(self.ink, 0.42 * alpha), x, y + under + 2.0 * scale, width, Align::Start, clear);
                 }
                 // Pressed, played from (where the wheel has turned the lines: as the line turned to is).
-                if turned.is_some() {
+                if turned.is_some() && self.seekable() {
                     self.hits.push((x, y, width, tall, Hit::Line(index as u16)));
                 }
             }
