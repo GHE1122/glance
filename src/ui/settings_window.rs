@@ -4777,7 +4777,7 @@ mod pictures {
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
         let history = (0..120).map(|i| crate::studio::made_up(&info, now_ms - (120 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
         crate::pictured(info, history);
-        let gfx = gfx::current().unwrap();
+        let gfx = gfx::held().unwrap();
         let hwnd = make(gfx.clone(), false).unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/settings", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();

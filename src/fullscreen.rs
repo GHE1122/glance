@@ -741,7 +741,7 @@ mod pictures {
         if let Ok(face) = std::env::var("GLANCE_SERIF") {
             crate::serif::have(std::fs::read(face).unwrap());
         }
-        let gfx = crate::ui::gfx::current().unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
         let (w, h) = (1280.0f32, 720.0f32);
         let mut smoke = Smoke::new(&gfx).unwrap();
         smoke.render(((w * smoke::SCALE) as u32, (h * smoke::SCALE) as u32), &smoke::Now { flow: 14.0, swell: 0.6, tint: [0.95, 0.66, 0.58], tint2: [0.98, 0.85, 0.81] }).unwrap();

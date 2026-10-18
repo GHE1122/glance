@@ -48,7 +48,7 @@ impl Layout {
         // Controls kept showing over the spectrum take a row more.
         let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
         let pick = |slack: f32| {
-            if h < PLAYER_FROM + more + slack || w < STRIP_UNDER + slack {
+            if h < strip_under(more) + slack || w < STRIP_UNDER + slack {
                 Layout::Strip
             } else if h < CARD_FROM + more + slack {
                 Layout::Player
@@ -91,6 +91,19 @@ const TALL_UNDER: f32 = 360.0;
 const STAGE_FROM: f32 = 520.0;
 /// How far past where the next layout begins a room keeps the one it has (DIPs).
 const HOLD: f32 = 12.0;
+/// Below how tall it is a strip (DIPs; `more` as in `Layout::for_room`): half way from the tallest the strip is at
+/// rest to the least the player is, so that sized between them it is the one it is nearer, and as it is let go it
+/// comes to that one (the player that tall drawn smaller as a whole: see `player_zoom`).
+fn strip_under(more: f32) -> f32 {
+    (STRIP_MOST + PLAYER_FROM + more) / 2.0
+}
+
+/// How much smaller than its own size a player sized `h` tall (DIPs; `more` as in `Layout::for_room`) is drawn: as
+/// the least it is, made smaller as a whole, below that (between it and the strip: see `strip_under`); else 1.
+fn player_zoom(h: f32, more: f32) -> f32 {
+    (h / (PLAYER_FROM + more)).min(1.0)
+}
+
 /// The least a music widget is (DIPs).
 pub const LEAST: (f32, f32) = (240.0, 56.0);
 /// What plays as a panel slides it out (DIPs, at the panel's size 1): from a side edge as a card, from the top as a
@@ -109,7 +122,7 @@ pub fn rests_at(room: (f32, f32), shows: &Shows) -> (f32, f32) {
     let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
     match Layout::for_room(room, shows, None) {
         Layout::Strip => (room.0, room.1.min(STRIP_MOST)),
-        Layout::Player => (room.0, room.1.min(PLAYER_MOST + more)),
+        Layout::Player => (room.0, room.1.clamp(PLAYER_FROM + more, PLAYER_MOST + more)),
         Layout::Card | Layout::Tall | Layout::Stage => room,
     }
 }
@@ -597,7 +610,29 @@ impl Music {
 
     /// As `paint`, what plays as `moment` says.
     #[allow(clippy::too_many_arguments)]
-    fn paint_moment(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, mut moment: Moment) -> Painted {
+    fn paint_moment(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, moment: Moment) -> Painted {
+        // A player less tall than the least it is (sized toward the strip, not yet nearer it): that least, smaller as
+        // a whole (see `player_zoom`).
+        let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
+        let zoom = if Layout::for_room(size, shows, self.layout) == Layout::Player { player_zoom(size.1, more) } else { 1.0 };
+        if zoom >= 1.0 {
+            return self.paint_laid(frame, size, shows, ground, scale, pointer, now, moment);
+        }
+        let mut painted = Painted { hits: Vec::new(), busy: false };
+        frame.turned(0.0, 0.0, 0.0, (zoom, zoom), |frame| {
+            let _moving = frame.moving_while(true);
+            let pointer = pointer.map(|(x, y)| (x / zoom, y / zoom));
+            painted = self.paint_laid(frame, (size.0 / zoom, size.1 / zoom), shows, ground, scale * zoom, pointer, now, moment);
+        });
+        for (x, y, w, h, _) in &mut painted.hits {
+            (*x, *y, *w, *h) = (*x * zoom, *y * zoom, *w * zoom, *h * zoom);
+        }
+        painted
+    }
+
+    /// As `paint_moment`, in `size` as it is laid out there.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_laid(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, mut moment: Moment) -> Painted {
         let step = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
         self.step = step;
@@ -876,10 +911,13 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
     match layout {
         Layout::Strip => {
             // (Inside another widget, no taller than a lane's line of words and what is under it, in its middle.) No
-            // larger than the player's as it begins: made smaller from the player into the strip, the cover grows no
-            // larger on the way (as tall as the strip, it grew as the strip came, and then shrank).
+            // larger than the player's as it begins, as drawn there (the least player, smaller as a whole: see
+            // `player_zoom`): made smaller from the player into the strip, the cover grows no larger on the way (as
+            // tall as the strip, it grew as the strip came, and then shrank).
             let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
-            let side = (h - 2.0 * pad).min(if shows.inset.is_some() { HOSTED_COVER } else { f32::MAX }).min(player_side((w, PLAYER_FROM + more), shows)).max(0.0);
+            let zoom = player_zoom(strip_under(more), more);
+            let player = player_side((w / zoom, PLAYER_FROM + more), shows) * zoom;
+            let side = (h - 2.0 * pad).min(if shows.inset.is_some() { HOSTED_COVER } else { f32::MAX }).min(player).max(0.0);
             let cover = shows.cover.then_some((pad, (h - side) / 2.0, side));
             let left = if shows.cover { pad + side + 12.0 } else { pad + 4.0 };
             Placed { cover, round: 0.0, record: 0.0, title: None, title_zoom: 1.0, below: 0.0, left, width: (w - pad - left).max(0.0) }
@@ -2084,10 +2122,12 @@ fn chip_at(frame: &Frame, text: &str, full: Font, width: f32, zoom: f32, settled
     let (end, _) = frame.gfx.wrapped_end(text, full, room);
     if end * settled + 10.0 + chip <= width {
         let (end, row_top) = frame.gfx.wrapped_end(text, full, room);
-        // Its middle level with the middle of the row's words: between a capital's top and the baseline (reckoned
-        // from the font's size, it stood above the words).
+        // Its middle level with the middle of the row's words as the eye takes it: between the baseline and a top
+        // half way between a capital's and a small letter's (most of a row's letters are small; level with the
+        // capitals' middle, it stood above the words, and reckoned from the font's size, more so).
         let (cap_top, _) = frame.gfx.ink("H", full);
-        let middle = (cap_top + frame.gfx.baseline(full).0) / 2.0;
+        let (small_top, _) = frame.gfx.ink("x", full);
+        let middle = ((cap_top + small_top) / 2.0 + frame.gfx.baseline(full).0) / 2.0;
         (end * zoom + 10.0, (row_top + middle) * zoom - 9.0, false)
     } else {
         (0.0, frame.gfx.wrapped_height(text, full, room) * zoom + 4.0, true)
@@ -2478,7 +2518,7 @@ mod tests {
     }
 
     /// Made taller from the strip into the player, at any width, the cover never grows smaller on the way (as tall as
-    /// the strip, it was larger near the player than the player's as it began).
+    /// the strip, it was larger near the player than the player's as it began), as drawn.
     #[test]
     fn the_cover_grows_from_the_strip_into_the_player() {
         let shows = Shows::from(&serde_json::Value::Null);
@@ -2487,7 +2527,10 @@ mod tests {
             let mut h = LEAST.1;
             while h < CARD_FROM {
                 let layout = Layout::for_room((w, h), &shows, None);
-                let side = placed(layout, (w, h), &shows).cover.map_or(0.0, |(_, _, side)| side);
+                // (As drawn: a player less tall than the least it is, that, smaller as a whole: see `player_zoom`.)
+                let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
+                let zoom = if layout == Layout::Player { player_zoom(h, more) } else { 1.0 };
+                let side = placed(layout, (w / zoom, h / zoom), &shows).cover.map_or(0.0, |(_, _, side)| side * zoom);
                 assert!(side + 1e-3 >= was, "at {w} x {h} ({}): {side}, before {was}", layout.key());
                 was = side;
                 h += 2.0;
@@ -2551,6 +2594,13 @@ mod tests {
         let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         // A strip pulled taller, short of a player: back to the strip's tallest; a player short of a card: its.
         assert_eq!(rests_at((420.0, 110.0), &all), (420.0, STRIP_MOST));
+        // Sized between the strip and the player, it is the one it is nearer, and comes to it.
+        let more = 0.0;
+        let half = strip_under(more);
+        assert_eq!(Layout::for_room((420.0, half - 1.0), &all, None), Layout::Strip);
+        assert_eq!(Layout::for_room((420.0, half + 1.0), &all, None), Layout::Player);
+        assert_eq!(rests_at((420.0, half + 1.0), &all), (420.0, PLAYER_FROM + more));
+        assert!(player_zoom(half + 1.0, more) < 1.0 && player_zoom(PLAYER_FROM + more, more) == 1.0);
         assert_eq!(rests_at((420.0, 245.0), &all), (420.0, PLAYER_MOST));
         // Within the range: where it was let go; the card, however tall; never under the least.
         assert_eq!(rests_at((420.0, 180.0), &all), (420.0, 180.0));
@@ -2634,7 +2684,7 @@ mod pictures {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
-        let gfx = crate::ui::gfx::current().unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
         let places = [1u32, 451, 902, 1350];
         let (w, h) = (470.0, 178.0);
         let margin = 34.0;
@@ -2682,7 +2732,7 @@ mod pictures {
         let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
-        let gfx = crate::ui::gfx::current().unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
         let start = Instant::now();
         let mut music = Music { last_frame: start, ..Music::default() };
         let (w, h) = (470.0, 400.0);
@@ -2706,6 +2756,42 @@ mod pictures {
         }
     }
 
+    /// A player sized down into a strip (each height a row, at its own size, 1.5 pixels a DIP), stacked into one PNG
+    /// in the target folder: `cargo test --features studio -- --ignored draws_sized_into_a_strip`.
+    #[test]
+    #[ignore = "draws on this PC's graphics card, to a picture to be looked at"]
+    fn draws_sized_into_a_strip() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(&out).unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
+        let heights = [170.0f32, 150.0, 140.0, 130.0, 122.0, 120.0, 110.0, 96.0];
+        let (w, margin) = (420.0f32, 12.0f32);
+        let tall: f32 = heights.iter().map(|h| h + margin).sum::<f32>() + margin;
+        let size = (((w + 2.0 * margin) * 1.5) as u32, (tall * 1.5) as u32);
+        let now = Instant::now();
+        let pixels = gfx
+            .draw_offscreen(size, 1.5, |frame| {
+                frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, tall);
+                let mut y = margin;
+                for h in heights {
+                    let mut music = Music { last_frame: now, ..Music::default() };
+                    let moment = playing(false);
+                    music.bands = moment.sound.bands;
+                    music.rail = 1.0;
+                    music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                    frame.origin(margin, y);
+                    music.paint_moment(frame, (w, h), &all, Ground::Own, 1.5, None, now, moment);
+                    y += h + margin;
+                }
+            })
+            .unwrap();
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/sized-into-a-strip.png")), size.0, size.1, &pixels).unwrap();
+    }
+
     /// Where the fill's edge is (DIPs from the line's start) as a line of characters with spaces between them is sung,
     /// shared out evenly (the line 微 微 微 微 of 微微, from 43.06 s, the next at 48.09 s): printed every 50 ms.
     #[test]
@@ -2714,7 +2800,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let gfx = crate::ui::gfx::current().unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
         let line = Line { at: 43.06, end: None, text: "微 微 微 微".into(), words: Vec::new(), backing: None, translation: None };
         let (text, parts) = parts(&line, Some(48.09));
         let layout = gfx.wrapped(&text, PLAYER_LINE, 1000.0);
@@ -2745,7 +2831,7 @@ mod pictures {
         let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
-        let gfx = crate::ui::gfx::current().unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
         let (w, h) = (470.0, 178.0);
         let margin = 20.0;
         let one = (((w + 2.0 * margin) * 1.5) as u32, ((h + 2.0 * margin) * 1.5) as u32);
@@ -2777,7 +2863,7 @@ mod pictures {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
-        let gfx = crate::ui::gfx::current().unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
         let (w, h) = (780.0, 64.0);
         let size = ((w * 1.5) as u32, (h * 1.5) as u32);
         let mut music = Music::default();
@@ -2802,7 +2888,7 @@ mod pictures {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
-        let gfx = crate::ui::gfx::current().unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
         for size in [(470.0, 400.0), (520.0, 236.0)] {
             let start = Instant::now();
             let mut music = Music { last_frame: start, ..Music::default() };
@@ -2882,7 +2968,7 @@ mod pictures {
         ];
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
-        let gfx = crate::ui::gfx::current().unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
         for (name, (w, h), shows, over, turned, dragged, between) in cases {
             let mut music = Music { controls_in: if over || shows.controls { 1.0 } else { 0.0 }, turned, turned_at: Instant::now(), arm: if name.ends_with("off") { 0.0 } else { 1.0 }, turned_by: 30.0, ..Music::default() };
             let mut moment = playing(between);
@@ -2941,7 +3027,7 @@ mod pictures {
             let (w, h) = (900.0f32, 470.0f32);
             let size = (((w + 2.0 * margin) * 1.5) as u32, ((h + 2.0 * margin) * 1.5) as u32);
             let start = Instant::now();
-            let mut paint = |music: &mut Music, room: (f32, f32), at: Instant| {
+            let paint = |music: &mut Music, room: (f32, f32), at: Instant| {
                 gfx.draw_offscreen(size, 1.5, |frame| {
                     frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
                     frame.origin(margin, margin);
