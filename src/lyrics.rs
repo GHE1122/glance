@@ -354,11 +354,11 @@ fn unescaped(text: &str) -> String {
 /// A TTML clock time (`h:mm:ss.fff`, `mm:ss.fff`, `ss.fff`, with or without `s`) as seconds.
 fn clock(time: &str) -> Option<f64> {
     let time = time.trim().trim_end_matches('s');
-    let mut seconds = 0.0;
+    let mut total = 0.0;
     for part in time.split(':') {
-        seconds = seconds * 60.0 + part.parse::<f64>().ok()?;
+        total = total * 60.0 + part.parse::<f64>().ok()?;
     }
-    Some(seconds)
+    seconds(total)
 }
 
 /// NetEase Cloud Music's lyrics of its track `id`, with their translation: timed word by word where it has them
@@ -415,22 +415,22 @@ pub fn word_timed(yrc: &str, translation: Option<&str>) -> Vec<Line> {
             lines.push(line);
             continue;
         }
-        let Some((head, mut rest)) = raw.trim().strip_prefix('[').and_then(|after| after.split_once(']')) else { continue };
-        let Some((start, length)) = head.split_once(',').and_then(|(a, b)| Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))) else { continue };
+        let Some((head, rest)) = raw.trim().strip_prefix('[').and_then(|after| after.split_once(']')) else { continue };
+        let Some((start, length)) = head.split_once(',').and_then(|(a, b)| Some((ms(a.trim().parse().ok()?)?, ms(b.trim().parse().ok()?)?))) else { continue };
         let mut words = Vec::new();
-        while let Some((timing, after)) = rest.strip_prefix('(').and_then(|after| after.split_once(')')) {
-            let mut parts = timing.split(',').map(|part| part.trim().parse::<f64>());
-            let (Some(Ok(at)), Some(Ok(lasts))) = (parts.next(), parts.next()) else { break };
-            // What is sung runs to the next word's timing, or the line's end.
-            let end = after.find('(').unwrap_or(after.len());
+        let mut rest = rest;
+        while let Some(((at, lasts), after)) = word_timing(rest) {
+            // What is sung runs to the next word's timing, or the line's end (a bracket in what is sung, "(world)",
+            // is sung).
+            let end = (0..after.len()).filter(|at| after.is_char_boundary(*at) && after[*at..].starts_with('(')).find(|at| word_timing(&after[*at..]).is_some()).unwrap_or(after.len());
             let text = &after[..end];
             if !text.is_empty() {
-                words.push(Word { at: at / 1000.0, end: (at + lasts) / 1000.0, text: text.to_string() });
+                words.push(Word { at, end: at + lasts, text: text.to_string() });
             }
             rest = &after[end..];
         }
         let text: String = words.iter().map(|word| word.text.as_str()).collect::<String>().trim().to_string();
-        lines.push(Line { at: start / 1000.0, end: Some((start + length) / 1000.0), text, words, backing: None, translation: None });
+        lines.push(Line { at: start, end: Some(start + length), text, words, backing: None, translation: None });
     }
     lines.sort_by(|a, b| a.at.total_cmp(&b.at));
     for (at, text) in translation.map(timed).unwrap_or_default() {
@@ -446,11 +446,33 @@ pub fn word_timed(yrc: &str, translation: Option<&str>) -> Vec<Line> {
     lines
 }
 
+/// A word's timing at the start of `rest` in NetEase's word-timed lyrics, `(start,length,0)` (milliseconds): its start
+/// and length (seconds), and what follows it.
+fn word_timing(rest: &str) -> Option<((f64, f64), &str)> {
+    let (timing, after) = rest.strip_prefix('(')?.split_once(')')?;
+    let mut parts = timing.split(',').map(str::trim);
+    let (at, lasts, _) = (parts.next()?, parts.next()?, parts.next()?.parse::<i64>().ok()?);
+    Some(((ms(at.parse().ok()?)?, ms(lasts.parse().ok()?)?), after))
+}
+
+/// The longest time lyrics are read with (seconds): a day (a track is no longer; a time beyond it, or none, is not one).
+const LONGEST: f64 = 24.0 * 3600.0;
+
+/// `ms` milliseconds as seconds, where it is a time of a track (see `LONGEST`).
+fn ms(ms: f64) -> Option<f64> {
+    seconds(ms / 1000.0)
+}
+
+/// `seconds`, where it is a time of a track (see `LONGEST`).
+fn seconds(seconds: f64) -> Option<f64> {
+    (0.0..=LONGEST).contains(&seconds).then_some(seconds)
+}
+
 /// A line NetEase writes as JSON in its word-timed lyrics (see `word_timed`): when it begins (`t`, milliseconds) and
 /// what it says (each part's `tx`, together). None where `raw` is no such line, or says nothing.
 fn credit(raw: &str) -> Option<Line> {
     let said: serde_json::Value = serde_json::from_str(raw.strip_prefix('{').map(|_| raw)?).ok()?;
-    let at = said["t"].as_f64()? / 1000.0;
+    let at = ms(said["t"].as_f64()?)?;
     let text: String = said["c"].as_array()?.iter().filter_map(|part| part["tx"].as_str()).collect::<String>().trim().to_string();
     (!text.is_empty()).then(|| Line { at, end: None, text, words: Vec::new(), backing: None, translation: None })
 }
@@ -668,6 +690,8 @@ fn timed(lrc: &str) -> Vec<(f64, String)> {
 fn offset(lrc: &str) -> f64 {
     lrc.lines()
         .find_map(|line| line.trim().strip_prefix("[offset:").and_then(|after| after.split_once(']')).and_then(|(ms, _)| ms.trim().parse::<f64>().ok()))
+        // (No more than a track is long, either way.)
+        .filter(|ms| ms.abs() / 1000.0 <= LONGEST)
         .map_or(0.0, |ms| ms / 1000.0)
 }
 
@@ -676,7 +700,7 @@ fn time(tag: &str) -> Option<f64> {
     let (minutes, seconds) = tag.split_once(':')?;
     let seconds = seconds.replacen(':', ".", 1);
     let (minutes, seconds) = (minutes.trim().parse::<u32>().ok()?, seconds.trim().parse::<f64>().ok()?);
-    (0.0..60.0).contains(&seconds).then_some(minutes as f64 * 60.0 + seconds)
+    (0.0..60.0).contains(&seconds).then(|| self::seconds(minutes as f64 * 60.0 + seconds)).flatten()
 }
 
 /// The line sung at `position` (seconds), sung a little early (a line shows as it is about to be sung, not
@@ -762,7 +786,9 @@ pub mod kept {
     pub(super) fn read_in(folder: &std::path::Path, track: &Track) -> Option<Kept> {
         let text = crate::elevation::read_in_place(folder, &name(track), FILE_MOST)?;
         let file: File = serde_json::from_str(&text).ok()?;
-        (file.track == *track && file.found_by == FOUND_BY).then(|| Kept { lines: file.lines, asked: SystemTime::UNIX_EPOCH + Duration::from_secs(file.asked), sure: file.sure })
+        // (Asked at a time no clock says: not kept.)
+        let asked = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(file.asked))?;
+        (file.track == *track && file.found_by == FOUND_BY).then_some(Kept { lines: file.lines, asked, sure: file.sure })
     }
 
     /// Keeps what was found of `track`'s lyrics (none: none had them), asked for now, and whether each source
@@ -919,7 +945,27 @@ mod tests {
         assert!(kept::read_in(&folder, &track).is_some_and(|kept| kept.lines.is_none() && kept.fresh()));
         let other = Track { seconds: 2, ..track.clone() };
         assert!(kept::read_in(&folder, &other).is_none());
+        // Asked at a time no clock says: not kept (it was added to the clock's start, past what it holds).
+        let file = std::fs::read_dir(&folder).unwrap().next().unwrap().unwrap().path();
+        let mut said: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        said["asked"] = serde_json::json!(u64::MAX);
+        std::fs::write(&file, serde_json::to_vec(&said).unwrap()).unwrap();
+        assert!(kept::read_in(&folder, &track).is_none());
         let _ = std::fs::remove_dir_all(folder.parent().unwrap());
+    }
+
+    /// Times no track has are not taken (taken, a line's time came to more than a clock holds, and Glance ended); a
+    /// bracket in what is sung is sung, not taken for a word's timing.
+    #[test]
+    fn reads_only_times_of_a_track() {
+        assert!(word_timed("[1e309,1000](0,1000,0)Hello", None).is_empty());
+        assert!(word_timed("[-5,1000](0,1000,0)Hello", None).is_empty());
+        assert_eq!(word_timed("[0,2000](0,1000,0)Hello(1e300,1000,0)there", None)[0].text, "Hello(1e300,1000,0)there");
+        assert!(word_timed(r#"{"t":1e300,"c":[{"tx":"作词: 某人"}]}"#, None).is_empty());
+        assert!(lrc("[99999:00.00]Too late").is_empty());
+        assert_eq!(lrc("[offset:1e300]\n[00:01.00]On time")[0].at, 1.0);
+        let lines = word_timed("[0,2000](0,1000,0)Hello (1000,1000,0)(world)", None);
+        assert_eq!(lines[0].words.iter().map(|word| word.text.as_str()).collect::<Vec<_>>(), ["Hello ", "(world)"]);
     }
 
     /// NetEase's lines of who wrote and made a song go among lyrics found elsewhere by their times, once each.
