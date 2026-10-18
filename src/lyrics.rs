@@ -364,11 +364,17 @@ fn netease_said(url: &str) -> Result<serde_json::Value, Unreached> {
 }
 
 /// The lines of NetEase's word-timed lyrics (`yrc`): `[start,length]` (milliseconds) before each, then each word as
-/// `(start,length,0)` and what is sung; lines of another kind (its credits, written as JSON) are left out. Each
-/// with the line of `translation` (an LRC text) nearest in time, within a second.
+/// `(start,length,0)` and what is sung; and the lines it writes otherwise, as JSON (`{"t":0,"c":[{"tx":"作词: "},…]}`:
+/// who wrote it, who made it), timed by line alone, shown as NetEase shows them (left out, the lyrics showed nothing
+/// while NetEase showed those lines, as if they had fallen behind it). Each with the line of `translation` (an LRC
+/// text) nearest in time, within a second.
 pub fn word_timed(yrc: &str, translation: Option<&str>) -> Vec<Line> {
     let mut lines = Vec::new();
     for raw in yrc.lines() {
+        if let Some(line) = credit(raw.trim()) {
+            lines.push(line);
+            continue;
+        }
         let Some((head, mut rest)) = raw.trim().strip_prefix('[').and_then(|after| after.split_once(']')) else { continue };
         let Some((start, length)) = head.split_once(',').and_then(|(a, b)| Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))) else { continue };
         let mut words = Vec::new();
@@ -398,6 +404,15 @@ pub fn word_timed(yrc: &str, translation: Option<&str>) -> Vec<Line> {
         }
     }
     lines
+}
+
+/// A line NetEase writes as JSON in its word-timed lyrics (see `word_timed`): when it begins (`t`, milliseconds) and
+/// what it says (each part's `tx`, together). None where `raw` is no such line, or says nothing.
+fn credit(raw: &str) -> Option<Line> {
+    let said: serde_json::Value = serde_json::from_str(raw.strip_prefix('{').map(|_| raw)?).ok()?;
+    let at = said["t"].as_f64()? / 1000.0;
+    let text: String = said["c"].as_array()?.iter().filter_map(|part| part["tx"].as_str()).collect::<String>().trim().to_string();
+    (!text.is_empty()).then(|| Line { at, end: None, text, words: Vec::new(), backing: None, translation: None })
 }
 
 /// The track on NetEase Cloud Music that is `track`: of those found by its title and artist, the first of its
@@ -625,8 +640,9 @@ pub mod kept {
 
     /// How lyrics are found and read, counted up as that changes: what was kept by an earlier way is not taken, and
     /// they are asked for again. (2: the artist of a track found by its title checked, an LRC file's offset read;
-    /// what was kept before had another artist's song's lyrics, or every line late or early, for good.)
-    const FOUND_BY: u32 = 2;
+    /// what was kept before had another artist's song's lyrics, or every line late or early, for good. 3: NetEase's
+    /// lines of who wrote and made a song kept.)
+    const FOUND_BY: u32 = 3;
 
     /// A track's lyrics as kept (none: none had them), when they were asked for, and whether each source answered.
     pub struct Kept {
@@ -798,7 +814,10 @@ mod tests {
 ";
         let lines = word_timed(yrc, Some("[00:16.20]你好世界
 [00:20.00]//"));
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
+        // Who wrote it, as NetEase shows it, from its time.
+        assert_eq!((lines[0].at, lines[0].text.as_str(), lines[0].words.len()), (0.0, "作词: 某人", 0));
+        let lines = &lines[1..];
         let line = &lines[0];
         assert_eq!((line.at, line.end, line.text.as_str(), line.translation.as_deref()), (16.21, Some(19.28), "Hello world", Some("你好世界")));
         assert_eq!(line.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(), ["Hello ", "wor", "ld"]);
