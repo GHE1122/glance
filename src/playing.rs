@@ -174,126 +174,108 @@ static SEEKING: [Mutex<Option<(f64, Option<std::time::Instant>)>>; 2] = [Mutex::
 #[cfg(windows)]
 static LYRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// How far into the track it was as last looked at (seconds), when that was, and whether it was playing.
+/// Where along its track what is followed for each is reckoned to be (see `Reckoning`); none while it is not looked at.
 #[cfg(windows)]
-static POSITION: [Mutex<Option<(f64, std::time::Instant, bool, f64)>>; 2] = [Mutex::new(None), Mutex::new(None)];
+static RECKONING: [Mutex<Option<Reckoning>>; 2] = [Mutex::new(None), Mutex::new(None)];
 
-/// What `POSITION` and `HELD` are of: its program (as Windows identifies it) and its track's title.
+/// One look at a time, whoever asks (the watcher, or an action's own thread): two at once, one's older report of the
+/// player was taken after the other's newer one.
 #[cfg(windows)]
-static TRACK: [Mutex<Option<(String, String)>>; 2] = [Mutex::new(None), Mutex::new(None)];
+static LOOKING: Mutex<()> = Mutex::new(());
 
-/// Played from elsewhere along its track: where (seconds), when, and the track (its title).
+/// Where along its track something is reckoned to be: `at` (seconds) as of `when`, playing or not, at `rate`, of
+/// its program and track; and the player's report it rests on (see `media::Playing::said`).
+///
+/// Players say how far in they are now and then, and not always as they pause, play again or are moved along:
+/// NetEase's says nothing more as it pauses, QQ Music's says it plays again before it says where, Media Player says
+/// nothing after it is moved along. So what a player says is taken only when it is newer than what was taken before;
+/// else it goes on from what was reckoned at the last look, at the rate and in the state then, to now. A pause, a
+/// play again, a move along or another rate so counts from when it is seen, not from the player's last report.
+#[derive(Clone, Debug, PartialEq)]
+struct Reckoning {
+    at: f64,
+    when: std::time::Instant,
+    playing: bool,
+    rate: f64,
+    app_id: String,
+    title: String,
+    said: Option<i64>,
+}
+
+/// What a player says of where along its track it is, as a look sees it (see `media::Playing`).
+#[derive(Clone, Copy)]
+struct Report<'a> {
+    app_id: &'a str,
+    title: &'a str,
+    playing: bool,
+    rate: f64,
+    /// How far in it is now, reckoned by the player's report, and how long the track is (seconds).
+    at: f64,
+    length: f64,
+    said: Option<i64>,
+}
+
+impl Reckoning {
+    /// How far in it is at `now` (seconds).
+    fn at(&self, now: std::time::Instant) -> f64 {
+        if self.playing { self.at + now.saturating_duration_since(self.when).as_secs_f64() * self.rate } else { self.at }
+    }
+
+    /// Where `report` puts it at `now`, after `was` (`settling`: just moved along, what the player says meanwhile not
+    /// taken).
+    fn after(was: Option<&Reckoning>, report: Report, settling: bool, now: std::time::Instant) -> Reckoning {
+        let was = was.filter(|was| was.app_id == report.app_id && was.title == report.title);
+        let newer = report.said.is_some_and(|said| was.is_none_or(|was| was.said.is_none_or(|taken| said > taken)));
+        let (at, said) = match was {
+            Some(was) if settling || !newer => (was.at(now).clamp(0.0, report.length), was.said),
+            _ => (report.at, report.said),
+        };
+        Reckoning { at, when: now, playing: report.playing, rate: report.rate, app_id: report.app_id.to_string(), title: report.title.to_string(), said }
+    }
+}
+
+/// Windows' time now, as players' reports say it (tenths of a microsecond since 1601).
 #[cfg(windows)]
-static SOUGHT: [Mutex<Option<(f64, std::time::Instant, String)>>; 2] = [Mutex::new(None), Mutex::new(None)];
+fn said_now() -> i64 {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    (since.as_secs() as i64 + 11_644_473_600) * 10_000_000 + since.subsec_nanos() as i64 / 100
+}
 
-/// Paused: where it was held (seconds), and when its player had last said how far in it was as that was taken (see
-/// `look`).
-#[cfg(windows)]
-static HELD: [Mutex<Option<(f64, std::time::Instant)>>; 2] = [Mutex::new(None), Mutex::new(None)];
-
-/// Played again after a pause: when that was first seen, and where it was paused (seconds), till its player says
-/// how far in it is since. (What it said before stands for where it was before the pause: reckoned on from then, the
-/// whole pause was added to where it is, and QQ Music's went ahead, then back as it said again.)
-#[cfg(windows)]
-static RESUMED: [Mutex<Option<(std::time::Instant, f64)>>; 2] = [Mutex::new(None), Mutex::new(None)];
-
-/// How far into the track of what is followed for `follow` it is now (seconds), from the last look on by the time
-/// since while it plays; none where its player does not say.
+/// How far into the track of what is followed for `follow` it is now (seconds): where it is dragged, while it is;
+/// else as reckoned (see `Reckoning`); none where its player does not say.
 #[cfg(windows)]
 pub fn position(follow: Follow) -> Option<f64> {
-    POSITION[follow as usize].lock().unwrap().map(|(at, when, playing, rate)| if playing { at + when.elapsed().as_secs_f64() * rate } else { at })
+    dragged_to(follow).or_else(|| RECKONING[follow as usize].lock().unwrap().as_ref().map(|reckoning| reckoning.at(std::time::Instant::now())))
 }
 
 /// Looks at how what is followed for `follow` is; how long till the next line of the lyrics is due, where one is
 /// (music's, while lyrics are shown).
 #[cfg(windows)]
 fn look(follow: Follow) -> Option<std::time::Duration> {
+    let _one = LOOKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let f = follow as usize;
     let mut playing = crate::media::playing_of(follow);
     if follow == Follow::Music {
         *MUSIC_PLAYERS.lock().unwrap() = crate::media::music_players();
     }
-    // Dragged along: as far as it is dragged. Just asked to go somewhere along it: see `SOUGHT`, below.
-    let (dragged, settling) = match *SEEKING[f].lock().unwrap() {
-        Some((at, None)) => (Some(at), false),
-        Some((_, Some(till))) => (None, std::time::Instant::now() < till),
-        None => (None, false),
-    };
-    let seeking = dragged.is_some() || settling;
-    if let (Some(at), Some((position, _))) = (dragged, playing.as_mut().and_then(|playing| playing.timeline.as_mut())) {
+    // Just asked to go somewhere along it: what its player says meanwhile not taken (see `SEEKING`).
+    let now = std::time::Instant::now();
+    let settling = matches!(*SEEKING[f].lock().unwrap(), Some((_, Some(till))) if now < till);
+    {
+        let mut reckoning = RECKONING[f].lock().unwrap();
+        *reckoning = playing.as_ref().and_then(|playing| {
+            let (at, length) = playing.timeline?;
+            let report = Report { app_id: &playing.app_id, title: &playing.title, playing: playing.playing, rate: playing.rate, at, length, said: playing.said };
+            Some(Reckoning::after(reckoning.as_ref(), report, settling, now))
+        });
+        if let (Some(reckoning), Some((position, _))) = (reckoning.as_ref(), playing.as_mut().and_then(|playing| playing.timeline.as_mut())) {
+            *position = reckoning.at;
+        }
+    }
+    // Dragged along: shown as far as it is dragged.
+    if let (Some(at), Some((position, _))) = (dragged_to(follow), playing.as_mut().and_then(|playing| playing.timeline.as_mut())) {
         *position = at;
     }
-    // Paused, where its player last said how far in it was while it still played (as NetEase's does: it says
-    // nothing more as it pauses), it went on from there till it paused: where it was as the pause was first seen,
-    // held till the player says again. (Taken as said, the line sung went back as much as a second.)
-    let now = std::time::Instant::now();
-    // Played from elsewhere along its track: where it was asked to go, on from then while it plays (not held there:
-    // held, and reckoned on from each look, the line sung went back and forth till it was let go), whatever its player
-    // says while it settles there; after, till its player says again, or another track plays (what it said before
-    // stands for where it was then, not where it is: Media Player says nothing more after it is moved along, and was
-    // taken back where it had been).
-    if let (Some(playing), None) = (playing.as_mut(), dragged) {
-        let mut sought = SOUGHT[f].lock().unwrap();
-        if let (Some((at, when, title)), Some((position, _))) = (sought.as_ref(), playing.timeline.as_mut()) {
-            let said_at = playing.said_ago.map(|ago| now - std::time::Duration::from_secs_f64(ago));
-            if !settling && (*title != playing.title || said_at.is_some_and(|said| said > *when)) {
-                *sought = None;
-            } else {
-                *position = at + if playing.playing { now.duration_since(*when).as_secs_f64() * playing.rate } else { 0.0 };
-            }
-        }
-    }
-    if let (Some(playing), seeking) = (playing.as_mut(), seeking) {
-        let said_at = playing.said_ago.map(|ago| now - std::time::Duration::from_secs_f64(ago));
-        let mut held = HELD[f].lock().unwrap();
-        // (What was looked at before, and held, is of this track, or nothing to it: another program's playing as it
-        // closed was taken for this one's pausing just then, and all the time since it last said where it was added
-        // to it, past its end.)
-        let same = TRACK[f].lock().unwrap().as_ref().is_some_and(|(app, title)| *app == playing.app_id && *title == playing.title);
-        let mut resumed = RESUMED[f].lock().unwrap();
-        if !same {
-            *held = None;
-            *resumed = None;
-        }
-        let was = *POSITION[f].lock().unwrap();
-        let sought = SOUGHT[f].lock().unwrap().is_some();
-        match (playing.playing, playing.timeline.as_mut()) {
-            // Played again just now (from where it was shown paused), or since, its player not having said again:
-            // on from where it was paused, by the time since it played again.
-            (true, Some((position, _))) if !seeking && !sought => {
-                *held = None;
-                if let (true, Some((at, _, false, _))) = (same, was) {
-                    *resumed = Some((now, at));
-                }
-                match *resumed {
-                    Some((since, at)) if said_at.is_none_or(|said| said <= since) => *position = at + now.duration_since(since).as_secs_f64() * playing.rate,
-                    _ => *resumed = None,
-                }
-            }
-            (false, Some((position, _))) if !seeking => {
-                *resumed = None;
-                match *held {
-                    // The same saying as when the pause was seen: where it was held.
-                    Some((at, by)) if said_at.is_some_and(|said| said <= by + std::time::Duration::from_millis(50)) => *position = at,
-                    // Paused just now: on from what was said, to now.
-                    _ if same && was.is_some_and(|(_, _, playing, _)| playing) => {
-                        let rate = was.map_or(1.0, |(_, _, _, rate)| rate);
-                        let at = *position + playing.said_ago.unwrap_or(0.0) * rate;
-                        *position = at;
-                        *held = said_at.map(|said| (at, said));
-                    }
-                    // Said again since (or paused before it was first looked at): as said.
-                    _ => *held = None,
-                }
-            }
-            _ => {
-                *held = None;
-                *resumed = None;
-            }
-        }
-    }
-    *POSITION[f].lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, now, playing.playing, playing.rate)));
-    *TRACK[f].lock().unwrap() = playing.as_ref().map(|playing| (playing.app_id.clone(), playing.title.clone()));
     let timeline = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, length)| Timeline { at: at.floor(), length, seekable: playing.seekable }));
     let sound = crate::actions::volume();
     // (The slider held, where it is.)
@@ -376,9 +358,7 @@ pub fn watch(wanted: impl Fn() -> (bool, bool, bool) + Send + 'static, changed: 
                     // Where it was, and whether it played, as last looked at, no longer known (not looked at
                     // meanwhile, a pause then was taken for one just now, and the whole time since added to where it
                     // was held).
-                    *POSITION[follow as usize].lock().unwrap() = None;
-                    *HELD[follow as usize].lock().unwrap() = None;
-                    *RESUMED[follow as usize].lock().unwrap() = None;
+                    *RECKONING[follow as usize].lock().unwrap() = None;
                 } else if !heeded.as_ref().is_some_and(|heeded| heeded.stands(follow)) {
                     *heeded = None;
                     *heeded = crate::media::heed(follow, look_now);
@@ -467,11 +447,21 @@ pub fn act_on(follow: Follow, act: Act) {
             Act::Volume(level) => sound_to(Some(level), None),
             Act::Seek(at) => {
                 // Shown there at once, and till the player says it is.
-                *SEEKING[f].lock().unwrap() = Some((at, Some(std::time::Instant::now() + SETTLES)));
-                *SOUGHT[f].lock().unwrap() = NOW[f].lock().unwrap().clone().map(|now| (at, std::time::Instant::now(), now.title));
+                // Reckoned from there, on from now: what its player said before stands for where it was then.
+                let now = std::time::Instant::now();
+                *SEEKING[f].lock().unwrap() = Some((at, Some(now + SETTLES)));
+                let before = {
+                    let mut reckoning = RECKONING[f].lock().unwrap();
+                    let before = reckoning.clone();
+                    if let Some(reckoning) = reckoning.as_mut() {
+                        let said = Some(reckoning.said.unwrap_or(i64::MIN).max(said_now()));
+                        *reckoning = Reckoning { at, when: now, said, ..reckoning.clone() };
+                    }
+                    before
+                };
                 if !crate::media::seek_of(follow, at) {
                     *SEEKING[f].lock().unwrap() = None;
-                    *SOUGHT[f].lock().unwrap() = None;
+                    *RECKONING[f].lock().unwrap() = before;
                 }
             }
         }
@@ -597,10 +587,6 @@ fn shown_dragged(follow: Follow, at: f64) {
     let now = NOW[f].lock().unwrap().clone();
     let Some(now) = now else { return };
     let Some(timeline) = now.timeline else { return };
-    let mut position = POSITION[f].lock().unwrap();
-    let rate = position.map_or(1.0, |(_, _, _, rate)| rate);
-    *position = Some((at, std::time::Instant::now(), now.playing, rate));
-    drop(position);
     keep(follow, Some(Now { timeline: Some(Timeline { at: at.floor(), ..timeline }), ..now }));
 }
 
@@ -690,6 +676,134 @@ mod tests {
         assert_eq!(shown.timeline.map(|timeline| timeline.at), Some(50.0));
         assert!(position(Follow::Any).is_some_and(|at| (50.0..51.0).contains(&at)));
         *SEEKING[Follow::Any as usize].lock().unwrap() = None;
+    }
+
+    /// A player's reports, one look after another, `seconds` after the first: where each puts it.
+    struct Player {
+        start: std::time::Instant,
+        was: Option<Reckoning>,
+    }
+
+    /// Tenths of a microsecond, as reports say when: `seconds` after the first look.
+    fn ticks(seconds: f64) -> i64 {
+        1_000_000_000 + (seconds * 1e7) as i64
+    }
+
+    impl Player {
+        fn new() -> Player {
+            Player { start: std::time::Instant::now(), was: None }
+        }
+
+        /// Looked at `seconds` in: `playing` at `rate`, its last report said at `said` (seconds in) that it was `at`
+        /// then (reckoned on to now while it plays, as `media::timeline` does).
+        fn look(&mut self, seconds: f64, title: &str, playing: bool, rate: f64, said: f64, at: f64) -> f64 {
+            self.look_settling(seconds, title, playing, rate, said, at, false)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn look_settling(&mut self, seconds: f64, title: &str, playing: bool, rate: f64, said: f64, at: f64, settling: bool) -> f64 {
+            let now = self.start + std::time::Duration::from_secs_f64(seconds);
+            let at = if playing { at + (seconds - said) * rate } else { at };
+            let report = Report { app_id: "player", title, playing, rate, at, length: 600.0, said: Some(ticks(said)) };
+            let reckoning = Reckoning::after(self.was.as_ref(), report, settling, now);
+            let at = reckoning.at;
+            self.was = Some(reckoning);
+            at
+        }
+
+        /// Moved along to `at`, `seconds` in (as `act_on` does).
+        fn sought(&mut self, seconds: f64, at: f64) {
+            let now = self.start + std::time::Duration::from_secs_f64(seconds);
+            let was = self.was.clone().unwrap();
+            self.was = Some(Reckoning { at, when: now, said: Some(was.said.unwrap().max(ticks(seconds))), ..was });
+        }
+    }
+
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    /// Played again after a pause, its player not saying where yet (QQ Music): on from where it was paused, not
+    /// ahead by the pause; then as it says.
+    #[test]
+    fn played_again_goes_on_from_where_it_was_paused() {
+        let mut player = Player::new();
+        assert!(near(player.look(0.0, "A", true, 1.0, 0.0, 10.0), 10.0));
+        // Paused at 15 s, said so then.
+        assert!(near(player.look(5.0, "A", false, 1.0, 5.0, 15.0), 15.0));
+        // Played again 60 s later: says it plays, its report still the pause's.
+        assert!(near(player.look(65.0, "A", true, 1.0, 5.0, 15.0), 15.0));
+        assert!(near(player.look(70.0, "A", true, 1.0, 5.0, 15.0), 20.0));
+        // Then says where it is.
+        assert!(near(player.look(71.0, "A", true, 1.0, 70.5, 20.5), 21.0));
+    }
+
+    /// Paused, its player not saying so (NetEase): on from its last report till the pause is seen, then held there;
+    /// paused again after playing again, the first pause not counted again.
+    #[test]
+    fn a_pause_holds_where_it_was_seen() {
+        let mut player = Player::new();
+        player.look(0.0, "A", true, 1.0, 0.0, 10.0);
+        assert!(near(player.look(5.0, "A", false, 1.0, 0.0, 10.0), 15.0));
+        assert!(near(player.look(65.0, "A", false, 1.0, 0.0, 10.0), 15.0));
+        assert!(near(player.look(65.0, "A", true, 1.0, 0.0, 10.0), 15.0));
+        assert!(near(player.look(70.0, "A", false, 1.0, 0.0, 10.0), 20.0));
+        assert!(near(player.look(200.0, "A", false, 1.0, 0.0, 10.0), 20.0));
+    }
+
+    /// Moved along while paused, then played a minute later, its player not saying: from where it was moved to, the
+    /// pause not counted; what it says from before the move not taken, what it says after taken.
+    #[test]
+    fn moved_along_while_paused_holds_there() {
+        let mut player = Player::new();
+        player.look(0.0, "A", false, 1.0, 0.0, 10.0);
+        player.sought(1.0, 100.0);
+        assert!(near(player.look(2.0, "A", false, 1.0, 0.0, 10.0), 100.0));
+        assert!(near(player.look(61.0, "A", true, 1.0, 0.0, 10.0), 100.0));
+        assert!(near(player.look(66.0, "A", true, 1.0, 0.0, 10.0), 105.0));
+        // Paused after: held where it was, the report's age not added.
+        assert!(near(player.look(70.0, "A", false, 1.0, 0.0, 10.0), 109.0));
+        assert!(near(player.look(80.0, "A", false, 1.0, 80.0, 109.5), 109.5));
+    }
+
+    /// While it settles after a move, what its player says is not taken, even if newer.
+    #[test]
+    fn settling_after_a_move_takes_nothing_said() {
+        let mut player = Player::new();
+        player.look(0.0, "A", true, 1.0, 0.0, 10.0);
+        player.sought(1.0, 100.0);
+        assert!(near(player.look_settling(1.5, "A", true, 1.0, 1.2, 11.2, true), 100.5));
+        assert!(near(player.look(3.0, "A", true, 1.0, 2.5, 101.5), 102.0));
+    }
+
+    /// Another rate counts from when it is seen, not over what played before.
+    #[test]
+    fn another_rate_counts_from_when_it_is_seen() {
+        let mut player = Player::new();
+        player.look(0.0, "A", true, 1.0, 0.0, 50.0);
+        assert!(near(player.look(10.0, "A", true, 2.0, 0.0, 50.0), 60.0));
+        assert!(near(player.look(15.0, "A", true, 2.0, 0.0, 50.0), 70.0));
+    }
+
+    /// A report newer than what was taken is taken, whether it came before or after its playing again was seen.
+    #[test]
+    fn a_newer_report_is_taken() {
+        let mut player = Player::new();
+        player.look(0.0, "A", false, 1.0, 0.0, 60.0);
+        // Moved along elsewhere and played, its player saying so before Glance looked.
+        assert!(near(player.look(10.0, "A", true, 1.0, 9.0, 120.0), 121.0));
+    }
+
+    /// Another track, or another player's: as its own player says, nothing of what was reckoned before.
+    #[test]
+    fn another_track_is_as_said() {
+        let mut player = Player::new();
+        player.look(0.0, "A", false, 1.0, 0.0, 60.0);
+        player.sought(1.0, 100.0);
+        assert!(near(player.look(2.0, "B", false, 1.0, 0.0, 30.0), 30.0));
+        let now = player.start + std::time::Duration::from_secs(3);
+        let other = Report { app_id: "other", title: "B", playing: false, rate: 1.0, at: 40.0, length: 600.0, said: Some(ticks(0.0)) };
+        assert!(near(Reckoning::after(player.was.as_ref(), other, false, now).at, 40.0));
     }
 
     /// Pausing shows it paused at once, and returns (it once locked what plays twice, and Glance hung).
