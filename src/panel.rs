@@ -104,6 +104,8 @@ const OPEN_FROM_TRAY: u32 = WM_APP + 1;
 const DISMISS: u32 = WM_APP + 2;
 const RESTYLE: u32 = WM_APP + 3;
 const OPEN_SETTINGS: u32 = WM_APP + 4;
+/// Notes asked to be stuck on the desktop (see `Controller::stick_note`).
+const STICK_NOTES: u32 = WM_APP + 30;
 const TOGGLE: u32 = WM_APP + 5;
 /// A new sample: the overlay is drawn again.
 const OVERLAY: u32 = WM_APP + 7;
@@ -430,6 +432,18 @@ impl Controller {
     /// takes the tray's and the overlay's asking.
     pub fn open_settings(&self) {
         self.post(OPEN_SETTINGS);
+    }
+
+    /// The note `name` stuck on the desktop with its corner at `at` (asked from any thread: done on the panel's).
+    pub fn stick_note(&self, name: String, at: POINT) {
+        STUCK.lock().unwrap().push((name, Some(at)));
+        self.post(STICK_NOTES);
+    }
+
+    /// The note `name`'s card on the desktop taken away, where it is stuck (it was deleted).
+    pub fn unstick_note(&self, name: String) {
+        STUCK.lock().unwrap().push((name, None));
+        self.post(STICK_NOTES);
     }
 
     /// The modules this machine has, in their default order.
@@ -771,6 +785,14 @@ impl Controller {
                 crate::ui::window::SCREENS_CHANGED if widgets.owns(msg.hwnd) || widgets.full_owns(msg.hwnd) => widgets.screens_changed(),
                 crate::widget::CAPTURED if widgets.owns(msg.hwnd) => widgets.captured(msg.hwnd),
                 OPEN_SETTINGS => settings_window::open(),
+                STICK_NOTES => {
+                    for (name, at) in std::mem::take(&mut *STUCK.lock().unwrap()) {
+                        match at {
+                            Some(at) => widgets.stick_note(&name, at),
+                            None => widgets.unstick_note(&name),
+                        }
+                    }
+                }
                 TRAY_MENU => {
                     let (x, y) = ((msg.lParam.0 & 0xFFFF) as u16 as i16 as i32, ((msg.lParam.0 >> 16) & 0xFFFF) as u16 as i16 as i32);
                     self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
@@ -979,6 +1001,13 @@ impl Controller {
                     let torn = widgets.torn_in_hand().unwrap();
                     widgets.release(torn, now, false)
                 }
+                // A note stuck on the desktop pressed in the panel: the one stuck shown, not opened a second time.
+                WM_LBUTTONUP
+                    if msg.hwnd == panel.window.hwnd
+                        && panel.hit_at(lparam_point(msg.lParam)).and_then(|hit| if let Hit::Note(at) = hit { crate::notes::shown().get(usize::from(at)).map(|note| note.name.clone()) } else { None }).is_some_and(|name| widgets.raise_note(&name)) =>
+                {
+                    panel.dismiss();
+                }
                 // The station's head's buttons: their menus.
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd && panel.hit_at(lparam_point(msg.lParam)).is_some_and(Hit::opens_menu) => {
                     let hit = panel.hit_at(lparam_point(msg.lParam)).unwrap();
@@ -1128,6 +1157,9 @@ impl Controller {
         }
     }
 }
+
+/// Notes asked to be stuck on the desktop, and where (see `Controller::stick_note`), or taken off it (none).
+static STUCK: std::sync::Mutex<Vec<(String, Option<POINT>)>> = std::sync::Mutex::new(Vec::new());
 
 /// The overlay kept under `menu`, while one is up (see `Overlay::under_menu`).
 fn keep_menu_above(menu: &Option<(crate::ui::menu::Menu, MenuFor)>, overlay: &mut Option<Overlay>) {

@@ -185,6 +185,7 @@ impl Writing {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum NoteChoice {
     Colour(crate::notes::Colour),
+    Stick,
     TakeAway,
 }
 
@@ -589,7 +590,8 @@ impl Beside {
         let names = [(Colour::Blue, lang.pick("蓝色", "Blue")), (Colour::Yellow, lang.pick("黄色", "Yellow")), (Colour::Green, lang.pick("绿色", "Green")), (Colour::Pink, lang.pick("粉色", "Pink")), (Colour::Purple, lang.pick("紫色", "Purple")), (Colour::Grey, lang.pick("灰色", "Grey"))];
         let mut rows: Vec<(NoteChoice, &'static str, Icon, bool, bool)> = names.iter().map(|(colour, name)| (NoteChoice::Colour(*colour), *name, Icon::Image, writing.colour == *colour, false)).collect();
         if writing.name.is_some() {
-            rows.push((NoteChoice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Icon::Close, false, true));
+            rows.push((NoteChoice::Stick, lang.pick("贴到桌面", "Stick on the desktop"), Icon::Pin, false, true));
+            rows.push((NoteChoice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Icon::Close, false, false));
         }
         let items = rows.iter().map(|(_, label, icon, checked, rule_before)| Item { label, icon: Some(*icon), checked: *checked, rule_before: *rule_before }).collect();
         if let Some(menu) = Menu::open_at(items, self.theme.dark, at, false, false) {
@@ -612,11 +614,25 @@ impl Beside {
                 self.redraw();
                 false
             }
+            // Its card on the desktop where the page is, the page gone.
+            NoteChoice::Stick => {
+                let Some(name) = writing.name.clone() else { return false };
+                let mut place = RECT::default();
+                unsafe {
+                    let _ = GetWindowRect(self.hwnd, &mut place);
+                }
+                crate::app().controller.stick_note(name, POINT { x: place.left + (24.0 * self.scale) as i32, y: place.top + (24.0 * self.scale) as i32 });
+                true
+            }
             NoteChoice::TakeAway => {
                 let taken = writing.name.as_ref().is_some_and(|name| folder.take_away(name));
                 if taken {
                     writing.unkept = false;
                     crate::notes::read_again();
+                    // (Its card on the desktop goes with it.)
+                    if let Some(name) = writing.name.clone() {
+                        crate::app().controller.unstick_note(name);
+                    }
                 }
                 taken
             }

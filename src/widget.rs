@@ -59,14 +59,15 @@ const ONLY_FORM: &str = "only:";
 /// after `ONLY_FORM` (a form an older Glance does not know: it leaves the widget out, rather than show all the lanes).
 fn form_of(only: Option<&str>, form: String) -> String {
     match only {
-        Some(id) => format!("{ONLY_FORM}{id}:{form}"),
+        Some(id) => format!("{ONLY_FORM}{id}|{form}"),
         None => form,
     }
 }
 
 /// A kept form read back (see `form_of`): the one lane it shows, if it shows one, and its form.
 fn only_of(kept: &str) -> (Option<String>, String) {
-    match kept.strip_prefix(ONLY_FORM).and_then(|rest| rest.split_once(':')) {
+    // (A module's id may hold ':', as a note stuck on the desktop's does; '|' none, nor a file's name.)
+    match kept.strip_prefix(ONLY_FORM).and_then(|rest| rest.split_once('|')) {
         Some((id, form)) => (Some(id.to_string()), form.to_string()),
         None => (None, kept.to_string()),
     }
@@ -1203,6 +1204,43 @@ impl Widgets {
         widget.window.yield_to(self.settings);
         unsafe { SetCapture(widget.window.hwnd) };
         self.list.push(widget);
+        true
+    }
+
+    /// The note `name` stuck on the desktop: a widget of its card alone, its corner at `at` (one stuck already is
+    /// raised instead).
+    pub fn stick_note(&mut self, name: &str, at: POINT) {
+        if self.raise_note(name) {
+            return;
+        }
+        let Some(contact) = monitor_at(at) else { return };
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE)), ..Readings::new(choice) });
+        if let Some(widget) = Widget::new(contact, at, content) {
+            widget.window.yield_to(self.settings);
+            self.list.push(widget);
+            self.save();
+        }
+    }
+
+    /// The widget the note `name` is stuck on the desktop as taken away (the note deleted): not put away to be
+    /// brought back, gone.
+    pub fn unstick_note(&mut self, name: &str) {
+        let only = format!("{}{name}", view::STUCK_NOTE);
+        if let Some(index) = self.list.iter().position(|widget| matches!(&widget.content, Content::Readings(readings) if readings.only.as_deref() == Some(only.as_str()))) {
+            let mut widget = self.list.remove(index);
+            widget.gone();
+            widget.window.destroy();
+            self.save();
+        }
+    }
+
+    /// The widget the note `name` is stuck on the desktop as, raised in front; whether there is one.
+    pub fn raise_note(&mut self, name: &str) -> bool {
+        let only = format!("{}{name}", view::STUCK_NOTE);
+        let Some(widget) = self.list.iter_mut().find(|widget| matches!(&widget.content, Content::Readings(readings) if readings.only.as_deref() == Some(only.as_str()))) else { return false };
+        widget.window.raise();
+        widget.next_frame = Instant::now();
         true
     }
 
@@ -3495,6 +3533,7 @@ mod tests {
         let form = Form::Lanes { detail: view::Detail::Full, columns: 1 }.key();
         let kept = form_of(Some("station"), form.clone());
         assert_eq!(only_of(&kept), (Some("station".to_string()), form.clone()));
+        assert_eq!(only_of(&form_of(Some("note:周会: 议题.md"), form.clone())), (Some("note:周会: 议题.md".to_string()), form.clone()));
         assert_eq!(only_of(&form_of(None, form.clone())), (None, form));
         assert!(Form::from_key(&kept).is_none());
     }

@@ -450,6 +450,8 @@ enum Block {
 /// A note as its card shows it: its title, its first lines, how long ago it was written, its colour.
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub struct NoteCard {
+    /// Its place among the notes (see `notes::shown`), as a press on it names it.
+    at: u16,
     title: String,
     lines: Vec<String>,
     when: String,
@@ -546,6 +548,9 @@ impl Tile {
     }
 }
 
+/// What a note stuck on the desktop is shown as: a lane of this name and its file's (see `stuck_note_lane`).
+pub const STUCK_NOTE: &str = "note:";
+
 /// How tall the room under a whole notes lane's head is, and a small lane's.
 const NOTES_TALL: f32 = 250.0;
 const NOTE_SMALL: f32 = 64.0;
@@ -558,15 +563,7 @@ const NOTE_CARD: f32 = 96.0;
 /// them as they show; else the last written alone.
 fn notes_lane(full: bool, lang: Lang) -> Vec<Block> {
     let now = crate::station::now_ms();
-    let notes: Vec<NoteCard> = crate::notes::shown()
-        .iter()
-        .map(|note| NoteCard {
-            title: if note.title().is_empty() { lang.pick("无标题", "Untitled").into() } else { note.title().to_string() },
-            lines: note.text.lines().map(str::trim).filter(|line| !line.is_empty()).skip(1).take(6).map(markdown_plain).collect(),
-            when: text::since(note.stamp.written_ms, now, lang),
-            colour: note.colour,
-        })
-        .collect();
+    let notes: Vec<NoteCard> = crate::notes::shown().iter().enumerate().map(|(at, note)| note_card(at, note, lang, now, 6)).collect();
     let count = match notes.len() {
         0 => String::new(),
         n if lang == Lang::Zh => format!("{n} 条"),
@@ -578,6 +575,28 @@ fn notes_lane(full: bool, lang: Lang) -> Vec<Block> {
     } else {
         vec![head(lang.pick("便签", "Notes"), count, "", false), Block::Notes { notes: notes.into_iter().take(1).collect(), view: crate::settings::NotesView::Deck, tall: NOTE_SMALL }]
     }
+}
+
+/// `note` (at `at` among them) as its card shows it, with up to `lines` of its lines after its title.
+fn note_card(at: usize, note: &crate::notes::Note, lang: Lang, now: u64, lines: usize) -> NoteCard {
+    NoteCard {
+        at: at as u16,
+        title: if note.title().is_empty() { lang.pick("无标题", "Untitled").into() } else { note.title().to_string() },
+        lines: note.text.lines().map(str::trim).filter(|line| !line.is_empty()).skip(1).take(lines).map(markdown_plain).collect(),
+        when: text::since(note.stamp.written_ms, now, lang),
+        colour: note.colour,
+    }
+}
+
+/// A note stuck on the desktop (`name`, its file's): its card alone, as tall as its lines take (up to a while); none
+/// where the note is gone.
+fn stuck_note_lane(name: &str, lang: Lang) -> Option<Vec<Block>> {
+    let now = crate::station::now_ms();
+    let shown = crate::notes::shown();
+    let (at, note) = shown.iter().enumerate().find(|(_, note)| note.name == name)?;
+    let card = note_card(at, note, lang, now, 14);
+    let tall = (60.0 + card.lines.len() as f32 * (LINE + 3.0) + 12.0).max(NOTE_CARD);
+    Some(vec![Block::Notes { notes: vec![card], view: crate::settings::NotesView::Deck, tall }])
 }
 
 /// A line of Markdown as plain words: its marks taken off (a heading's, a list's, a to-do's box, emphasis, code).
@@ -621,7 +640,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
         return;
     }
     let radius = theme.control_radius.max(8.0);
-    let lit = |at: usize| scene.hover == Some(Hit::Note(at as u16));
+    let lit = |at: usize| notes.get(at).is_some_and(|note| scene.hover == Some(Hit::Note(note.at)));
     frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
     match view {
         NotesView::Deck => {
@@ -639,7 +658,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 note_mark(frame, theme, mark, left, y, strip);
                 frame.text(&fitted(frame, &note.title, theme.body, width - 110.0), theme.body, theme.text, left + 22.0, y + (strip - LINE) / 2.0, width - 110.0, Align::Start);
                 frame.text(&note.when, theme.small, theme.text3, left, y + (strip - LINE) / 2.0 + 1.0, width - 12.0, Align::End);
-                hits.push((left, y, width, NOTE_STRIP, Hit::Note(at as u16)));
+                hits.push((left, y, width, NOTE_STRIP, Hit::Note(note.at)));
             }
             let y = top + strips as f32 * NOTE_STRIP;
             let front = &notes[0];
@@ -660,7 +679,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 }
                 frame.text(&fitted(frame, line, theme.body, width - 24.0), theme.body, theme.text2, left + 12.0, line_y, width - 24.0, Align::Start);
             }
-            hits.push((left, y, width, card, Hit::Note(0)));
+            hits.push((left, y, width, card, Hit::Note(front.at)));
         }
         NotesView::Cards => {
             let across = 2;
@@ -685,7 +704,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                     frame.text(&fitted(frame, line, theme.small, card_w - 20.0), theme.small, theme.text2, x + 10.0, y + 32.0 + line_at as f32 * (LINE + 1.0), card_w - 20.0, Align::Start);
                 }
                 frame.text(&note.when, theme.small, theme.text3, x + 10.0, y + NOTE_CARD - LINE - 6.0, card_w - 20.0, Align::Start);
-                hits.push((x, y, card_w, NOTE_CARD, Hit::Note(at as u16)));
+                hits.push((x, y, card_w, NOTE_CARD, Hit::Note(note.at)));
             }
             if most > 0.0 {
                 hits.push((left, top, width, tall, Hit::List(List::Notes, most.to_bits())));
@@ -707,7 +726,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 frame.text(&fitted(frame, &note.title, theme.body, width - 24.0 - when_w), theme.body, theme.text, left + 18.0, y + 4.0, width - 24.0 - when_w, Align::Start);
                 frame.text(&fitted(frame, note.lines.first().map_or("", String::as_str), theme.small, width - 24.0), theme.small, theme.text3, left + 18.0, y + 4.0 + LINE, width - 24.0, Align::Start);
                 frame.text(&note.when, theme.small, theme.text3, left, y + 4.0, width, Align::End);
-                hits.push((left, y, width, NOTE_ROW, Hit::Note(at as u16)));
+                hits.push((left, y, width, NOTE_ROW, Hit::Note(note.at)));
             }
             if most > 0.0 {
                 hits.push((left, top, width, tall, Hit::List(List::Notes, most.to_bits())));
@@ -1829,6 +1848,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         "station" => station_lane(full, scene.tab, lang),
         "apps" => apps_lane(full, lang),
         "notes" => notes_lane(full, lang),
+        id if id.starts_with(STUCK_NOTE) => return stuck_note_lane(&id[STUCK_NOTE.len()..], lang),
         // What plays, in a widget merged with readings: drawn apart (see `Scene::music_apart`), its lane its head and
         // room under it (a player's, full; a strip's, compact).
         "lyrics" if scene.music_apart => {
