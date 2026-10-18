@@ -104,6 +104,12 @@ fn player_zoom(h: f32, more: f32) -> f32 {
     (h / (PLAYER_FROM + more)).min(1.0)
 }
 
+/// How large a layout is drawn in a room `size` large (DIPs) showing `shows`, of its own size (see `player_zoom`).
+fn zoom_at(layout: Layout, size: (f32, f32), shows: &Shows) -> f32 {
+    let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
+    if layout == Layout::Player { player_zoom(size.1, more) } else { 1.0 }
+}
+
 /// The least a music widget is (DIPs).
 pub const LEAST: (f32, f32) = (240.0, 56.0);
 /// What plays as a panel slides it out (DIPs, at the panel's size 1): from a side edge as a card, from the top as a
@@ -351,6 +357,10 @@ pub struct Painted {
     pub busy: bool,
 }
 
+/// Its colours with no cover (as it begins, and for a track with none).
+const TINT: [f32; 3] = [1.0, 0.9, 0.8];
+const ACCENT: [f32; 3] = [1.0, 0.75, 0.6];
+
 impl Default for Music {
     fn default() -> Self {
         Music {
@@ -361,8 +371,8 @@ impl Default for Music {
             last_frame: Instant::now(),
             backdrop: None,
             fading: None,
-            tint: [1.0, 0.9, 0.8],
-            accent: [1.0, 0.75, 0.6],
+            tint: TINT,
+            accent: ACCENT,
             ground_pixels: None,
             ground: Layer::default(),
             controls_in: 0.0,
@@ -409,6 +419,8 @@ struct Moment {
     said: Option<String>,
     playing: bool,
     cover: Option<Arc<Cover>>,
+    /// Known to have no cover (see `cover::has_none`): the last track's goes, and its colours.
+    no_cover: bool,
     sound: crate::sound::Heard,
 }
 
@@ -424,6 +436,7 @@ fn moment() -> Moment {
         length: heard.as_ref().and_then(|heard| heard.timeline).map(|timeline| (timeline.length, timeline.seekable)),
         dragged_to: crate::playing::dragged_to(crate::playing::Follow::Music),
         cover: heard.as_ref().filter(|heard| !heard.title.is_empty()).and_then(crate::cover::of),
+        no_cover: heard.as_ref().filter(|heard| !heard.title.is_empty()).is_some_and(crate::cover::has_none),
         sound: if playing { crate::sound::heard() } else { crate::sound::Heard::default() },
         title,
         artist,
@@ -524,6 +537,7 @@ fn example(t: f64) -> Moment {
         said: None,
         playing: true,
         cover: Some(example_cover()),
+        no_cover: false,
         sound: crate::sound::Heard { level: 0.7, bands, beat: (0.5 + 0.5 * (t * 4.0).sin()).max(0.0) as f32 },
     }
 }
@@ -576,6 +590,10 @@ impl Music {
             self.tint = toward(self.tint, readable(cover.base, 0.72), 0.2);
             self.accent = toward(self.accent, readable(cover.accent, 0.62), 0.2);
             self.backdrop(frame, &cover);
+        } else if heard.as_ref().filter(|heard| !heard.title.is_empty()).is_some_and(crate::cover::has_none) {
+            self.tint = toward(self.tint, TINT, 0.2);
+            self.accent = toward(self.accent, ACCENT, 0.2);
+            self.no_backdrop();
         }
         let shown = self.fading.as_ref().map_or(1.0, |(_, since)| (since.elapsed().as_secs_f32() / 1.2).min(1.0));
         let before = self.fading.as_ref().map(|(before, _)| before.clone());
@@ -613,16 +631,15 @@ impl Music {
     fn paint_moment(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, moment: Moment) -> Painted {
         // A player less tall than the least it is (sized toward the strip, not yet nearer it): that least, smaller as
         // a whole (see `player_zoom`).
-        let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
-        let zoom = if Layout::for_room(size, shows, self.layout) == Layout::Player { player_zoom(size.1, more) } else { 1.0 };
+        let zoom = zoom_at(Layout::for_room(size, shows, self.layout), size, shows);
         if zoom >= 1.0 {
-            return self.paint_laid(frame, size, shows, ground, scale, pointer, now, moment);
+            return self.paint_laid(frame, size, shows, ground, scale, pointer, now, moment, 1.0);
         }
         let mut painted = Painted { hits: Vec::new(), busy: false };
         frame.turned(0.0, 0.0, 0.0, (zoom, zoom), |frame| {
             let _moving = frame.moving_while(true);
             let pointer = pointer.map(|(x, y)| (x / zoom, y / zoom));
-            painted = self.paint_laid(frame, (size.0 / zoom, size.1 / zoom), shows, ground, scale * zoom, pointer, now, moment);
+            painted = self.paint_laid(frame, (size.0 / zoom, size.1 / zoom), shows, ground, scale * zoom, pointer, now, moment, zoom);
         });
         for (x, y, w, h, _) in &mut painted.hits {
             (*x, *y, *w, *h) = (*x * zoom, *y * zoom, *w * zoom, *h * zoom);
@@ -630,21 +647,31 @@ impl Music {
         painted
     }
 
-    /// As `paint_moment`, in `size` as it is laid out there.
+    /// As `paint_moment`, in `size` as it is laid out there, drawn `zoom` as large (see `zoom_at`).
     #[allow(clippy::too_many_arguments)]
-    fn paint_laid(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, mut moment: Moment) -> Painted {
+    fn paint_laid(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, mut moment: Moment, zoom: f32) -> Painted {
         let step = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
         self.step = step;
         self.easing = false;
-        // The colours, toward the cover's (a little each frame).
+        // The colours, toward the cover's (a little each frame); with none, toward its own.
+        let ease = (step * 3.0).min(1.0);
         if let Some(cover) = &moment.cover {
-            let ease = (step * 3.0).min(1.0);
             self.tint = toward(self.tint, readable(cover.base, 0.72), ease);
             self.accent = toward(self.accent, readable(cover.accent, 0.62), ease);
+        } else if moment.no_cover {
+            self.tint = toward(self.tint, TINT, ease);
+            self.accent = toward(self.accent, ACCENT, ease);
         }
         // Turned to a line a while ago and left there: back to the one sung now.
         if self.turned != 0 && self.turned_at.elapsed() >= TURNED_HOLD {
+            self.back_to_now();
+        }
+        // Other lyrics (another track): from the line sung now, not turned (turned for the lyrics before, they were
+        // first shown turned as far, and sprang back).
+        let key = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+        let other_lyrics = key != self.lyrics;
+        if other_lyrics {
             self.back_to_now();
         }
         // Turned no further than the lines go.
@@ -658,12 +685,10 @@ impl Music {
         // (The line turned to, as every part that shows it finds it: see `turned_to`.)
         let count = moment.lines.as_ref().map_or(0, |lines| lines.len());
         let target = turned_to(moment.now, self.turned, count).map_or(moment.now.map_or(-1.0, |now| now as f32), |index| index as f32);
-        let key = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
-        if key != self.lyrics {
+        if other_lyrics {
             self.lyrics = key;
             self.rail = target;
             self.rail_speed = 0.0;
-            self.back_to_now();
         }
         let (stiffness, damping, mass) = (142.0, 28.0, 0.82);
         let mut left = step;
@@ -706,17 +731,21 @@ impl Music {
             self.layout = Some(layout);
         }
         // Laid out anew (the player too, from its line to its lines, or back): its parts move from where they were,
-        // from where they had got to if they were moving still.
+        // from where they had got to if they were moving still. (Where they are as drawn, each layout as large as it is
+        // drawn: see `zoom_at`; kept so, and in this one's terms as it is drawn.)
         let lines = layout == Layout::Player && player_shows_lines(size, shows);
+        let drawn = (size.0 * zoom, size.1 * zoom);
         if let Some((was, showed, _)) = self.shown.filter(|shown| *shown != (layout, *shows, lines)) {
+            let was_zoom = zoom_at(was, drawn, &showed);
+            let was_at = placed(was, (drawn.0 / was_zoom, drawn.1 / was_zoom), &showed).scaled(was_zoom);
             let from = match self.turning.and_then(|(since, from)| turned(now, since).map(|t| (from, t))) {
-                Some((from, t)) => tween(from, placed(was, size, &showed), t),
-                None => placed(was, size, &showed),
+                Some((from, t)) => tween(from, was_at, t),
+                None => was_at,
             };
             self.turning = Some((now, from));
         }
         self.shown = Some((layout, *shows, lines));
-        let turn = self.turning.and_then(|(since, from)| turned(now, since).map(|t| (from, t)));
+        let turn = self.turning.and_then(|(since, from)| turned(now, since).map(|t| (from.scaled(1.0 / zoom), t)));
         if turn.is_none() {
             self.turning = None;
         }
@@ -732,7 +761,7 @@ impl Music {
         }, ..*shows };
         let (tint, accent) = if light { (deep(self.tint), deep(self.accent)) } else { (self.tint, self.accent) };
         let ink = if light { 0x1A1A1A } else { 0xFFFFFF };
-        let mut drawing = Drawing { music: self, frame, moment: &moment, shows, ground, ink, edged: ground == Ground::Clear, light, tint, accent, fonts: Fonts::in_family(family), scale, pointer, size, turn, hits: Vec::new() };
+        let mut drawing = Drawing { music: self, frame, moment: &moment, shows, ground, ink, edged: ground == Ground::Clear, light, tint, accent, fonts: Fonts::in_family(family), scale, pointer, size, turn, hits: Vec::new(), clips: Vec::new() };
         drawing.ground(layout);
         drawing.disc(layout);
         // Turning into this layout: what is not on its ground comes in as its parts move.
@@ -777,6 +806,8 @@ struct Drawing<'a> {
     /// Turning from another layout: where its parts were, and how far they have come (0 to 1, eased).
     turn: Option<(Placed, f32)>,
     hits: Vec<HitBox>,
+    /// What is drawn within (see `clip`): each, and how many hits there were as it began.
+    clips: Vec<((f32, f32, f32, f32), usize)>,
 }
 
 /// How far a turn begun at `since` has come by `now` (0 to 1, eased); none once it is over.
@@ -798,6 +829,21 @@ const RECORD_LABEL: f32 = 0.62;
 /// The corners of a cover `side` across, on a card or beside what plays.
 fn cover_corner(side: f32) -> f32 {
     if side < 50.0 { 6.0 } else { 9.0 }
+}
+
+impl Placed {
+    /// Its parts as they are drawn `k` as large.
+    fn scaled(self, k: f32) -> Placed {
+        Placed {
+            cover: self.cover.map(|(x, y, side)| (x * k, y * k, side * k)),
+            title: self.title.map(|(x, y, w, small)| (x * k, y * k, w * k, small)),
+            title_zoom: self.title_zoom * k,
+            below: self.below * k,
+            left: self.left * k,
+            width: self.width * k,
+            ..self
+        }
+    }
 }
 
 fn tween(from: Placed, to: Placed, t: f32) -> Placed {
@@ -988,6 +1034,8 @@ impl Drawing<'_> {
         let frame = self.frame;
         if let Some(cover) = &self.moment.cover {
             self.music.backdrop(frame, cover);
+        } else if self.moment.no_cover {
+            self.music.no_backdrop();
         }
         let shown = self.music.fading.as_ref().map_or(1.0, |(_, since)| (since.elapsed().as_secs_f32() / 1.2).min(1.0));
         let before = self.music.fading.as_ref().map(|(before, _)| before.clone());
@@ -1224,6 +1272,25 @@ impl Drawing<'_> {
     }
 
     /// Whether its player lets what plays be moved along (see `Timeline::seekable`).
+    /// Draws within `x, y, w, h` from now on (till `unclip`): what is pressed there too (a line partly out of it is
+    /// pressed only where it shows: pressed where it was cut off, it played from a line not seen).
+    fn clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.frame.clip(x, y, w, h);
+        self.clips.push(((x, y, w, h), self.hits.len()));
+    }
+
+    /// Draws wherever again (see `clip`): what was pressed within it, cut to it.
+    fn unclip(&mut self) {
+        self.frame.unclip();
+        let ((cx, cy, cw, ch), from) = self.clips.pop().expect("clipped");
+        let within: Vec<HitBox> = self.hits.drain(from..).filter_map(|(x, y, w, h, hit)| {
+            let (left, top) = (x.max(cx), y.max(cy));
+            let (right, bottom) = ((x + w).min(cx + cw), (y + h).min(cy + ch));
+            (right > left && bottom > top).then_some((left, top, right - left, bottom - top, hit))
+        }).collect();
+        self.hits.extend(within);
+    }
+
     fn seekable(&self) -> bool {
         self.moment.length.is_some_and(|(_, seekable)| seekable)
     }
@@ -1335,7 +1402,7 @@ impl Drawing<'_> {
         let left = at.left;
         let width = (end - left).max(0.0);
         let frame = self.frame;
-        frame.clip(left - 4.0, 0.0, width + 8.0, h);
+        self.clip(left - 4.0, 0.0, width + 8.0, h);
         let (lines, now) = (self.moment.lines.clone(), self.moment.now);
         match (&lines, now) {
             (Some(lines), _) if self.music.turned != 0 => {
@@ -1395,7 +1462,7 @@ impl Drawing<'_> {
                 words(frame, &fitted(frame, &said, self.fonts.about, width), self.fonts.about, Color::hex(self.ink, 0.8), left, h / 2.0 - self.fonts.about.size * 0.7, width + 2.0, Align::Start, self.edged);
             }
         }
-        frame.unclip();
+        self.unclip();
     }
 
     /// The line sung now large in the middle between `from` and `to` (floating lyrics), what is under it below where
@@ -1486,7 +1553,7 @@ impl Drawing<'_> {
             return;
         }
         let frame = self.frame;
-        frame.clip(left - 4.0, line_top - 4.0, width + 8.0, bottom - line_top + 8.0);
+        self.clip(left - 4.0, line_top - 4.0, width + 8.0, bottom - line_top + 8.0);
         let (lines, now) = (self.moment.lines.clone(), self.moment.now);
         match (&lines, now) {
             (Some(lines), _) if self.music.turned != 0 => {
@@ -1634,7 +1701,7 @@ impl Drawing<'_> {
                 }
             }
         }
-        frame.unclip();
+        self.unclip();
     }
 
     /// The stage: the record at the start (the cover in its middle, turning as it plays), what plays and the lines
@@ -1934,7 +2001,7 @@ impl Drawing<'_> {
         // While the rail glides, its lines drawn where they fall (see `Frame::set_moving`): put on whole pixels, a line
         // easing the last of the way stood still, then stepped a pixel.
         let _moving = frame.moving_while(rail != rail.round() || self.music.anchoring);
-        frame.clip(x - 8.0, top, width + 16.0, bottom - top + 12.0);
+        self.clip(x - 8.0, top, width + 16.0, bottom - top + 12.0);
         #[cfg(test)]
         self.music.drawn_lines.clear();
         for (index, middle, scale, tall) in middles {
@@ -1999,7 +2066,7 @@ impl Drawing<'_> {
                 }
             }
         }
-        frame.unclip();
+        self.unclip();
     }
 
     /// How far the line sung now has risen in as it came (0 to 1, eased).
@@ -2077,6 +2144,14 @@ impl Music {
     }
 
     /// The cover behind it, blurred: made once for each cover (the one before fading out over a moment).
+    /// No cover under it (the track has none): the last one's fades.
+    fn no_backdrop(&mut self) {
+        if let Some((_, before)) = self.backdrop.take() {
+            self.fading = Some((before, Instant::now()));
+            self.ground_pixels = None;
+        }
+    }
+
     fn backdrop(&mut self, frame: &Frame, cover: &Arc<Cover>) {
         let key = cover.key;
         if self.backdrop.as_ref().is_some_and(|(of, _)| *of == key) {
@@ -2527,9 +2602,8 @@ mod tests {
             let mut h = LEAST.1;
             while h < CARD_FROM {
                 let layout = Layout::for_room((w, h), &shows, None);
-                // (As drawn: a player less tall than the least it is, that, smaller as a whole: see `player_zoom`.)
-                let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
-                let zoom = if layout == Layout::Player { player_zoom(h, more) } else { 1.0 };
+                // (As drawn: a player less tall than the least it is, that, smaller as a whole: see `zoom_at`.)
+                let zoom = zoom_at(layout, (w, h), &shows);
                 let side = placed(layout, (w / zoom, h / zoom), &shows).cover.map_or(0.0, |(_, _, side)| side * zoom);
                 assert!(side + 1e-3 >= was, "at {w} x {h} ({}): {side}, before {was}", layout.key());
                 was = side;
@@ -2669,6 +2743,7 @@ mod pictures {
             said: None,
             playing: true,
             cover: Some(Arc::new(Cover::new(pixels, [0.85, 0.5, 0.4], [0.95, 0.6, 0.35]))),
+            no_cover: false,
             sound: crate::sound::Heard { level: 0.8, bands, beat: 0.3 },
         }
     }
@@ -2790,6 +2865,33 @@ mod pictures {
             })
             .unwrap();
         crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/sized-into-a-strip.png")), size.0, size.1, &pixels).unwrap();
+    }
+
+    /// A player drawn smaller (sized toward the strip) turning into the strip begins from where its cover is drawn at
+    /// that size, not from where it would be at its own (it shrank at once, then grew back as the turn began).
+    #[test]
+    #[ignore = "draws on this PC's graphics card"]
+    fn a_smaller_player_turns_into_the_strip_from_where_it_was_drawn() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let gfx = crate::ui::gfx::held().unwrap();
+        let now = Instant::now();
+        let mut music = Music { last_frame: now, ..Music::default() };
+        let half = strip_under(0.0);
+        let (w, before, after) = (470.0, half + 1.0, half - HOLD - 1.0);
+        gfx.draw_offscreen((800, 300), 1.5, |frame| {
+            music.paint_moment(frame, (w, before), &all, Ground::Own, 1.5, None, now, playing(false));
+            music.paint_moment(frame, (w, after), &all, Ground::Own, 1.5, None, now, playing(false));
+        })
+        .unwrap();
+        // (Where the player is drawn as large as it now is: its layout's parts begin a turn where they are at the size
+        // it turns at, as the hand sizes it on from where they were.)
+        let zoom = zoom_at(Layout::Player, (w, after), &all);
+        let drawn = placed(Layout::Player, (w / zoom, after / zoom), &all).cover.unwrap().2 * zoom;
+        let from = music.turning.expect("turning into the strip").1.cover.unwrap().2;
+        assert!((from - drawn).abs() < 2.0, "the turn begins at {from}, the cover was drawn {drawn}");
     }
 
     /// Where the fill's edge is (DIPs from the line's start) as a line of characters with spaces between them is sung,

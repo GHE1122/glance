@@ -55,8 +55,7 @@ static KNOWN: Mutex<Option<(String, std::time::Instant, Known)>> = Mutex::new(No
 /// for, and again a while after its player gave none. (By its title, artist and album: the same song on another
 /// album has another cover.)
 pub fn of(playing: &crate::playing::Now) -> Option<Arc<Cover>> {
-    let crate::playing::Now { title, artist, album, .. } = playing;
-    let key = format!("{title}\u{1}{artist}\u{1}{album}");
+    let key = key_of(playing);
     let mut known = KNOWN.lock().unwrap();
     // A cover read in the moment after its track came is read once more after it (shown meanwhile): a player that
     // tells the new title before the new cover gave the last track's with it, and that stood for the whole track.
@@ -77,6 +76,19 @@ pub fn of(playing: &crate::playing::Now) -> Option<Arc<Cover>> {
     *known = Some((key.clone(), first, Known::Reading));
     read_on(key, track_of(playing), None);
     None
+}
+
+/// Whether the music playing is known to have no cover (read, and none found): not while it is being read, as
+/// `of` gives none then too (what was shown of the track before is kept meanwhile, and goes only for none).
+pub fn has_none(playing: &crate::playing::Now) -> bool {
+    let key = key_of(playing);
+    matches!(KNOWN.lock().unwrap().as_ref(), Some((of, _, Known::None(_))) if *of == key)
+}
+
+/// What a track's cover is known by: its title, artist and album.
+fn key_of(playing: &crate::playing::Now) -> String {
+    let crate::playing::Now { title, artist, album, .. } = playing;
+    format!("{title}\u{1}{artist}\u{1}{album}")
 }
 
 /// What plays, as the music on this PC is matched against (see `library::file_of`): its first artist, as its lyrics
