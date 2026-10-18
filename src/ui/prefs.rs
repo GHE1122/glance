@@ -58,7 +58,11 @@ const fn item(name: &'static str, on: bool) -> Item {
 }
 
 // The items of each kind of module, in the order the settings list them.
-const CPU: [Item; 6] = [item("chart", true), item("temp", true), item("clock", true), item("power", true), item("ccds", true), item("threads", true)];
+/// (The CPU's fans: of the board's, as its group, "fans:cpu_fan"; see `CPU_FAN`.)
+const CPU: [Item; 7] = [item("chart", true), item("temp", true), item("clock", true), item("power", true), item("fans", true), item("ccds", true), item("threads", true)];
+/// The fan the CPU's lane shows by default, of the board's (as the board's chip and a laptop's firmware name the
+/// CPU's).
+pub const CPU_FAN: &str = "cpu_fan";
 const GPU: [Item; 9] = [
     item("chart", true),
     item("temp", true),
@@ -256,9 +260,11 @@ pub fn shows_in(entries: &[ModuleEntry], id: &str, name: &str) -> bool {
 }
 
 /// Whether module `id` among `entries` shows item `name` unless it is switched: as the module's items are by default;
-/// one of a group the machine names ("temps:CPU", a board's sensor), as the group is.
+/// one of a group the machine names ("temps:CPU", a board's sensor), as the group is; of the board's fans, the CPU's
+/// shows its own (see `CPU_FAN`).
 fn shows_by_default(entries: &[ModuleEntry], id: &str, name: &str) -> bool {
     match name.split_once(':') {
+        Some(("fans", fan)) if id == "cpu" => fan == CPU_FAN && shows_in(entries, id, "fans"),
         Some((group, _)) => shows_in(entries, id, group),
         None => items(id).iter().find(|item| item.name == name).is_some_and(|item| item.on),
     }

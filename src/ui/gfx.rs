@@ -168,16 +168,16 @@ pub fn current() -> Result<Rc<Gfx>> {
 /// This thread's graphics device (see `current`), let go of as what is given is: before the thread ends, not as its
 /// own storage is let go of after (on Windows, under the loader's lock, where the device let go of waits on threads
 /// of its own that wait on that lock, and the thread never ends). For a test drawing on its own thread.
-#[cfg(any(test, feature = "studio"))]
+#[cfg(all(test, feature = "studio"))]
 pub fn held() -> Result<Held> {
     current().map(Held)
 }
 
 /// See `held`.
-#[cfg(any(test, feature = "studio"))]
+#[cfg(all(test, feature = "studio"))]
 pub struct Held(Rc<Gfx>);
 
-#[cfg(any(test, feature = "studio"))]
+#[cfg(all(test, feature = "studio"))]
 impl std::ops::Deref for Held {
     type Target = Rc<Gfx>;
     fn deref(&self) -> &Rc<Gfx> {
@@ -185,7 +185,7 @@ impl std::ops::Deref for Held {
     }
 }
 
-#[cfg(any(test, feature = "studio"))]
+#[cfg(all(test, feature = "studio"))]
 impl Drop for Held {
     fn drop(&mut self) {
         CURRENT.with(|cell| cell.borrow_mut().take());

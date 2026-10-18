@@ -561,6 +561,16 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if on("power") && scene.seen.cpu_power {
                 facts.push((lang.pick("功耗", "Power").into(), shown(sensors.and_then(|c| c.power), |power| format!("{power:.1} W")), false));
             }
+            // Its fans, of the board's seen turning (a header with none on it reads 0), as switched: its own by default
+            // (see `prefs::CPU_FAN`). One alone, as "Fan"; more, each by its name.
+            if let Some(board) = scene.seen.board.as_ref().filter(|_| on("fans")) {
+                let fans: Vec<&String> = board.fans.iter().filter(|n| board.turning.contains(n) && on(&format!("fans:{n}"))).collect();
+                for n in &fans {
+                    let rpm = s.board.as_ref().and_then(|b| b.fans.iter().find(|(read, _)| read == *n)).map(|(_, rpm)| *rpm);
+                    let label = if fans.len() == 1 { lang.pick("风扇", "Fan").into() } else { board_sensor(n, "fans", lang) };
+                    facts.push((label, shown(rpm, |rpm| format!("{rpm:.0} RPM")), false));
+                }
+            }
             let chiplets = &scene.seen.ccds;
             if on("ccds") && chiplets.len() > 1 {
                 for &ccd in chiplets {
@@ -2232,6 +2242,37 @@ mod tests {
         let cpu = facts(&lane(&scene(history), "cpu", Detail::Full).unwrap());
         assert!(cpu.contains(&("CCD 1".into(), UNREAD.into())));
         assert!(cpu.contains(&("CCD 2".into(), "95 °C".into())));
+    }
+
+    /// The CPU's lane shows its fan, of the board's, once seen turning; others as switched, each by its name.
+    #[test]
+    fn the_cpu_shows_its_fan() {
+        let (info, theme) = (info(), Theme::new(Skin::Paper, false));
+        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let fans = |read: &[(&str, f32)]| {
+            let mut s = sample(None, None, None);
+            s.board = Some(crate::reading::BoardSensors { temps: Vec::new(), fans: read.iter().map(|(n, rpm)| (n.to_string(), *rpm)).collect() });
+            s
+        };
+        let cpu_fans = |prefs: &Prefs, history: &'static [Sample]| {
+            let scene = Scene { music_apart: false, info: &info, prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+            facts(&lane(&scene, "cpu", Detail::Full).unwrap()).into_iter().filter(|(_, value)| value.ends_with("RPM") || value == UNREAD).collect::<Vec<_>>()
+        };
+        let prefs = Prefs::default();
+        // Its own, turning: as "Fan"; the case's not.
+        assert_eq!(cpu_fans(&prefs, leak(vec![fans(&[("cpu_fan", 1200.0), ("system_fan_1", 800.0)])])), vec![("Fan".to_string(), "1200 RPM".to_string())]);
+        // A header with none on it: none.
+        assert!(cpu_fans(&prefs, leak(vec![fans(&[("cpu_fan", 0.0), ("system_fan_1", 800.0)])])).is_empty());
+        // Seen turning, and stopped since: kept, at 0.
+        assert_eq!(cpu_fans(&prefs, leak(vec![fans(&[("cpu_fan", 900.0)]), fans(&[("cpu_fan", 0.0)])])), vec![("Fan".to_string(), "0 RPM".to_string())]);
+        // A pump switched on beside it: each by its name.
+        let mut prefs = Prefs::resolve(&serde_json::Value::Null, &["cpu".to_string()]);
+        prefs.set_item("cpu", "fans:system_fan_4_pump", true);
+        let history = leak(vec![fans(&[("cpu_fan", 1200.0), ("system_fan_4_pump", 2800.0)])]);
+        assert_eq!(cpu_fans(&prefs, history).len(), 2);
+        // The group off: none.
+        prefs.set_item("cpu", "fans", false);
+        assert!(cpu_fans(&prefs, history).is_empty());
     }
 
     #[test]

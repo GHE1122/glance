@@ -68,6 +68,8 @@ pub struct GpuSeen {
 pub struct BoardSeen {
     pub temps: Vec<String>,
     pub fans: Vec<String>,
+    /// The fans seen turning (a header with none on it, or a fan that has not turned since, reads 0).
+    pub turning: Vec<String>,
 }
 
 impl Seen {
@@ -116,6 +118,7 @@ impl Seen {
             let seen = self.board.get_or_insert_with(BoardSeen::default);
             merge(&mut seen.temps, board.temps.iter().map(|(name, _)| name.clone()), |a, b| a == b);
             merge(&mut seen.fans, board.fans.iter().map(|(name, _)| name.clone()), |a, b| a == b);
+            merge(&mut seen.turning, board.fans.iter().filter(|(_, rpm)| *rpm > 0.0).map(|(name, _)| name.clone()), |a, b| a == b);
         }
         self.battery |= s.battery.is_some();
         self.battery_power |= s.battery.as_ref().is_some_and(|b| b.watts.is_some());

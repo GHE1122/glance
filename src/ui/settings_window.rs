@@ -2634,6 +2634,7 @@ impl Ui {
                 ("cpu", "temp") => seen.cpu_temp,
                 ("cpu", "clock") => seen.cpu_clock,
                 ("cpu", "power") => seen.cpu_power,
+                ("cpu", "fans") => seen.board.as_ref().is_some_and(|board| !board.turning.is_empty()),
                 ("cpu", "ccds") => seen.ccds.len() > 1,
                 ("cpu", "threads") => seen.threads > 0,
                 ("gpu", name) => gpu.as_ref().is_some_and(|(info, seen)| match name {
@@ -2660,10 +2661,15 @@ impl Ui {
                 _ => true,
             })
             .flat_map(|name| match (id, name) {
-                // A switch for each sensor the board has shown.
-                ("board", "temps" | "fans") => {
+                // A switch for each sensor the board has shown (for the CPU's, each fan seen turning: a header with
+                // none on it reads 0).
+                ("board", "temps" | "fans") | ("cpu", "fans") => {
                     let board = seen.board.clone().unwrap_or_default();
-                    let sensors = if name == "temps" { board.temps } else { board.fans };
+                    let sensors = match (id, name) {
+                        (_, "temps") => board.temps,
+                        ("cpu", _) => board.fans.into_iter().filter(|fan| board.turning.contains(fan)).collect(),
+                        _ => board.fans,
+                    };
                     sensors.into_iter().map(|sensor| format!("{name}:{sensor}")).collect()
                 }
                 // A switch for each drive.
