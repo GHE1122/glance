@@ -221,6 +221,7 @@ const SETTINGS: usize = 2;
 const CHECK: usize = 3;
 const QUIT: usize = 4;
 const RECALL: usize = 5;
+const PAUSE_COPIES: usize = 6;
 
 /// The icon's menu, opening up from `(x, y)` on the screen as the taskbar's do, up (see `menu::Menu`), with what each
 /// of its choices is (see `chosen`). On the panel's thread.
@@ -236,10 +237,15 @@ pub fn open_menu(x: i32, y: i32, over_the_panel: bool) -> Option<(crate::ui::men
     if recall {
         choices.push((RECALL, if zh { "召回小组件" } else { "Bring the widget back" }, Icon::Restore, false));
     }
+    // What is copied, kept by the station: paused and kept again at a press (ticked while paused).
+    let station = crate::app().settings.lock().unwrap().station;
+    if station.history {
+        choices.push((PAUSE_COPIES, if zh { "暂停记录复制" } else { "Pause Recently copied" }, Icon::Clipboard, false));
+    }
     choices.push((SETTINGS, if zh { "设置" } else { "Settings" }, Icon::Settings, false));
     choices.push((CHECK, if zh { "检查更新" } else { "Check for updates" }, Icon::Update, false));
     choices.push((QUIT, if zh { "退出 Glance" } else { "Quit Glance" }, Icon::Quit, true));
-    let items: Vec<Item<'static>> = choices.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
+    let items: Vec<Item<'static>> = choices.iter().map(|(choice, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: *choice == PAUSE_COPIES && station.paused, rule_before: *rule_before }).collect();
     MENU_UP.store(true, Ordering::Relaxed);
     show_tip(false);
     let Some(menu) = Menu::open_at(items, crate::os::apps_dark(), POINT { x, y }, true, over_the_panel) else {
@@ -256,6 +262,7 @@ pub fn chosen(choice: Option<usize>, choices: &[usize]) {
     match choice.map_or(0, |i| choices[i]) {
         OPEN => crate::app().controller.open_from_tray(),
         RECALL => crate::app().controller.recall_widget(),
+        PAUSE_COPIES => crate::app().change(|settings| settings.station.paused = !settings.station.paused),
         SETTINGS => crate::show_settings(),
         CHECK => crate::update::check_now(crate::update::Asker::Tray),
         QUIT => crate::quit(),

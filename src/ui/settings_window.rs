@@ -528,9 +528,14 @@ fn module_fields(id: &str) -> &'static [Field] {
     match id {
         "network" => &[Field::RateUnit],
         "processes" => &[Field::ProcessCount, Field::ProcessSort],
+        "station" => &[Field::StationHistory, Field::StationKeep, Field::StationMost, Field::StationCopy, Field::StationAfterDrag],
         _ => &[],
     }
 }
+
+/// The days the station keeps what is not pinned, and the most it keeps of its own (GB), as its settings offer them.
+const STATION_DAYS: [u32; 3] = [1, 7, 30];
+const STATION_GB: [u32; 4] = [1, 2, 5, 10];
 
 /// The settings, a group to a page: what each screen edge opens and how; each component's own (the monitor's, on
 /// tabs of their own, and what plays); and Glance's as a whole.
@@ -650,6 +655,13 @@ enum Field {
     OverlayRows,
     /// The player music is followed from (see `Ui::sources`).
     MusicSource,
+    /// The station's (see `settings::StationSettings`): what is copied kept, how long what is not pinned stays, the
+    /// most it keeps of its own, files kept as a copy too, and what is dragged off it taken off.
+    StationHistory,
+    StationKeep,
+    StationMost,
+    StationCopy,
+    StationAfterDrag,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -2154,6 +2166,15 @@ impl Ui {
             ),
             Field::OverlaySize | Field::OverlayClear | Field::PanelSize => (self.slider(field).0, Vec::new(), None),
             Field::LoadAlert => (pick(lang, "负载警示", "Load alert"), vec!["70%".into(), "85%".into(), "95%".into()], at(&[70, 85, 95], prefs.hot_load as u64)),
+            Field::StationHistory => (pick(lang, "最近复制", "Recently copied"), vec![s("记录", "Kept"), s("不记录", "Not kept")], Some(usize::from(!settings.station.history))),
+            Field::StationKeep => (
+                pick(lang, "未固定的项目保留", "Unpinned things stay"),
+                vec![s("1 天", "1 day"), s("7 天", "7 days"), s("30 天", "30 days")],
+                at(&STATION_DAYS.map(u64::from), u64::from(settings.station.keep_days)),
+            ),
+            Field::StationMost => (pick(lang, "副本最多占用", "Copies take at most"), STATION_GB.iter().map(|gb| format!("{gb} GB")).collect(), at(&STATION_GB.map(u64::from), u64::from(settings.station.most_gb))),
+            Field::StationCopy => (pick(lang, "拖进来的文件", "Files dragged in"), vec![s("只记位置", "Where they are"), s("保留副本", "Kept as a copy")], Some(usize::from(settings.station.always_copy))),
+            Field::StationAfterDrag => (pick(lang, "拖出去以后", "Once dragged off"), vec![s("留在中转站", "Kept on it"), s("从中转站移除", "Taken off it")], Some(usize::from(settings.station.remove_after_drag))),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
                 vec!["75 °C".into(), "85 °C".into(), "95 °C".into()],
@@ -2185,6 +2206,11 @@ impl Ui {
             Field::LoadAlert => prefs.hot_load = [70.0, 85.0, 95.0][index],
             Field::OverlaySize | Field::OverlayClear | Field::PanelSize => {}
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
+            Field::StationHistory => settings.station.history = index == 0,
+            Field::StationKeep => settings.station.keep_days = STATION_DAYS[index],
+            Field::StationMost => settings.station.most_gb = STATION_GB[index],
+            Field::StationCopy => settings.station.always_copy = index == 1,
+            Field::StationAfterDrag => settings.station.remove_after_drag = index == 1,
         }
         self.save();
         match field {
