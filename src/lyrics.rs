@@ -430,12 +430,25 @@ fn credit(raw: &str) -> Option<Line> {
 fn netease_search(track: &Track) -> Answer<u64> {
     let asked = format!("{} {}", track.title, track.artist);
     let said = netease_said(&format!("https://music.163.com/api/search/get?s={}&type=1&limit=10", escaped(&asked)))?;
-    Ok(said["result"]["songs"].as_array().into_iter().flatten().find_map(|song| {
-        let length = song["duration"].as_f64()? / 1000.0;
-        let artists = song["artists"].as_array().into_iter().flatten().filter_map(|artist| artist["name"].as_str());
-        let by = by_artist(artists, &track.artist);
-        (same(song["name"].as_str()?, &track.title) && by && (length - track.seconds as f64).abs() <= 2.0).then(|| song["id"].as_u64()).flatten()
-    }))
+    let found = |artist: &str| {
+        said["result"]["songs"].as_array().into_iter().flatten().find_map(|song| {
+            let length = song["duration"].as_f64()? / 1000.0;
+            let artists = song["artists"].as_array().into_iter().flatten().filter_map(|artist| artist["name"].as_str());
+            let by = by_artist(artists, artist);
+            (same(song["name"].as_str()?, &track.title) && by && (length - track.seconds as f64).abs() <= 2.0).then(|| song["id"].as_u64()).flatten()
+        })
+    };
+    if let Some(id) = found(&track.artist) {
+        return Ok(Some(id));
+    }
+    // The player names the artist as NetEase translates the name (YouTube Music in Chinese: "酷玩乐队", Coldplay): by
+    // the name of the artist NetEase so translates, or knows by that name too.
+    let known = netease_said(&format!("https://music.163.com/api/search/get?s={}&type=100&limit=5", escaped(&track.artist)))?;
+    let named = |artist: &serde_json::Value| {
+        let mut others = artist["alias"].as_array().into_iter().flatten().filter_map(|alias| alias.as_str()).chain(artist["trans"].as_str());
+        others.any(|other| same(other, &track.artist))
+    };
+    Ok(known["result"]["artists"].as_array().into_iter().flatten().filter(|artist| named(artist)).filter_map(|artist| artist["name"].as_str()).find_map(found))
 }
 
 /// QQ Music's timed lyrics of `track`, with their translation: of the tracks it finds by title and artist, the first
@@ -900,6 +913,9 @@ mod tests {
         let searched = netease_search(&Track { netease: None, title: "我爱你中国 (live)".into(), artist: "孙楠".into(), album: String::new(), seconds: 330, qq_music: false });
         println!("NetEase by its title: {:?}", searched.as_ref().ok());
         assert!(matches!(searched, Ok(Some(_))));
+        let translated = netease_search(&Track { netease: None, title: "Yellow".into(), artist: "酷玩乐队".into(), album: String::new(), seconds: 267, qq_music: false });
+        println!("NetEase by its artist's name in Chinese: {:?}", translated.as_ref().ok());
+        assert!(matches!(translated, Ok(Some(_))));
         // (NetEase has this one, but without its words; LRCLIB has it not at all.)
         let qq_only = Track { netease: None, title: "牡丹亭".into(), artist: "浅影阿".into(), album: "牡丹亭".into(), seconds: 181, qq_music: true };
         let qq = qq_music(&qq_only).ok().flatten().expect("QQ Music's");
