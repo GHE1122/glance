@@ -2639,6 +2639,33 @@ mod tests {
         assert!(cpu_fans(&prefs, history).is_empty());
     }
 
+    /// What is on the station as its tiles show it: a web address by its site, files by the first's name with how
+    /// many more, text by its first lines; copied lately, each in a line.
+    #[test]
+    fn the_station_shows_what_it_holds() {
+        use crate::station::shelf::{Item, What};
+        let folder = crate::station::folder::Folder::at(std::path::PathBuf::from("C:/station"));
+        let item = |what: What| Item { id: 1, what, added_ms: 0, pinned: false, copied: false, stays_here: false, own_bytes: 0 };
+        let link = Tile::of(&item(What::Link { url: "https://example.com/a/b?c".into() }), &folder, Lang::En);
+        assert_eq!((link.label.as_str(), &link.face), ("example.com", &Face::Link));
+        let files = Tile::of(&item(What::Files { paths: vec!["D:/x/report.pdf".into(), "D:/x/b.txt".into()], kept: Vec::new() }), &folder, Lang::En);
+        assert_eq!(files.label, "report.pdf");
+        assert!(matches!(files.face, Face::Picture { more: 1, .. }));
+        let text = Tile::of(&item(What::Text { text: "one
+
+ two 
+three
+four
+five".into() }), &folder, Lang::Zh);
+        assert_eq!((text.label.as_str(), &text.face), ("文字", &Face::Text("one
+ two 
+three
+four".into())));
+        assert_eq!(copied_line(&What::Text { text: "a
+  b	c".into() }, Lang::En), "a b c");
+        assert_eq!(copied_line(&What::Files { paths: vec!["a".into(), "b".into(), "c".into()], kept: Vec::new() }, Lang::Zh), "3 个文件");
+    }
+
     #[test]
     fn keeps_the_order_of_what_it_has_seen() {
         let fans = |names: &[&str]| {
