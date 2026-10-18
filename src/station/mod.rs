@@ -1,6 +1,7 @@
 //! The station: a shelf to put things on for a while (files, pictures, text, links) and take them off again into
 //! another program, and what was copied lately (see docs/station-and-notes.md).
 
+pub mod catch;
 pub mod clipboard;
 pub mod drag;
 pub mod drop;

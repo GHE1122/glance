@@ -125,6 +125,8 @@ const WAKE: u32 = WM_APP + 16;
 
 /// The panel thread's own hotkey: Escape, while the panel is open.
 const ESCAPE_HOTKEY: i32 = 1;
+/// Ctrl+V, while the pointer is over a station: what is on the clipboard put on it.
+const PASTE_HOTKEY: i32 = 2;
 
 struct Config {
     /// Which edges of which screens open the panel, to a push (and how hard)
@@ -501,6 +503,8 @@ impl Controller {
         // panel is open and not pinned (it has no keyboard focus of its own),
         // and given back as it closes or is pinned.
         let mut escape = false;
+        // Ctrl+V taken (see `PASTE_HOTKEY`).
+        let mut paste = false;
         // A rest on the seam between two screens: since when, and where;
         // and, as on the edge, armed once the pointer has left it.
         let mut seam_rest: Option<(Instant, POINT)> = None;
@@ -750,6 +754,7 @@ impl Controller {
                 // stays, the settings window coming up or not.
                 DISMISS if panel.stays() => {}
                 DISMISS => panel.dismiss(),
+                WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == PASTE_HOTKEY as usize => crate::station::run::ask(crate::station::run::Ask::Paste),
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize => {
                     if panel.is_open() && !panel.stays() {
                         panel.begin_close(now);
@@ -803,6 +808,9 @@ impl Controller {
                 }
                 // The pinned panel dragged by its bar.
                 WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => panel.press(lparam_point(msg.lParam)),
+                WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd && panel.shelf_press.is_some() => panel.shelf_moved(),
+                // (The pointer taken from it as a thing on its station was pressed: nothing pressed.)
+                crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.shelf_press.is_some() => panel.shelf_press = None,
                 WM_TIMER if msg.hwnd == panel.window.hwnd && panel.held() => {
                     panel.dragged(now);
                     if let Some((form, scale, at, grab, size)) = panel.tear.take() {
@@ -1058,6 +1066,19 @@ impl Controller {
                         let _ = RegisterHotKey(None, ESCAPE_HOTKEY, MOD_NOREPEAT, u32::from(VK_ESCAPE.0));
                     } else {
                         let _ = UnregisterHotKey(None, ESCAPE_HOTKEY);
+                    }
+                }
+            }
+            // Ctrl+V taken while the pointer is over a station (the panel's or a widget's), and only then: else it is
+            // every program's.
+            let over_station = cursor_position().is_some_and(|at| crate::station::run::areas().iter().any(|area| at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom));
+            if over_station != paste {
+                paste = over_station;
+                unsafe {
+                    if over_station {
+                        let _ = RegisterHotKey(None, PASTE_HOTKEY, windows::Win32::UI::Input::KeyboardAndMouse::MOD_CONTROL | MOD_NOREPEAT, u32::from(b'V'));
+                    } else {
+                        let _ = UnregisterHotKey(None, PASTE_HOTKEY);
                     }
                 }
             }
@@ -1483,6 +1504,9 @@ struct Panel<'a> {
     /// What plays let go after it was sized: settling from the room the hand gave it to the room its layout is right
     /// in, its edges held as the drag held them (see `music_sized_to`): since when, the drag, from, to.
     music_settle: Option<(Instant, PanelDrag, (f32, f32), (f32, f32))>,
+    /// A thing on its station pressed, and where the pointer was: dragged off it once moved far enough (see
+    /// `shelf_moved`), else pressed as it is let go.
+    shelf_press: Option<(u64, POINT)>,
     /// The sound's track is being slid along.
     sliding: Option<crate::playing::Slider>,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
@@ -1577,6 +1601,7 @@ impl<'a> Panel<'a> {
             sizing: None,
             sized_room: None,
             music_settle: None,
+            shelf_press: None,
             sliding: None,
             thumbs: crate::ui::thumb::Dots::new(),
             recapture: false,
@@ -2247,6 +2272,12 @@ impl<'a> Panel<'a> {
         if !self.on_panel(client) {
             return;
         }
+        // On a thing on its station: dragged off it, or pressed (see `shelf_press`).
+        if let (Some(Hit::Shelf(id)), Some(from)) = (self.hit_at(client), cursor_position()) {
+            self.shelf_press = Some((id, from));
+            unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd) };
+            return;
+        }
         // On the sound's track: it is slid along till let go.
         if let Some(slider) = self.hit_at(client).and_then(Hit::slider) {
             self.sliding = Some(slider);
@@ -2267,6 +2298,17 @@ impl<'a> Panel<'a> {
         unsafe {
             windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd);
             SetTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER, FOLLOW_MS, None);
+        }
+    }
+
+    /// The pointer moved with a thing on its station pressed: far enough, it is dragged off (by the station, which
+    /// takes the pointer from here).
+    fn shelf_moved(&mut self) {
+        let (Some((id, from)), Some(now)) = (self.shelf_press, cursor_position()) else { return };
+        if crate::station::run::drag_begins(from, now) {
+            self.shelf_press = None;
+            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+            crate::station::run::ask(crate::station::run::Ask::DragOut(id));
         }
     }
 
@@ -3070,6 +3112,9 @@ impl<'a> Panel<'a> {
 
     fn click(&mut self, client: POINT) {
         self.next_frame = Instant::now();
+        if self.shelf_press.take().is_some() {
+            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+        }
         match self.hit_at(client) {
             Some(Hit::Settings) => {
                 crate::show_settings();

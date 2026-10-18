@@ -7,6 +7,7 @@
 //! (see `clipboard`), the clipboard read again in a moment where another program holds it.
 
 use super::clipboard::{self, Busy, Content, Why};
+use super::drop::Dragged;
 use super::folder::Folder;
 use super::keep::Keep;
 use super::shelf::Item;
@@ -39,6 +40,10 @@ pub enum Ask {
     Show(u64),
     /// The settings changed (see `settings::StationSettings`).
     Settings,
+    /// Something dragged is over a station now, or no longer.
+    Over(bool),
+    /// What `id` holds dragged off it (pressed on it and moved: see `drag_from`).
+    DragOut(u64),
 }
 
 /// What the station shows: what it holds, oldest first, and how it stands.
@@ -59,6 +64,9 @@ const ASKED: u32 = WM_APP + 1;
 /// Its timers: the clipboard read again (held by another program as it changed), what has stayed its days taken off.
 const AGAIN: usize = 1;
 const EXPIRE: usize = 2;
+const WATCH: usize = 3;
+/// How often it looks whether something is dragged (see `catch`, ms).
+const WATCH_EVERY_MS: u32 = 100;
 /// How soon the clipboard is read again, and how many times at most.
 const AGAIN_AFTER_MS: u32 = 60;
 const AGAIN_MOST: u32 = 8;
@@ -78,9 +86,31 @@ pub fn shows_at(window: HWND, areas: Vec<windows::Win32::Foundation::RECT>) {
     held.extend(areas.into_iter().map(|area| (window.0 as isize, area)));
 }
 
-/// Whether the window `window` shows a station at `at` (screen px).
-pub fn station_at(window: HWND, at: windows::Win32::Foundation::POINT) -> bool {
-    AREAS.lock().unwrap().iter().any(|(of, area)| *of == window.0 as isize && at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom)
+/// Where stations are shown (screen px), each window's, of windows still shown.
+pub fn areas() -> Vec<windows::Win32::Foundation::RECT> {
+    let mut held = AREAS.lock().unwrap();
+    held.retain(|(of, _)| unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(HWND(*of as *mut _)) }.as_bool());
+    held.iter().map(|(_, area)| *area).collect()
+}
+
+/// What a window catching drops saw (see `catch`; on the station's thread, perhaps as it does something already: so
+/// told it by message): a drag over a strip along `edge` opens the station there, as a push into the edge does.
+pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>) {
+    match dragged {
+        Dragged::Over(at) => {
+            if let Some(edge) = edge {
+                crate::app().controller.pushed(edge, (at.x, at.y));
+            }
+            ask(Ask::Over(true));
+        }
+        Dragged::Gone => ask(Ask::Over(false)),
+        Dragged::Dropped(given) => {
+            for content in given {
+                ask(Ask::Take(content));
+            }
+            ask(Ask::Over(false));
+        }
+    }
 }
 
 /// Called (on the station's thread) as what it shows changes: to wake what shows it.
@@ -170,6 +200,10 @@ struct Station {
     tries: u32,
     /// Something dragged over a station, to be dropped (see `drop`).
     over: bool,
+    /// Where drops are caught while something is dragged (see `catch`).
+    catchers: super::catch::Catchers,
+    /// What is to be dragged off it, asked (dragged once it is done answering: see `drag_off`).
+    dragging: Option<u64>,
 }
 
 thread_local! {
@@ -191,9 +225,10 @@ fn run(asks: Receiver<Ask>) {
         let settings = crate::app().settings.lock().unwrap().station;
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
         keep.expire(super::now_ms());
-        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false }));
+        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, catchers: Default::default(), dragging: None }));
         WINDOW.store(window.0 as isize, Ordering::Release);
         let _ = SetTimer(Some(window), EXPIRE, EXPIRE_EVERY_MS, None);
+        let _ = SetTimer(Some(window), WATCH, WATCH_EVERY_MS, None);
         with_station(|station| {
             station.follow_settings();
             station.answer();
@@ -203,6 +238,34 @@ fn run(asks: Receiver<Ask>) {
             DispatchMessageW(&message);
         }
     }
+}
+
+/// What was asked to be dragged off the station, dragged (outside `with_station`: the drag's own loop passes the
+/// station's messages on meanwhile, which find it free); its own files held meanwhile, and taken off after, where the
+/// settings say so.
+fn drag_off() {
+    let mut given = None;
+    with_station(|station| given = station.dragging.take().and_then(|id| station.drag_given(id)));
+    let Some((id, content, stays_here, held)) = given else { return };
+    let dragged = super::drag::drag(&content, stays_here);
+    with_station(|station| {
+        for name in &held {
+            station.keep.folder.let_go(name);
+        }
+        let remove = crate::app().settings.lock().unwrap().station.remove_after_drag;
+        if remove && dragged == Some(super::drag::Dragged::Taken) {
+            station.keep.remove(id);
+        }
+        station.show();
+    });
+}
+
+/// Where a drag off a station begun at `from` is at `now` (screen px): whether it has gone far enough to be one (the
+/// system's distance for a drag).
+pub fn drag_begins(from: windows::Win32::Foundation::POINT, now: windows::Win32::Foundation::POINT) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CYDRAG};
+    let (w, h) = unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+    (now.x - from.x).abs() > w / 2 || (now.y - from.y).abs() > h / 2
 }
 
 /// Does `act` with the station; whether it could (not while it is acting already: a message sent to its window while
@@ -232,6 +295,7 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
                     let _ = unsafe { KillTimer(Some(window), AGAIN) };
                     station.copied();
                 }
+                _ if wparam.0 == WATCH => station.catchers.follow(),
                 _ => {
                     station.keep.expire(super::now_ms());
                     station.show();
@@ -240,6 +304,7 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
             if !done {
                 let _ = unsafe { PostMessageW(Some(window), message, wparam, lparam) };
             }
+            drag_off();
         }
         _ => return unsafe { DefWindowProcW(window, message, wparam, lparam) },
     }
@@ -283,9 +348,28 @@ impl Station {
                     }
                 }
                 Ask::Settings => self.follow_settings(),
+                Ask::Over(over) => self.over = over,
+                Ask::DragOut(id) => self.dragging = Some(id),
             }
         }
         self.show();
+    }
+
+    /// What a drag off it of `id` gives (see `drag_off`): its number, what it gives, whether it stays on this PC, and
+    /// the files of its own it holds meanwhile.
+    fn drag_given(&mut self, id: u64) -> Option<(u64, Content, bool, Vec<String>)> {
+        let item = self.keep.shelf.get(id)?.clone();
+        // A picture of its own dragged as its file (what Explorer and the chat programs take where it is dropped);
+        // copied, it is the picture.
+        let content = match &item.what {
+            super::shelf::What::Picture { file } => Content::Files(vec![self.keep.folder.path(file)]),
+            _ => self.keep.content_of(&item)?,
+        };
+        let held: Vec<String> = item.what.own_files().into_iter().map(str::to_string).collect();
+        for name in &held {
+            self.keep.folder.hold(name);
+        }
+        Some((id, content, item.stays_here, held))
     }
 
     /// The settings as they are now: the shelf's rules, and the clipboard listened to while Recently copied is on.

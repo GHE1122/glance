@@ -506,6 +506,9 @@ struct Widget {
     /// is from the corner of what it shows (its own DIPs), as last drawn.
     hits: Vec<view::HitBox>,
     hits_from: (f32, f32),
+    /// A thing on its station pressed, and where the pointer was: dragged off it once moved far enough, else pressed
+    /// as it is let go (see `Widgets::hover`, `Widgets::release`).
+    shelf_press: Option<(u64, POINT)>,
     behind: Option<Behind>,
     /// When it is next drawn: at once while it moves, else after a rest (as
     /// its charts step), or sooner as the pointer comes or it is pressed.
@@ -1308,6 +1311,16 @@ impl Widgets {
         if !widget.hover {
             widget.next_frame = Instant::now();
         }
+        // A thing on its station pressed and moved far enough: dragged off it (by the station, which takes the
+        // pointer from here).
+        if let (Some((id, from)), Some(now)) = (widget.shelf_press, cursor_position()) {
+            if crate::station::run::drag_begins(from, now) {
+                widget.shelf_press = None;
+                let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                crate::station::run::ask(crate::station::run::Ask::DragOut(id));
+            }
+            return;
+        }
         if widget.drag.is_some() {
             return;
         }
@@ -1425,6 +1438,17 @@ impl Widgets {
 
     /// Let go of a press on a widget, or (`cancelled`) its capture lost: then no press is completed.
     pub fn release(&mut self, hwnd: HWND, now: Instant, cancelled: bool) {
+        // A thing on its station pressed and let go where it was: pressed (its capture lost: nothing).
+        if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
+            if let Some((id, _)) = widget.shelf_press.take() {
+                let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                if !cancelled {
+                    crate::station::pressed(view::Hit::Shelf(id));
+                }
+                widget.next_frame = now;
+                return;
+            }
+        }
         if let Some(widget) = self.list.iter().find(|w| w.window.hwnd == hwnd) {
             note(format!("widget: release ({}), {}", if cancelled { "its capture lost" } else { "let go" }, match &widget.drag { Some(Drag::Move { moved, torn, .. }) => format!("moving (moved {moved}, torn {torn})"), Some(Drag::Size { .. }) => "sizing".into(), Some(Drag::Slide { .. }) => "sliding".into(), None => "in no hand".into() }));
         }
@@ -1908,6 +1932,7 @@ impl Widget {
             tip: None,
             hits: Vec::new(),
             hits_from: (0.0, 0.0),
+            shelf_press: None,
             behind: None,
             next_frame: Instant::now(),
             surface_size: (0.0, 0.0),
@@ -2205,8 +2230,14 @@ impl Widget {
         self.fling = None;
         self.opacity = 1.0;
         self.anchor = None;
-        // On the sound's track: it is slid along till let go (pinned or not: that is not moving it).
         let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
+        // On a thing on its station: dragged off it, or pressed (see `shelf_press`).
+        if let Some(view::Hit::Shelf(id)) = self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4) {
+            self.shelf_press = Some((id, from));
+            unsafe { SetCapture(self.window.hwnd) };
+            return;
+        }
+        // On the sound's track: it is slid along till let go (pinned or not: that is not moving it).
         if let Some((hx, hy, wide, tall, hit)) = self.hits.iter().find(|(hx, hy, w, h, hit)| hit.slider().is_some() && lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).copied() {
             self.drag = Some(match hit.upright() {
                 true => Drag::Slide { slider: hit.slider().unwrap(), from: hy + tall + self.hits_from.1, wide: tall, upright: true },
