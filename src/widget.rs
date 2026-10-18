@@ -1843,6 +1843,7 @@ impl Widget {
     fn new(contact: Contact, at: POINT, content: Content) -> Option<Self> {
         let gfx = gfx::current().ok()?;
         let window = Window::new().ok()?;
+        window.under_the_panel();
         let surface = Surface::new(&gfx, window.hwnd).ok();
         Some(Widget {
             window,

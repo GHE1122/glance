@@ -530,6 +530,8 @@ impl Controller {
             std::thread::spawn(|| crate::app().change(|settings| settings.panel_at = None));
         }
         let mut restore = false;
+        // How many times a widget had come to the top, as last seen (see `window::on_top`).
+        let mut widgets_on_top = crate::ui::window::on_top();
         // Pinned open at its edge as Glance last ran: opened so again once
         // there are readings to show.
         let mut pinned_at = self.config.lock().unwrap().panel_pinned;
@@ -578,6 +580,15 @@ impl Controller {
                         let look = crate::widget::Look { prefs: &panel.prefs, skin: panel.skin, lang: panel.lang, live: panel.live };
                         if let Some(due) = widgets.tick(now, &look, &kept, samples, &seen, self) {
                             wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
+                        }
+                    }
+                    // A widget come to the top over the open panel (giving way to the settings and back, shown, torn
+                    // off): the panel over it again.
+                    let on_top = crate::ui::window::on_top();
+                    if on_top != widgets_on_top {
+                        widgets_on_top = on_top;
+                        if panel.is_shown() {
+                            panel.window.stand_again();
                         }
                     }
                     self.widget_put_away.store(widgets.any_put_away(), Ordering::Relaxed);

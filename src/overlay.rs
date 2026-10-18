@@ -78,6 +78,9 @@ pub struct Overlay {
     showing: Option<Showing>,
     /// Where it was last placed, with its shadow (physical px).
     placed: std::cell::Cell<RECT>,
+    /// The shape its window takes the pointer in, as last given it (see `shape`): its width, height and corners'
+    /// radius (physical px).
+    shaped: (i32, i32, i32),
     /// What takes the pointer: as large as its glass, showing nothing.
     pub window: Window,
     /// What shows (see the top): its stage, where it is (physical px), and what is drawn on it, its glass and its
@@ -256,6 +259,7 @@ impl Overlay {
             showing: None,
             shown: false,
             placed: std::cell::Cell::new(RECT::default()),
+            shaped: (0, 0, 0),
             locked: false,
             clear: 0.0,
             through: false,
@@ -437,6 +441,22 @@ impl Overlay {
         }
     }
 
+    /// Its window shaped as its glass is, `width` × `height` with corners `radius` round (physical px): the pointer
+    /// is taken on the glass alone (past its rounded corners, a press went to it, not to what was under them).
+    fn shape(&mut self, width: i32, height: i32, radius: f32) {
+        let shaped = (width, height, radius.round() as i32);
+        if self.shaped == shaped {
+            return;
+        }
+        self.shaped = shaped;
+        unsafe {
+            // (A round rectangle's region leaves its right and bottom edges out: one more each way.)
+            let region = windows::Win32::Graphics::Gdi::CreateRoundRectRgn(0, 0, width + 1, height + 1, 2 * shaped.2, 2 * shaped.2);
+            // (The window owns the region from here.)
+            windows::Win32::Graphics::Gdi::SetWindowRgn(self.window.hwnd, Some(region), true);
+        }
+    }
+
     /// Draws what it shows where it is, set off in colour while it is dragged.
     fn draw(&mut self) {
         // This thread's device: a new one after the last was lost.
@@ -454,6 +474,7 @@ impl Overlay {
         let scale = self.scale();
         let glass = Glass { presence: 1.0 - self.clear, ..self.glass.unwrap_or_else(|| overlay::glass(&mut [], None)) };
         let (width, height, radius) = self.measures();
+        self.shape(width, height, radius);
         let (readings, frames, shape) = (&self.drawn.0, &self.drawn.1, self.drawn.2);
         let dragged = self.grab.is_some();
         let hand = if dragged { Hand::Dragged } else { Hand::Free };
