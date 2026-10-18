@@ -88,7 +88,7 @@ const STRIP_UNDER: f32 = 230.0;
 const CARD_FROM: f32 = 250.0;
 const TALL_UNDER: f32 = 360.0;
 /// The stage from this wide (and as tall as a card).
-const STAGE_FROM: f32 = 600.0;
+const STAGE_FROM: f32 = 520.0;
 /// How far past where the next layout begins a room keeps the one it has (DIPs).
 const HOLD: f32 = 12.0;
 /// The least a music widget is (DIPs).
@@ -994,10 +994,14 @@ impl Drawing<'_> {
             return;
         }
         let fraction = if muted { 0.0 } else { level as f32 / 100.0 };
-        let line = centre.x - 1.5;
-        frame.fill_rounded(Color::hex(self.ink, 0.25 * fade), line, top, 3.0, bottom - top, 1.5);
+        // (As the track: thicker under the pointer, or held, its knob on it.)
+        let lit = self.pointer.is_some_and(|p| inside(p, up_x, up_top, CONTROL, up_bottom - up_top)) || crate::playing::volume_held();
+        let thick = if lit { 5.0 } else { 3.0 };
+        let line = centre.x - thick / 2.0;
+        frame.fill_rounded(Color::hex(self.ink, 0.25 * fade), line, top, thick, bottom - top, thick / 2.0);
         let filled = (bottom - top) * fraction;
-        frame.fill_rounded(colour(self.accent, 0.95 * fade), line, bottom - filled, 3.0, filled, 1.5);
+        frame.fill_rounded(colour(self.accent, 0.95 * fade), line, bottom - filled, thick, filled, thick / 2.0);
+        frame.fill_circle(Color::hex(self.ink, fade), Point { x: centre.x, y: bottom - filled }, if lit { 6.0 } else { 4.5 });
         if let Some((_, py)) = self.pointer.filter(|&p| inside(p, up_x, up_top, CONTROL, up_bottom - up_top)) {
             let at = ((bottom - py) / (bottom - top)).clamp(0.0, 1.0);
             let said = format!("{}%", (at * 100.0).round() as u32);
@@ -1044,9 +1048,10 @@ impl Drawing<'_> {
         x - gap
     }
 
-    /// What plays's track, from `from` to `to` on `row`, with how long is left at its end, `fade` of it shown (never
-    /// thicker: under the pointer, the time at the pointer over it; dragged, the time it is dragged to). Pressed and
-    /// dragged along it (see `Hit::Seek`), what plays is shown that far in, and played from there once let go.
+    /// What plays's track, from `from` to `to` on `row`, with how long is left at its end, `fade` of it shown (thicker
+    /// under the pointer, or dragged, its knob on it; under the pointer, the time there over it; dragged, the time it
+    /// is dragged to). Pressed and dragged along it (see `Hit::Seek`), what plays is shown that far in, and played from
+    /// there once let go. (Only the full screen keeps its track thin and bare.)
     fn progress(&mut self, from: f32, to: f32, row: f32, fade: f32) {
         let Some((length, seekable)) = self.moment.length.filter(|(length, _)| *length > 0.0) else { return };
         let frame = self.frame;
@@ -1061,8 +1066,12 @@ impl Drawing<'_> {
         let dragged = self.moment.dragged_to.is_some();
         let middle = row + CONTROL / 2.0;
         let fraction = (position / length).clamp(0.0, 1.0) as f32;
-        frame.fill_rounded(Color::hex(self.ink, 0.2 * fade), from, middle - 1.5, track, 3.0, 1.5);
-        frame.fill_rounded(colour(self.accent, 0.95 * fade), from, middle - 1.5, track * fraction, 3.0, 1.5);
+        let thick = if seekable && (lit || dragged) { 5.0 } else { 3.0 };
+        frame.fill_rounded(Color::hex(self.ink, 0.2 * fade), from, middle - thick / 2.0, track, thick, thick / 2.0);
+        frame.fill_rounded(colour(self.accent, 0.95 * fade), from, middle - thick / 2.0, track * fraction, thick, thick / 2.0);
+        if seekable && (lit || dragged) {
+            frame.fill_circle(Color::hex(self.ink, fade), Point { x: from + track * fraction, y: middle }, 6.0);
+        }
         words(frame, &left_over, self.fonts.time, Color::hex(self.ink, 0.6 * fade), to - time_wide, middle - self.fonts.time.size * 0.7, time_wide, Align::End, self.edged);
         // Dragged, the time it is dragged to, over where it is; else, under the pointer, the time there.
         if dragged {
@@ -2533,7 +2542,7 @@ mod pictures {
         let floating = Shows { cover: false, title: false, spectrum: false, clear: true, ..all };
         // Name, size, switches, the pointer over it (the controls come), lines turned by the wheel, the track dragged,
         // the music between lines.
-        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 23] = [
+        let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 24] = [
             ("strip", (420.0, 76.0), all, false, 0, false, false),
             ("strip-over", (420.0, 76.0), all, true, 0, false, false),
             ("strip-narrow-tall", (360.0, 96.0), all, false, 0, false, false),
@@ -2553,6 +2562,7 @@ mod pictures {
             ("card-turned", (470.0, 400.0), all, false, 2, false, false),
             ("tall", (290.0, 480.0), all, false, 0, false, false),
             ("stage", (900.0, 470.0), all, false, 0, false, false),
+            ("stage-narrow", (530.0, 330.0), all, false, 0, false, false),
             ("stage-off", (900.0, 470.0), all, false, 0, false, false),
             ("clear-player", (470.0, 178.0), Shows { clear: true, ..all }, false, 0, false, false),
             ("floating", (760.0, 110.0), floating, false, 0, false, false),

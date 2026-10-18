@@ -2535,18 +2535,19 @@ impl<'a> Panel<'a> {
     }
 
     /// What plays, as large as it is shown from the edge the panel is at (as a card from a side, as a player across
-    /// from the top; the panel's size makes it larger or smaller), the window placed for it.
+    /// from the top), the window placed for it: drawn as large as a widget of what plays is (the panel's size is the
+    /// readings'; what plays is made larger or smaller by its edges, as a widget is), so that the two look alike.
     fn music_size(&mut self) -> (f32, f32) {
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
         // (No larger than the screen it opens on holds: kept as it was made on a larger one, it reached past this one.)
         let room = self.music_room();
         let contact = self.placement.as_ref().unwrap().contact;
-        let most = self.music_most(contact, contact.scale * self.size);
+        let most = self.music_most(contact, contact.scale);
         let least = crate::ui::music::LEAST;
         let room = (room.0.min(most.0).max(least.0), room.1.min(most.1).max(least.1));
         let size = crate::ui::music::rests_at(room, &shows);
         let placement = self.placement.as_mut().unwrap();
-        place(placement, self.edge, &self.theme, size, self.size);
+        place(placement, self.edge, &self.theme, size, 1.0);
         size
     }
 
