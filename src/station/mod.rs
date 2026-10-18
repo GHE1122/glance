@@ -13,11 +13,21 @@ pub mod thumbs;
 mod spike;
 
 /// A press on what a station's lane shows (see `view::Hit`), in the panel and in a widget alike: done; whether it was
-/// one. A thing on it, or copied lately, is put on the clipboard; its head's word clears it.
+/// one. A thing on it, or copied lately, is put on the clipboard (pressed again within a double click's time, a thing
+/// on it is opened); its head's word clears it.
 pub fn pressed(hit: crate::ui::view::Hit) -> bool {
     use crate::ui::view::Hit;
+    /// The thing on it last pressed, and when.
+    static LAST: std::sync::Mutex<Option<(u64, std::time::Instant)>> = std::sync::Mutex::new(None);
     match hit {
-        Hit::Shelf(id) | Hit::Copied(id) => run::ask(run::Ask::Copy(id)),
+        Hit::Shelf(id) => {
+            let double = std::time::Duration::from_millis(u64::from(unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }));
+            let mut last = LAST.lock().unwrap();
+            let again = last.is_some_and(|(was, at)| was == id && at.elapsed() <= double);
+            *last = (!again).then(|| (id, std::time::Instant::now()));
+            run::ask(if again { run::Ask::Open(id) } else { run::Ask::Copy(id) });
+        }
+        Hit::Copied(id) => run::ask(run::Ask::Copy(id)),
         Hit::ShelfClear => run::ask(run::Ask::Clear),
         _ => return false,
     }
