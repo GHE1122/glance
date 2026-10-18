@@ -268,7 +268,7 @@ pub fn head_chose(choice: HeadChoice) {
         HeadChoice::StopRecent => {
             std::thread::spawn(|| crate::app().change(|settings| settings.station.recent = false));
         }
-        HeadChoice::Settings => crate::show_settings(),
+        HeadChoice::Settings => crate::show_workbench_settings(),
     }
 }
 

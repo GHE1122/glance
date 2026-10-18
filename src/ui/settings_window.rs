@@ -158,6 +158,8 @@ static OPENING: AtomicBool = AtomicBool::new(false);
 /// overlay's page asked for (see `open_at_overlay`).
 const FOLLOW: u32 = WM_APP + 40;
 const TO_OVERLAY: u32 = WM_APP + 41;
+/// Asked to turn to the workbench's page.
+const TO_WORKBENCH: u32 = WM_APP + 42;
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
@@ -197,32 +199,49 @@ pub fn hwnd() -> Option<HWND> {
 /// thread in a loop of its own till it is let go, and the panel, the widgets and the lyrics go on meanwhile. Open,
 /// it is raised.
 pub fn open() {
-    open_at(false);
+    open_at(None);
 }
 
 /// Opens the window (as `open`) at the overlay's page: from the overlay's menu.
 pub fn open_at_overlay() {
-    open_at(true);
+    open_at(Some(To::Overlay));
 }
 
-fn open_at(overlay: bool) {
+/// Opens the window (as `open`) at the workbench's page: from the station's menu.
+pub fn open_at_workbench() {
+    open_at(Some(To::Workbench));
+}
+
+/// A page the window is opened at, other than the one last shown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum To {
+    Overlay,
+    Workbench,
+}
+
+fn open_at(to: Option<To>) {
     if let Some(hwnd) = hwnd() {
-        if overlay {
-            let _ = unsafe { PostMessageW(Some(hwnd), TO_OVERLAY, WPARAM(0), LPARAM(0)) };
+        let message = match to {
+            Some(To::Overlay) => Some(TO_OVERLAY),
+            Some(To::Workbench) => Some(TO_WORKBENCH),
+            None => None,
+        };
+        if let Some(message) = message {
+            let _ = unsafe { PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0)) };
         }
         return show();
     }
     if OPENING.swap(true, Ordering::AcqRel) {
         return;
     }
-    if std::thread::Builder::new().name("settings".into()).spawn(move || run(overlay)).is_err() {
+    if std::thread::Builder::new().name("settings".into()).spawn(move || run(to)).is_err() {
         OPENING.store(false, Ordering::Release);
     }
 }
 
 /// The window's thread: makes it (on a graphics device of its own, given back as the thread ends), and draws it
 /// whenever it is due, between the messages that arrive, till it is gone.
-fn run(overlay: bool) {
+fn run(to: Option<To>) {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
@@ -236,8 +255,10 @@ fn run(overlay: bool) {
     if made.is_none() {
         return;
     }
-    if overlay {
-        to_overlay();
+    match to {
+        Some(To::Overlay) => to_overlay(),
+        Some(To::Workbench) => to_workbench(),
+        None => {}
     }
     let mut msg = MSG::default();
     loop {
@@ -265,6 +286,13 @@ fn to_overlay() {
         OVERLAY_OWED.store(false, Ordering::Release);
         ui.tab = Tab::Overlay;
         ui.turn_to(Page::Monitor);
+    });
+}
+
+fn to_workbench() {
+    with_ui(|ui| {
+        WORKBENCH_OWED.store(false, Ordering::Release);
+        ui.turn_to(Page::Workbench);
     });
 }
 
@@ -317,6 +345,7 @@ static SWITCHES_READ: std::sync::Mutex<Option<(bool, bool)>> = std::sync::Mutex:
 static FOLLOW_OWED: AtomicBool = AtomicBool::new(false);
 /// The overlay's page asked for, to be turned to (see `open_at_overlay`); kept as `FOLLOW_OWED` is.
 static OVERLAY_OWED: AtomicBool = AtomicBool::new(false);
+static WORKBENCH_OWED: AtomicBool = AtomicBool::new(false);
 
 /// Draws the window if a frame is due, and says when the next one is; `None`
 /// while there is no window.
@@ -1259,6 +1288,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             to_overlay();
             LRESULT(0)
         }
+        TO_WORKBENCH => {
+            WORKBENCH_OWED.store(true, Ordering::Release);
+            to_workbench();
+            LRESULT(0)
+        }
         // The screens changed: this thread asks for them anew too (see `screens::changed`).
         WM_DISPLAYCHANGE => {
             crate::screens::changed();
@@ -1504,12 +1538,13 @@ impl Ui {
                     rows.push(Row::Module(id.clone()));
                     if self.opened(&id) > 0.0 {
                         rows.extend(self.items_here(&id).into_iter().map(|name| Row::Item(id.clone(), name)));
+                        rows.extend(module_fields(&entry.id).iter().map(|field| Row::ModuleChoice(id.clone(), *field)));
                     }
                 }
                 rows.push(Row::Note(pick(
                     self.lang,
-                    "工作台放手头常用的东西。时间与媒体在监控和工作台里各有一份，分别开关。中转站、便签、快捷 App 做好后会加到这里",
-                    "The workbench holds what is at hand. The time and media are in the monitor and in the workbench alike, each switched on its own. The station, notes and quick launch will come here",
+                    "工作台放手头常用的东西。时间与媒体在监控和工作台里各有一份，分别开关",
+                    "The workbench holds what is at hand. The time and media are in the monitor and in the workbench alike, each switched on its own",
                 )));
             }
             (Page::Music, _) => {
@@ -2745,7 +2780,6 @@ impl Ui {
             ("overlay", "time") => (p("时间", "Time"), None),
             ("overlay" | "time", "twelve") => (p("12 小时制", "12-hour clock"), Some(p("关闭时为 24 小时制", "Off, a 24-hour clock"))),
             ("time", "sound") => (p("音量", "Volume"), Some(p("拖动调节音量，可静音", "Dragged to set how loud the sound is; muted too"))),
-            ("station", "copies") => (p("最近复制", "Recently copied"), Some(p("复制过的文字、图片和文件，点一下再次复制", "What was copied lately: pressed, copied again"))),
             ("time", "media") => (p("正在播放", "Now playing"), Some(p("可暂停、播放和切换曲目", "Paused, played and skipped"))),
             ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在唱的这一句和下一句。查找时会把歌名发给网易云音乐、QQ 音乐或 LRCLIB", "The line sung now and the next. To find them the track's title is sent to NetEase Cloud Music, QQ Music or LRCLIB"))),
             ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在正在唱的这一句下面", "Under the line sung now, where there is one"))),
@@ -2887,6 +2921,10 @@ impl Ui {
             OVERLAY_OWED.store(false, Ordering::Release);
             self.tab = Tab::Overlay;
             self.turn_to(Page::Monitor);
+        }
+        if WORKBENCH_OWED.load(Ordering::Acquire) {
+            WORKBENCH_OWED.store(false, Ordering::Release);
+            self.turn_to(Page::Workbench);
         }
         if !FOLLOW_OWED.load(Ordering::Acquire) || self.sliding.is_some() || self.drag.is_some() || self.carry.is_some() {
             return;

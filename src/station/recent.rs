@@ -353,6 +353,7 @@ fn follow() {
     let mut looked_for_drives: Option<std::time::Instant> = None;
     let mut saved = std::time::Instant::now();
     let tools = Tools::new(&places, looked_at);
+    let mut shown_hidden: Vec<PathBuf> = Vec::new();
     loop {
         let (on, hidden) = {
             let settings = crate::app().settings.lock().unwrap();
@@ -371,7 +372,9 @@ fn follow() {
             looked_for_drives = Some(std::time::Instant::now());
             tools.forget();
         }
-        let out = |path: &Path| left_out(path, &hidden) || tools.hold(path);
+        // (The folders the user asked not to list are left out as it is shown, not dropped from it: listed again,
+        // their files come back.)
+        let out = |path: &Path| left_out(path, &[]) || tools.hold(path);
         let now = super::now_ms();
         // The list as it was: those gone meanwhile, or now left out, taken off.
         let mut changed = kept.prune(now, |came| !came.path.exists() || out(&came.path));
@@ -385,8 +388,9 @@ fn follow() {
             kept.read.retain(|(letter, ..)| *letter != drive.letter);
             kept.read.push((drive.letter, drive.journal, to));
         }
-        if changed || SHOWN.lock().unwrap().is_none() {
-            publish(kept.files.clone());
+        if changed || SHOWN.lock().unwrap().is_none() || hidden != shown_hidden {
+            publish(kept.files.iter().filter(|came| !hidden.iter().any(|folder| came.path.starts_with(folder))).cloned().collect());
+            shown_hidden = hidden.clone();
         }
         // Kept as it changes, and where each journal was read up to now and then (a restart reads on from there).
         if changed || saved.elapsed() > SAVE_EVERY {

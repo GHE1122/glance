@@ -95,7 +95,7 @@ const LYRICS: [Item; 6] = [
     item("clear", false),
 ];
 /// The station: what was copied lately under what is on it.
-const STATION: [Item; 1] = [item("copies", true)];
+const STATION: [Item; 0] = [];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
 const GAME: [Item; 9] = [
     item("chart", true),

@@ -454,16 +454,17 @@ pub struct Lately {
 impl Lately {
     fn of(came: &crate::station::recent::Came, lang: Lang, now: u64) -> Lately {
         let label = came.path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        // The folder it is in, by its last two names ("Documents\Work"); where it came from, where it says, and in
+        // which folder it is unless it is still in Downloads.
+        let folders: Vec<String> = came.path.parent().into_iter().flat_map(|parent| parent.components()).filter_map(|part| match part {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        }).collect();
+        let folder = folders[folders.len().saturating_sub(2)..].join("\\");
         let from = match &came.site {
-            Some(site) => format!("{} {site}", lang.pick("来自", "from")),
-            // (The folder it is in, by its last two names: "Documents\Work".)
-            None => {
-                let folders: Vec<String> = came.path.parent().into_iter().flat_map(|parent| parent.components()).filter_map(|part| match part {
-                    std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
-                    _ => None,
-                }).collect();
-                folders[folders.len().saturating_sub(2)..].join("\\")
-            }
+            Some(site) if came.downloaded => format!("{} {site}", lang.pick("来自", "from")),
+            Some(site) => format!("{folder} · {} {site}", lang.pick("来自", "from")),
+            None => folder,
         };
         Lately { file: came.file, day: text::day_of(came.came_ms, now, lang), label, about: format!("{from} · {}", text::bytes(came.bytes as f64)), when: text::since(came.came_ms, now, lang), path: came.path.clone() }
     }
@@ -719,10 +720,10 @@ fn tiles_across(width: f32) -> usize {
 /// laid out): how many were copied since is said on their tab.
 static COPIES_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
-/// The station's lane: whole (`full`), its head's pages (what is on it, and with `copies` switched on and Recently
-/// copied on, what was copied lately) over the page `tab` (as far as there is one); else what is on it in a row
+/// The station's lane: whole (`full`), its head's pages (what is on it, and with Recently copied on, what was copied
+/// lately, and with Recent files on, the files come lately) over the page `tab` (as far as there is one); else what is on it in a row
 /// under its name.
-fn station_lane(full: bool, copies: bool, tab: Tab, lang: Lang) -> Vec<Block> {
+fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     use std::sync::atomic::Ordering;
     let shown = crate::station::run::shown();
     let folder = crate::station::folder::Folder::own();
@@ -739,7 +740,7 @@ fn station_lane(full: bool, copies: bool, tab: Tab, lang: Lang) -> Vec<Block> {
         let count = if tiles.is_empty() { String::new() } else { tiles.len().to_string() };
         return vec![head(lang.pick("中转站", "Station"), count, "", false), Block::Shelf { tiles, shows: Shows::Row, tall: TILE_H, said, over: shown.over }];
     }
-    let copies = copies && shown.history;
+    let copies = shown.history;
     let tab = if copies { tab } else { Tab::Shelf };
     let newest = shown.items.iter().filter(|item| item.copied).map(|item| item.id).max().unwrap_or(0);
     // (Their first showing takes all there are for seen.)
@@ -1621,7 +1622,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             blocks
         }
-        "station" => station_lane(full, on("copies"), scene.tab, lang),
+        "station" => station_lane(full, scene.tab, lang),
         "apps" => apps_lane(full, lang),
         // What plays, in a widget merged with readings: drawn apart (see `Scene::music_apart`), its lane its head and
         // room under it (a player's, full; a strip's, compact).
@@ -3090,7 +3091,7 @@ otepad.exe", "Notepad"),
                 let seen = Seen::of(history);
                 let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::App(1)), thumbs: &RESTING, pinned: true, overlay: false, buttons: true, newer: false };
                 let lanes = vec![
-                    Lane { id: "station".into(), blocks: station_lane(true, false, Tab::Shelf, Lang::Zh), ink: theme.ink("station") },
+                    Lane { id: "station".into(), blocks: station_lane(true, Tab::Shelf, Lang::Zh), ink: theme.ink("station") },
                     Lane { id: "apps".into(), blocks: apps_lane(true, Lang::Zh), ink: theme.ink("apps") },
                 ];
                 for (column, side) in sides.iter().enumerate() {
@@ -3189,7 +3190,7 @@ otepad.exe", "Notepad"),
                         _ => None,
                     };
                     let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
-                    let lane = Lane { id: "station".into(), blocks: station_lane(true, true, tab, Lang::Zh), ink: theme.ink("station") };
+                    let lane = Lane { id: "station".into(), blocks: station_lane(true, tab, Lang::Zh), ink: theme.ink("station") };
                     let area = Rect { x, y, w: lane_w, h: lane.height(&theme) };
                     paint_lane(frame, &scene, &lane, area, 0.0, Pass::Content, &mut Vec::new());
                 }

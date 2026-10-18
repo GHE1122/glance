@@ -1173,6 +1173,9 @@ impl Widgets {
     #[allow(clippy::too_many_arguments)]
     pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, size: (f32, f32), lent: Option<Lent>, from: Option<Edge>, part: crate::settings::Part, only: Option<String>) -> bool {
         let Some(contact) = monitor_at(at) else { return false };
+        // (Its top on the screen, not above it: torn off high, as the hand pulled it, it is held lower.)
+        let below = (contact.work.top - at.y).max(0);
+        let (at, grab) = (POINT { y: at.y + below, ..at }, POINT { y: grab.y - below, ..grab });
         let choice = Choice { form, scale, extra: (0.0, 0.0) };
         let made = Instant::now();
         // What the panel showed, as large as it was.

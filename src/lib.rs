@@ -100,6 +100,8 @@ mod source;
 mod update;
 #[cfg(windows)]
 mod station;
+
+mod notes;
 #[cfg(windows)]
 mod watch;
 #[cfg(windows)]
@@ -294,6 +296,12 @@ impl App {
 pub(crate) fn show_settings() {
     app().controller.dismiss();
     ui::settings_window::show();
+}
+
+/// The settings shown at the workbench's page (the station's choices are there).
+pub(crate) fn show_workbench_settings() {
+    app().controller.dismiss();
+    ui::settings_window::open_at_workbench();
 }
 
 #[cfg(windows)]
