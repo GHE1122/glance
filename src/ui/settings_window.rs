@@ -1493,8 +1493,8 @@ impl Ui {
                 rows.extend(super::prefs::items("lyrics").iter().map(|item| Row::Element(item.name)));
                 rows.push(Row::Note(pick(
                     self.lang,
-                    "查找歌词时会把歌名发给网易云音乐或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
-                    "To find lyrics the track's title is sent to NetEase Cloud Music or LRCLIB; a track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
+                    "查找歌词时会把歌名发给网易云音乐、QQ 音乐或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
+                    "To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
                 )));
             }
             (Page::General, _) => {
@@ -1673,7 +1673,8 @@ impl Ui {
                 Row::Choice(field) if self.choice_hint(*field).is_some() => {
                     let options = self.choices(*field).1;
                     let words = self.words_height(&row).max(ROW);
-                    (if after_heading { 8.0 } else { ROW_GAP }, if self.stacked(&options) { words + CHOICE_LINE } else { words })
+                    let lines = self.choice_lines(&options, Self::choices_room()).len() as f32;
+                    (if after_heading { 8.0 } else { ROW_GAP }, if self.stacked(&options) { words + CHOICE_LINE * lines } else { words })
                 }
                 // Inside its module's card, right under the row above.
                 Row::Item(..) => (0.0, (self.words_height(&row) - ROW + ITEM_ROW).max(ITEM_ROW)),
@@ -1891,18 +1892,33 @@ impl Ui {
         22.0 + self.gfx.wrapped_height(&word, Font::new(Family::Segoe, 12.0, 400.0), room.max(40.0)) + 18.0
     }
 
-    /// How wide a row of choices is.
-    fn segmented_width(&self, options: &[String]) -> f32 {
+    /// How wide each of a row's choices is.
+    fn choice_widths(&self, options: &[String]) -> Vec<f32> {
         let font = Font::new(Family::Segoe, 13.0, 400.0);
-        options.iter().map(|o| (self.gfx.measure(o, font) + 24.0).max(44.0)).sum::<f32>() + 4.0
+        options.iter().map(|o| (self.gfx.measure(o, font) + 24.0).max(44.0)).collect()
+    }
+
+    /// How wide a row of choices is, on one line.
+    fn segmented_width(&self, options: &[String]) -> f32 {
+        self.choice_widths(options).iter().sum::<f32>() + 4.0
+    }
+
+    /// A row's choices, line by line: as many whole to a line as fit in `room` (on their own line in the card, all
+    /// of its width: more than that, as the players music is followed from may be, ran past its left side).
+    fn choice_lines(&self, options: &[String], room: f32) -> Vec<std::ops::Range<usize>> {
+        lines_of(&self.choice_widths(options), room)
+    }
+
+    /// The room a row's choices have on a line of their own in their card.
+    fn choices_room() -> f32 {
+        PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE
     }
 
     /// Whether a row of choices with a word goes on a line of its own under
     /// its name: when beside it, it would leave the word too narrow a column
     /// to read (a few characters to a line).
     fn stacked(&self, options: &[String]) -> bool {
-        let width = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
-        width - self.segmented_width(options) - 16.0 < MIN_WORDS
+        Self::choices_room() - self.segmented_width(options) - 16.0 < MIN_WORDS
     }
 
     /// What a row of buttons says, its word, and its buttons, right to left:
@@ -2532,8 +2548,8 @@ impl Ui {
             "lyrics" => (
                 p("音乐", "Music"),
                 Some(p(
-                    "正在播放的歌曲：封面、播放进度、播放控制、音量，以及随播放滚动的歌词。查找歌词时会把歌名发给网易云音乐或 LRCLIB，本地歌曲先使用文件自带的歌词；歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
-                    "What plays: its cover, its track, its controls, how loud, and its lyrics as it plays. To find lyrics the track's title is sent to NetEase Cloud Music or LRCLIB; a track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
+                    "正在播放的歌曲：封面、播放进度、播放控制、音量，以及随播放滚动的歌词。查找歌词时会把歌名发给网易云音乐、QQ 音乐或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
+                    "What plays: its cover, its track, its controls, how loud, and its lyrics as it plays. To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
                 )),
             ),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
@@ -2675,7 +2691,7 @@ impl Ui {
             ("overlay" | "time", "twelve") => (p("12 小时制", "12-hour clock"), Some(p("关闭时为 24 小时制", "Off, a 24-hour clock"))),
             ("time", "sound") => (p("音量", "Volume"), Some(p("拖动调节音量，可静音", "Dragged to set how loud the sound is; muted too"))),
             ("time", "media") => (p("正在播放", "Now playing"), Some(p("可暂停、播放和切换曲目", "Paused, played and skipped"))),
-            ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在唱的这一句和下一句；会把歌名发给网易云音乐或 LRCLIB 来查找", "The line sung now and the next; the track's title is sent to NetEase Cloud Music or LRCLIB to find them"))),
+            ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在唱的这一句和下一句。查找时会把歌名发给网易云音乐、QQ 音乐或 LRCLIB", "The line sung now and the next. To find them the track's title is sent to NetEase Cloud Music, QQ Music or LRCLIB"))),
             ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在正在唱的这一句下面", "Under the line sung now, where there is one"))),
             ("lyrics", "cover") => (p("封面", "Cover"), Some(p("音乐组件显示专辑封面", "The music widget shows the album cover"))),
             ("lyrics", "title") => (p("歌名与歌手", "Title and artist"), None),
@@ -3672,18 +3688,19 @@ impl Ui {
                     let right = left + width - ROW_SIDE;
                     match self.choice_hint(field) {
                         Some(word) if self.stacked(&options) => {
-                            let words = row_height - CHOICE_LINE;
+                            let lines = self.choice_lines(&options, Self::choices_room()).len() as f32;
+                            let words = row_height - CHOICE_LINE * lines;
                             field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + words / 2.0, width - 2.0 * ROW_SIDE);
-                            self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height - CHOICE_LINE / 2.0 - 8.0, now, &hovered);
+                            self.segmented(frame, palette, field, &options, chosen, true, right, y + words + CHOICE_LINE / 2.0 - 8.0, Self::choices_room(), now, &hovered);
                         }
                         Some(word) => {
                             let room = width - 2.0 * ROW_SIDE - self.segmented_width(&options) - 16.0;
                             field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + row_height / 2.0, room);
-                            self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, now, &hovered);
+                            self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
                         }
                         None => {
                             text_centred(frame, name, label, palette.text, left + ROW_SIDE, y + row_height / 2.0, width / 2.0, Align::Start);
-                            self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, now, &hovered);
+                            self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
                         }
                     }
                 }
@@ -3733,7 +3750,7 @@ impl Ui {
                     text_centred(frame, name, label, color, left + ITEM_INSET, y + row_height / 2.0, width / 2.0 - ITEM_INSET, Align::Start);
                     let right = left + width - ROW_SIDE - CHEVRON_ROOM;
                     let targets = self.targets.len();
-                    self.segmented(frame, palette, field, &options, chosen, active, right, y + row_height / 2.0, now, &hovered);
+                    self.segmented(frame, palette, field, &options, chosen, active, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
                     if !usable {
                         self.targets.truncate(targets);
                     }
@@ -3923,31 +3940,38 @@ impl Ui {
     /// right-aligned at `right` and centred on `cy`; unless `enabled`, dimmed
     /// and not to be pressed.
     #[allow(clippy::too_many_arguments)]
-    fn segmented(&mut self, frame: &Frame, palette: &Palette, field: Field, options: &[String], chosen: Option<usize>, enabled: bool, right: f32, cy: f32, now: Instant, hovered: &Option<Target>) {
+    /// Its first line centred on `cy`, each right-aligned at `right`, as many to a line as fit in `room` (see
+    /// `choice_lines`), a line under another `CHOICE_LINE` apart.
+    #[allow(clippy::too_many_arguments)]
+    fn segmented(&mut self, frame: &Frame, palette: &Palette, field: Field, options: &[String], chosen: Option<usize>, enabled: bool, right: f32, cy: f32, room: f32, now: Instant, hovered: &Option<Target>) {
         let font = Font::new(Family::Segoe, 13.0, 400.0);
-        let widths: Vec<f32> = options.iter().map(|o| (frame.gfx.measure(o, font) + 24.0).max(44.0)).collect();
-        let total = widths.iter().sum::<f32>() + 4.0;
-        let (x0, y0) = (right - total, cy - 16.0);
-        fill(frame, palette.control, x0, y0, total, 32.0, 6.0);
-        let mut x = x0 + 2.0;
+        let widths = self.choice_widths(options);
+        // Each choice where it is: its left, its width, and the middle of its line.
         let mut spans = Vec::new();
-        for w in &widths {
-            spans.push((x, *w));
-            x += w;
+        for (line, range) in lines_of(&widths, room).into_iter().enumerate() {
+            let total = widths[range.clone()].iter().sum::<f32>() + 4.0;
+            let (x0, line_cy) = (right - total, cy + line as f32 * CHOICE_LINE);
+            fill(frame, palette.control, x0, line_cy - 16.0, total, 32.0, 6.0);
+            let mut x = x0 + 2.0;
+            for w in &widths[range] {
+                spans.push((x, *w, line_cy));
+                x += w;
+            }
         }
         if let Some(index) = chosen {
-            let (to_x, to_w) = (spans[index].0 - x0, spans[index].1);
+            let (to_x, to_w, to_cy) = spans[index];
             let jump = self.settle_thumbs;
-            let tx = self.animate(format!("thumb-x:{field:?}"), to_x, SLIDE, now, jump);
+            let tx = self.animate(format!("thumb-x:{field:?}"), to_x - right, SLIDE, now, jump);
             let tw = self.animate(format!("thumb-w:{field:?}"), to_w, SLIDE, now, jump);
-            let thumb = Rect { x: x0 + tx, y: y0 + 2.0, w: tw, h: 28.0 };
+            let ty = self.animate(format!("thumb-y:{field:?}"), to_cy - cy, SLIDE, now, jump);
+            let thumb = Rect { x: right + tx, y: cy + ty - 14.0, w: tw, h: 28.0 };
             if let Some(drop) = palette.control_drop {
                 fill(frame, drop, thumb.x, thumb.y + 1.0, thumb.w, thumb.h, 4.0);
             }
             stroke_outside(frame, thumb, 4.0, palette.control_ring, 1.0);
             fill(frame, palette.control_on, thumb.x, thumb.y, thumb.w, thumb.h, 4.0);
         }
-        for (i, ((sx, sw), option)) in spans.iter().zip(options).enumerate() {
+        for (i, ((sx, sw, line_cy), option)) in spans.iter().zip(options).enumerate() {
             let target = Target::Choice(field, i);
             let lit = chosen == Some(i) || *hovered == Some(target.clone());
             let color = match (enabled, lit) {
@@ -3956,9 +3980,9 @@ impl Ui {
                 (true, false) => palette.text2,
             };
             let text_w = frame.gfx.measure(option, font);
-            text_centred(frame, option, font, color, sx + (sw - text_w) / 2.0, cy, *sw, Align::Start);
+            text_centred(frame, option, font, color, sx + (sw - text_w) / 2.0, *line_cy, *sw, Align::Start);
             if enabled {
-                self.targets.push((Rect { x: *sx, y: y0, w: *sw, h: 32.0 }, target));
+                self.targets.push((Rect { x: *sx, y: line_cy - 16.0, w: *sw, h: 32.0 }, target));
             }
         }
     }
@@ -4595,6 +4619,24 @@ fn text_centred(frame: &Frame, text: &str, font: Font, color: Color, x: f32, cy:
     frame.text(text, font, color, x, cy - (ascent + descent) / 2.0, width, align);
 }
 
+/// Choices `widths` wide, line by line: each line as many whole as fit in `room` (the track's 4 DIPs of rim
+/// included), one at least.
+fn lines_of(widths: &[f32], room: f32) -> Vec<std::ops::Range<usize>> {
+    let mut lines = Vec::new();
+    let (mut start, mut taken) = (0, 4.0);
+    for (at, width) in widths.iter().enumerate() {
+        if at > start && taken + width > room {
+            lines.push(start..at);
+            (start, taken) = (at, 4.0);
+        }
+        taken += width;
+    }
+    if start < widths.len() {
+        lines.push(start..widths.len());
+    }
+    lines
+}
+
 /// A row's label, and below it, if there is one, its hint, centred together on `cy`.
 #[allow(clippy::too_many_arguments)]
 fn field_label(frame: &Frame, palette: &Palette, label: &str, hint: Option<&str>, label_font: Font, hint_font: Font, x: f32, cy: f32, width: f32) {
@@ -4763,5 +4805,19 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Choices wider than their room go on as many lines as they take, each whole, in order.
+    #[test]
+    fn choices_too_wide_go_on_lines() {
+        assert_eq!(super::lines_of(&[50.0, 60.0, 70.0], f32::INFINITY), vec![0..3]);
+        assert_eq!(super::lines_of(&[50.0, 60.0, 70.0], 120.0), vec![0..2, 2..3]);
+        assert_eq!(super::lines_of(&[50.0, 60.0, 70.0], 100.0), vec![0..1, 1..2, 2..3]);
+        // (One wider than all the room still has a line.)
+        assert_eq!(super::lines_of(&[500.0, 20.0], 100.0), vec![0..1, 1..2]);
+        assert!(super::lines_of(&[], 100.0).is_empty());
     }
 }
