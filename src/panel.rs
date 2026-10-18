@@ -279,7 +279,11 @@ impl Controller {
     }
 
     pub fn record(&self, sample: Sample) {
-        self.seen.lock().unwrap().note(&sample);
+        {
+            let mut seen = self.seen.lock().unwrap();
+            seen.note(&sample);
+            seen.note_playing(crate::ui::view::playing_rows());
+        }
         // A game that has gone a short while without frames has not ended.
         let now = Instant::now();
         let (started, ended) = {

@@ -45,6 +45,12 @@ pub struct Seen {
     pub game_limit: bool,
     /// A microphone's mute.
     pub mic: bool,
+    /// Of what plays, beside the time: the sound's level, what plays, its track, and its line sung (see
+    /// `note_playing`).
+    pub sound: bool,
+    pub media: bool,
+    pub timeline: bool,
+    pub lyric: bool,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -121,6 +127,15 @@ impl Seen {
         self.mic |= s.mic_muted.is_some();
     }
 
+    /// Takes in what is known of what plays (see `view::playing_rows`): the sound's level, what plays, its track, its
+    /// line sung. (Not in a sample: what plays is looked at apart.)
+    pub fn note_playing(&mut self, (sound, media, timeline, lyric): (bool, bool, bool, bool)) {
+        self.sound |= sound;
+        self.media |= media;
+        self.timeline |= timeline;
+        self.lyric |= lyric;
+    }
+
     /// The readings `other` holds for the lane of module `id` that this
     /// does not, one at a time.
     pub fn news(&self, other: &Seen, id: &str, info: &StaticInfo) -> Vec<Item> {
@@ -159,6 +174,12 @@ impl Seen {
                 flag(self.battery_power, other.battery_power, Item::BatteryPower);
                 flag(self.battery_health, other.battery_health, Item::BatteryHealth);
             }
+            "time" => {
+                flag(self.sound, other.sound, Item::Sound);
+                flag(self.media, other.media, Item::Media);
+                flag(self.timeline, other.timeline, Item::Timeline);
+                flag(self.lyric, other.lyric, Item::Lyric);
+            }
             "game" => {
                 flag(self.game, other.game, Item::Game);
                 flag(self.game_limit, other.game_limit, Item::GameLimit);
@@ -192,7 +213,7 @@ impl Seen {
     /// This and `other` together: everything either holds.
     pub fn join(&self, other: &Seen, info: &StaticInfo) -> Seen {
         let mut joined = self.clone();
-        let mut lanes: Vec<String> = ["game", "cpu", "memory", "network", "disk", "storage", "board", "battery", "docker"].map(String::from).to_vec();
+        let mut lanes: Vec<String> = ["time", "game", "cpu", "memory", "network", "disk", "storage", "board", "battery", "docker"].map(String::from).to_vec();
         lanes.extend(info.gpu_modules());
         for id in &lanes {
             for item in joined.news(other, id, info) {
@@ -240,6 +261,10 @@ impl Seen {
             Item::Game => seen.game = true,
             Item::GameLimit => seen.game_limit = true,
             Item::Mic => seen.mic = true,
+            Item::Sound => seen.sound = true,
+            Item::Media => seen.media = true,
+            Item::Timeline => seen.timeline = true,
+            Item::Lyric => seen.lyric = true,
             Item::Gpu(index, gpu) => {
                 if seen.gpus.len() <= *index {
                     seen.gpus.resize(index + 1, GpuSeen::default());
@@ -289,6 +314,11 @@ pub enum Item {
     Game,
     GameLimit,
     Mic,
+    /// Beside the time (see `Seen::note_playing`).
+    Sound,
+    Media,
+    Timeline,
+    Lyric,
     /// Of the GPU at this place in `StaticInfo::gpus`.
     Gpu(usize, GpuItem),
 }

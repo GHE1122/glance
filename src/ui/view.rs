@@ -54,6 +54,19 @@ fn glide_of(heard: Option<&crate::playing::Now>) -> Glide {
 
 /// What is said of what plays (`heard`): its title (else its player's name, else that nothing plays), and under it
 /// whether it plays, by whom and in which player.
+/// The music, while what plays is it (a video playing meanwhile is not).
+fn playing_music() -> Option<crate::playing::Now> {
+    crate::playing::music().filter(|music| crate::playing::now().is_some_and(|now| now.title == music.title && now.app == music.app))
+}
+
+/// What of what plays the time's lane would show now: the sound's level, what plays, its track, its line sung (see
+/// `Seen::note_playing`).
+pub fn playing_rows() -> (bool, bool, bool, bool) {
+    let Some(heard) = crate::playing::now() else { return (false, false, false, false) };
+    let music = playing_music();
+    (heard.volume.is_some(), true, heard.timeline.is_some(), music.is_some() && sung_now(music.as_ref(), Lang::En, false).is_some())
+}
+
 fn said_of(heard: &crate::playing::Now, lang: Lang) -> (String, String) {
     let nothing = heard.title.is_empty() && heard.app.is_empty();
     let title = match (heard.title.is_empty(), nothing) {
@@ -1087,23 +1100,38 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let now = text::Local::at(s.t);
             let (figure, unit) = now.time(on("twelve"), lang);
             let mut blocks = vec![head(lang.pick("时间", "Time"), now.date(lang), "", false), Block::Readout { figure, unit, hot: false, plot: None }];
-            if let Some(heard) = crate::playing::now() {
-                if let Some(level) = heard.volume.filter(|_| on("sound")) {
-                    blocks.push(Block::Sound { level, muted: heard.muted });
-                }
-                if on("media") {
-                    let (title, about) = said_of(&heard, lang);
-                    blocks.push(Block::Playing { title, about, playing: heard.playing, players: heard.players });
-                    if let Some(timeline) = heard.timeline {
-                        let whole = |seconds: f64| seconds.max(0.0).round() as u32;
-                        blocks.push(Block::Progress { at: whole(timeline.at).min(whole(timeline.length)), length: whole(timeline.length), seekable: timeline.seekable });
-                    }
+            // Each of what plays as the panel was laid out for it (see `Seen::note_playing`): not there yet, nothing
+            // (drawn as it came, it was drawn over the lane under, the panel laid out before it was known); there and
+            // gone a while, its room kept, as a reading's is.
+            let seen = scene.seen;
+            let heard = crate::playing::now();
+            if on("sound") && seen.sound {
+                blocks.push(match heard.as_ref().and_then(|heard| heard.volume.map(|level| (level, heard.muted))) {
+                    Some((level, muted)) => Block::Sound { level, muted },
+                    None => Block::Room(Block::Sound { level: 0, muted: false }.height()),
+                });
+            }
+            if on("media") && seen.media {
+                let heard = heard.clone().unwrap_or_default();
+                let (title, about) = said_of(&heard, lang);
+                blocks.push(Block::Playing { title, about, playing: heard.playing, players: heard.players });
+                if seen.timeline {
+                    blocks.push(match heard.timeline {
+                        Some(timeline) => {
+                            let whole = |seconds: f64| seconds.max(0.0).round() as u32;
+                            Block::Progress { at: whole(timeline.at).min(whole(timeline.length)), length: whole(timeline.length), seekable: timeline.seekable }
+                        }
+                        None => Block::Room(Block::Progress { at: 0, length: 0, seekable: false }.height()),
+                    });
                 }
             }
             // The music's line, while what plays is it (a video playing meanwhile has none); none where none were found.
-            let heard = crate::playing::music().filter(|music| crate::playing::now().is_some_and(|now| now.title == music.title && now.app == music.app));
-            if let Some((line, under, said)) = sung_now(heard.as_ref(), lang, prefs.shows("lyrics", "translation")).filter(|_| on("lyrics") && heard.is_some()) {
-                blocks.push(Block::Lyric { line, under, said, glide: glide_of(heard.as_ref()) });
+            if on("lyrics") && seen.lyric {
+                let heard = playing_music();
+                blocks.push(match sung_now(heard.as_ref(), lang, prefs.shows("lyrics", "translation")).filter(|_| heard.is_some()) {
+                    Some((line, under, said)) => Block::Lyric { line, under, said, glide: glide_of(heard.as_ref()) },
+                    None => Block::Room(Block::Lyric { line: String::new(), under: String::new(), said: false, glide: Glide::default() }.height()),
+                });
             }
             blocks
         }

@@ -349,6 +349,16 @@ pub fn watch(wanted: impl Fn() -> (bool, bool, bool) + Send + 'static, changed: 
         crate::media::heed_sessions(look_now);
         // The player followed for each, listened to while it is looked at.
         let mut heeding: [Option<crate::media::Heeding>; 2] = [None, None];
+        // Looked at once as Glance starts, whether or not anything shows it yet: the panel is laid out for what it
+        // holds as it first opens, and what plays was not known then (laid out without it, it was drawn over the lane
+        // under the time's once it was).
+        let (any, music, _) = wanted();
+        if any {
+            let _ = look(Follow::Any);
+        }
+        if music {
+            let _ = look(Follow::Music);
+        }
         loop {
             let (any, music, seen) = wanted();
             for (follow, on) in [(Follow::Any, any), (Follow::Music, music)] {
