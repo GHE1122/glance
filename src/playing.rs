@@ -191,6 +191,12 @@ static SOUGHT: [Mutex<Option<(f64, std::time::Instant, String)>>; 2] = [Mutex::n
 #[cfg(windows)]
 static HELD: [Mutex<Option<(f64, std::time::Instant)>>; 2] = [Mutex::new(None), Mutex::new(None)];
 
+/// Played again after a pause: when that was first seen, and where it was paused (seconds), till its player says
+/// how far in it is since. (What it said before stands for where it was before the pause: reckoned on from then, the
+/// whole pause was added to where it is, and QQ Music's went ahead, then back as it said again.)
+#[cfg(windows)]
+static RESUMED: [Mutex<Option<(std::time::Instant, f64)>>; 2] = [Mutex::new(None), Mutex::new(None)];
+
 /// How far into the track of what is followed for `follow` it is now (seconds), from the last look on by the time
 /// since while it plays; none where its player does not say.
 #[cfg(windows)]
@@ -244,12 +250,28 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
         // closed was taken for this one's pausing just then, and all the time since it last said where it was added
         // to it, past its end.)
         let same = TRACK[f].lock().unwrap().as_ref().is_some_and(|(app, title)| *app == playing.app_id && *title == playing.title);
+        let mut resumed = RESUMED[f].lock().unwrap();
         if !same {
             *held = None;
+            *resumed = None;
         }
+        let was = *POSITION[f].lock().unwrap();
+        let sought = SOUGHT[f].lock().unwrap().is_some();
         match (playing.playing, playing.timeline.as_mut()) {
+            // Played again just now (from where it was shown paused), or since, its player not having said again:
+            // on from where it was paused, by the time since it played again.
+            (true, Some((position, _))) if !seeking && !sought => {
+                *held = None;
+                if let (true, Some((at, _, false, _))) = (same, was) {
+                    *resumed = Some((now, at));
+                }
+                match *resumed {
+                    Some((since, at)) if said_at.is_none_or(|said| said <= since) => *position = at + now.duration_since(since).as_secs_f64() * playing.rate,
+                    _ => *resumed = None,
+                }
+            }
             (false, Some((position, _))) if !seeking => {
-                let was = *POSITION[f].lock().unwrap();
+                *resumed = None;
                 match *held {
                     // The same saying as when the pause was seen: where it was held.
                     Some((at, by)) if said_at.is_some_and(|said| said <= by + std::time::Duration::from_millis(50)) => *position = at,
@@ -264,7 +286,10 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
                     _ => *held = None,
                 }
             }
-            _ => *held = None,
+            _ => {
+                *held = None;
+                *resumed = None;
+            }
         }
     }
     *POSITION[f].lock().unwrap() = playing.as_ref().and_then(|playing| playing.timeline.map(|(at, _)| (at, now, playing.playing, playing.rate)));
@@ -353,6 +378,7 @@ pub fn watch(wanted: impl Fn() -> (bool, bool, bool) + Send + 'static, changed: 
                     // was held).
                     *POSITION[follow as usize].lock().unwrap() = None;
                     *HELD[follow as usize].lock().unwrap() = None;
+                    *RESUMED[follow as usize].lock().unwrap() = None;
                 } else if !heeded.as_ref().is_some_and(|heeded| heeded.stands(follow)) {
                     *heeded = None;
                     *heeded = crate::media::heed(follow, look_now);
@@ -698,6 +724,34 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+    }
+
+    /// On a desktop, music paused: played again, where it is shown to be goes on from where it was paused, neither
+    /// ahead (by the pause) nor back; paused again after.
+    #[test]
+    #[ignore = "needs music paused on this PC, and plays it four seconds"]
+    fn resumes_where_paused() {
+        let follow = super::Follow::Music;
+        for _ in 0..10 {
+            super::look(follow);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let paused = super::position(follow).expect("music paused, its player saying where it is");
+        crate::media::ask_of(follow, "toggle");
+        let start = std::time::Instant::now();
+        let mut last = paused;
+        let mut worst: f64 = 0.0;
+        while start.elapsed() < std::time::Duration::from_secs(4) {
+            super::look(follow);
+            let at = super::position(follow).unwrap_or(last);
+            let off = at - (paused + start.elapsed().as_secs_f64());
+            println!("{:5.2} s  at {at:8.3}  off {off:+.3}{}", start.elapsed().as_secs_f64(), if at < last - 0.05 { "  BACK" } else { "" });
+            worst = worst.max(off.abs());
+            last = at;
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        crate::media::ask_of(follow, "toggle");
+        assert!(worst < 0.6, "shown as far off as {worst:.3} s from where it was paused, on by the time since");
     }
 
     /// On a desktop: how long one look takes, and what it sees.
