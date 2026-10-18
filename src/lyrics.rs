@@ -163,17 +163,23 @@ fn find(track: &Track) -> Said {
     };
     let by_number = |id: u64| {
         let (worded, theirs) = std::thread::scope(|scope| {
-            let theirs = scope.spawn(|| answered(netease(id)));
+            let theirs = scope.spawn(|| netease_and_credits(id));
             (answered(amll(id)), theirs.join().expect("NetEase asked"))
         });
+        let (theirs, credits) = match theirs {
+            Ok((lines, credits)) => (lines, credits),
+            Err(Unreached) => (answered(Err(Unreached)), Vec::new()),
+        };
         match (worded, theirs) {
-            (Some(mut lines), Some(theirs)) => {
-                if lines.iter().all(|line| line.translation.is_none()) {
+            // Timed word by word elsewhere: with NetEase's translation where they have none, and NetEase's lines of
+            // who wrote and made the song (they have none: NetEase showed those lines, the lyrics nothing).
+            (Some(mut lines), theirs) => {
+                if let Some(theirs) = theirs.filter(|_| lines.iter().all(|line| line.translation.is_none())) {
                     translated(&mut lines, &theirs);
                 }
-                Some(lines)
+                Some(with_credits(lines, &credits))
             }
-            (worded, theirs) => worded.or(theirs),
+            (None, theirs) => theirs,
         }
     };
     let found = match track.netease {
@@ -356,15 +362,39 @@ fn clock(time: &str) -> Option<f64> {
 }
 
 /// NetEase Cloud Music's lyrics of its track `id`, with their translation: timed word by word where it has them
-/// (its `yrc`), else line by line.
+/// (its `yrc`), else line by line; with its lines of who wrote and made the song either way (see `credit`).
+#[cfg(test)]
 fn netease(id: u64) -> Answer<Vec<Line>> {
+    netease_and_credits(id).map(|(lines, _)| lines)
+}
+
+/// As `netease`, and its lines of who wrote and made the song apart (for lyrics found elsewhere: see `find`).
+fn netease_and_credits(id: u64) -> Result<(Option<Vec<Line>>, Vec<Line>), Unreached> {
     let said = netease_said(&format!("https://music.163.com/api/song/lyric/v1?id={id}&lv=1&tv=-1&yv=1"))?;
     let translation = said["tlyric"]["lyric"].as_str();
+    let credits = |text: Option<&str>| text.map(|text| text.lines().filter_map(|raw| credit(raw.trim())).collect::<Vec<_>>()).unwrap_or_default();
     if let Some(lines) = said["yrc"]["lyric"].as_str().map(|yrc| word_timed(yrc, translation)).filter(|lines| lines.iter().any(|line| !line.words.is_empty())) {
-        return Ok(Some(lines));
+        return Ok((Some(lines), credits(said["yrc"]["lyric"].as_str())));
     }
-    let lines = said["lrc"]["lyric"].as_str().map(|lrc| merged(lrc, translation));
-    Ok(lines.filter(|lines| lines.iter().any(|line| !line.text.is_empty())))
+    // Line by line: its lines of who wrote and made it are written among them as JSON (see `credit`), which the
+    // LRC's times do not take (left out, the lyrics showed nothing while NetEase showed those lines).
+    let lrc = said["lrc"]["lyric"].as_str();
+    let credits = credits(lrc);
+    let lines = lrc.map(|lrc| with_credits(merged(lrc, translation), &credits));
+    Ok((lines.filter(|lines| lines.iter().any(|line| !line.text.is_empty())), credits))
+}
+
+/// `lines` with `credits` (NetEase's lines of who wrote and made the song) among them by their times, each one they
+/// do not hold already.
+fn with_credits(mut lines: Vec<Line>, credits: &[Line]) -> Vec<Line> {
+    for credit in credits {
+        if !lines.iter().any(|line| line.text == credit.text) {
+            lines.push(credit.clone());
+        }
+    }
+    // (In order of time, those at one time as they were.)
+    lines.sort_by(|a, b| a.at.total_cmp(&b.at));
+    lines
 }
 
 /// What NetEase's API says to `url`, where it answers (its own `code` 200; another, such as when it is asked too
@@ -689,8 +719,9 @@ pub mod kept {
     /// How lyrics are found and read, counted up as that changes: what was kept by an earlier way is not taken, and
     /// they are asked for again. (2: the artist of a track found by its title checked, an LRC file's offset read;
     /// what was kept before had another artist's song's lyrics, or every line late or early, for good. 3: NetEase's
-    /// lines of who wrote and made a song kept.)
-    const FOUND_BY: u32 = 3;
+    /// lines of who wrote and made a song kept. 4: those lines kept from NetEase's lyrics timed line by line too, and
+    /// with lyrics timed word by word found elsewhere.)
+    const FOUND_BY: u32 = 4;
 
     /// A track's lyrics as kept (none: none had them), when they were asked for, and whether each source answered.
     pub struct Kept {
@@ -889,6 +920,29 @@ mod tests {
         let other = Track { seconds: 2, ..track.clone() };
         assert!(kept::read_in(&folder, &other).is_none());
         let _ = std::fs::remove_dir_all(folder.parent().unwrap());
+    }
+
+    /// NetEase's lines of who wrote and made a song go among lyrics found elsewhere by their times, once each.
+    #[test]
+    fn credits_go_among_the_lines() {
+        let line = |at: f64, text: &str| Line { at, end: None, text: text.into(), words: Vec::new(), backing: None, translation: None };
+        let lines = vec![line(55.9, "Upset"), line(58.2, "Cold wet")];
+        let credits = vec![line(0.0, "作词: 2KM"), line(1.0, "作曲: 2KM"), line(58.2, "Cold wet")];
+        let with = with_credits(lines, &credits);
+        assert_eq!(with.iter().map(|line| (line.at, line.text.as_str())).collect::<Vec<_>>(), vec![(0.0, "作词: 2KM"), (1.0, "作曲: 2KM"), (55.9, "Upset"), (58.2, "Cold wet")]);
+    }
+
+    /// A track NetEase has timed line by line, its credits written as JSON among the lines (network): they are kept,
+    /// and handed apart for lyrics found elsewhere. `cargo test -- --ignored keeps_netease_credits --nocapture`.
+    #[test]
+    #[ignore = "asks NetEase over the network"]
+    fn keeps_netease_credits() {
+        let Ok((lines, credits)) = netease_and_credits(1359818052) else { panic!("NetEase answers") };
+        let lines = lines.expect("its lyrics");
+        assert!(credits.len() >= 10, "{credits:?}");
+        assert_eq!(credits[0].text, "作词: 2KM");
+        assert!(lines.iter().take(3).all(|line| line.at < 3.0 && line.text.contains(':')), "{:?}", &lines[..3]);
+        assert!(lines.iter().any(|line| line.text == "Cold wet"));
     }
 
     #[test]
