@@ -1,0 +1,1055 @@
+<title>__TITLE__</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@500;900&family=Noto+Serif+SC:wght@300;600&family=ZCOOL+QingKe+HuangYou&family=ZCOOL+KuaiLe&family=Bangers&family=Oswald:wght@500&display=swap">
+<style>
+/* Layout: the music full screen, as Glance shows it: one picture filling the screen, the controls along the bottom. */
+:root {
+  --night: #050407;
+  --white: #ffffff;
+  --sans: "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  --serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+  --display: "ZCOOL QingKe HuangYou", "Noto Sans SC", sans-serif;
+  --comic: "ZCOOL KuaiLe", "Noto Sans SC", sans-serif;
+  --bang: "Bangers", "Impact", sans-serif;
+  --condensed: "Oswald", "Bahnschrift", "Arial Narrow", sans-serif;
+  --ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { background: var(--night); color: var(--white); overflow: hidden; font-family: var(--sans); }
+canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+/* The controls, drawn as Glance draws them: a darkening along the bottom, the track short in the middle with its
+   times at its ends, the keys under it, the sound and the way out at the right. */
+.controls { position: fixed; left: 0; right: 0; bottom: 0; height: 140px; transition: opacity 0.35s ease; z-index: 3; }
+.controls::before { content: ""; position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(0,0,0,0), rgba(0,0,0,0.42)); pointer-events: none; }
+body.idle .controls { opacity: 0; }
+body.idle { cursor: none; }
+.keys { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(22px + env(safe-area-inset-bottom, 0px)); display: flex; gap: 18px; }
+.key { width: 44px; height: 44px; border: 0; padding: 0; background: none; color: rgba(255,255,255,0.82); display: grid; place-items: center; cursor: pointer; }
+.key:hover, .key:focus-visible { color: #fff; outline: none; }
+.key svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.key.toggle svg { width: 30px; height: 30px; }
+.key.toggle svg .solid { fill: currentColor; stroke: none; }
+.track { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(88px + env(safe-area-inset-bottom, 0px)); width: min(42vw, 420px); height: 20px; cursor: pointer; }
+.track .line, .track .done { position: absolute; left: 0; top: 50%; height: 3px; margin-top: -1.5px; border-radius: 2px; }
+.track .line { right: 0; background: rgba(255,255,255,0.22); }
+.track .done { background: rgba(255,255,255,0.85); }
+.track:hover .line, .track:hover .done { height: 5px; margin-top: -2.5px; }
+.track:hover .line { background: rgba(255,255,255,0.3); }
+.track:hover .done { background: #fff; }
+.time { position: absolute; top: 2px; font: 500 12px var(--ui); color: rgba(255,255,255,0.6); font-variant-numeric: tabular-nums; width: 60px; }
+.time.now { right: calc(100% + 10px); text-align: right; }
+.time.all { left: calc(100% + 10px); }
+.pill { position: absolute; bottom: 22px; padding: 3px 8px; border-radius: 6px; background: rgba(0,0,0,0.6); font: 500 12px var(--ui); color: rgba(255,255,255,0.95); transform: translateX(-50%); white-space: nowrap; display: none; font-variant-numeric: tabular-nums; }
+.track:hover .pill { display: block; }
+.right { position: absolute; right: calc(30px + env(safe-area-inset-right, 0px)); bottom: calc(22px + env(safe-area-inset-bottom, 0px)); display: flex; gap: 8px; }
+.sound { position: relative; }
+.pop { position: absolute; left: 2px; bottom: 50px; width: 40px; height: 156px; border-radius: 20px; background: rgba(0,0,0,0.45); display: none; }
+.sound:hover .pop, .pop.held { display: block; }
+.pop span { position: absolute; top: 10px; left: 0; right: 0; text-align: center; font: 600 12px var(--ui); color: rgba(255,255,255,0.9); }
+.pop .bar { position: absolute; left: 18.5px; width: 3px; top: 34px; bottom: 16px; border-radius: 2px; background: rgba(255,255,255,0.22); cursor: pointer; }
+.pop .bar i { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; background: rgba(255,255,255,0.85); }
+.styles { position: fixed; top: calc(18px + env(safe-area-inset-top, 0px)); right: calc(24px + env(safe-area-inset-right, 0px)); display: flex; gap: 2px; z-index: 3; transition: opacity 0.35s ease; }
+body.idle .styles { opacity: 0; }
+.styles button { font: 500 13px var(--ui); color: rgba(255,255,255,0.6); background: none; border: 0; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+.styles button[aria-pressed="true"] { color: #fff; background: rgba(0,0,0,0.35); }
+#fade { z-index: 1; pointer-events: none; opacity: 0; }
+#fade.out { transition: opacity 0.6s ease; }
+.start { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(5, 4, 7, 0.6); z-index: 5; }
+.start[hidden] { display: none !important; }
+.start div { display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; padding: 0 24px; }
+.start button { font: 900 18px var(--sans); border: 0; border-radius: 999px; padding: 16px 34px; cursor: pointer; background: #fff; color: #111; }
+.start p { margin: 0; font-size: 13px; opacity: 0.75; max-width: 34em; line-height: 1.6; }
+.jump { position: fixed; left: calc(24px + env(safe-area-inset-left, 0px)); bottom: calc(30px + env(safe-area-inset-bottom, 0px)); display: flex; gap: 4px; z-index: 3; transition: opacity 0.35s ease; }
+body.idle .jump { opacity: 0; }
+.jump button { font: 500 12px var(--ui); color: rgba(255,255,255,0.7); background: rgba(0,0,0,0.3); border: 0; border-radius: 6px; padding: 5px 9px; cursor: pointer; }
+@media (max-width: 640px) { .jump { display: none; } .track { width: 52vw; } }
+</style>
+
+<canvas id="gl"></canvas>
+<canvas id="scene"></canvas>
+<canvas id="fade"></canvas>
+<nav class="styles" id="styles"></nav>
+<div class="jump" id="jumps"></div>
+<div class="controls" id="controls">
+  <div class="track" id="track"><div class="line"></div><div class="done" id="done"></div><span class="time now" id="tNow">0:00</span><span class="time all" id="tAll">0:00</span><span class="pill" id="pill"></span></div>
+  <div class="keys">
+    <button class="key" id="back" aria-label="上一句" title="上一句"><svg viewBox="0 0 24 24"><path d="M19 20L9 12L19 4Z"/><path d="M5 19V5"/></svg></button>
+    <button class="key toggle" id="toggle" aria-label="播放"><svg viewBox="0 0 24 24" id="toggleIcon"></svg></button>
+    <button class="key" id="next" aria-label="下一句" title="下一句"><svg viewBox="0 0 24 24"><path d="M5 4L15 12L5 20Z"/><path d="M19 5V19"/></svg></button>
+  </div>
+  <div class="right">
+    <div class="sound"><div class="pop" id="pop"><span id="level">100%</span><div class="bar" id="vbar"><i id="vfill"></i></div></div>
+      <button class="key" id="mute" aria-label="声音"><svg viewBox="0 0 24 24" id="muteIcon"></svg></button></div>
+    <button class="key" id="leave" aria-label="全屏" title="全屏"><svg viewBox="0 0 24 24" id="leaveIcon"></svg></button>
+  </div>
+</div>
+<div class="start" id="start"><div>
+  <button id="go">播放</button>
+  <p id="startNote">画面跟随实际声音律动，歌词按网易云的逐字时间。</p>
+  <input type="file" id="fileInput" accept="audio/*" hidden>
+</div></div>
+
+<script>
+// The style shown: the page's own, or the one its link names (#paper, #space, #poster); changed in place, the song
+// playing on.
+const FIXED = "__STYLE__";
+let STYLE = ["poster", "pop", "pv"].includes(location.hash.slice(1)) ? location.hash.slice(1) : FIXED !== "any" ? FIXED : "poster";
+const LINES = __LINES__;
+const AN = __ANALYSIS__;
+const COVER = "data:image/jpeg;base64,__COVER__";
+const SONG = __SONG__;
+const TITLE = SONG.title, ARTIST = SONG.artist, LATIN = SONG.latin;
+const PAGES = __PAGES__;
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const $ = (id) => document.getElementById(id);
+const canvas = $("scene"), g = canvas.getContext("2d");
+const glCanvas = $("gl");
+let W = 0, H = 0, DPR = 1;
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOut = (t) => 1 - (1 - clamp(t)) ** 3;
+const easeExpo = (t) => (t >= 1 ? 1 : 1 - 2 ** (-10 * clamp(t)));
+const easeBack = (t) => { t = clamp(t); const c = 1.9; return 1 + (c + 1) * (t - 1) ** 3 + c * (t - 1) ** 2; };
+// Randomness by hash: the same inputs always give the same draw (a line sung twice looks the same).
+function hash(...xs) { let h = 2166136261; for (const x of xs) { const s = String(x); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } h ^= 0x9e37; h = Math.imul(h, 16777619); } return ((h >>> 0) % 100000) / 100000; }
+let seq = 1; const rand = () => hash("r", seq++);
+const pick = (arr, r) => arr[Math.floor(r * arr.length) % arr.length];
+class Spring {
+  constructor(v, w = 12, z = 0.6) { this.v = v; this.t = v; this.vel = 0; this.w = w; this.z = z; }
+  step(dt) { const a = -this.w * this.w * (this.v - this.t) - 2 * this.z * this.w * this.vel; this.vel += a * dt; this.v += this.vel * dt; return this.v; }
+}
+
+// ---------- The song ----------
+const audio = new Audio();
+let actx = null, analyser = null, freq = null;
+const DURATION = AN.duration;
+$("tAll").textContent = time(DURATION);
+function hook() {
+  if (actx) return;
+  actx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = actx.createMediaElementSource(audio);
+  analyser = actx.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.55;
+  freq = new Uint8Array(analyser.frequencyBinCount);
+  src.connect(analyser); analyser.connect(actx.destination);
+}
+const pos = () => audio.currentTime || 0;
+const playing = () => !audio.paused;
+function toggle() { if (!audio.src) return; hook(); actx.resume(); audio.paused ? audio.play() : audio.pause(); }
+function seek(p) { audio.currentTime = clamp(p, 0, DURATION - 0.2); }
+function time(s) { s = Math.max(0, Math.floor(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
+
+// ---------- What the music does now ----------
+// The beats were found in the song once, as Glance can by listening; spectrum and loudness are heard live.
+const BEATS = AN.beats;
+const music = { beat: -1, down: false, kick: 0, bass: 0, mid: 0, high: 0, bands: new Float32Array(24), intensity: 0, flow: 0 };
+const onBeat = [];
+function beatAt(p) { let lo = 0, hi = BEATS.length - 1, i = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (BEATS[m] <= p) { i = m; lo = m + 1; } else hi = m - 1; } return i; }
+function intensityAt(p) { let s = 0, n = 0; for (let t = p - 3; t <= p + 0.5; t += 0.1) { const v = AN.rms10[Math.round(t * 10)]; if (v !== undefined) { s += v; n++; } } return clamp(((n ? s / n : 0) - 0.18) / 0.42); }
+function listen(p, dt) {
+  const b = beatAt(p);
+  if (b !== music.beat) {
+    const fresh = b === music.beat + 1 && playing();
+    music.beat = b;
+    music.down = b >= 0 && ((b - AN.down) % 4 + 4) % 4 === 0;
+    if (fresh) for (const f of onBeat) f(b, music.down);
+  }
+  const since = b >= 0 ? p - BEATS[b] : 9;
+  music.kick = playing() ? Math.exp(-since * 5) * (music.down ? 1 : 0.65) : music.kick * Math.exp(-dt * 5);
+  if (analyser && playing()) {
+    analyser.getByteFrequencyData(freq);
+    const hz = actx.sampleRate / analyser.fftSize;
+    const band = (a, z) => { let s = 0, c = 0; for (let i = Math.max(1, Math.floor(a / hz)); i <= Math.ceil(z / hz); i++) { s += freq[i]; c++; } return s / c / 255; };
+    music.bass = lerp(music.bass, band(30, 140), 0.5);
+    music.mid = lerp(music.mid, band(300, 2500), 0.4);
+    music.high = lerp(music.high, band(5000, 12000), 0.4);
+    for (let k = 0; k < 24; k++) music.bands[k] = lerp(music.bands[k], band(40 * 2 ** (k / 2.6), 40 * 2 ** ((k + 1) / 2.6)), 0.45);
+  } else { music.bass *= 0.92; music.mid *= 0.92; music.high *= 0.92; for (let k = 0; k < 24; k++) music.bands[k] *= 0.9; }
+  music.intensity = lerp(music.intensity, intensityAt(p), Math.min(1, dt * 2));
+  // Its own time, never backwards: faster as the song swells (as the smoke flows).
+  if (playing()) music.flow += dt * (0.5 + 1.2 * music.intensity + 0.8 * music.bass);
+}
+
+// ---------- Lyrics, and how each line moves (after JIZURA's planner) ----------
+const LYRICS = LINES.filter((l) => !/^\s*(作词|作曲|编曲|制作人)\s*:/.test(l[2].map((w) => w[2]).join(""))).map((l, i) => {
+  const chars = [];
+  l[2].forEach(([t, d, text], wi) => {
+    const cs = Array.from(text);
+    cs.forEach((c, k) => chars.push({ c, t: t + (d * k) / cs.length, d: d / cs.length, word: wi }));
+  });
+  while (chars.length && !chars[chars.length - 1].c.trim()) chars.pop();
+  while (chars.length && !chars[0].c.trim()) chars.shift();
+  return { i, t: l[0], end: l[0] + l[1], chars, text: chars.map((c) => c.c).join("") };
+});
+const CREDITS = LINES.filter((l) => /^\s*(作词|作曲|编曲)/.test(l[2].map((w) => w[2]).join(""))).map((l) => l[2].map((w) => w[2]).join("").trim());
+// Sections: a gap of more than six seconds starts one; a line sung more than once in the song is the chorus's.
+const counts = {};
+for (const l of LYRICS) counts[l.text] = (counts[l.text] || 0) + 1;
+let section = 0;
+LYRICS.forEach((l, k) => {
+  if (k > 0 && l.t - LYRICS[k - 1].end > 6) section++;
+  const chorus = counts[l.text] > 1;
+  if (k > 0 && chorus !== LYRICS[k - 1].chorus) section++;
+  l.section = section; l.chorus = chorus;
+});
+// Key lines: the first of each section, and the last line of the song; each gets one big shot.
+LYRICS.forEach((l, k) => { l.key = k === 0 || l.section !== LYRICS[k - 1].section || k === LYRICS.length - 1; });
+// Each section reuses two or three moves; a line takes one by its own text (so a repeated line moves the same), and
+// moves alternate their direction within the section.
+function planLines(families) {
+  const bySection = {};
+  for (const l of LYRICS) {
+    if (!bySection[l.section]) {
+      const r = hash("sec", l.chorus ? "chorus" : l.section);
+      const pool = families.slice().sort((a, b) => hash(a, r) - hash(b, r));
+      bySection[l.section] = { moves: pool.slice(0, 2 + Math.floor(r * 2)), turn: 0 };
+    }
+    const s = bySection[l.section];
+    l.move = pick(s.moves, hash("line", l.text));
+    l.dir = s.turn++ % 2 === 0 ? 1 : -1;
+    if (l.chorus) l.dir = hash("dir", l.text) < 0.5 ? 1 : -1;
+  }
+}
+function lineAt(p) {
+  let i = -1;
+  for (let k = 0; k < LYRICS.length; k++) if (LYRICS[k].t <= p + 0.06) i = k;
+  if (i >= 0 && p > LYRICS[i].end + 2.5 && (i + 1 >= LYRICS.length || LYRICS[i + 1].t - p > 1.5)) return -1;
+  return i;
+}
+// The line on screen and the one leaving it.
+const shown = { li: -2, lines: [] };
+function followLines(p, now, onLine) {
+  const li = lineAt(p);
+  if (li !== shown.li) {
+    for (const s of shown.lines) if (!s.leaving) s.leaving = now;
+    if (li >= 0) shown.lines.push({ line: LYRICS[li], at: now, leaving: 0 });
+    if (shown.li !== -2 && onLine) onLine(li);
+    shown.li = li;
+  }
+  shown.lines = shown.lines.filter((s) => !s.leaving || now - s.leaving < 1.2);
+  return li;
+}
+
+// ---------- Colours from the cover ----------
+const cover = new Image();
+cover.src = COVER;
+let palette = [[22, 14, 14], [244, 204, 186], [236, 120, 150], [250, 244, 238], [120, 70, 56], [214, 160, 130]];
+palette.accent = [236, 120, 150];
+function hsl(r, g2, b) { r /= 255; g2 /= 255; b /= 255; const mx = Math.max(r, g2, b), mn = Math.min(r, g2, b), l = (mx + mn) / 2; if (mx === mn) return [0, 0, l]; const d = mx - mn, s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); const h = mx === r ? (g2 - b) / d + (g2 < b ? 6 : 0) : mx === g2 ? (b - r) / d + 2 : (r - g2) / d + 4; return [h / 6, s, l]; }
+function rgb(h, s, l) { h = ((h % 1) + 1) % 1; const f = (n) => { const k = (n + h * 12) % 12, a = s * Math.min(l, 1 - l); return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))); }; return [f(0), f(8), f(4)]; }
+function lum([r, g2, b]) { const c = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * c(r) + 0.7152 * c(g2) + 0.0722 * c(b); }
+const css = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const inkOn = (c) => (lum(c) > 0.3 ? [20, 14, 14] : [252, 247, 242]);
+function paletteFromCover() {
+  const c = document.createElement("canvas"); c.width = c.height = 48;
+  const x = c.getContext("2d"); x.drawImage(cover, 0, 0, 48, 48);
+  const px = x.getImageData(0, 0, 48, 48).data, pts = [];
+  for (let i = 0; i < px.length; i += 4) pts.push([px[i], px[i + 1], px[i + 2]]);
+  let cs = Array.from({ length: 8 }, (_, k) => pts[Math.floor((k + 0.5) * pts.length / 8)].slice()), cn = [];
+  for (let it = 0; it < 10; it++) {
+    const sum = cs.map(() => [0, 0, 0]); cn = cs.map(() => 0);
+    for (const p of pts) { let best = 0, bd = 1e9; cs.forEach((c2, k) => { const d = (p[0] - c2[0]) ** 2 + (p[1] - c2[1]) ** 2 + (p[2] - c2[2]) ** 2; if (d < bd) { bd = d; best = k; } }); sum[best][0] += p[0]; sum[best][1] += p[1]; sum[best][2] += p[2]; cn[best]++; }
+    cs = cs.map((c2, k) => cn[k] ? sum[k].map((v) => v / cn[k]) : c2);
+  }
+  const out = [];
+  for (const { c: c2 } of cs.map((c2, k) => ({ c: c2, n: cn[k] })).sort((a, b) => b.n - a.n)) {
+    const [h, s, l] = hsl(...c2); const v = rgb(h, Math.min(1, s * 1.4 + 0.06), l);
+    if (out.every((o) => Math.hypot(o[0] - v[0], o[1] - v[1], o[2] - v[2]) > 46)) out.push(v);
+  }
+  const [h0] = hsl(...out[0]);
+  if (!out.some((o) => lum(o) < 0.03)) out.push(rgb(h0, 0.3, 0.07));
+  if (!out.some((o) => lum(o) > 0.75)) out.push(rgb(h0, 0.45, 0.94));
+  palette = out.slice(0, 7);
+  // The accent: the cover's most vivid pixels (saturated, neither dark nor pale), however few, averaged.
+  const vivid = pts.map((p) => { const [, s, l] = hsl(...p); return { p, v: s * (1 - Math.abs(l - 0.55) * 1.6) }; }).sort((a, b) => b.v - a.v).slice(0, Math.max(8, pts.length * 0.03));
+  const mean = [0, 1, 2].map((k) => vivid.reduce((u, x) => u + x.p[k], 0) / vivid.length);
+  const [ha, sa] = hsl(...mean);
+  palette.accent = rgb(ha, Math.max(0.6, sa), 0.62);
+}
+
+// ---------- Characters in motion: entrances and exits (after JIZURA's recipes) ----------
+// `k` is how far a character is into its entrance (0 to 1), `out` into its exit; `draw(dx, dy)` draws it where it
+// rests offset by (dx, dy), in the transform set for it.
+function enterChar(move, k, dir, idx, draw, size, x, y, ch, font) {
+  if (k <= 0) return;
+  g.save();
+  switch (move) {
+    case "slam": { const s = lerp(1.9, 1, easeBack(k)); g.translate(x, y - size * 0.35); g.scale(s, s); g.rotate((1 - easeOut(k)) * 0.22 * (idx % 2 ? 1 : -1)); g.translate(-x, -(y - size * 0.35)); g.globalAlpha *= clamp(k * 3); draw(0, -(1 - easeOut(k)) * size * 0.5); break; }
+    case "slice": {
+      // Bands of the character slide in from alternate sides.
+      const bands = 6, bh = size * 1.25 / bands;
+      for (let b = 0; b < bands; b++) {
+        const kb = easeExpo(clamp(k * 1.4 - b * 0.06));
+        g.save(); g.beginPath(); g.rect(x - size, y - size * 1.05 + b * bh, size * 3, bh + 0.6); g.clip();
+        draw((1 - kb) * size * 3 * ((b % 2 ? 1 : -1) * dir), 0); g.restore();
+      }
+      break;
+    }
+    case "assemble": {
+      // Four pieces fly in from their own angles and lock together.
+      for (let q = 0; q < 4; q++) {
+        const a = hash("as", ch, idx, q) * 6.283, kq = easeExpo(clamp(k * 1.2 - q * 0.05)), r = (1 - kq) * size * 2.2;
+        g.save(); g.beginPath(); g.rect(x - size * 0.1 + (q % 2) * size * 0.6, y - size * 1.05 + (q >> 1) * size * 0.62, size * 0.62, size * 0.64); g.clip();
+        g.globalAlpha *= clamp(kq * 2); draw(Math.cos(a) * r, Math.sin(a) * r); g.restore();
+      }
+      break;
+    }
+    case "scramble": {
+      // Other characters of the line flicker through, then it settles.
+      if (k < 0.75) { const pool = "如果你我爱的事情想要一件不是"; const alt = pool[Math.floor(hash("sc", idx, Math.floor(k * 12)) * pool.length)]; g.globalAlpha *= 0.6; draw(0, 0, alt); }
+      else draw(0, 0);
+      break;
+    }
+    case "rise": { g.globalAlpha *= easeOut(k); draw(0, (1 - easeOut(k)) * size * 0.6); break; }
+    case "pop": { const s = lerp(0, 1, easeBack(k)); g.translate(x + size / 2, y - size * 0.35); g.scale(s, s); g.translate(-(x + size / 2), -(y - size * 0.35)); draw(0, 0); break; }
+    case "drop": { const t = clamp(k), b = t < 0.7 ? (t / 0.7) ** 2 : 1 - Math.sin(((t - 0.7) / 0.3) * Math.PI) * 0.12; draw(0, -(1 - b) * size * 2.2); break; }
+    case "stamp": { const s = lerp(3.2, 1, easeExpo(k)); g.translate(x + size / 2, y - size * 0.35); g.scale(s, s); g.translate(-(x + size / 2), -(y - size * 0.35)); g.globalAlpha *= clamp(k * 2.5); draw(0, 0); break; }
+    default: draw(0, 0);
+  }
+  g.restore();
+}
+function exitChar(move, out, dir, idx, draw, size) {
+  g.save();
+  switch (move) {
+    case "drop": { const k = clamp(out * 1.3 - (idx % 5) * 0.05); g.globalAlpha *= 1 - k; draw(0, k * k * size * 2.4); break; }
+    case "slide": { const k = easeExpo(clamp(out * 1.4 - (idx % 6) * 0.03)); g.globalAlpha *= 1 - k * 0.8; draw(-dir * k * size * 4, 0); break; }
+    case "shatter": { const a = hash("sh", idx) * 6.283, k = easeOut(out); g.globalAlpha *= 1 - k; draw(Math.cos(a) * k * size * 1.6, Math.sin(a) * k * size * 1.6); break; }
+    default: { g.globalAlpha *= 1 - easeOut(out); draw(0, -easeOut(out) * size * 0.4); }
+  }
+  g.restore();
+}
+
+// ---------- Style: poster (retro future) ----------
+// A dusk sky in the cover's colours, a sun cut by bars at the horizon and mirrored in the ground, clouds drawn across
+// it, three ridges of mountains (the far one traced in light), a grid of light running toward the viewer with a
+// pulse sent down it on every beat; the cover as a record's sleeve, the record turning out of it; scan lines over all.
+const poster = { mask: null, ghost: null, sun: null, crash: new Spring(1, 12, 0.45), run: 0, ridges: null, pulses: [], stars: [] };
+onBeat.push((b, down) => {
+  if (STYLE !== "poster") return;
+  poster.pulses.push(performance.now() / 1000);
+  if (down) poster.crash.vel += 0.2 + 0.4 * music.intensity;
+  if (down && music.intensity > 0.55) poster.stars.push({ at: performance.now() / 1000, x: 0.15 + hash("ss", b) * 0.7, y: 0.05 + hash("sy", b) * 0.2 });
+});
+function posterBackdrop(now, p) {
+  const hz = H * 0.6, [ha] = hsl(...palette.accent);
+  const sky = g.createLinearGradient(0, 0, 0, hz);
+  sky.addColorStop(0, css(rgb(ha + 0.72, 0.55, 0.08))); sky.addColorStop(0.45, css(rgb(ha + 0.86, 0.55, 0.25)));
+  sky.addColorStop(0.8, css(rgb(ha + 0.97, 0.7, 0.5))); sky.addColorStop(1, css(rgb(ha + 0.06, 0.9, 0.66)));
+  g.fillStyle = sky; g.fillRect(0, 0, W, hz + 1);
+  for (let k = 0; k < 110; k++) { const x = hash("st", k) * W, y = hash("sy", k) * hz * 0.6; g.fillStyle = `rgba(255,240,255,${0.12 + 0.55 * hash("sb", k) * (0.55 + 0.45 * Math.sin(now * (0.8 + hash("sf", k) * 2) + k))})`; g.fillRect(x, y, 1.4, 1.4); }
+  // Now and then, in the chorus, a falling star.
+  poster.stars = poster.stars.filter((s) => now - s.at < 0.9);
+  for (const s of poster.stars) {
+    const k = (now - s.at) / 0.9, x = s.x * W - k * W * 0.25, y = s.y * H + k * H * 0.12;
+    const gr = g.createLinearGradient(x, y, x + W * 0.08, y - H * 0.04);
+    gr.addColorStop(0, `rgba(255,255,255,${1 - k})`); gr.addColorStop(1, "rgba(255,255,255,0)");
+    g.strokeStyle = gr; g.lineWidth = 1.5; g.beginPath(); g.moveTo(x, y); g.lineTo(x + W * 0.08, y - H * 0.04); g.stroke();
+  }
+  // The sun's glow, then the sun, its lower half cut by bars running downward with the music.
+  const sr = Math.min(W, H) * 0.3 * (1 + 0.025 * music.bass + 0.012 * music.kick), scx = W / 2, scy = hz - sr * 0.32;
+  g.save(); g.beginPath(); g.rect(0, 0, W, hz); g.clip();
+  g.globalCompositeOperation = "lighter";
+  const bloom = g.createRadialGradient(scx, scy, sr * 0.5, scx, scy, sr * 2.8);
+  bloom.addColorStop(0, css(rgb(ha + 0.06, 1, 0.6), 0.35 + 0.25 * music.bass)); bloom.addColorStop(1, css(rgb(ha + 0.06, 1, 0.6), 0));
+  g.fillStyle = bloom; g.fillRect(0, 0, W, hz);
+  g.globalCompositeOperation = "source-over";
+  const sun = poster.sun, sc = sun.getContext("2d");
+  if (sun.width !== W * DPR || sun.height !== H * DPR) { sun.width = W * DPR; sun.height = H * DPR; }
+  sc.setTransform(DPR, 0, 0, DPR, 0, 0); sc.globalCompositeOperation = "source-over"; sc.clearRect(0, 0, W, H);
+  const sg = sc.createLinearGradient(0, scy - sr, 0, scy + sr);
+  sg.addColorStop(0, css(rgb(ha + 0.13, 1, 0.68))); sg.addColorStop(0.55, css(rgb(ha + 0.04, 0.95, 0.6))); sg.addColorStop(1, css(rgb(ha - 0.02, 0.9, 0.52)));
+  sc.fillStyle = sg; sc.beginPath(); sc.arc(scx, scy, sr, 0, Math.PI * 2); sc.fill();
+  sc.globalCompositeOperation = "destination-out";
+  const shift = (poster.run * 0.6) % 1;
+  for (let k = 0; k < 9; k++) { const t = (k + shift) / 9; sc.fillRect(scx - sr, scy + sr * (0.05 + 0.95 * t), sr * 2, 1.5 + t * sr * 0.075); }
+  sc.globalCompositeOperation = "source-over";
+  g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(sun, 0, 0); g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  // Long thin clouds drawn across the sky and the sun, drifting.
+  // (About the sun only, their ends fading, drifting to and fro.)
+  for (let k = 0; k < 4; k++) {
+    const y = scy - sr * 0.55 + k * sr * 0.3 + Math.sin(now * 0.2 + k) * 4, len = sr * (1.1 + hash("cl", k) * 1.1);
+    const x = scx - len / 2 + Math.sin(now * 0.07 + k * 2) * sr * 0.5 + (hash("cx", k) - 0.5) * sr;
+    const cg = g.createLinearGradient(x, 0, x + len, 0), col = rgb(ha + 0.8, 0.45, 0.18 + k * 0.03);
+    cg.addColorStop(0, css(col, 0)); cg.addColorStop(0.25, css(col, 0.85)); cg.addColorStop(0.75, css(col, 0.85)); cg.addColorStop(1, css(col, 0));
+    g.fillStyle = cg; g.fillRect(x, y, len, 2 + k * 1.3);
+  }
+  g.restore();
+  // Mountains: a far ridge traced in light, a nearer two dark; each shifted a little by its distance.
+  if (!poster.ridges) poster.ridges = [0, 1, 2].map((r) => Array.from({ length: 41 }, (_, k) => hash("ridge", r, k)));
+  const neon = rgb(ha + 0.9, 0.9, 0.62);
+  poster.ridges.forEach((ridge, r) => {
+    const height = [0.16, 0.11, 0.06][r], par = Math.sin(now * 0.05) * [4, 9, 16][r];
+    g.beginPath(); g.moveTo(-20, hz);
+    ridge.forEach((v, k) => { const x = (k / 40) * (W + 40) - 20 + par, edge = Math.abs(k / 40 - 0.5) * 2; g.lineTo(x, hz - height * H * v * (0.25 + 0.95 * edge)); });
+    g.lineTo(W + 20, hz); g.closePath();
+    const fill = g.createLinearGradient(0, hz - height * H, 0, hz);
+    fill.addColorStop(0, css(rgb(ha + 0.75, 0.5, [0.24, 0.15, 0.08][r]))); fill.addColorStop(1, css(rgb(ha + 0.75, 0.55, [0.12, 0.07, 0.04][r])));
+    g.fillStyle = fill; g.fill();
+    if (r === 0) { g.strokeStyle = css(neon, 0.5 + 0.3 * music.kick); g.lineWidth = 1.2; g.shadowColor = css(neon); g.shadowBlur = 8; g.stroke(); g.shadowBlur = 0; }
+  });
+  // The ground, the sun mirrored in it as broken bars, and the grid.
+  g.fillStyle = css(rgb(ha + 0.75, 0.6, 0.05)); g.fillRect(0, hz, W, H - hz);
+  g.globalCompositeOperation = "lighter";
+  for (let k = 0; k < 14; k++) {
+    const y = hz + 4 + k * k * 1.6, w = sr * (1.3 - k * 0.07) * (0.85 + 0.15 * Math.sin(now * 3 + k));
+    if (y > H) break;
+    g.fillStyle = css(rgb(ha + 0.06, 1, 0.62), 0.32 * (1 - k / 14));
+    g.fillRect(scx - w / 2 + Math.sin(now * 2.3 + k * 1.7) * 6, y, w, 2 + k * 0.3);
+  }
+  g.globalCompositeOperation = "source-over";
+  const lit = 0.4 + 0.35 * music.kick + 0.2 * music.intensity;
+  const lineY = (d) => hz + (H - hz) * 1.6 / (d + 0.6);
+  for (const pass of [[4, 0.18], [1.2, 1]]) {
+    g.lineWidth = pass[0];
+    for (let k = 0; k < 18; k++) {
+      const y = lineY(k + 1 - (poster.run % 1));
+      if (y > H || y < hz) continue;
+      g.strokeStyle = css(neon, lit * pass[1] * clamp((y - hz) / (H - hz) * 2.2)); g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke();
+    }
+    for (let i = -14; i <= 14; i++) { g.strokeStyle = css(neon, lit * pass[1] * 0.8); g.beginPath(); g.moveTo(W / 2 + i * W * 0.025, hz); g.lineTo(W / 2 + i * W * 0.16, H); g.stroke(); }
+  }
+  // Each beat sends a bright line from the horizon to the viewer.
+  poster.pulses = poster.pulses.filter((t) => now - t < 0.9);
+  for (const t of poster.pulses) {
+    const k = (now - t) / 0.9, y = hz + (H - hz) * k * k;
+    g.strokeStyle = css(rgb(ha + 0.06, 1, 0.75), 0.9 * (1 - k)); g.lineWidth = 2 + 3 * k;
+    g.shadowColor = css(neon); g.shadowBlur = 12; g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); g.shadowBlur = 0;
+  }
+  const haze = g.createLinearGradient(0, hz - H * 0.06, 0, hz + H * 0.08);
+  haze.addColorStop(0, css(rgb(ha + 0.02, 1, 0.7), 0)); haze.addColorStop(0.5, css(rgb(ha + 0.02, 1, 0.7), 0.4)); haze.addColorStop(1, css(rgb(ha + 0.02, 1, 0.7), 0));
+  g.fillStyle = haze; g.fillRect(0, hz - H * 0.06, W, H * 0.14);
+  // The record, turning half out of its sleeve, and the sleeve: the cover.
+  if (cover.complete) {
+    const s = Math.min(78, W * 0.085), x0 = 28, y0 = 26;
+    const rx = x0 + s * 0.62, ry = y0 + s / 2, rr = s * 0.47;
+    g.save(); g.translate(rx, ry); g.rotate(p * 3.5);
+    g.fillStyle = "#0b0a0d"; g.beginPath(); g.arc(0, 0, rr, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = "rgba(255,255,255,0.08)"; g.lineWidth = 0.6;
+    for (let k = 0; k < 6; k++) { g.beginPath(); g.arc(0, 0, rr * (0.45 + k * 0.09), 0, Math.PI * 2); g.stroke(); }
+    g.fillStyle = css(palette.accent); g.beginPath(); g.arc(0, 0, rr * 0.3, 0, Math.PI * 2); g.fill();
+    g.fillStyle = "rgba(255,255,255,0.35)"; g.fillRect(rr * 0.12, -1, rr * 0.15, 2);
+    g.restore();
+    g.shadowColor = "rgba(0,0,0,0.5)"; g.shadowBlur = 18; g.drawImage(cover, x0, y0, s, s); g.shadowBlur = 0;
+    g.font = `500 ${Math.max(13, s * 0.2)}px ${getComputedStyle(document.body).getPropertyValue("--condensed")}`;
+    g.fillStyle = "rgba(255,255,255,0.9)"; g.textBaseline = "top";
+    if (g.letterSpacing !== undefined) g.letterSpacing = "0.2em";
+    g.fillText(SONG.short, x0 + s * 1.15 + 14, y0 + 4); g.fillStyle = "rgba(255,255,255,0.6)"; g.fillText(ARTIST, x0 + s * 1.15 + 14, y0 + 4 + s * 0.3);
+    if (g.letterSpacing !== undefined) g.letterSpacing = "0px";
+    g.textBaseline = "alphabetic";
+  }
+  return hz;
+}
+function posterOverlay() {
+  // Scan lines and a darker rim, as a tube shows it.
+  g.fillStyle = "rgba(0,0,0,0.08)";
+  for (let y = 0; y < H; y += 3) g.fillRect(0, y, W, 1);
+  const v = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.45, W / 2, H / 2, Math.max(W, H) * 0.75);
+  v.addColorStop(0, "rgba(0,0,0,0)"); v.addColorStop(1, "rgba(0,0,0,0.45)");
+  g.fillStyle = v; g.fillRect(0, 0, W, H);
+}
+function posterFrame(p, dt, now) {
+  if (!poster.mask) { poster.mask = document.createElement("canvas"); poster.ghost = document.createElement("canvas"); poster.sun = document.createElement("canvas"); }
+  const li = followLines(p, now, (l) => { if (l >= 0 && LYRICS[l].key) poster.crash.vel += 1.2; });
+  poster.crash.step(dt);
+  poster.run += dt * (playing() ? 0.35 + 0.9 * music.intensity + 1.2 * music.kick : 0.05);
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const z = poster.crash.v;
+  g.translate(W / 2, H / 2); g.scale(z, z); g.translate(-W / 2, -H / 2);
+  const hz = posterBackdrop(now, p);
+  const m = poster.mask, mc = m.getContext("2d");
+  if (m.width !== W * DPR || m.height !== H * DPR) { m.width = poster.ghost.width = W * DPR; m.height = poster.ghost.height = H * DPR; }
+  mc.setTransform(DPR, 0, 0, DPR, 0, 0); mc.clearRect(0, 0, W, H);
+  const F = getComputedStyle(document.body).getPropertyValue("--display");
+  const small = Math.max(14, Math.min(30, W * 0.024));
+  const y = hz - H * 0.01;
+  for (const s of shown.lines) {
+    const line = s.line, n = line.chars.length;
+    const fs = Math.min(H * (line.key ? 0.3 : 0.24), (W * 0.86) / Math.max(4, n) * 1.05);
+    mc.font = `${fs}px ${F}`; mc.textBaseline = "alphabetic"; mc.fillStyle = "#fff";
+    const ws = line.chars.map((c) => mc.measureText(c.c).width);
+    let x = (W - ws.reduce((a, b) => a + b, 0)) / 2;
+    const mt = mc.measureText(line.text), asc = mt.actualBoundingBoxAscent || fs * 0.86, desc = mt.actualBoundingBoxDescent || fs * 0.1;
+    const bands = 12, bh = (asc + desc) / bands;
+    const out = s.leaving ? clamp((now - s.leaving) / 0.55) : 0;
+    if (out >= 1) continue;
+    line.chars.forEach((c, k) => {
+      const since = p - c.t;
+      const fill = since < 0 ? 0.5 : lerp(0.5, 1, easeOut(since / Math.max(0.3, c.d)));
+      const kin = s.leaving ? 1 : clamp((now - s.at) / 0.6 - k * 0.04);
+      for (let b = 0; b < bands; b++) {
+        const dirB = (b % 2 ? 1 : -1) * line.dir;
+        const slideIn = (1 - easeExpo(clamp(kin * 1.3 - b * 0.03))) * W * 0.6 * dirB;
+        const slideOut = easeExpo(clamp(out * 1.3 - b * 0.03)) * W * 0.6 * -dirB;
+        mc.save(); mc.beginPath(); mc.rect(x - fs, y - asc + b * bh, fs * 3, bh * fill); mc.clip();
+        mc.fillText(c.c, x + slideIn + slideOut, y);
+        mc.restore();
+      }
+      x += ws[k];
+    });
+    if (!s.leaving) {
+      const nx = LYRICS[line.i + 1];
+      mc.textAlign = "center";
+      mc.font = `500 ${small}px ${getComputedStyle(document.body).getPropertyValue("--condensed")}`;
+      if (mc.letterSpacing !== undefined) mc.letterSpacing = "0.32em";
+      mc.fillText(LATIN, W / 2, y + small * 2.2);
+      if (mc.letterSpacing !== undefined) mc.letterSpacing = "0px";
+      mc.font = `500 ${Math.max(12, Math.min(18, W * 0.014))}px ${getComputedStyle(document.body).getPropertyValue("--sans")}`;
+      if (nx) mc.fillText(Array.from(nx.text).join("  "), W / 2, y + small * 3.6);
+      mc.textAlign = "left";
+    }
+  }
+  if (li < 0 && !shown.lines.some((s) => !s.leaving)) {
+    const fs = Math.min(H * 0.3, W * 0.2);
+    mc.font = `${fs}px ${F}`; mc.textAlign = "center"; mc.fillStyle = "#fff";
+    const mt = mc.measureText(TITLE), asc = mt.actualBoundingBoxAscent || fs * 0.86, desc = mt.actualBoundingBoxDescent || fs * 0.1, bh = (asc + desc) / 12;
+    for (let b = 0; b < 12; b++) { mc.save(); mc.beginPath(); mc.rect(0, y - asc + b * bh, W, bh * 0.55); mc.clip(); mc.fillText(TITLE, W / 2 + (b % 2 ? 1 : -1) * music.kick * 6, y); mc.restore(); }
+    mc.font = `500 ${small}px ${getComputedStyle(document.body).getPropertyValue("--condensed")}`;
+    if (mc.letterSpacing !== undefined) mc.letterSpacing = "0.32em";
+    mc.fillText(LATIN, W / 2, y + small * 2.2);
+    if (mc.letterSpacing !== undefined) mc.letterSpacing = "0px";
+    mc.textAlign = "left";
+  }
+  const gc = poster.ghost.getContext("2d");
+  const off = 1.5 + 6 * music.kick;
+  for (const [col, dx] of [[palette.accent, -off], [rgb(hsl(...palette.accent)[0] + 0.5, 0.7, 0.62), off]]) {
+    gc.setTransform(1, 0, 0, 1, 0, 0); gc.globalCompositeOperation = "source-over"; gc.clearRect(0, 0, m.width, m.height);
+    gc.drawImage(m, 0, 0); gc.globalCompositeOperation = "source-in"; gc.fillStyle = css(col, 0.42); gc.fillRect(0, 0, m.width, m.height);
+    g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = "screen"; g.drawImage(poster.ghost, dx * DPR, 0); g.restore();
+  }
+  g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 0.96; g.drawImage(m, 0, 0); g.restore();
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  posterOverlay();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+// ---------- Style: pop art ----------
+// Comic-book panels on a ground of Ben-Day dots: the cover four times over as Warhol printed it (each in other loud
+// colours, traded on every bar), the line in a speech balloon, the next in a caption box, and a burst ("POP!") on the
+// big moments. Thick black lines everywhere; the dots and the panels jolt on the beat.
+const pop = { prints: null, cycle: 0, burst: null, jolt: new Spring(0, 14, 0.35), balloon: new Spring(1, 13, 0.4) };
+const POP_INKS = [[[20, 16, 22], [236, 40, 120], [255, 222, 40]], [[20, 16, 22], [30, 170, 230], [255, 140, 170]], [[20, 16, 22], [255, 110, 30], [120, 220, 255]], [[20, 16, 22], [220, 30, 40], [170, 240, 90]]];
+const POP_WORDS = ["POP!", "WOW!", "BAM!", "YES!", "OH!"];
+function popPrints() {
+  // Each print: the cover's light in three steps, the middle step as halftone dots.
+  const size = 260, src = document.createElement("canvas"); src.width = src.height = size;
+  const sx = src.getContext("2d"); sx.drawImage(cover, 0, 0, size, size);
+  const px = sx.getImageData(0, 0, size, size).data;
+  return POP_INKS.map((ink) => {
+    const c = document.createElement("canvas"); c.width = c.height = size;
+    const x = c.getContext("2d"), img = x.createImageData(size, size), o = img.data;
+    for (let yy = 0; yy < size; yy++) for (let xx = 0; xx < size; xx++) {
+      const i = (yy * size + xx) * 4, l = (0.3 * px[i] + 0.59 * px[i + 1] + 0.11 * px[i + 2]) / 255;
+      let col;
+      if (l < 0.3) col = ink[0];
+      else if (l > 0.72) col = ink[2];
+      else {
+        const cx = (xx % 6) - 3, cy = (yy % 6) - 3, r = (0.72 - l) / 0.42 * 3.4;
+        col = cx * cx + cy * cy < r * r ? ink[1] : ink[2];
+      }
+      o[i] = col[0]; o[i + 1] = col[1]; o[i + 2] = col[2]; o[i + 3] = 255;
+    }
+    x.putImageData(img, 0, 0);
+    return c;
+  });
+}
+onBeat.push((b, down) => {
+  if (STYLE !== "pop") return;
+  pop.jolt.vel += down ? 1.2 : 0.5;
+  if (down) pop.cycle++;
+  if (down && music.intensity > 0.6 && hash("burst", b) < 0.35) pop.burst = { at: performance.now() / 1000, word: pick(POP_WORDS, hash("bw", b)), x: 0.55 + hash("bx", b) * 0.3, y: 0.15 + hash("by", b) * 0.2 };
+});
+function popFrame(p, dt, now) {
+  if (!pop.prints && cover.complete) pop.prints = popPrints();
+  const li = followLines(p, now, (l) => { pop.balloon.v = 0.6; pop.balloon.vel = 0; if (l >= 0 && LYRICS[l].key) pop.burst = { at: now, word: pick(POP_WORDS, hash("bw", l)), x: 0.62, y: 0.2 }; });
+  pop.jolt.step(dt); pop.balloon.step(dt);
+  const SANS = getComputedStyle(document.body).getPropertyValue("--comic"), BANG = getComputedStyle(document.body).getPropertyValue("--bang");
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  // The ground: loud yellow, red dots growing with the low end and drifting.
+  const ground = [255, 214, 30];
+  g.fillStyle = css(ground); g.fillRect(0, 0, W, H);
+  const step = 22, rr = 3.2 + 3.4 * music.bass + 1.5 * music.kick, drift = (now * 8) % step;
+  g.fillStyle = "rgba(235,50,60,0.55)";
+  for (let y = -step; y < H + step; y += step) for (let x = -step; x < W + step; x += step) {
+    const ox = ((y / step) % 2) * step / 2;
+    g.beginPath(); g.arc(x + ox + drift, y + drift * 0.5, rr, 0, Math.PI * 2); g.fill();
+  }
+  const jolt = pop.jolt.v * 4;
+  g.translate(W / 2, H / 2); g.rotate(-0.012 + jolt * 0.0015); g.translate(-W / 2, -H / 2);
+  const ink = "#141016", lw = Math.max(4, Math.min(W, H) * 0.007);
+  const panel = (x, y, w, h, draw) => { g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip(); draw(x, y, w, h); g.restore(); g.lineWidth = lw; g.strokeStyle = ink; g.strokeRect(x, y, w, h); };
+  const portrait = H > W;
+  // The cover, four times, as prints.
+  const A = portrait ? [W * 0.05, H * 0.05, W * 0.9, H * 0.42] : [W * 0.04, H * 0.08, Math.min(W * 0.44, H * 0.8), H * 0.8];
+  panel(...A, (x, y, w, h) => {
+    g.fillStyle = "#fff"; g.fillRect(x, y, w, h);
+    const s = Math.min(w, h) / 2, ox = x + (w - s * 2) / 2, oy = y + (h - s * 2) / 2;
+    for (let k = 0; k < 4; k++) {
+      const pr = pop.prints && pop.prints[(k + pop.cycle) % 4];
+      const px = ox + (k % 2) * s, py = oy + Math.floor(k / 2) * s;
+      if (pr) g.drawImage(pr, px + 3, py + 3, s - 6, s - 6);
+    }
+  });
+  // The line, in a speech balloon pointing at the prints.
+  const line = li >= 0 ? LYRICS[li] : null;
+  const B = portrait ? [W * 0.08, H * 0.52, W * 0.84, H * 0.26] : [A[0] + A[2] + W * 0.05, H * 0.3, W * 0.95 - (A[0] + A[2] + W * 0.05), H * 0.42];
+  const bx = B[0] + B[2] / 2, by = B[1] + B[3] / 2;
+  g.save(); g.translate(bx, by); const bs = pop.balloon.v; g.scale(bs, bs); g.translate(-bx, -by);
+  g.fillStyle = "#fff"; g.strokeStyle = ink; g.lineWidth = lw;
+  g.beginPath(); g.ellipse(bx, by, B[2] / 2, B[3] / 2, 0, 0, Math.PI * 2);
+  g.fill();
+  // The tail.
+  const tx = portrait ? bx - B[2] * 0.2 : B[0] + B[2] * 0.12, ty = portrait ? B[1] : by + B[3] * 0.32;
+  g.beginPath(); g.moveTo(tx, ty - 18); g.lineTo(portrait ? tx - 10 : A[0] + A[2] + 6, portrait ? A[1] + A[3] + 8 : ty + B[3] * 0.25); g.lineTo(tx + 26, ty - 4); g.closePath(); g.fill(); g.stroke();
+  g.beginPath(); g.ellipse(bx, by, B[2] / 2, B[3] / 2, 0, 0, Math.PI * 2); g.stroke();
+  g.fillStyle = "#fff"; g.beginPath(); g.ellipse(bx, by, B[2] / 2 - lw / 2, B[3] / 2 - lw / 2, 0, 0, Math.PI * 2); g.fill();
+  if (line) {
+    const n = line.chars.length, rows = n > 8 ? 2 : 1, per = Math.ceil(n / rows);
+    const fs = Math.min(B[3] * (rows === 1 ? 0.34 : 0.26), (B[2] * 0.74) / per);
+    g.font = `${fs}px ${SANS}`; g.textBaseline = "alphabetic"; g.textAlign = "left";
+    for (let r = 0; r < rows; r++) {
+      const cs = line.chars.slice(r * per, (r + 1) * per), ws = cs.map((c) => g.measureText(c.c).width), rowW = ws.reduce((a, b) => a + b, 0);
+      let x = bx - rowW / 2;
+      const y = by + fs * 0.35 + (r - (rows - 1) / 2) * fs * 1.15;
+      cs.forEach((c, k) => {
+        const since = p - c.t, w = ws[k];
+        g.save();
+        if (since >= 0) {
+          const s = lerp(1.6, 1, easeBack(since / 0.25)) + (since < c.d ? 0.08 * music.bass : 0);
+          g.translate(x + w / 2, y - fs * 0.35); g.scale(s, s); g.rotate((1 - easeOut(since / 0.25)) * (k % 2 ? 0.25 : -0.25)); g.translate(-(x + w / 2), -(y - fs * 0.35));
+          g.fillStyle = ink;
+        } else g.fillStyle = "rgba(20,16,22,0.22)";
+        g.fillText(c.c, x, y);
+        g.restore();
+        x += w;
+      });
+    }
+  } else {
+    g.font = `${Math.min(B[3] * 0.4, B[2] * 0.2)}px ${SANS}`; g.fillStyle = ink; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText(p < 17 ? TITLE : "……", bx, by); g.textAlign = "left"; g.textBaseline = "alphabetic";
+  }
+  g.restore();
+  // The next line, in a caption box.
+  const nx = line ? LYRICS[li + 1] : LYRICS.find((l) => l.t > p);
+  if (nx) {
+    g.font = `${Math.max(14, Math.min(22, W * 0.017))}px ${SANS}`;
+    const label = `接下来……${nx.text}`, w = g.measureText(label).width + 28, h = Math.max(34, Math.min(46, W * 0.034));
+    const cx = portrait ? W * 0.08 : W * 0.5, cy = portrait ? H * 0.82 : H * 0.8;
+    g.fillStyle = "#fff8d0"; g.fillRect(cx, cy, w, h); g.lineWidth = lw * 0.7; g.strokeStyle = ink; g.strokeRect(cx, cy, w, h);
+    g.fillStyle = ink; g.textBaseline = "middle"; g.fillText(label, cx + 14, cy + h / 2); g.textBaseline = "alphabetic";
+  }
+  // The title, as a comic's masthead.
+  g.font = `${Math.max(22, Math.min(46, W * 0.034))}px ${BANG}`; g.fillStyle = "#e8283c"; g.strokeStyle = ink; g.lineWidth = 3;
+  if (g.letterSpacing !== undefined) g.letterSpacing = "0.06em";
+  const mast = `${SONG.short}!  ${SONG.latinArtist}`;
+  const mx = portrait ? W * 0.05 : W * 0.5, my = portrait ? H * 0.04 + 30 : H * 0.07 + 34;
+  g.strokeText(mast, mx, my); g.fillText(mast, mx, my);
+  if (g.letterSpacing !== undefined) g.letterSpacing = "0px";
+  // A burst on the big moments.
+  if (pop.burst && now - pop.burst.at < 0.9) {
+    const k = (now - pop.burst.at) / 0.9, s = easeBack(k / 0.3) * (1 - clamp((k - 0.75) / 0.25) * 0.3);
+    const cx = pop.burst.x * W, cy = pop.burst.y * H, R = Math.min(W, H) * 0.14 * s;
+    g.save(); g.globalAlpha = 1 - clamp((k - 0.8) / 0.2); g.translate(cx, cy); g.rotate(-0.15 + 0.1 * Math.sin(k * 12));
+    g.beginPath();
+    for (let i = 0; i < 28; i++) { const a = (i / 28) * Math.PI * 2, r = R * (i % 2 ? 0.62 : 1) * (1 + 0.08 * hash("bp", i)); g.lineTo(Math.cos(a) * r, Math.sin(a) * r * 0.8); }
+    g.closePath(); g.fillStyle = "#e8283c"; g.fill(); g.lineWidth = lw; g.strokeStyle = ink; g.stroke();
+    g.font = `${R * 0.55}px ${BANG}`; g.textAlign = "center"; g.textBaseline = "middle";
+    g.lineWidth = Math.max(3, R * 0.06); g.strokeText(pop.burst.word, 0, 0); g.fillStyle = "#ffe14a"; g.fillText(pop.burst.word, 0, 0);
+    g.restore(); g.textAlign = "left"; g.textBaseline = "alphabetic";
+  }
+  g.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+// ---------- Style: lyric PV (after JIZURA) ----------
+function chunksOf(line) {
+  // A line in shots: at its space if it has one, else in two or three runs of characters.
+  const cs = line.chars, sp = cs.findIndex((c, k) => c.c === " " && k > 0);
+  if (sp > 0) return [cs.slice(0, sp), cs.slice(sp + 1)].filter((x) => x.length);
+  const n = cs.length, m = n >= 8 ? 3 : n >= 4 ? 2 : 1, parts = [];
+  for (let i = 0; i < m; i++) parts.push(cs.slice(Math.round((i * n) / m), Math.round(((i + 1) * n) / m)));
+  return parts.filter((x) => x.length);
+}
+// Each line cut into shots of a few characters, each shot with its own layout, ground, treatment of the type,
+// camera and way of taking over from the last; a section keeps to a few of each, a line sung again is shot again the
+// same way. Motion is drawn twelve times a second, as drawn animation is.
+const pv = { cuts: null, cur: -2, prev: null, trans: null, glitch: 0, flash: 0, lay: new Map() };
+const PV_MOVES = ["stamp", "slice", "slam", "pop", "drop"];
+const PV_LAYOUTS = ["center", "huge", "left", "vcol", "diag", "scatter", "grid", "stairs", "ring", "repeat"];
+const PV_GROUNDS = ["plain", "speed", "burst", "rings", "stripes", "split", "checker", "halftone", "eq", "bigchar", "grid", "polka", "tvbars", "scan"];
+const PV_TREATS = ["plain", "outline", "longshadow", "hardshadow", "marker", "boxed", "neon", "ransom", "stripes", "circled", "glitch"];
+const PV_CAMS = ["push", "punch", "crash", "dutch", "snap", "hand", "spiral", "pull", "drift"];
+const PV_TRANS = ["cut", "wipe", "diag", "iris", "blinds", "slice", "flash", "zoom", "push"];
+const LAYOUT_FITS = { huge: (n) => n <= 3, grid: (n) => n >= 3 && n <= 9, ring: (n) => n >= 3 && n <= 8, vcol: (n) => n <= 9, diag: (n) => n >= 3 && n <= 8, scatter: (n) => n >= 2 && n <= 5, stairs: (n) => n <= 7 };
+function shuffled(arr, r) { return arr.slice().sort((a, b) => hash(a, r) - hash(b, r)); }
+function pvSchemes() {
+  const light = palette.slice().sort((a, b) => lum(b) - lum(a))[0], dark = palette.slice().sort((a, b) => lum(a) - lum(b))[0];
+  const acc = palette.accent, [ha] = hsl(...acc), acc2 = rgb(ha + 0.5, 0.75, 0.55);
+  return [
+    { bg: dark, fg: [250, 246, 240], acc, acc2 },
+    { bg: light, fg: [22, 16, 18], acc, acc2: rgb(ha + 0.5, 0.75, 0.4) },
+    { bg: rgb(ha, 0.8, 0.5), fg: [18, 12, 16], acc: [250, 246, 240], acc2: rgb(ha + 0.5, 0.8, 0.3) },
+    { bg: rgb(ha + 0.55, 0.55, 0.14), fg: [250, 246, 240], acc, acc2: rgb(ha + 0.15, 0.9, 0.6) },
+  ];
+}
+function buildCuts() {
+  const cuts = [];
+  // A line is one shot, long enough to read; only a long line (a space in it, or ten characters and more) is two.
+  const shotsOf = (l) => {
+    const cs = l.chars, sp = cs.findIndex((c, k) => c.c === " " && k > 2 && k < cs.length - 3);
+    if (sp > 0) return [cs.slice(0, sp), cs.slice(sp + 1)];
+    if (cs.length >= 10) { const m = Math.ceil(cs.length / 2); return [cs.slice(0, m), cs.slice(m)]; }
+    return [cs];
+  };
+  for (const l of LYRICS) shotsOf(l).forEach((chars, k) => cuts.push({ line: l, chars, k, t0: k === 0 ? Math.min(chars[0].t, l.t) : chars[0].t, text: chars.map((c) => c.c).join("") }));
+  cuts.forEach((c, i) => { c.t1 = i + 1 < cuts.length ? Math.min(cuts[i + 1].t0, c.line.end + 3) : c.line.end + 3; });
+  const sections = {}, recent = { layout: [], ground: [], treat: [], cam: [], trans: [], move: [] }, seen = {};
+  cuts.forEach((c, i) => {
+    const l = c.line, key = l.chorus ? "chorus" : l.section;
+    if (!sections[key]) {
+      const r = (k) => hash("pvsec", key, k);
+      sections[key] = { scheme: l.chorus ? 2 : [0, 1, 3][Math.floor(r(0) * 3)], layout: shuffled(PV_LAYOUTS, r(1)).slice(0, 5), ground: shuffled(PV_GROUNDS, r(2)).slice(0, 4), treat: shuffled(PV_TREATS, r(3)).slice(0, 3), cam: shuffled(PV_CAMS, r(4)).slice(0, 4), trans: shuffled(PV_TRANS, r(5)).slice(0, 4), move: shuffled(PV_MOVES, r(6)).slice(0, 3) };
+    }
+    const S = sections[key], id = l.text + "|" + c.k;
+    if (seen[id]) { Object.assign(c, seen[id]); return; }
+    const n = c.chars.length;
+    const choose = (name, pool) => {
+      let opts = pool.filter((x) => !recent[name].slice(-2).includes(x));
+      if (name === "layout") opts = opts.filter((x) => !LAYOUT_FITS[x] || LAYOUT_FITS[x](n));
+      if (!opts.length) opts = name === "layout" ? ["center"] : pool;
+      const v = pick(opts, hash("cut", id, name)); recent[name].push(v); return v;
+    };
+    const plan = { scheme: S.scheme, layout: choose("layout", S.layout), ground: choose("ground", S.ground), treat: choose("treat", S.treat), cam: choose("cam", S.cam), trans: choose("trans", S.trans), move: choose("move", S.move), decor: shuffled(["brackets", "ruler", "frame", "cross", "underline", "number", "tag"], hash("dec", id)).slice(0, hash("decn", id) < 0.4 ? 1 : 2), dir: hash("dir", id) < 0.5 ? 1 : -1 };
+    // A section's first shot is the big one.
+    if (c.k === 0 && l.key) Object.assign(plan, { layout: n <= 3 ? "huge" : "center", cam: "crash", trans: "flash", ground: "burst" });
+    Object.assign(c, plan); seen[id] = plan;
+  });
+  return cuts;
+}
+function cutAt(p) {
+  const cuts = pv.cuts; let i = -1;
+  for (let k = 0; k < cuts.length; k++) if (cuts[k].t0 <= p + 0.04) i = k;
+  if (i >= 0 && p > cuts[i].t1 + 0.2 && (i + 1 >= cuts.length || cuts[i + 1].t0 - p > 1.5)) return -1;
+  return i;
+}
+onBeat.push((b, down) => {
+  if (STYLE !== "pv") return;
+  if (down && music.intensity > 0.6 && hash("gl", b) < 0.12) pv.glitch = 0.08;
+});
+// Where each character of a shot goes: {c, x, y, fs, rot, ghost}.
+function pvLayout(c) {
+  const memo = c.layout + W + "x" + H;
+  if (pv.lay.get(c) && pv.lay.get(c).memo === memo) return pv.lay.get(c).items;
+  const F = getComputedStyle(document.body).getPropertyValue("--sans"), n = c.chars.length, items = [];
+  const width = (fs, ch) => { g.font = `900 ${fs}px ${F}`; return g.measureText(ch).width; };
+  const row = (fs, x0, y, chars = c.chars, extra = {}) => { let x = x0; for (const ch of chars) { const w = width(fs, ch.c); items.push({ c: ch, x, y, fs, rot: 0, w, ...extra }); x += w; } return x - x0; };
+  const rowW = (fs, chars = c.chars) => chars.reduce((a, ch) => a + width(fs, ch.c), 0);
+  switch (c.layout) {
+    case "huge": { const fs = Math.min(H * 0.82, (W * 0.92) / n); row(fs, (W - rowW(fs)) / 2, H / 2 + fs * 0.36); break; }
+    case "left": { const fs = Math.min(H * 0.2, (W * 0.62) / n); row(fs, W * 0.07, H * 0.66); break; }
+    case "vcol": { const fs = Math.min(W * 0.2, (H * 0.82) / n), x = c.dir > 0 ? W * 0.66 : W * 0.2; c.chars.forEach((ch, k) => { const w = width(fs, ch.c); items.push({ c: ch, x: x + (fs - w) / 2, y: H * 0.09 + fs * (k + 0.88), fs, rot: 0, w }); }); break; }
+    case "diag": {
+      const x0 = W * 0.1, y0 = H * 0.22, x1 = W * 0.9, y1 = H * 0.86, a = Math.atan2(y1 - y0, x1 - x0) * 0.6 * c.dir;
+      const fs = Math.min(H * 0.22, (Math.hypot(x1 - x0, y1 - y0) / n) * 0.95);
+      c.chars.forEach((ch, k) => { const t = n === 1 ? 0.5 : k / (n - 1), w = width(fs, ch.c); items.push({ c: ch, x: lerp(x0, x1 - fs, t), y: c.dir > 0 ? lerp(y0, y1, t) + fs * 0.4 : lerp(y1, y0, t) + fs * 0.4, fs, rot: a, w }); });
+      break;
+    }
+    case "scatter": {
+      const cols = Math.ceil(Math.sqrt(n * 1.6)), rows = Math.ceil(n / cols);
+      c.chars.forEach((ch, k) => { const s = 0.55 + hash("sz", c.text, k) * 0.7, cw = W * 0.86 / cols, chh = H * 0.8 / rows, fs = Math.min(cw, chh) * s; const w = width(fs, ch.c); items.push({ c: ch, x: W * 0.07 + (k % cols) * cw + (cw - w) * hash("sx", c.text, k), y: H * 0.1 + Math.floor(k / cols) * chh + chh * 0.5 + fs * 0.35, fs, rot: (hash("sr", c.text, k) - 0.5) * 0.4, w }); });
+      break;
+    }
+    case "grid": { const cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols), fs = Math.min((W * 0.9) / cols, (H * 0.86) / rows) * 0.92; c.chars.forEach((ch, k) => { const w = width(fs, ch.c); items.push({ c: ch, x: (W - cols * fs) / 2 + (k % cols) * fs + (fs - w) / 2, y: (H - rows * fs) / 2 + Math.floor(k / cols) * fs + fs * 0.86, fs, rot: 0, w }); }); break; }
+    case "stairs": { const fs = Math.min(H * 0.24, (W * 0.8) / n), step = Math.min(fs * 0.5, (H * 0.5) / n); let x = W * 0.08; c.chars.forEach((ch, k) => { const w = width(fs, ch.c); items.push({ c: ch, x, y: H * 0.28 + fs * 0.8 + k * step, fs, rot: 0, w }); x += w * 1.02; }); break; }
+    case "ring": { const R = Math.min(W, H) * 0.3, fs = Math.min(R * 0.55, (Math.PI * 2 * R) / n * 0.8); c.chars.forEach((ch, k) => { const a = -Math.PI / 2 + (k / n) * Math.PI * 2, w = width(fs, ch.c); items.push({ c: ch, x: W / 2 + Math.cos(a) * R - w / 2, y: H / 2 + Math.sin(a) * R + fs * 0.35, fs, rot: a + Math.PI / 2, w, ring: true }); }); break; }
+    case "repeat": {
+      const fs = Math.min(H * 0.14, (W * 0.9) / n), rw = rowW(fs);
+      for (let r = -2; r <= 2; r++) row(fs, (W - rw) / 2 + r * fs * 0.8 * c.dir, H / 2 + fs * 0.35 + r * fs * 1.15, c.chars, r === 0 ? {} : { ghost: 0.12 + 0.06 * (2 - Math.abs(r)) });
+      break;
+    }
+    default: { const fs = Math.min(H * 0.26, (W * 0.86) / n); row(fs, (W - rowW(fs)) / 2, H / 2 + fs * 0.36); }
+  }
+  pv.lay.set(c, { memo, items });
+  return items;
+}
+function pvGround(c, sc, lt, now) {
+  const F = getComputedStyle(document.body).getPropertyValue("--sans");
+  const mix = (a, b, k) => a.map((v, i) => v + (b[i] - v) * k);
+  const faint = css(mix(sc.bg, sc.fg, 0.1)), tint = css(mix(sc.bg, sc.acc, 0.35));
+  const fr = Math.floor(now * 12), m = Math.min(W, H);
+  switch (c.ground) {
+    case "speed": { g.strokeStyle = css(sc.fg, 0.16); for (let i = 0; i < 110; i++) { const a = hash("sl", i, fr) * 6.283, r0 = m * (0.28 + hash("sl0", i, fr) * 0.2), r1 = Math.max(W, H); g.lineWidth = 1 + hash("slw", i, fr) * 3; g.beginPath(); g.moveTo(W / 2 + Math.cos(a) * r0, H / 2 + Math.sin(a) * r0); g.lineTo(W / 2 + Math.cos(a) * r1, H / 2 + Math.sin(a) * r1); g.stroke(); } break; }
+    case "burst": { const n = 20, rot = now * 0.15 * c.dir; g.fillStyle = tint; for (let i = 0; i < n; i += 2) { const a0 = rot + (i / n) * Math.PI * 2, a1 = rot + ((i + 1) / n) * Math.PI * 2, R = Math.max(W, H); g.beginPath(); g.moveTo(W / 2, H / 2); g.lineTo(W / 2 + Math.cos(a0) * R, H / 2 + Math.sin(a0) * R); g.lineTo(W / 2 + Math.cos(a1) * R, H / 2 + Math.sin(a1) * R); g.closePath(); g.fill(); } break; }
+    case "rings": { g.strokeStyle = tint; const gap = m * 0.09, off = (lt * m * 0.12 + music.kick * gap * 0.4) % gap; for (let r = off; r < Math.max(W, H); r += gap) { g.lineWidth = gap * 0.32; g.beginPath(); g.arc(W / 2, H / 2, r, 0, Math.PI * 2); g.stroke(); } break; }
+    case "stripes": { g.save(); g.translate(W / 2, H / 2); g.rotate(-0.6 * c.dir); g.fillStyle = faint; const sw = m * 0.07, off = (lt * 90) % (sw * 2); for (let x = -Math.max(W, H) - sw * 2 + off; x < Math.max(W, H); x += sw * 2) g.fillRect(x, -Math.max(W, H), sw, Math.max(W, H) * 2); g.restore(); break; }
+    case "split": { const k = easeExpo(lt / 0.4); g.fillStyle = css(sc.acc2); g.beginPath(); g.moveTo(W, 0); g.lineTo(W, H); g.lineTo(W - (W * 0.55 + H * 0.3) * k, H); g.lineTo(W - (W * 0.55 - H * 0.3) * k, 0); g.closePath(); g.fill(); break; }
+    case "checker": { const s = m * 0.09, ox = (lt * 40 * c.dir) % (s * 2), oy = (lt * 25) % (s * 2); g.fillStyle = faint; for (let y = -s * 2; y < H + s * 2; y += s) for (let x = -s * 2; x < W + s * 2; x += s) if (((Math.floor((x - ox) / s) + Math.floor((y - oy) / s)) & 1) === 0) g.fillRect(x + (ox % s), y + (oy % s), s, s); break; }
+    case "halftone": { g.fillStyle = tint; const s = 20; for (let y = 0; y < H + s; y += s) for (let x = 0; x < W + s; x += s) { const t = clamp(x / W + (y / H) * 0.3 - 0.15 + Math.sin(now) * 0.05); const r = (s / 2) * t * (0.9 + 0.3 * music.kick); if (r > 0.6) { g.beginPath(); g.arc(x + ((y / s) % 2) * s / 2, y, r, 0, Math.PI * 2); g.fill(); } } break; }
+    case "eq": { const n = 32, bw = W / n; g.fillStyle = tint; for (let i = 0; i < n; i++) { const v = clamp(music.bands[Math.floor((i / n) * 24)] * 1.3); g.fillRect(i * bw + 2, H - v * H * 0.75, bw - 4, v * H * 0.75); } break; }
+    case "bigchar": { const ch = c.chars[0].c, fs = H * 1.25; g.font = `900 ${fs}px ${F}`; g.fillStyle = faint; g.textBaseline = "alphabetic"; g.fillText(ch, W * 0.5 - fs * 0.5 - lt * 20 * c.dir, H / 2 + fs * 0.36); break; }
+    case "grid": { const hz = H * 0.55; g.strokeStyle = tint; g.lineWidth = 1.5; for (let k = 0; k < 16; k++) { const y = hz + (H - hz) * 1.4 / (k + 1 - ((lt * 1.5) % 1) + 0.4); if (y > hz && y < H) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); } } for (let i = -12; i <= 12; i++) { g.beginPath(); g.moveTo(W / 2 + i * W * 0.02, hz); g.lineTo(W / 2 + i * W * 0.14, H); g.stroke(); } break; }
+    case "polka": { g.fillStyle = faint; const s = m * 0.11, off = (lt * 30) % s; for (let y = -s; y < H + s; y += s) for (let x = -s; x < W + s; x += s) { g.beginPath(); g.arc(x + off * c.dir, y + off, s * 0.22, 0, Math.PI * 2); g.fill(); } break; }
+    case "tvbars": { const cols = [sc.fg, sc.acc, sc.acc2, mix(sc.bg, sc.fg, 0.4), sc.acc, sc.fg, sc.acc2]; const bw = W / cols.length; cols.forEach((col, i) => { g.fillStyle = css(col, 0.13); g.fillRect(i * bw, 0, bw + 1, H * 0.68); }); g.fillStyle = css(sc.fg, 0.08); g.fillRect(0, H * 0.68, W, H * 0.05); break; }
+    case "scan": { g.fillStyle = faint; const bh = m * 0.05, off = (lt * 60) % (bh * 3); for (let y = -bh * 3 + off; y < H; y += bh * 3) g.fillRect(0, y, W, bh); break; }
+  }
+}
+function pvCamera(c, lt, now) {
+  const d = c.dir;
+  let tx = 0, ty = 0, rot = 0, s = 1 + 0.035 * music.kick;
+  switch (c.cam) {
+    case "push": s *= 1 + 0.05 * clamp(lt / Math.max(0.5, c.t1 - c.t0)); break;
+    case "punch": s *= 1 + 0.05 * music.kick; break;
+    case "crash": s *= 1 + 0.7 * (1 - easeExpo(lt / 0.4)); break;
+    case "dutch": rot = 0.1 * d; s *= 1.06; break;
+    case "snap": tx = d * W * 0.4 * (1 - easeExpo(lt / 0.32)); break;
+    case "hand": tx = Math.sin(now * 2.1) * 7 + Math.sin(now * 5.3) * 3; ty = Math.cos(now * 1.7) * 6; rot = Math.sin(now * 1.3) * 0.008; break;
+    case "spiral": rot = (1 - easeOut(lt / 0.7)) * 0.7 * d; s *= lerp(0.55, 1, easeOut(lt / 0.7)); break;
+    case "pull": s *= lerp(1.3, 1, easeOut(lt / 1.4)); break;
+    case "drift": tx = d * lt * W * 0.012; ty = -lt * H * 0.006; break;
+  }
+  if (music.intensity > 0.6) { tx += (hash("qx", Math.floor(now * 12)) - 0.5) * 6 * music.kick; ty += (hash("qy", Math.floor(now * 12)) - 0.5) * 6 * music.kick; }
+  g.translate(W / 2 + tx, H / 2 + ty); g.rotate(rot); g.scale(s, s); g.translate(-W / 2, -H / 2);
+}
+// One character, in the shot's treatment.
+function pvPut(c, it, ch, x, y, sc, alpha) {
+  const fs = it.fs, F = getComputedStyle(document.body).getPropertyValue("--sans");
+  g.font = `900 ${fs}px ${F}`; g.textBaseline = "alphabetic";
+  const w = it.w, fg = sc.fg, a = alpha;
+  const fill = (col, dx = 0, dy = 0, al = 1) => { g.globalAlpha = a * al; g.fillStyle = css(col); g.fillText(ch, x + dx, y + dy); };
+  const idx = c.chars.indexOf(it.c);
+  switch (c.treat) {
+    case "outline": g.globalAlpha = a; g.lineJoin = "round"; g.lineWidth = fs * 0.07; g.strokeStyle = css(fg); g.strokeText(ch, x, y); fill(sc.acc); break;
+    case "longshadow": for (let k = 12; k > 0; k--) fill(sc.acc, k * fs * 0.012 * c.dir, k * fs * 0.012, 1); fill(fg); break;
+    case "hardshadow": fill(sc.acc2, fs * 0.06 * c.dir, fs * 0.06); fill(fg); break;
+    case "marker": g.globalAlpha = a; g.fillStyle = css(sc.acc); g.fillRect(x - fs * 0.04, y - fs * 0.32, w + fs * 0.08, fs * 0.36); fill(fg); break;
+    case "boxed": g.globalAlpha = a; g.fillStyle = css(fg); g.fillRect(x - fs * 0.05, y - fs * 0.9, w + fs * 0.1, fs * 1.08); fill(sc.bg); break;
+    case "neon": g.globalAlpha = a; g.shadowColor = css(sc.acc); g.shadowBlur = fs * 0.22; g.lineWidth = Math.max(1.5, fs * 0.03); g.strokeStyle = css(sc.acc); g.strokeText(ch, x, y); g.shadowBlur = 0; fill([255, 255, 255], 0, 0, 0.85); break;
+    case "ransom": { const cols = [sc.fg, sc.acc, sc.acc2, sc.bg], bgc = cols[Math.floor(hash("rb", c.text, idx) * 3)], r = (hash("rr", c.text, idx) - 0.5) * 0.18; g.save(); g.translate(x + w / 2, y - fs * 0.35); g.rotate(r); g.translate(-(x + w / 2), -(y - fs * 0.35)); g.globalAlpha = a; g.fillStyle = css(bgc); g.fillRect(x - fs * 0.06, y - fs * 0.92, w + fs * 0.12, fs * 1.12); fill(inkOn(bgc)); g.restore(); break; }
+    case "stripes": { const bands = 7, top = y - fs * 0.88, bh = fs * 1.0 / bands; for (let b = 0; b < bands; b++) { g.save(); g.beginPath(); g.rect(x - fs * 0.2, top + b * bh, w + fs * 0.4, bh * 0.58); g.clip(); fill(fg); g.restore(); } break; }
+    case "circled": g.globalAlpha = a; g.lineWidth = Math.max(2, fs * 0.035); g.strokeStyle = css(sc.acc); g.beginPath(); g.arc(x + w / 2, y - fs * 0.36, fs * 0.62, 0, Math.PI * 2); g.stroke(); fill(fg); break;
+    case "glitch": { const off = fs * 0.03 + 10 * music.kick; fill(sc.acc, -off, 0, 0.7); fill(sc.acc2, off, 0, 0.7); fill(fg); break; }
+    default: { const off = 1.5 + 6 * music.kick; fill(sc.acc, -off, 0, 0.5); fill(sc.acc2, off, 0, 0.5); fill(fg); }
+  }
+  g.globalAlpha = 1;
+}
+function pvDecor(c, sc, items, lt, p) {
+  if (!items.length) return;
+  const C = getComputedStyle(document.body).getPropertyValue("--condensed");
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const it of items) if (!it.ghost) { x0 = Math.min(x0, it.x); x1 = Math.max(x1, it.x + it.w); y0 = Math.min(y0, it.y - it.fs * 0.9); y1 = Math.max(y1, it.y + it.fs * 0.12); }
+  const k = easeExpo(lt / 0.5), pad = 18;
+  g.strokeStyle = css(sc.fg, 0.8); g.fillStyle = css(sc.fg, 0.8); g.lineWidth = 2;
+  g.font = `500 12px ${C}`; if (g.letterSpacing !== undefined) g.letterSpacing = "0.2em";
+  for (const d of c.decor) {
+    switch (d) {
+      case "brackets": { const L = 26 * k; for (const [x, y, sx, sy] of [[x0 - pad, y0 - pad, 1, 1], [x1 + pad, y0 - pad, -1, 1], [x0 - pad, y1 + pad, 1, -1], [x1 + pad, y1 + pad, -1, -1]]) { g.beginPath(); g.moveTo(x, y + sy * L); g.lineTo(x, y); g.lineTo(x + sx * L, y); g.stroke(); } break; }
+      case "ruler": { const x = W - 46; for (let i = 0; i <= 40; i++) { const y = H * 0.12 + (i / 40) * H * 0.7 * k; g.fillRect(x - (i % 5 ? 6 : 14), y, i % 5 ? 6 : 14, 1); } const at = H * 0.12 + clamp(p / DURATION) * H * 0.7; g.beginPath(); g.moveTo(x - 22, at); g.lineTo(x - 30, at - 5); g.lineTo(x - 30, at + 5); g.closePath(); g.fill(); break; }
+      case "frame": { const m = 22; g.lineWidth = 3; g.beginPath(); const per = 2 * (W + H - 4 * m), len = per * k; g.setLineDash([len, per]); g.strokeRect(m, m, W - 2 * m, H - 2 * m); g.setLineDash([]); g.lineWidth = 2; break; }
+      case "cross": { const cx = x1 + pad * 2, cy = y0 - pad * 1.5, r = 14 * k; g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.moveTo(cx - r * 1.8, cy); g.lineTo(cx + r * 1.8, cy); g.moveTo(cx, cy - r * 1.8); g.lineTo(cx, cy + r * 1.8); g.stroke(); break; }
+      case "underline": { g.fillStyle = css(sc.acc); g.fillRect(x0, y1 + pad * 0.6, (x1 - x0) * k, 6); g.fillStyle = css(sc.fg, 0.8); break; }
+      case "number": { g.font = `500 ${Math.min(W, H) * 0.16}px ${C}`; g.lineWidth = 1.5; g.strokeStyle = css(sc.fg, 0.35); g.strokeText(String(c.line.i + 1).padStart(2, "0"), W * 0.05, H * 0.9); g.font = `500 12px ${C}`; g.strokeStyle = css(sc.fg, 0.8); g.lineWidth = 2; break; }
+      case "tag": { const s = `${c.text.length} CHARS  /  ${c.cam.toUpperCase()}  /  ${c.treat.toUpperCase()}`; const w = g.measureText(s).width + 16; g.fillStyle = css(sc.fg); g.fillRect(x0, y0 - pad - 26, w * k, 20); g.fillStyle = css(sc.bg); if (k > 0.9) g.fillText(s, x0 + 8, y0 - pad - 11); g.fillStyle = css(sc.fg, 0.8); break; }
+    }
+  }
+  if (g.letterSpacing !== undefined) g.letterSpacing = "0px";
+}
+// The whole line, steady, under every shot: on a plate of the ground's colour, the sung part full, the rest faint.
+function pvSubtitle(line, sc, pq) {
+  const F = getComputedStyle(document.body).getPropertyValue("--sans"), fs = Math.max(18, Math.min(30, W * 0.022));
+  g.font = `900 ${fs}px ${F}`; g.textBaseline = "alphabetic";
+  const ws = line.chars.map((c) => g.measureText(c.c).width), total = ws.reduce((a, b) => a + b, 0);
+  let x = (W - total) / 2; const y = H - 168;
+  g.fillStyle = css(sc.bg, 0.85); g.fillRect(x - 16, y - fs * 1.05, total + 32, fs * 1.5);
+  line.chars.forEach((c, k) => { g.fillStyle = css(sc.fg, pq >= c.t ? 1 : 0.4); g.fillText(c.c, x, y); x += ws[k]; });
+}
+function pvTransition(kind, k, dir) {
+  // The shot before, still on top, going away (k from 0 to 1).
+  const A = pv.prev; if (!A || k >= 1) return;
+  g.save(); g.setTransform(1, 0, 0, 1, 0, 0);
+  const w = canvas.width, h = canvas.height, e = easeExpo(k);
+  switch (kind) {
+    case "wipe": g.beginPath(); dir > 0 ? g.rect(w * e, 0, w, h) : g.rect(0, 0, w * (1 - e), h); g.clip(); g.drawImage(A, 0, 0); break;
+    case "diag": g.beginPath(); g.moveTo(w * (1.5 * e - 0.25) + h * 0.5, 0); g.lineTo(w, 0); g.lineTo(w, h); g.lineTo(w * (1.5 * e - 0.25) - h * 0.5, h); g.closePath(); g.clip(); g.drawImage(A, 0, 0); break;
+    case "iris": g.beginPath(); g.rect(0, 0, w, h); g.arc(w / 2, h / 2, Math.hypot(w, h) * 0.55 * e, 0, Math.PI * 2, true); g.clip("evenodd"); g.drawImage(A, 0, 0); break;
+    case "blinds": { g.beginPath(); const n = 10, bh = h / n; for (let i = 0; i < n; i++) g.rect(0, i * bh, w, bh * (1 - e)); g.clip(); g.drawImage(A, 0, 0); break; }
+    case "slice": { const n = 12, bh = h / n; for (let i = 0; i < n; i++) g.drawImage(A, 0, i * bh, w, bh, (i % 2 ? 1 : -1) * w * easeExpo(clamp(k * 1.3 - i * 0.02)), i * bh, w, bh); break; }
+    case "zoom": g.globalAlpha = 1 - e; g.translate(w / 2, h / 2); g.scale(1 + e * 0.7, 1 + e * 0.7); g.translate(-w / 2, -h / 2); g.drawImage(A, 0, 0); break;
+    case "push": g.drawImage(A, -dir * w * e, 0); break;
+    case "flash": g.fillStyle = `rgba(255,255,255,${(1 - e) * 0.95})`; g.fillRect(0, 0, w, h); break;
+  }
+  g.restore();
+}
+function pvFrame(p, dt, now) {
+  if (!pv.cuts) pv.cuts = buildCuts();
+  const schemes = pvSchemes();
+  const ci = cutAt(p);
+  if (ci !== pv.cur) {
+    // The shot ending, kept to go away over the new one.
+    if (!pv.prev) pv.prev = document.createElement("canvas");
+    pv.prev.width = canvas.width; pv.prev.height = canvas.height;
+    pv.prev.getContext("2d").drawImage(canvas, 0, 0);
+    const c = pv.cuts[ci];
+    pv.trans = { at: now, kind: c ? c.trans : "flash", dir: c ? c.dir : 1 };
+    pv.cur = ci;
+  }
+  const c = pv.cuts[ci];
+  const sc = schemes[c ? c.scheme : 0];
+  // Motion drawn twelve times a second; who sings when still by the song's own time.
+  const pq = Math.floor(p * 12) / 12, lt = c ? Math.max(0, pq - c.t0) : 0;
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.fillStyle = css(sc.bg); g.fillRect(0, 0, W, H);
+  if (c) {
+    pvGround(c, sc, lt, now);
+    g.save(); pvCamera(c, lt, now);
+    const items = pvLayout(c);
+    for (const it of items) {
+      const since = pq - it.c.t, idx = c.chars.indexOf(it.c);
+      if (it.ghost) { if (since >= 0 || lt > 0) pvPut(c, it, it.c.c, it.x, it.y, sc, it.ghost); continue; }
+      // The whole shot sets down at once, a character after another; what is not sung yet stays faint.
+      const settle = (lt - idx * 0.03) / 0.22;
+      if (settle <= 0) continue;
+      const alpha = since >= 0 ? 1 : 0.3;
+      const draw = (dx, dy, alt) => {
+        if (it.rot) { g.save(); g.translate(it.x + it.w / 2 + dx, it.y - it.fs * 0.35 + dy); g.rotate(it.rot + (it.ring ? lt * 0.3 * c.dir : 0)); pvPut(c, it, alt || it.c.c, -it.w / 2, it.fs * 0.35, sc, alpha); g.restore(); }
+        else pvPut(c, it, alt || it.c.c, it.x + dx, it.y + dy, sc, alpha);
+      };
+      // A character as it is sung jumps once more, a little.
+      const beat = since >= 0 && since < 0.18 ? 1 + 0.12 * (1 - since / 0.18) : 1;
+      if (beat !== 1) { g.save(); g.translate(it.x + it.w / 2, it.y - it.fs * 0.35); g.scale(beat, beat); g.translate(-(it.x + it.w / 2), -(it.y - it.fs * 0.35)); }
+      enterChar(c.move, settle, c.dir, idx, draw, it.fs, it.x, it.y, it.c.c);
+      if (beat !== 1) g.restore();
+    }
+    pvDecor(c, sc, items, lt, p);
+    g.restore();
+    pvSubtitle(c.line, sc, pq);
+  } else {
+    // Between lines: the title, its characters hopping in turn.
+    const t = Array.from(TITLE), fs = Math.min(H * 0.5, W / (t.length + 0.5)), F = getComputedStyle(document.body).getPropertyValue("--sans");
+    g.font = `900 ${fs}px ${F}`;
+    let x = W * 0.06;
+    t.forEach((ch, k) => { const on = ((music.beat % t.length) + t.length) % t.length === k; g.fillStyle = css(on ? sc.acc : sc.fg); g.fillText(ch, x, H * 0.5 + fs * 0.36 - (on ? music.kick * fs * 0.12 : 0)); x += g.measureText(ch).width; });
+  }
+  if (pv.trans) { const k = (now - pv.trans.at) / 0.34; if (k < 1 && pv.trans.kind !== "cut") pvTransition(pv.trans.kind, k, pv.trans.dir); }
+  // Now and then on the first beat of a bar, the picture slips in strips for a moment.
+  if (pv.glitch > 0) {
+    pv.glitch -= dt;
+    g.save(); g.setTransform(1, 0, 0, 1, 0, 0);
+    for (let i = 0; i < 7; i++) { const y = hash("gy", i, Math.floor(now * 24)) * canvas.height, hh = 8 + hash("gh", i) * 50, dx = (hash("gx", i, Math.floor(now * 24)) - 0.5) * 90; g.drawImage(canvas, 0, y, canvas.width, hh, dx, y, canvas.width, hh); }
+    g.restore();
+  }
+  // Labels, as a PV keeps at its corners.
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const C = getComputedStyle(document.body).getPropertyValue("--condensed");
+  g.font = `500 13px ${C}`; if (g.letterSpacing !== undefined) g.letterSpacing = "0.25em";
+  g.fillStyle = css(sc.fg, 0.75); g.textBaseline = "top";
+  g.fillText(`${SONG.short} — ${ARTIST}`, 28, 26);
+  g.textAlign = "right";
+  g.fillText(`${String(Math.floor(p / 60)).padStart(2, "0")}:${(p % 60).toFixed(1).padStart(4, "0")}`, W - 28, 66);
+  const line0 = c ? c.line : null;
+  g.fillText(line0 ? (line0.chorus ? "CHORUS" : `VERSE ${String(line0.section + 1).padStart(2, "0")}`) : "INTRO", W - 28, 86);
+  g.textAlign = "left"; g.textBaseline = "alphabetic";
+  if (g.letterSpacing !== undefined) g.letterSpacing = "0px";
+  g.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+// ---------- The frame ----------
+function resize() { DPR = Math.min(window.devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight; canvas.width = W * DPR; canvas.height = H * DPR; }
+let last = performance.now() / 1000;
+function frame() {
+  const now = performance.now() / 1000, dt = Math.min(0.05, now - last); last = now;
+  const p = pos();
+  listen(p, dt);
+  ({ poster: posterFrame, pop: popFrame, pv: pvFrame })[STYLE](p, dt, now);
+  $("tNow").textContent = time(p);
+  $("done").style.width = (p / DURATION * 100) + "%";
+  requestAnimationFrame(frame);
+}
+
+// ---------- Controls ----------
+const ICON = {
+  play: '<path class="solid" d="M7 4.5v15l12-7.5z"/>', pause: '<rect class="solid" x="6" y="4.5" width="4" height="15" rx="1"/><rect class="solid" x="14" y="4.5" width="4" height="15" rx="1"/>',
+  volume: '<path d="M11 5L6 9H2v6h4l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/>', muted: '<path d="M11 5L6 9H2v6h4l5 4V5Z"/><path d="M22 9L16 15"/><path d="M16 9L22 15"/>',
+  minimize: '<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>',
+  maximize: '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
+};
+function drawIcons() {
+  $("toggleIcon").innerHTML = playing() ? ICON.pause : ICON.play;
+  $("toggle").setAttribute("aria-label", playing() ? "暂停" : "播放");
+  $("muteIcon").innerHTML = audio.muted || audio.volume === 0 ? ICON.muted : ICON.volume;
+  $("leaveIcon").innerHTML = document.fullscreenElement ? ICON.minimize : ICON.maximize;
+  const v = audio.muted ? 0 : audio.volume;
+  $("vfill").style.height = v * 100 + "%"; $("level").textContent = Math.round(v * 100) + "%";
+}
+audio.addEventListener("play", drawIcons); audio.addEventListener("pause", drawIcons); audio.addEventListener("volumechange", drawIcons);
+audio.addEventListener("ended", () => { seek(0); audio.play(); });
+document.addEventListener("fullscreenchange", drawIcons);
+$("toggle").onclick = toggle;
+$("back").onclick = () => { const p = pos(), i = lineAt(p); const at = i < 0 ? 0 : p - LYRICS[i].t > 1.5 ? LYRICS[i].t : (LYRICS[i - 1] || { t: 0 }).t; seek(at - 0.05); };
+$("next").onclick = () => { const p = pos(), n = LYRICS.find((l) => l.t > p + 0.1); if (n) seek(n.t - 0.05); };
+$("mute").onclick = () => { audio.muted = !audio.muted; };
+$("leave").onclick = () => { const d = document; (d.fullscreenElement ? d.exitFullscreen() : d.documentElement.requestFullscreen?.())?.catch?.(() => {}); };
+const trackAt = (e) => { const r = $("track").getBoundingClientRect(); return clamp((e.clientX - r.left) / r.width); };
+$("track").onpointermove = (e) => { const k = trackAt(e); $("pill").textContent = time(k * DURATION); $("pill").style.left = k * 100 + "%"; };
+$("track").onclick = (e) => seek(trackAt(e) * DURATION);
+const setVol = (e) => { const r = $("vbar").getBoundingClientRect(); audio.volume = clamp((r.bottom - e.clientY) / r.height); audio.muted = false; };
+$("vbar").onpointerdown = (e) => { setVol(e); $("vbar").setPointerCapture(e.pointerId); $("pop").classList.add("held"); };
+$("vbar").onpointermove = (e) => { if (e.buttons) setVol(e); };
+$("vbar").onpointerup = () => $("pop").classList.remove("held");
+// Quick jumps: the intro, the first verse, the first chorus, the last section.
+{
+  const chorus = LYRICS.find((l) => l.chorus), last = LYRICS.filter((l) => l.key).pop();
+  const at = [["前奏", 0], ["主歌", LYRICS[0] && LYRICS[0].t], ["副歌", chorus && chorus.t], ["尾声", last && last.t]].filter(([, t]) => t !== undefined);
+  $("jumps").innerHTML = at.map(([n, t]) => `<button data-at="${t}">${n}</button>`).join("");
+  for (const b of document.querySelectorAll(".jump button")) b.onclick = () => seek(+b.dataset.at);
+}
+$("go").textContent = `播放《${TITLE}》`;
+const MOVES = { poster: ["slice"], pop: ["pop"], pv: PV_MOVES };
+$("styles").innerHTML = PAGES.map(([, name, key]) => `<button data-style="${key}">${name}</button>`).join("");
+for (const b of document.querySelectorAll(".styles button")) b.onclick = () => setStyle(b.dataset.style);
+// Another style, at once, the song going on: the last frame of the one before kept on top and faded out over it.
+function setStyle(s, first) {
+  if (!first) {
+    if (s === STYLE) return;
+    const fade = $("fade"), f = fade.getContext("2d");
+    fade.width = canvas.width; fade.height = canvas.height;
+    fade.classList.remove("out"); fade.style.opacity = 1;
+    if (STYLE === "space") f.drawImage(glCanvas, 0, 0, fade.width, fade.height);
+    f.drawImage(canvas, 0, 0);
+    requestAnimationFrame(() => requestAnimationFrame(() => { fade.classList.add("out"); fade.style.opacity = 0; }));
+  }
+  STYLE = s;
+  shown.li = -2; shown.lines = [];
+  planLines(MOVES[s]);
+  pv.cur = -2;
+  glCanvas.style.display = s === "space" ? "block" : "none";
+  g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, canvas.width, canvas.height);
+  for (const b of document.querySelectorAll(".styles button")) b.setAttribute("aria-pressed", b.dataset.style === s);
+  document.title = `Glance 全屏 · ${PAGES.find((x) => x[2] === s)[1]}`;
+  try { history.replaceState(null, "", "#" + s); } catch (e) {}
+}
+function begin() { $("start").hidden = true; hook(); actx.resume(); audio.play(); wake(); }
+$("go").onclick = () => { if (audio.src) begin(); else $("fileInput").click(); };
+$("fileInput").onchange = (e) => { const f = e.target.files[0]; if (!f) return; audio.src = URL.createObjectURL(f); begin(); };
+// Beside its own copy of the song (song.mp3) it plays that, held whole so that it seeks anywhere; else it asks.
+fetch("song.mp3").then((r) => { if (!r.ok) throw new Error(r.status); return r.blob(); })
+  .then((b) => { audio.src = URL.createObjectURL(b); })
+  .catch(() => {
+    $("go").textContent = `选择《${TITLE}》的音乐文件`;
+    $("startNote").textContent = `${ARTIST}。请选择本机上的这首歌，文件只在本页播放，不会上传。`;
+  });
+addEventListener("keydown", (e) => {
+  if (e.key === " ") { e.preventDefault(); toggle(); }
+  if (e.key === "ArrowRight") seek(pos() + 5);
+  if (e.key === "ArrowLeft") seek(pos() - 5);
+  wake();
+});
+let idleTimer = 0;
+function wake() { document.body.classList.remove("idle"); clearTimeout(idleTimer); idleTimer = setTimeout(() => { if (playing()) document.body.classList.add("idle"); }, 2500); }
+addEventListener("pointermove", wake); addEventListener("pointerdown", wake);
+addEventListener("resize", resize);
+cover.onload = () => { paletteFromCover(); pop.prints = null; };
+resize(); drawIcons(); setStyle(STYLE, true);
+document.fonts.load(`900 40px "Noto Sans SC"`, "如果").then(() => document.fonts.load(`40px "ZCOOL QingKe HuangYou"`, "如果")).catch(() => {});
+requestAnimationFrame(frame);
+</script>
