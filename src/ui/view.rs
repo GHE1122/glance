@@ -795,7 +795,9 @@ fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Col
 pub(crate) fn note_page(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (width, height): (f32, f32)) {
     match theme.skin {
         Skin::Glass => {
-            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark)), 0.0, 0.0, width, height, theme.radius);
+            // (Of its tint about half the card's: over a page's breadth the card's own reads as a sheet of paint, the
+            // desktop frosted under it no longer seen through.)
+            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark) * 0.55), 0.0, 0.0, width, height, theme.radius);
             frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, if theme.dark { 0.22 } else { 0.65 })), 0.0, 0.0, width, height, theme.radius, 1.5);
         }
         Skin::Fluent => {

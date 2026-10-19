@@ -131,6 +131,10 @@ const KEEP: usize = 3;
 /// Its timer for a note's file looked at, for what changed outside (see `Beside::read_outside`), and how often.
 const FOLLOW: usize = 4;
 const FOLLOW_MS: u32 = 1000;
+/// Its timer for showing it, drawn without the desktop behind it, where that does not come (it cannot be taken), and
+/// how long it waits for it.
+const SHOW: usize = 5;
+const SHOW_WITHIN_MS: u32 = 400;
 /// How long after the last key a note is kept.
 const KEEP_AFTER_MS: u32 = 600;
 
@@ -238,6 +242,9 @@ struct Beside {
     /// Over a note stuck on the desktop, moved by its head: where its corner last was (the note moved along by as
     /// much as it moves since).
     moved_from: Option<POINT>,
+    /// Shown on the screen yet: not before it is first drawn whole (on glass and Windows 11, with the desktop behind it,
+    /// see `ready`), else it came up as it was drawn, and a moment after changed (the desktop come in behind).
+    shown: bool,
 }
 
 /// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
@@ -502,6 +509,7 @@ fn show(opening: Opening) {
             writing: None,
             opening: Some(opening.clone()),
             moved_from: None,
+            shown: false,
         };
         let page = beside.page.clone();
         let theme = beside.theme.clone();
@@ -563,9 +571,8 @@ fn show(opening: Opening) {
         DROP_TARGET.with(|held| *held.borrow_mut() = Some(target));
         let _ = SetTimer(Some(hwnd), BLINK, windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime(), None);
         let _ = SetTimer(Some(hwnd), FOLLOW, FOLLOW_MS, None);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = SetFocus(Some(hwnd));
+        // Shown once drawn whole (see `Beside::shown`), or after a while drawn as it can be.
+        let _ = SetTimer(Some(hwnd), SHOW, SHOW_WITHIN_MS, None);
         with(Beside::draw);
     }
 }
@@ -655,7 +662,7 @@ fn write(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
         WM_LBUTTONUP | WM_MOUSEMOVE => editor.holds(point) || unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == hwnd,
         WM_SETCURSOR => (lparam.0 & 0xFFFF) as u32 == HTCLIENT && editor.holds(pointer()),
         WM_MOUSEWHEEL => true,
-        WM_TIMER => !matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW),
+        WM_TIMER => !matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW | SHOW),
         _ => false,
     };
     if !its {
@@ -795,9 +802,18 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                         let _ = beside.keep();
                     }
                     FOLLOW => beside.read_outside(),
+                    SHOW => {
+                        let _ = unsafe { KillTimer(Some(hwnd), SHOW) };
+                        beside.show_now();
+                    }
                     _ => {}
                 }
-                beside.redraw();
+                // (Not shown yet, it is sent nothing to paint: drawn here, shown once it is drawn whole.)
+                if beside.shown {
+                    beside.redraw();
+                } else {
+                    beside.draw();
+                }
             });
         }
         WM_IME_STARTCOMPOSITION => {
@@ -874,6 +890,25 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 impl Beside {
     fn redraw(&self) {
         let _ = unsafe { InvalidateRect(Some(self.hwnd), None, false) };
+    }
+
+    /// Whether it is drawn whole: the desktop behind it taken, where its skin shows it (chart paper's does not).
+    fn ready(&self) -> bool {
+        self.theme.skin == Skin::Paper || BEHIND.with(|held| held.borrow().1.is_some())
+    }
+
+    /// Shown, in front, taking the keys (once: see `shown`).
+    fn show_now(&mut self) {
+        if self.shown {
+            return;
+        }
+        self.shown = true;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), SHOW);
+            let _ = ShowWindow(self.hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(self.hwnd);
+            let _ = SetFocus(Some(self.hwnd));
+        }
     }
 
     /// The point (`x`, `y`) physical px in its window, on its page (DIPs from the page's corner, past its shadow's room).
@@ -1334,6 +1369,9 @@ impl Beside {
         });
         if drawn.is_ok() {
             self.surface = Some(surface);
+            if !self.shown && self.ready() {
+                self.show_now();
+            }
         } else {
             gfx::lost();
         }
@@ -1641,29 +1679,33 @@ impl Beside {
         }
         frame.unclip();
         hits.extend(placed);
-        // The kinds, side by side on a ground of their own, the one listed lit (as the notes' views are).
+        // The kinds, side by side as the station's pages are, the one listed marked as the skin marks the station's
+        // chosen page: glass's on a face of its own, Windows 11's a bar of its accent under it, chart paper's
+        // underlined in ink; the others lit under the pointer.
         let kinds = [(Kinds::Programs, Icon::LayoutGrid, lang.pick("程序", "Programs")), (Kinds::Files, Icon::File, lang.pick("文件", "Files")), (Kinds::Folders, Icon::Folder, lang.pick("文件夹", "Folders"))];
-        frame.fill_rounded(theme.track, PAD, KINDS_TOP, inner, KINDS_H, round(KINDS_H));
-        let cell_w = (inner - 6.0) / kinds.len() as f32;
+        let cell_w = inner / kinds.len() as f32;
         for (at, (kind, icon, name)) in kinds.into_iter().enumerate() {
-            let cell = (PAD + 3.0 + at as f32 * cell_w, KINDS_TOP + 3.0, cell_w, KINDS_H - 6.0);
+            let cell = (PAD + at as f32 * cell_w, KINDS_TOP + 3.0, cell_w, KINDS_H - 6.0);
             let chosen = kind == self.kind;
-            if chosen {
-                let face = if theme.skin == Skin::Paper { theme.text.alpha(0.12) } else { Color::hex(0xFFFFFF, if theme.dark { 0.16 } else { 0.9 }) };
-                frame.fill_rounded(face, cell.0, cell.1, cell.2, cell.3, (round(KINDS_H) - 3.0).max(2.0));
-            } else if lit(cell) {
-                frame.fill_rounded(theme.hover, cell.0, cell.1, cell.2, cell.3, (round(KINDS_H) - 3.0).max(2.0));
+            let hovered = lit(cell);
+            let name_w = frame.measure(name, theme.body);
+            let content = 15.0 + 6.0 + name_w;
+            let start = cell.0 + (cell.2 - content) / 2.0;
+            match theme.skin {
+                Skin::Glass if chosen => frame.fill_rounded(Color::hex(0xFFFFFF, if theme.dark { 0.16 } else { 0.9 }), cell.0, cell.1, cell.2, cell.3, cell.3 / 2.0),
+                Skin::Glass | Skin::Fluent if hovered && !chosen => frame.fill_rounded(theme.hover, cell.0, cell.1, cell.2, cell.3, round(cell.3)),
+                _ => {}
             }
-            let font = if chosen { super::canvas::Font { weight: 650.0, ..theme.body } } else { theme.body };
-            let ink = match (chosen, theme.skin) {
-                (true, Skin::Fluent) => self.accent(),
-                (true, _) => theme.text,
-                (false, _) => theme.text2,
-            };
-            let name_w = frame.measure(name, font);
-            let start = cell.0 + (cell.2 - 15.0 - 6.0 - name_w) / 2.0;
+            if chosen {
+                match theme.skin {
+                    Skin::Fluent => frame.fill_rounded(super::theme::accent(theme.dark), cell.0 + cell.2 / 2.0 - 8.0, cell.1 + cell.3 - 3.0, 16.0, 3.0, 1.5),
+                    Skin::Paper => frame.fill(theme.text, start, cell.1 + cell.3 - 2.0, content, 2.0),
+                    Skin::Glass => {}
+                }
+            }
+            let ink = if chosen || hovered { theme.text } else { theme.text3 };
             frame.icon(icon, Point { x: start + 7.5, y: cell.1 + cell.3 / 2.0 }, 15.0, ink);
-            frame.text(name, font, ink, start + 21.0, cell.1 + (cell.3 - font.size * 1.35) / 2.0, name_w + 2.0, Align::Start);
+            frame.text(name, theme.body, ink, start + 21.0, cell.1 + (cell.3 - theme.body.size * 1.35) / 2.0, name_w + 2.0, Align::Start);
             hits.push((cell.0, cell.1, cell.2, cell.3, Hit::Kind(kind)));
         }
         // The search, its caret blinking.
@@ -1965,6 +2007,7 @@ otepad.exe"),
                             writing: None,
                             opening: None,
                             moved_from: None,
+            shown: false,
                         };
                         beside.search.put(&search.encode_utf16().collect::<Vec<_>>());
                         let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, h))).unwrap();
