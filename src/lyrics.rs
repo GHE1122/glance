@@ -5,8 +5,10 @@
 //! (where its player says it, as it does with the InfLink-rs plugin; else as
 //! NetEase finds it by its title and length): of the AMLL TTML collection
 //! (lyrics timed word by word, public domain, kept by that number, reached
-//! through a CDN) and of NetEase itself; and of LRCLIB (an open collection of
-//! lyrics timed by line), by the track's title, artist, album and length.
+//! through a CDN) and of NetEase itself; of Kugou (its lyrics timed word by
+//! word, by the track's title, artist and length); and of LRCLIB (an open
+//! collection of lyrics timed by line), by the track's title, artist, album
+//! and length. Lyrics timed word by word are taken first, wherever they are.
 //! The sources are asked all at once (see `find`): where one far away cannot
 //! be reached, as may be in mainland China, NetEase's still come at once.
 //! Each track's are asked for on a thread of their own, and kept on disk
@@ -147,10 +149,12 @@ struct Said {
 
 /// Asks the sources, all at once (one far away, slow or not reached, keeps none waiting for the others): by the
 /// track's NetEase number, the word-timed collection and NetEase itself (the collection's, with NetEase's
-/// translation where it gives none; else NetEase's); by its name, LRCLIB, QQ Music, and the same by the number
-/// NetEase finds it by: played in QQ Music, its own first (the lyrics it shows itself); then lyrics timed word by
-/// word, then LRCLIB's (found by title, artist, album and length, more surely the track's own than a search's), then
-/// NetEase's, then QQ Music's (a track QQ Music alone has the lyrics of, played there, showed none).
+/// translation where it gives none; else NetEase's); by its name, Kugou, LRCLIB, QQ Music, and the same by the number
+/// NetEase finds it by. Lyrics timed word by word first, wherever they are: the collection's or NetEase's, then
+/// Kugou's (with a translation from the others where theirs have none). Else, by the NetEase number its player gave,
+/// NetEase's own (the lyrics it shows itself); played in QQ Music, its own; then LRCLIB's (found by title, artist,
+/// album and length, more surely the track's own than a search's), then NetEase's, then QQ Music's (a track QQ Music
+/// alone has the lyrics of, played there, showed none).
 fn find(track: &Track) -> Said {
     use std::sync::atomic::{AtomicBool, Ordering};
     let sure = AtomicBool::new(true);
@@ -182,33 +186,55 @@ fn find(track: &Track) -> Said {
             (None, theirs) => theirs,
         }
     };
-    let found = match track.netease {
-        Some(id) => by_number(id),
-        None => std::thread::scope(|scope| {
-            let searched = scope.spawn(|| match netease_search(track) {
-                Ok(id) => id.and_then(by_number),
-                Err(Unreached) => answered(Err(Unreached)),
-            });
-            let qq = scope.spawn(|| answered(qq_music(track)));
-            let named = answered(lrclib(track));
-            let searched = searched.join().expect("NetEase asked");
-            let qq = qq.join().expect("QQ Music asked");
-            let worded = |lines: &Option<Vec<Line>>| lines.as_ref().is_some_and(|lines| lines.iter().any(|line| !line.words.is_empty()));
-            match qq {
-                Some(qq) if track.qq_music => Some(qq),
-                qq if worded(&searched) => searched.or(qq),
-                qq => named.or(searched).or(qq),
+    let found = std::thread::scope(|scope| {
+        let kugou = scope.spawn(|| answered(kugou(track)));
+        let (netease, qq, named) = match track.netease {
+            // (Played by NetEase: its own, else lyrics timed word by word elsewhere; none asked of the others.)
+            Some(id) => (by_number(id), None, None),
+            None => {
+                let searched = scope.spawn(|| match netease_search(track) {
+                    Ok(id) => id.and_then(by_number),
+                    Err(Unreached) => answered(Err(Unreached)),
+                });
+                let qq = scope.spawn(|| answered(qq_music(track)));
+                let named = answered(lrclib(track));
+                (searched.join().expect("NetEase asked"), qq.join().expect("QQ Music asked"), named)
             }
-        }),
-    };
+        };
+        chosen(track, netease, kugou.join().expect("Kugou asked"), qq, named)
+    });
     Said { found, sure: sure.into_inner() }
+}
+
+/// Of what the sources had of `track`'s lyrics (NetEase's, the collection's among them; Kugou's; QQ Music's; LRCLIB's),
+/// those taken (see `find`): timed word by word first, wherever they are (Kugou's with a translation from the
+/// others where theirs have none); else as its player shows them, by its NetEase number or played in QQ Music; else
+/// LRCLIB's, NetEase's, QQ Music's.
+fn chosen(track: &Track, netease: Option<Vec<Line>>, kugou: Option<Vec<Line>>, qq: Option<Vec<Line>>, named: Option<Vec<Line>>) -> Option<Vec<Line>> {
+    let worded = |lines: &[Line]| lines.iter().any(|line| !line.words.is_empty());
+    if netease.as_deref().is_some_and(worded) {
+        return netease;
+    }
+    if let Some(mut lines) = kugou.filter(|lines| worded(lines)) {
+        if lines.iter().all(|line| line.translation.is_none()) {
+            for theirs in [&netease, &qq].into_iter().flatten() {
+                translated(&mut lines, theirs);
+            }
+        }
+        return Some(lines);
+    }
+    match (track.netease, qq) {
+        (Some(_), _) => netease,
+        (None, Some(qq)) if track.qq_music => Some(qq),
+        (None, qq) => named.or(netease).or(qq),
+    }
 }
 
 /// `lines` with the translation of the line of `theirs` nearest in time to each, within a second.
 fn translated(lines: &mut [Line], theirs: &[Line]) {
     for line in lines {
         let nearest = theirs.iter().filter(|their| their.translation.is_some()).min_by(|a, b| (a.at - line.at).abs().total_cmp(&(b.at - line.at).abs()));
-        if let Some(their) = nearest.filter(|their| (their.at - line.at).abs() <= 1.0) {
+        if let Some(their) = nearest.filter(|their| (their.at - line.at).abs() <= 1.0 && line.translation.is_none()) {
             line.translation = their.translation.clone();
         }
     }
@@ -528,6 +554,106 @@ fn qq_music(track: &Track) -> Answer<Vec<Line>> {
     Ok(said["lyric"].as_str().map(|lrc| merged(lrc, translation)).filter(|lines| lines.iter().any(|line| !line.text.is_empty())))
 }
 
+/// Kugou's lyrics of `track`, timed word by word (its KRC), with their translation where they have one: of the songs
+/// it finds by title and artist, the first of that title (its highlighting left out), by that artist and of that
+/// length (to two seconds); of the lyrics it keeps for that song, the first of its length. None where they are not
+/// timed word by word (what is chosen from them, see `find`, are those).
+fn kugou(track: &Track) -> Answer<Vec<Line>> {
+    // (Its mobile search: its web search answers from some of its servers with nothing found.)
+    let searched = format!("https://mobiles.kugou.com/api/v3/search/song?format=json&keyword={}&page=1&pagesize=20&showtype=1", escaped(&format!("{} {}", track.title, track.artist)));
+    let Some(said) = fetched_json(&searched)? else { return Ok(None) };
+    let plain = |text: &str| text.replace("<em>", "").replace("</em>", "");
+    let found = said["data"]["info"].as_array().into_iter().flatten().find_map(|song| {
+        let singers = plain(song["singername"].as_str()?);
+        let artists = std::iter::once(singers.as_str()).chain(singers.split(['、', ','])).map(str::trim);
+        let length = song["duration"].as_f64()?;
+        (same(&plain(song["songname"].as_str()?), &track.title) && by_artist(artists, &track.artist) && (length - track.seconds as f64).abs() <= 2.0).then(|| song["hash"].as_str().map(str::to_string)).flatten()
+    });
+    let Some(hash) = found else { return Ok(None) };
+    let Some(kept) = fetched_json(&format!("https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=&duration=&hash={}", escaped(&hash)))? else { return Ok(None) };
+    let ms = f64::from(track.seconds) * 1000.0;
+    let chosen = kept["candidates"].as_array().into_iter().flatten().find(|one| one["duration"].as_f64().is_some_and(|length| (length - ms).abs() <= 2000.0));
+    let Some((id, key)) = chosen.and_then(|one| Some((one["id"].as_str()?, one["accesskey"].as_str()?))) else { return Ok(None) };
+    let Some(lyric) = fetched_json(&format!("https://lyrics.kugou.com/download?ver=1&client=pc&id={}&accesskey={}&fmt=krc&charset=utf8", escaped(id), escaped(key)))? else { return Ok(None) };
+    let Some(text) = lyric["content"].as_str().and_then(krc_opened) else { return Ok(None) };
+    Ok(Some(krc(&text)).filter(|lines| lines.iter().any(|line| !line.words.is_empty())))
+}
+
+/// The words of a KRC file as Kugou gives it (`content`, in base64): past its mark ("krc1"), each byte joined
+/// (exclusive or) with Kugou's key in turn, then inflated (zlib), in UTF-8; none where it is not one.
+fn krc_opened(content: &str) -> Option<String> {
+    const KEY: [u8; 16] = [64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105];
+    let bytes = base64_decoded(content)?;
+    let sealed = bytes.strip_prefix(b"krc1")?;
+    let unsealed: Vec<u8> = sealed.iter().zip(KEY.iter().cycle()).map(|(byte, key)| byte ^ key).collect();
+    let inflated = miniz_oxide::inflate::decompress_to_vec_zlib(&unsealed).ok()?;
+    let text = String::from_utf8(inflated).ok()?;
+    Some(text.strip_prefix('\u{FEFF}').map(str::to_string).unwrap_or(text))
+}
+
+/// `text` in base64 (RFC 4648, padded or not, spaces and line breaks passed over) as its bytes; none where it is not.
+fn base64_decoded(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let digits: Vec<u8> = text.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
+    let digits = digits.strip_suffix(b"==").or_else(|| digits.strip_suffix(b"=")).unwrap_or(&digits);
+    let mut bytes = Vec::with_capacity(digits.len() * 3 / 4);
+    for chunk in digits.chunks(4) {
+        if chunk.len() == 1 {
+            return None;
+        }
+        let mut whole = 0u32;
+        for (at, digit) in chunk.iter().enumerate() {
+            whole |= u32::from(value(*digit)?) << (18 - 6 * at);
+        }
+        bytes.extend(&whole.to_be_bytes()[1..chunk.len()]);
+    }
+    Some(bytes)
+}
+
+/// Lyrics in Kugou's KRC: each line `[start,length]` (ms), then its words, each `<offset,length,0>` (ms from the
+/// line's start) before what is sung; its translation in `[language:…]` (base64 JSON: of its lists, the one of type
+/// 1, a line of it for each line). A line with no length (the song's name over its first) left out.
+pub fn krc(text: &str) -> Vec<Line> {
+    let mut lines = Vec::new();
+    let mut translation: Vec<String> = Vec::new();
+    for raw in text.lines().map(str::trim) {
+        if let Some(said) = raw.strip_prefix("[language:").and_then(|rest| rest.strip_suffix(']')) {
+            let json = base64_decoded(said).and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            let lists = json.as_ref().and_then(|json| json["content"].as_array().cloned()).unwrap_or_default();
+            if let Some(list) = lists.iter().find(|list| list["type"].as_i64() == Some(1)) {
+                translation = list["lyricContent"].as_array().into_iter().flatten().map(|line| line.as_array().into_iter().flatten().filter_map(|part| part.as_str()).collect::<String>()).collect();
+            }
+            continue;
+        }
+        let Some((head, rest)) = raw.strip_prefix('[').and_then(|after| after.split_once(']')) else { continue };
+        let Some((start, length)) = head.split_once(',').and_then(|(a, b)| Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))) else { continue };
+        let mut words = Vec::new();
+        for part in rest.split('<').skip(1) {
+            let Some((timing, sung)) = part.split_once('>') else { continue };
+            let mut numbers = timing.split(',').map(|number| number.trim().parse::<f64>());
+            let (Some(Ok(offset)), Some(Ok(lasts))) = (numbers.next(), numbers.next()) else { continue };
+            if !sung.is_empty() {
+                words.push(Word { at: (start + offset) / 1000.0, end: (start + offset + lasts) / 1000.0, text: sung.to_string() });
+            }
+        }
+        let text: String = words.iter().map(|word| word.text.as_str()).collect::<String>().trim().to_string();
+        lines.push((length > 0.0 && !text.is_empty()).then(|| Line { at: start / 1000.0, end: Some((start + length) / 1000.0), text, words, backing: None, translation: None }));
+    }
+    // (Its translation's lines, one for each of its lines, those left out too.)
+    lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(at, line)| line.map(|line| Line { translation: translation.get(at).filter(|text| !text.trim().is_empty()).cloned(), ..line }))
+        .collect()
+}
+
 /// Whether a track by `artists` (as a collection names them) is by `artist` (as its player does): one of them is,
 /// but for case and spaces. Any is, where the player names none. (By title and length alone, another artist's song
 /// of that name, a cover, was taken for it, and its lyrics shown.)
@@ -744,8 +870,9 @@ pub mod kept {
     /// they are asked for again. (2: the artist of a track found by its title checked, an LRC file's offset read;
     /// what was kept before had another artist's song's lyrics, or every line late or early, for good. 3: NetEase's
     /// lines of who wrote and made a song kept. 4: those lines kept from NetEase's lyrics timed line by line too, and
-    /// with lyrics timed word by word found elsewhere.)
-    const FOUND_BY: u32 = 4;
+    /// with lyrics timed word by word found elsewhere. 5: Kugou's, timed word by word, asked too, and lyrics timed
+    /// word by word taken first wherever they are.)
+    const FOUND_BY: u32 = 5;
 
     /// A track's lyrics as kept (none: none had them), when they were asked for, and whether each source answered.
     pub struct Kept {
@@ -909,6 +1036,59 @@ mod tests {
         assert_eq!((line.words[1].at, line.words[1].end), (25.274, 25.619));
         assert_eq!((line.backing.as_deref(), line.translation.as_deref()), (Some("(ooh)"), Some("你好世界")));
         assert_eq!(lines[1].at, 3601.5);
+    }
+
+    /// Kugou's KRC read word by word: each word's time from its line's start, the song's name with no length left
+    /// out, its translation a line for each line.
+    #[test]
+    fn reads_kugou_word_by_word() {
+        let translation = r#"{"content":[{"language":0,"type":0,"lyricContent":[["x"],["y"],["z"]]},{"language":0,"type":1,"lyricContent":[[""],["You fall from the sky"],["Drowned"]]}],"version":1}"#;
+        let language: String = {
+            const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            translation.as_bytes().chunks(3).flat_map(|chunk| {
+                let whole = chunk.iter().enumerate().fold(0u32, |whole, (at, byte)| whole | u32::from(*byte) << (16 - 8 * at));
+                (0..4).map(move |at| if at <= chunk.len() { DIGITS[(whole >> (18 - 6 * at) & 63) as usize] as char } else { '=' })
+            }).collect()
+        };
+        let text = format!("[ti:完美降落]\n[language:{language}]\n[0,0]<0,0,0>胡期皓 - 完美降落\n[12000,2000]<0,500,0>你<500,500,0>从<1000,1000,0>天上\n[14500,1000]<0,1000,0>淹没\n");
+        let lines = krc(&text);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "你从天上");
+        assert_eq!((lines[0].at, lines[0].end), (12.0, Some(14.0)));
+        assert_eq!(lines[0].words[2], Word { at: 13.0, end: 14.0, text: "天上".into() });
+        assert_eq!(lines[0].translation.as_deref(), Some("You fall from the sky"));
+        assert_eq!(lines[1].translation.as_deref(), Some("Drowned"));
+        assert_eq!(base64_decoded("aGk="), Some(b"hi".to_vec()));
+        assert_eq!(base64_decoded("aGk"), Some(b"hi".to_vec()));
+        assert_eq!(base64_decoded("a"), None);
+    }
+
+    /// Lyrics timed word by word taken first, wherever they are: Kugou's over NetEase's timed by line (with NetEase's
+    /// translation), over QQ Music's own where it plays, over LRCLIB's; NetEase's timed word by word over Kugou's;
+    /// with none timed word by word, the player's own.
+    #[test]
+    fn takes_lyrics_timed_word_by_word_first() {
+        let lined = |text: &str, translation: Option<&str>| vec![Line { at: 1.0, end: None, text: text.into(), words: Vec::new(), backing: None, translation: translation.map(str::to_string) }];
+        let worded = |text: &str| vec![Line { at: 1.0, end: Some(2.0), text: text.into(), words: vec![Word { at: 1.0, end: 2.0, text: text.into() }], backing: None, translation: None }];
+        let track = |netease: Option<u64>, qq_music: bool| Track { netease, qq_music, title: "t".into(), artist: "a".into(), album: String::new(), seconds: 100 };
+        let text = |lines: Option<Vec<Line>>| lines.map(|lines| (lines[0].text.clone(), lines[0].translation.clone()));
+        assert_eq!(text(chosen(&track(Some(1), false), Some(lined("netease", Some("译"))), Some(worded("kugou")), None, None)), Some(("kugou".into(), Some("译".into()))));
+        assert_eq!(text(chosen(&track(None, true), None, Some(worded("kugou")), Some(lined("qq", None)), Some(lined("lrclib", None)))), Some(("kugou".into(), None)));
+        assert_eq!(text(chosen(&track(None, false), Some(worded("netease")), Some(worded("kugou")), None, None)), Some(("netease".into(), None)));
+        assert_eq!(text(chosen(&track(Some(1), false), Some(lined("netease", None)), Some(lined("kugou", None)), None, Some(lined("lrclib", None)))), Some(("netease".into(), None)));
+        assert_eq!(text(chosen(&track(None, true), Some(lined("netease", None)), None, Some(lined("qq", None)), Some(lined("lrclib", None)))), Some(("qq".into(), None)));
+        assert_eq!(text(chosen(&track(None, false), Some(lined("netease", None)), None, Some(lined("qq", None)), Some(lined("lrclib", None)))), Some(("lrclib".into(), None)));
+    }
+
+    /// Kugou's lyrics as it gives them, sealed: opened and read (an ignored test: it asks Kugou).
+    #[test]
+    #[ignore = "asks Kugou on the network"]
+    fn finds_kugou_word_by_word() {
+        let track = Track { netease: None, qq_music: false, title: "完美降落".into(), artist: "胡期皓、叶琼琳、董唧唧".into(), album: String::new(), seconds: 137 };
+        let lines = kugou(&track).ok().flatten().expect("Kugou reached, and its lyrics");
+        let sung = lines.iter().find(|line| line.text.contains("你从天上降落")).expect("the line");
+        assert!(sung.words.len() > 3, "{sung:?}");
+        println!("{} lines, {:?}", lines.len(), sung);
     }
 
     #[test]
