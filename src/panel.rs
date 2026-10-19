@@ -1277,6 +1277,10 @@ impl Controller {
         if let Some(overlay) = overlay.as_mut() {
             overlay.under_menu(None);
         }
+        // The pointer, where the menu left it (past the panel's edge, as a menu longer than it reaches), taken to
+        // have not yet come onto the panel: it stays till the pointer comes and goes again, or a press elsewhere, as
+        // opened by its shortcut. (Else gone from under it a moment after its choice, before what was chosen showed.)
+        panel.menu_closed();
         match of {
             MenuFor::Tray(choices) => crate::tray::chosen(choice, &choices),
             MenuFor::Widget(hwnd) => {
@@ -2158,6 +2162,14 @@ impl<'a> Panel<'a> {
         let elsewhere;
         (self.ours_owed, elsewhere) = matched(new, new_ours, self.ours_owed);
         (new > 0, elsewhere)
+    }
+
+    /// Its menu closed (see `Controller::end_menu`): the pointer not yet come onto it.
+    fn menu_closed(&mut self) {
+        if let Phase::Open { entered, outside_since, .. } = &mut self.phase {
+            *entered = false;
+            *outside_since = None;
+        }
     }
 
     /// Presses so far taken as seen: none of them a press elsewhere.
