@@ -3121,10 +3121,13 @@ pub(crate) fn glass_segments(frame: &dyn Canvas, theme: &Theme, track: (f32, f32
     let (py, ph) = pills;
     let dark = theme.dark;
     let round = th / 2.0;
-    frame.shadow(Color::hex(0, if dark { 0.25 } else { 0.07 }), tx, ty, tw, th, round, 7.0, 2.0);
-    frame.shadow(Color::hex(0, if dark { 0.25 } else { 0.06 }), tx, ty, tw, th, round, 1.0, 1.0);
-    frame.fill_rounded(if dark { Color::hex(0x3A3A3E, 0.62) } else { Color::hex(0xFFFFFF, 0.78) }, tx, ty, tw, th, round);
-    frame.stroke_rounded(Fill::Solid(if dark { Color::hex(0xFFFFFF, 0.07) } else { Color::hex(0, 0.05) }), tx, ty, tw, th, round, 0.5);
+    // (Glass on glass: little of a fill of its own, what is under it showing through, as macOS's controls take the
+    // colour of what they are over; a rim catching the light along its top, fainter round its foot; a shadow barely
+    // there. Filled white, it stood off the sheet as a button.)
+    frame.shadow(Color::hex(0, if dark { 0.18 } else { 0.05 }), tx, ty, tw, th, round, 5.0, 1.0);
+    frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.06) } else { Color::hex(0xFFFFFF, 0.24) }, tx, ty, tw, th, round);
+    let (lit, foot) = if dark { (Color::hex(0xFFFFFF, 0.26), Color::hex(0xFFFFFF, 0.06)) } else { (Color::hex(0xFFFFFF, 0.85), Color::hex(0xFFFFFF, 0.3)) };
+    frame.stroke_rounded(Fill::Down { top: ty, from: lit, bottom: ty + th, to: foot }, tx, ty, tw, th, round, 1.0);
     if let Some(&(x, w)) = hovered.filter(|at| *at != chosen).and_then(|at| boxes.get(at)) {
         frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.06) } else { Color::hex(0, 0.04) }, x, py, w, ph, ph / 2.0);
     }
@@ -3133,7 +3136,7 @@ pub(crate) fn glass_segments(frame: &dyn Canvas, theme: &Theme, track: (f32, f32
         Some(((from_x, from_w), done)) => (from_x + (to_x - from_x) * done, from_w + (to_w - from_w) * done),
         None => (to_x, to_w),
     };
-    frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.15) } else { Color::hex(0, 0.085) }, x, py, w, ph, ph / 2.0);
+    frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.12) } else { Color::hex(0, 0.07) }, x, py, w, ph, ph / 2.0);
     // (Between two not chosen: the chosen one stands on its pill, a line by it is none.)
     let hair = if dark { Color::hex(0xFFFFFF, 0.12) } else { Color::hex(0, 0.11) };
     for (at, &(x, _)) in boxes.iter().enumerate().skip(1) {
