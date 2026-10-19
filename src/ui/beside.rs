@@ -135,6 +135,21 @@ const FOLLOW_MS: u32 = 1000;
 /// How long after the last key a note is kept.
 const KEEP_AFTER_MS: u32 = 600;
 
+/// The page's window while one is up (0 while none is): what a page's going asked for later is for (see `go_soon`).
+static PAGE: AtomicIsize = AtomicIsize::new(0);
+
+/// The page up (its window `page`) to go as soon as it is free: asked of its thread's loop, for that page alone (one
+/// opened meanwhile, another note pressed on the panel as this one was left for it, stays).
+fn go_soon(page: isize) {
+    let post = POST.load(Ordering::Acquire);
+    let _ = unsafe { PostMessageW(Some(HWND(post as *mut _)), GO_SOON, WPARAM(page as usize), LPARAM(0)) };
+}
+
+/// Whether a page's going asked for `meant` (its window) is for the page up now, `up`.
+fn goes_now(meant: isize, up: isize) -> bool {
+    meant != 0 && meant == up
+}
+
 /// Whether the page is up.
 pub fn is_up() -> bool {
     UP.load(Ordering::Acquire)
@@ -333,7 +348,9 @@ fn run(asks: Receiver<Ask>) {
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             if message.hwnd == post && message.message == GO_SOON {
-                gone();
+                if goes_now(message.wParam.0 as isize, PAGE.load(Ordering::Acquire)) {
+                    gone();
+                }
                 continue;
             }
             if message.hwnd == post && message.message == ASKED {
@@ -530,6 +547,7 @@ fn show(opening: Opening) {
             }
         }
         OWNER.store(opening.owner, Ordering::Release);
+        PAGE.store(hwnd.0 as isize, Ordering::Release);
         UP.store(true, Ordering::Release);
         // The widgets kept under it while it is up (one drawn again under it, as a note stuck on the desktop is as
         // it is written in over it, came over it: on top of what is written, the input method's words broken off).
@@ -583,8 +601,7 @@ fn gone() {
     let answering = EDITOR.with(|held| held.borrow().as_ref().is_some_and(|editor| Rc::strong_count(editor) > 2));
     let held = if answering { Err(()) } else { BESIDE.with(|cell| cell.try_borrow_mut().map(|mut beside| beside.take()).map_err(drop)) };
     let Ok(mut held) = held else {
-        let post = POST.load(Ordering::Acquire);
-        let _ = unsafe { PostMessageW(Some(HWND(post as *mut _)), GO_SOON, WPARAM(0), LPARAM(0)) };
+        go_soon(PAGE.load(Ordering::Acquire));
         return;
     };
     if let Some(beside) = held.as_mut() {
@@ -616,6 +633,7 @@ fn gone() {
         });
         crate::app().controller.page_front(None);
     }
+    PAGE.store(0, Ordering::Release);
     UP.store(false, Ordering::Release);
 }
 
@@ -835,8 +853,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
             if !ours(HWND(lparam.0 as *mut _)) && !with(|beside| beside.page == Page::Picker).unwrap_or(false) {
                 // (Gone once the page is free: this may come in the middle of what it does.)
-                let post = POST.load(Ordering::Acquire);
-                let _ = unsafe { PostMessageW(Some(HWND(post as *mut _)), GO_SOON, WPARAM(0), LPARAM(0)) };
+                go_soon(hwnd.0 as isize);
             }
         }
         // Its screen's scale changed (moved to another screen, or the scale chosen): made again at the new one.
@@ -1976,5 +1993,20 @@ otepad.exe"),
             }
             std::thread::sleep(std::time::Duration::from_millis(1500));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::goes_now;
+
+    /// A note's page left for another note pressed on the panel: its going, asked for as it was left, comes after the
+    /// other's page is up, and leaves that one up (it went: the page flashed, and the note pressed never showed).
+    #[test]
+    fn a_page_left_goes_alone() {
+        let (left, opened) = (0x1010, 0x2020);
+        assert!(!goes_now(left, opened));
+        assert!(goes_now(opened, opened));
+        assert!(!goes_now(left, 0));
     }
 }
