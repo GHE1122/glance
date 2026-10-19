@@ -731,7 +731,7 @@ const NOTE_FROST: f32 = 7.0;
 
 /// What is written on a note's card in `theme`: its title's, its words', and the faint (when it was written). On glass
 /// the tint's ink (white in the dark); else the skin's own.
-fn note_inks(theme: &Theme, colour: crate::notes::Colour) -> (Color, Color, Color) {
+pub(crate) fn note_inks(theme: &Theme, colour: crate::notes::Colour) -> (Color, Color, Color) {
     match theme.skin {
         Skin::Glass => {
             let ink = note_glass(colour).1;
@@ -820,22 +820,26 @@ pub(crate) fn note_page(frame: &dyn Canvas, theme: &Theme, colour: crate::notes:
         Skin::Glass => {
             // (Lighter than its card: over a page's breadth the card's own reads as a sheet of paint, the desktop frosted
             // under it no longer seen through; at half of it, it read as another colour.)
+            // (No rim of its own: the sheet's is round it, the two a thick frame.)
             if let Some(light) = note_light(theme.dark) {
-                frame.fill_rounded(light.alpha(0.4), 0.0, 0.0, width, height, theme.radius);
+                frame.fill_rounded(light.alpha(0.3), 0.0, 0.0, width, height, theme.radius);
             }
-            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark) * 0.65), 0.0, 0.0, width, height, theme.radius);
-            frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, if theme.dark { 0.22 } else { 0.65 })), 0.0, 0.0, width, height, theme.radius, 1.5);
+            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark) * 0.45), 0.0, 0.0, width, height, theme.radius);
         }
+        // Windows 11's: its acrylic through it, a little of the note's colour over it, the band of it along its top
+        // its card has (near opaque, the acrylic was lost and the card's band with it).
         Skin::Fluent => {
-            frame.fill_rounded(fluent_note_ground(theme, colour), 0.0, 0.0, width, height, theme.radius);
-            frame.stroke_rounded(Fill::Solid(theme.rule), 0.0, 0.0, width, height, theme.radius, 1.0);
+            frame.fill_rounded(note_colour(colour).alpha(if theme.dark { 0.1 } else { 0.08 }), 0.0, 0.0, width, height, theme.radius);
+            frame.clip(0.0, 0.0, width, 4.0);
+            frame.fill_rounded(note_colour(colour), 0.0, 0.0, width, 2.0 * theme.radius + 4.0, theme.radius);
+            frame.unclip();
         }
         Skin::Paper => {}
     }
 }
 
 /// `top` laid over `under` (an opaque colour): the opaque colour they make.
-fn over(under: Color, top: Color) -> Color {
+pub(crate) fn over(under: Color, top: Color) -> Color {
     let mix = |a: f32, b: f32| a + (b - a) * top.a;
     Color { r: mix(under.r, top.r), g: mix(under.g, top.g), b: mix(under.b, top.b), a: 1.0 }
 }
@@ -1187,7 +1191,6 @@ pub(crate) fn rounded_outline(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Ve
 /// What is kept at hand as a lane lays it out (see `Block::Apps`) from (`left`, `top`), `width` across, in its `rows`:
 /// named cells spread over the width, scrolled through where they take more rows; or one row of pictures (as many as
 /// fit); the place to add more after them. What is dragged there may be dropped to be kept at hand.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), apps: &[(String, String)], rows: usize, named: bool, over: bool, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
@@ -3808,7 +3811,7 @@ fn centred(frame: &dyn Canvas, text: &str, font: Font, color: Color, x: f32, y: 
 }
 
 /// `text`, or as much of its start as is no wider than `room` with an ellipsis after it.
-fn fitted<'t>(frame: &dyn Canvas, text: &'t str, font: Font, room: f32) -> std::borrow::Cow<'t, str> {
+pub(crate) fn fitted<'t>(frame: &dyn Canvas, text: &'t str, font: Font, room: f32) -> std::borrow::Cow<'t, str> {
     if frame.measure(text, font) <= room {
         return text.into();
     }

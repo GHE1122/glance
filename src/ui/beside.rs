@@ -289,6 +289,24 @@ impl Writing {
     }
 }
 
+/// What a note's words are written in on its page (`pixels` high), its colour `colour`: as its card's on the panel are
+/// (glass's in the ink of its colour), and as opaque colours (the words' box takes none other: a faint ink half see
+/// through came out as solid as the words, and Markdown's faint marks no fainter), as they show over the page.
+fn palette_for(theme: &Theme, colour: crate::notes::Colour, pixels: f32) -> super::editor::Palette {
+    let (text, _, faint) = super::view::note_inks(theme, colour);
+    let ground = match theme.skin {
+        Skin::Paper => theme.paper,
+        _ if theme.dark => Color::hex(0x26282E, 1.0),
+        _ => Color::hex(0xF5F6F8, 1.0),
+    };
+    let opaque = |ink: Color| colorref(super::view::over(Color { a: 1.0, ..ground }, ink));
+    let accent = match theme.skin {
+        Skin::Paper => theme.text,
+        _ => super::theme::accent(theme.dark),
+    };
+    super::editor::Palette { text: opaque(text), faint: opaque(faint), accent: opaque(accent), points: pixels * 0.75, face: "Microsoft YaHei UI".into(), code_face: "Cascadia Mono".into() }
+}
+
 /// What a note's menu does: its colour chosen, it taken to the Recycle Bin.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum NoteChoice {
@@ -315,7 +333,9 @@ enum Kinds {
 struct PickRow {
     name: String,
     target: String,
+    /// Where it is, and when it came (each shown whole as far as there is room: the time kept, the place shortened).
     about: String,
+    when: String,
     letter: Option<char>,
     on_disk: bool,
 }
@@ -564,11 +584,7 @@ fn show(opening: Opening) {
             };
             let rect = words_box(room_px, wide, tall, scale);
             let pixels = 15.0 * scale;
-            let accent = match theme.skin {
-                Skin::Paper => theme.text,
-                _ => super::theme::accent(theme.dark),
-            };
-            let palette = super::editor::Palette { text: colorref(theme.text), faint: colorref(theme.text3), accent: colorref(accent), points: pixels * 0.75, face: "Microsoft YaHei UI".into(), code_face: "Cascadia Mono".into() };
+            let palette = palette_for(&theme, colour, pixels);
             if let Some(editor) = super::editor::Editor::new(hwnd, rect, &palette.face, pixels, palette.text) {
                 if let Some((text, _)) = &read {
                     editor.set_text(text);
@@ -1121,6 +1137,9 @@ impl Beside {
         match choice {
             NoteChoice::Colour(colour) => {
                 writing.colour = colour;
+                // (Its words in the ink of its colour, where its card's are.)
+                writing.palette = palette_for(&self.theme, colour, writing.palette.points / 0.75);
+                writing.dress();
                 if let Some(name) = &writing.name {
                     let _ = folder.colour(name, colour);
                 }
@@ -1165,6 +1184,7 @@ impl Beside {
                             name: found.name.clone(),
                             target: found.target.clone(),
                             about: String::new(),
+                            when: String::new(),
                             letter: found.initials.first().map(|bits| if bits.trailing_zeros() < 26 { (b'A' + bits.trailing_zeros() as u8) as char } else { '#' }),
                             on_disk: false,
                         })
@@ -1187,7 +1207,7 @@ impl Beside {
                         continue;
                     }
                     let place = path.parent().map(|parent| parent.display().to_string()).unwrap_or_default();
-                    rows.push(PickRow { name, target: path.display().to_string(), about: format!("{place} · {}", super::text::since(came.came_ms, now, self.lang)), letter: None, on_disk: true });
+                    rows.push(PickRow { name, target: path.display().to_string(), about: place, when: super::text::since(came.came_ms, now, self.lang), letter: None, on_disk: true });
                 }
                 rows
             }
@@ -1666,7 +1686,8 @@ impl Beside {
             (None, name) => {
                 frame.text(&counted, theme.small, theme.text3, PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * PAD, Align::Start);
                 let room = width - 2.0 * PAD - frame.measure(&counted, theme.small) - 16.0;
-                if let Some(name) = name {
+                // (Where it fits: shortened past a few letters, a name says nothing.)
+                if let Some(name) = name.as_ref().filter(|_| room >= 96.0) {
                     frame.text(name, theme.small, theme.text3, width - PAD - room, bottom + (FOOT - 16.0) / 2.0, room, Align::End);
                 }
             }
@@ -1788,7 +1809,21 @@ impl Beside {
         }
         // The search, its caret blinking.
         let field = (PAD, SEARCH_TOP, inner, SEARCH);
-        frame.fill_rounded(theme.track, field.0, field.1, field.2, field.3, round(SEARCH));
+        // (Glass's a shallow well of its glass, lit along its foot: a grey bar, it was the heaviest thing on the page;
+        // Windows 11's its field, the accent along its foot as the words go in; chart paper's a faint wash of ink.)
+        match theme.skin {
+            Skin::Glass => {
+                frame.fill_rounded(if theme.dark { Color::hex(0xFFFFFF, 0.08) } else { Color::hex(0, 0.05) }, field.0, field.1, field.2, field.3, round(SEARCH));
+                frame.stroke_rounded(super::canvas::Fill::Down { top: field.1, from: Color::hex(0xFFFFFF, 0.0), bottom: field.1 + field.3, to: Color::hex(0xFFFFFF, if theme.dark { 0.18 } else { 0.6 }) }, field.0, field.1, field.2, field.3, round(SEARCH), 1.0);
+            }
+            Skin::Fluent => {
+                frame.fill_rounded(theme.track, field.0, field.1, field.2, field.3, round(SEARCH));
+                frame.clip(field.0, field.1 + field.3 - 2.0, field.2, 2.0);
+                frame.fill_rounded(super::theme::accent(theme.dark), field.0, field.1, field.2, field.3, round(SEARCH));
+                frame.unclip();
+            }
+            Skin::Paper => frame.fill_rounded(theme.track.alpha(theme.track.a * 0.6), field.0, field.1, field.2, field.3, round(SEARCH)),
+        }
         frame.icon(Icon::Search, Point { x: field.0 + 16.0, y: field.1 + SEARCH / 2.0 }, 14.0, theme.text3);
         let text_x = field.0 + 32.0;
         let text_y = field.1 + (SEARCH - theme.body.size * 1.35) / 2.0;
@@ -1874,9 +1909,10 @@ impl Beside {
             } else {
                 match crate::station::thumbs::icon(std::path::Path::new(&row.target), super::view::APP_PIXELS) {
                     Some(picture) => frame.picture(&picture, face_x, ry + (tall - face) / 2.0, face, face, 5.0, 1.0),
+                    // (None yet, or none to be had: a program's mark in its place, a grey block read as still loading.)
                     None => {
                         waiting = true;
-                        frame.fill_rounded(theme.track, face_x, ry + (tall - face) / 2.0, face, face, 5.0);
+                        frame.icon(Icon::LayoutGrid, Point { x: face_x + face / 2.0, y: ry + tall / 2.0 }, 20.0, theme.text3);
                     }
                 }
             }
@@ -1892,13 +1928,20 @@ impl Beside {
             } else {
                 let name_top = ry + (tall - theme.body.size * 1.35 - 15.0) / 2.0;
                 frame.text(&row.name, theme.body, ink, words_x, name_top, words_w, Align::Start);
-                frame.text(&row.about, theme.small, theme.text3, words_x, name_top + theme.body.size * 1.35, words_w, Align::Start);
+                let when = format!(" · {}", row.when);
+                let when_w = frame.measure(&when, theme.small);
+                let about_y = name_top + theme.body.size * 1.35;
+                let place = super::view::fitted(frame, &row.about, theme.small, (words_w - when_w).max(0.0)).into_owned();
+                let place_w = frame.measure(&place, theme.small);
+                frame.text(&place, theme.small, theme.text3, words_x, about_y, words_w - when_w, Align::Start);
+                frame.text(&when, theme.small, theme.text3, words_x + place_w, about_y, when_w + 1.0, Align::Start);
             }
             let centre = Point { x: mark.0 + mark.2 / 2.0, y: mark.1 + mark.3 / 2.0 };
             if is_kept {
                 frame.icon(Icon::Check, centre, 15.0, self.accent());
             } else {
-                if hovered {
+                // (Its plate only with the pointer on it: on the row's, a plate in a plate.)
+                if lit(mark) {
                     frame.fill_rounded(theme.hover, mark.0, mark.1, mark.2, mark.3, round(28.0));
                 }
                 frame.icon(Icon::Add, centre, 15.0, if hovered { theme.text } else { theme.text2 });
@@ -1919,11 +1962,16 @@ impl Beside {
         if theme.skin == Skin::Glass {
             super::view::glass_pill(frame, &theme, button, round(32.0), lit(button));
         } else {
-            frame.fill_rounded(theme.track, button.0, button.1, button.2, button.3, round(32.0));
+            // (Chart paper's its paper ruled round in ink, a wash of it under the pointer: a filled bar, it was the search
+            // field over again.)
+            if theme.skin != Skin::Paper {
+                frame.fill_rounded(theme.track, button.0, button.1, button.2, button.3, round(32.0));
+            }
             if lit(button) {
                 frame.fill_rounded(theme.hover, button.0, button.1, button.2, button.3, round(32.0));
             }
-            frame.stroke_rounded(super::canvas::Fill::Solid(theme.rule), button.0, button.1, button.2, button.3, round(32.0), 1.0);
+            let edge = if theme.skin == Skin::Paper { theme.text.alpha(0.25) } else { theme.rule };
+            frame.stroke_rounded(super::canvas::Fill::Solid(edge), button.0, button.1, button.2, button.3, round(32.0), 1.0);
         }
         let (label, hint, icon) = match self.kind {
             Kinds::Programs => (lang.pick("列表中没有？从电脑中选择程序", "Not listed? Choose a program on the PC"), lang.pick("可以选择 exe 或快捷方式", "A program or a shortcut to one"), Icon::File),
@@ -2112,6 +2160,19 @@ otepad.exe"),
 #[cfg(test)]
 mod tests {
     use super::goes_now;
+
+    /// A note's words, in every skin, light and dark: its faint marks (Markdown's) fainter than its words, not as solid
+    /// (the box takes colours with no see-through: a faint ink given as one came out as the words' own).
+    #[test]
+    fn a_note_s_faint_marks_are_fainter() {
+        use super::super::theme::{Skin, Theme};
+        for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+            for dark in [false, true] {
+                let palette = super::palette_for(&Theme::new(skin, dark), crate::notes::Colour::Blue, 15.0);
+                assert_ne!(palette.text.0, palette.faint.0, "{skin:?} {dark}");
+            }
+        }
+    }
 
     /// A note's page left for another note pressed on the panel: its going, asked for as it was left, comes after the
     /// other's page is up, and leaves that one up (it went: the page flashed, and the note pressed never showed).

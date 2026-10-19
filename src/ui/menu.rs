@@ -131,7 +131,8 @@ impl Menu {
         let gfx = gfx::current().ok()?;
         let showing = super::life::Showing::of(&gfx);
         let window = Window::activating().ok()?;
-        let frosted = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::glass::Frosted::new(&gfx, window.hwnd).ok()).flatten();
+        // (Glass's over the screen frosted, as its lanes are over the desktop; Windows 11's too, as its acrylic is.)
+        let frosted = matches!(look.skin, Some(super::theme::Skin::Glass | super::theme::Skin::Fluent)).then(|| super::glass::Frosted::new(&gfx, window.hwnd).ok()).flatten();
         let surface = match frosted {
             Some(mut frosted) => {
                 frosted.set_frost(1.0);
@@ -422,7 +423,7 @@ impl Colours {
                 radius: 8.0,
             },
             _ if dark => Colours {
-                sheet: Color::hex(0x2C2C2C, 0.98),
+                sheet: Color::hex(0x2C2C2C, if frosted { 0.78 } else { 0.98 }),
                 stroke: Color::hex(0x000000, 0.2),
                 rim: None,
                 shadow: Color::hex(0x000000, 0.35),
@@ -433,7 +434,7 @@ impl Colours {
                 radius: RADIUS,
             },
             _ => Colours {
-                sheet: Color::hex(0xF9F9F9, 0.98),
+                sheet: Color::hex(0xF9F9F9, if frosted { 0.78 } else { 0.98 }),
                 stroke: Color::hex(0x000000, 0.08),
                 rim: None,
                 shadow: Color::hex(0x000000, 0.16),
