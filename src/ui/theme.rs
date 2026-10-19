@@ -336,7 +336,9 @@ fn glass(dark: bool) -> Theme {
         rule: rgba(on, a[3]),
         track: rgba(on, a[4]),
         signal: if dark { rgba(0xFF6961, 1.0) } else { rgba(0xFF3B30, 1.0) },
-        hover: if dark { rgba(0xFFFFFF, 0.1) } else { rgba(0xFFFFFF, 0.35) },
+        // (Light glass is near white over a light desktop: a white plate on it did not show. A faint shade does, on
+        // any desktop, as the mockup has it.)
+        hover: if dark { rgba(0xFFFFFF, 0.1) } else { rgba(0x000000, 0.06) },
         inks: vec![
             ("game", lane(mint)),
             ("gpu", lane(green)),

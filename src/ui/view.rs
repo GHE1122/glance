@@ -2814,7 +2814,8 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
         let chosen = page == tab;
         let hovered = scene.hover == Some(Hit::Tab(page));
         match theme.skin {
-            Skin::Glass if chosen => frame.fill_rounded(theme.hover, x, row, wide, TAB_H, TAB_H / 2.0),
+            // (Glass's chosen tab on a face of its own, as the notes' chosen view is.)
+            Skin::Glass if chosen => frame.fill_rounded(Color::hex(0xFFFFFF, if theme.dark { 0.16 } else { 0.9 }), x, row, wide, TAB_H, TAB_H / 2.0),
             Skin::Glass | Skin::Fluent if hovered => frame.fill_rounded(theme.hover.alpha(0.6), x, row, wide, TAB_H, theme.control_radius.min(TAB_H / 2.0)),
             _ => {}
         }

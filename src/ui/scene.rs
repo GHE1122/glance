@@ -872,6 +872,11 @@ impl Scene {
     /// had (then a frame of it as it is now comes). What it stands for, and its frames, may reach past `area` (see
     /// `gfx::room`): a capture says where it was taken.
     pub fn arrange(&mut self, area: RECT, over: HWND) -> bool {
+        // What of the area is on the screens it meets (a widget stuck to a screen's top reaches past it, its shadow's
+        // room: above a screen lower than the one beside it, inside the desktop's box, there is nothing, which the
+        // glass would draw in as a black band). Its frames hold that only; the glass mirrors on past their edges.
+        let screen = Some(screens_of(area, &crate::screens::monitors()).unwrap_or_else(crate::mouse::desktop));
+        let area = screen.and_then(|screen| meeting(area, screen)).unwrap_or(area);
         // As large as it is while that serves, else with room to spare (see `gfx::room`): a window sized pixel by
         // pixel makes its frames, and what they are read through and kept in, anew a few times, not at each size.
         let want = ((area.right - area.left).max(1) as u32, (area.bottom - area.top).max(1) as u32);
@@ -880,7 +885,6 @@ impl Scene {
         // The room to spare on the desktop (what reaches past it is of no screen): on whichever side there is room,
         // all of what was asked held. Against the desktop's edge (a panel, a widget stuck to it), it spares room
         // towards the middle. Not on one screen alone: what is behind a window across two is behind it on both.
-        let screen = Some(screens_of(area, &crate::screens::monitors()).unwrap_or_else(crate::mouse::desktop));
         let span = |from: i32, to: i32, length: i32, low: Option<i32>, high: Option<i32>| {
             // As far as it goes from `from`, moved back from the screen's far side, never past where it begins.
             let start = high.map_or(from, |high| from.min(high - length));

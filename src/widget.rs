@@ -3171,7 +3171,9 @@ impl Widget {
         let elsewhere = !sizing && self.behind.as_ref().is_some_and(|behind| {
             let taken = behind.capture.rect;
             let ahead = if self.drag.is_some() { (on_screen.right - on_screen.left).max(on_screen.bottom - on_screen.top) / 6 } else { 0 };
-            let past = on_screen.left - ahead < taken.left || on_screen.top - ahead < taken.top || on_screen.right + ahead > taken.right || on_screen.bottom + ahead > taken.bottom;
+            // (Ahead of it as far as its screen goes: what was taken goes no further, see `Scene::arrange`.)
+            let screen = self.contact.monitor;
+            let past = (on_screen.left - ahead).max(screen.left) < taken.left || (on_screen.top - ahead).max(screen.top) < taken.top || (on_screen.right + ahead).min(screen.right) > taken.right || (on_screen.bottom + ahead).min(screen.bottom) > taken.bottom;
             // (What was taken may reach past its screen, onto others or where there is none: only its being on
             // another screen than it was on when it was taken counts.)
             let other_screen = self.arranged_on.is_some_and(|on| on != self.contact.monitor);
