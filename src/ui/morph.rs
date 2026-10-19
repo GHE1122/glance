@@ -25,6 +25,8 @@ pub enum Op {
     Shape { points: Vec<Point>, fill: Fill },
     Outline { fill: Fill, x: f32, y: f32, w: f32, h: f32, radius: f32, line: f32 },
     Shadow { color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, drop: f32 },
+    /// Frosted glass over what `below` draws (see `Canvas::frosted`).
+    Frosted { x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, below: Vec<Op> },
     Arc { centre: Point, radius: f32, from: f32, sweep: f32, color: Color, width: f32 },
     Icon { icon: Icon, centre: Point, size: f32, color: Color },
     Picture { picture: Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32 },
@@ -123,7 +125,7 @@ impl Op {
                 let left = if *align == Align::End { x + width - inked } else { *x };
                 Bounds { x: left, y: *y, w: *inked, h: font.size * scale * 1.25 }
             }
-            Op::Clip { x, y, w, h, .. } | Op::Fill { x, y, w, h, .. } | Op::Rounded { x, y, w, h, .. } | Op::Outline { x, y, w, h, .. } | Op::Shadow { x, y, w, h, .. } => {
+            Op::Clip { x, y, w, h, .. } | Op::Fill { x, y, w, h, .. } | Op::Rounded { x, y, w, h, .. } | Op::Outline { x, y, w, h, .. } | Op::Shadow { x, y, w, h, .. } | Op::Frosted { x, y, w, h, .. } => {
                 Bounds { x: *x, y: *y, w: *w, h: *h }
             }
             Op::Circle { centre, radius, .. } | Op::Arc { centre, radius, .. } => Bounds { x: centre.x - radius, y: centre.y - radius, w: 2.0 * radius, h: 2.0 * radius },
@@ -149,6 +151,7 @@ impl Op {
             Op::Shadow { color, .. } | Op::Arc { color, .. } | Op::Icon { color, .. } => fade(color),
             Op::Shape { fill, .. } | Op::Outline { fill, .. } => fade_fill(fill),
             Op::Picture { opacity, .. } => *opacity *= alpha,
+            Op::Frosted { below, .. } => *below = std::mem::take(below).into_iter().map(|op| op.faded(alpha)).collect(),
             Op::Clip { .. } | Op::Unclip => {}
         }
         self
@@ -167,6 +170,7 @@ impl Op {
             Op::Shadow { color, .. } | Op::Arc { color, .. } | Op::Icon { color, .. } => color.a >= LEAST,
             Op::Shape { fill: f, .. } | Op::Outline { fill: f, .. } => fill(f),
             Op::Picture { opacity, .. } => *opacity >= LEAST,
+            Op::Frosted { below, .. } => below.iter().any(|op| op.bounds().is_some() && op.shows()),
             Op::Clip { .. } | Op::Unclip => true,
         }
     }
@@ -206,6 +210,10 @@ impl Op {
             Op::Shadow { color, x, y, w, h, radius, blur, drop } => {
                 let (x, y, w, h) = rect(x, y, w, h);
                 Op::Shadow { color, x, y, w, h, radius: map.length(radius), blur: map.length(blur), drop: map.length(drop) }
+            }
+            Op::Frosted { x, y, w, h, radius, blur, below } => {
+                let (x, y, w, h) = rect(x, y, w, h);
+                Op::Frosted { x, y, w, h, radius: map.length(radius), blur: map.length(blur), below: below.iter().map(|op| op.mapped(map)).collect() }
             }
             Op::Circle { color, centre, radius } => Op::Circle { color, centre: map.point(centre), radius: map.length(radius) },
             Op::Arc { centre, radius, from, sweep, color, width } => Op::Arc { centre: map.point(centre), radius: map.length(radius), from, sweep, color, width: map.length(width) },
@@ -323,6 +331,11 @@ impl Op {
                     line: lerp(*al, *bl, t),
                 }]
             }
+            // (The same pane each way, over the same things: they move between with it.)
+            (Op::Frosted { x: ax, y: ay, w: aw, h: ah, radius: ar, blur: ab, below: abelow }, Op::Frosted { x: bx, y: by, w: bw, h: bh, radius: br, blur: bb, below: bbelow }) if abelow.len() == bbelow.len() => {
+                let below = abelow.iter().zip(bbelow).map(|(a, b)| a.between(b, t)).collect::<Option<Vec<Vec<Op>>>>()?.concat();
+                vec![Op::Frosted { x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t), radius: lerp(*ar, *br, t), blur: lerp(*ab, *bb, t), below }]
+            }
             _ => return None,
         })
     }
@@ -342,6 +355,7 @@ impl Op {
             Op::Shape { points, fill } => canvas.fill_shape(points, *fill),
             Op::Outline { fill, x, y, w, h, radius, line } => canvas.stroke_rounded(*fill, *x, *y, *w, *h, *radius, *line),
             Op::Shadow { color, x, y, w, h, radius, blur, drop } => canvas.shadow(*color, *x, *y, *w, *h, *radius, *blur, *drop),
+            Op::Frosted { x, y, w, h, radius, blur, below } => canvas.frosted(*x, *y, *w, *h, *radius, *blur, &|canvas| below.iter().for_each(|op| op.draw(canvas))),
             Op::Arc { centre, radius, from, sweep, color, width } => canvas.arc(*centre, *radius, *from, *sweep, *color, *width),
             Op::Icon { icon, centre, size, color } => canvas.icon(*icon, *centre, *size, *color),
             Op::Picture { picture, x, y, w, h, radius, opacity } => canvas.picture(picture, *x, *y, *w, *h, *radius, *opacity),
@@ -543,6 +557,14 @@ impl Canvas for Recorder<'_> {
         self.push(Op::Shadow { color, x, y, w, h, radius, blur, drop });
     }
 
+    fn frosted(&self, x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, below: &dyn Fn(&dyn Canvas)) {
+        // (What is under recorded where it is drawn, unmoved: moved with the pane, as it is pushed.)
+        let under = Recorder::new(self.measure, 1.0, (0.0, 0.0));
+        below(&under);
+        let below = under.parts().into_iter().flat_map(|part| part.ops).collect();
+        self.push(Op::Frosted { x, y, w, h, radius, blur, below });
+    }
+
     fn arc(&self, centre: Point, radius: f32, from: f32, sweep: f32, color: Color, width: f32) {
         self.push(Op::Arc { centre, radius, from, sweep, color, width });
     }
@@ -680,6 +702,7 @@ mod tests {
             fn fill_shape(&self, _: &[Point], _: Fill) {}
             fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
             fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+            fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
             fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
             fn icon(&self, _: Icon, _: Point, _: f32, _: Color) {}
             fn picture(&self, _: &Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}

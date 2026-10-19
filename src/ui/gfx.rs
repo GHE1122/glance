@@ -1056,6 +1056,91 @@ impl Canvas for Frame<'_> {
         })();
         unsafe { dc.SetTransform(&transform) };
     }
+
+    fn frosted(&self, x: f32, y: f32, width: f32, height: f32, radius: f32, blur: f32, below: &dyn Fn(&dyn Canvas)) {
+        // (Nothing, where the device is going: the frame's end tells.)
+        let mut transform = Matrix3x2::default();
+        unsafe { self.dc.GetTransform(&mut transform) };
+        let _ = self.frost(x, y, width, height, radius, blur, below);
+        unsafe { self.dc.SetTransform(&transform) };
+    }
+}
+
+impl Frame<'_> {
+    /// See `Canvas::frosted`. What `below` draws is recorded through the frame's transform (on the pixels it would be
+    /// drawn on), blurred and deepened, and drawn back untransformed inside the rectangle.
+    #[allow(clippy::too_many_arguments)]
+    fn frost(&self, x: f32, y: f32, width: f32, height: f32, radius: f32, blur: f32, below: &dyn Fn(&dyn Canvas)) -> Result<()> {
+        use windows::Win32::Graphics::Direct2D::Common::{D2D_MATRIX_5X4_F, D2D_MATRIX_5X4_F_0, D2D_MATRIX_5X4_F_0_0};
+        use windows::Win32::Graphics::Direct2D::{
+            CLSID_D2D1ColorMatrix, CLSID_D2D1GaussianBlur, D2D1_COLORMATRIX_PROP_CLAMP_OUTPUT, D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
+            D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_PROPERTY_TYPE_BOOL,
+            D2D1_PROPERTY_TYPE_MATRIX_5X4,
+        };
+        let dc = &self.dc;
+        let mut transform = Matrix3x2::default();
+        let mut dpi = (0.0, 0.0);
+        unsafe {
+            dc.GetTransform(&mut transform);
+            dc.GetDpi(&mut dpi.0, &mut dpi.1);
+            let list = dc.CreateCommandList()?;
+            let target = dc.GetTarget()?;
+            dc.SetTarget(&list);
+            // (Setting a target can change the context's DPI: what is under is recorded at the frame's.)
+            dc.SetDpi(dpi.0, dpi.1);
+            below(self);
+            dc.SetTarget(&target);
+            dc.SetDpi(dpi.0, dpi.1);
+            dc.SetTransform(&transform);
+            list.Close()?;
+            let blurred = dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;
+            blurred.SetInput(0, &list.cast::<ID2D1Image>()?, true);
+            let deviation = blur * stretch(&transform);
+            blurred.SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &deviation.to_ne_bytes())?;
+            // Deepened about its lightness (a colour matrix: each colour keeps more of itself, and takes as much less
+            // of the others).
+            let deepened = dc.CreateEffect(&CLSID_D2D1ColorMatrix)?;
+            deepened.SetInput(0, &blurred.GetOutput()?, true);
+            let s = super::canvas::FROST_SATURATION;
+            let light = [0.2126f32, 0.7152, 0.0722];
+            let share = |from: usize, to: usize| light[from] * (1.0 - s) + if from == to { s } else { 0.0 };
+            let matrix = D2D_MATRIX_5X4_F {
+                Anonymous: D2D_MATRIX_5X4_F_0 {
+                    Anonymous: D2D_MATRIX_5X4_F_0_0 {
+                        _11: share(0, 0), _12: share(0, 1), _13: share(0, 2), _14: 0.0,
+                        _21: share(1, 0), _22: share(1, 1), _23: share(1, 2), _24: 0.0,
+                        _31: share(2, 0), _32: share(2, 1), _33: share(2, 2), _34: 0.0,
+                        _41: 0.0, _42: 0.0, _43: 0.0, _44: 1.0,
+                        _51: 0.0, _52: 0.0, _53: 0.0, _54: 0.0,
+                    },
+                },
+            };
+            let bytes = std::slice::from_raw_parts((&matrix as *const D2D_MATRIX_5X4_F).cast::<u8>(), std::mem::size_of::<D2D_MATRIX_5X4_F>());
+            deepened.SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32, D2D1_PROPERTY_TYPE_MATRIX_5X4, bytes)?;
+            deepened.SetValue(D2D1_COLORMATRIX_PROP_CLAMP_OUTPUT.0 as u32, D2D1_PROPERTY_TYPE_BOOL, &1u32.to_ne_bytes())?;
+            let image = deepened.GetOutput()?;
+            // Inside the rectangle only: it the mask of a layer, through the frame's transform.
+            let (x, y, width, height) = self.on_pixels(x, y, width, height);
+            let radius = radius.max(0.0).min(width / 2.0).min(height / 2.0);
+            let shape = self.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius })?;
+            let layer = D2D1_LAYER_PARAMETERS1 {
+                contentBounds: D2D_RECT_F { left: f32::MIN, top: f32::MIN, right: f32::MAX, bottom: f32::MAX },
+                geometricMask: std::mem::ManuallyDrop::new(Some(shape.cast()?)),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: 1.0,
+                opacityBrush: std::mem::ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+            };
+            dc.PushLayer(&layer, None);
+            dc.SetTransform(&Matrix3x2::identity());
+            dc.DrawImage(&image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            dc.SetTransform(&transform);
+            dc.PopLayer();
+            drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+        }
+        Ok(())
+    }
 }
 
 impl<'a> Frame<'a> {

@@ -1516,8 +1516,12 @@ impl Beside {
             self.hits = hits;
             return;
         };
-        // Its colour's dot by when it was written (the page the skin's own, as the note's card on the panel is).
+        // Its colour over all of it, faintly, where its card on the panel is of it (glass's, Windows 11's; chart
+        // paper's card is the skin's own); its dot by when it was written.
         let mark = super::view::note_colour(writing.colour);
+        if theme.skin != super::theme::Skin::Paper {
+            frame.fill(mark.alpha(if theme.dark { 0.10 } else { 0.08 }), 0.0, 0.0, width, height);
+        }
         frame.fill_circle(mark, Point { x: PAD + 5.0, y: 26.0 }, 5.0);
         let when = super::text::since(writing.written_ms, crate::station::now_ms(), lang);
         let said = match (&writing.name, lang) {

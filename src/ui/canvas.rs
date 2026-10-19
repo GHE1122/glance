@@ -131,6 +131,9 @@ impl PartialEq for Picture {
 /// What the panel's readings are painted with: each platform paints these
 /// with its own graphics (Direct2D and DirectWrite on Windows). Coordinates
 /// are in DIPs; text is placed by the top of its line box.
+/// How much deeper frosted glass makes the colours under it (see `Canvas::frosted`): blurred, they would go grey.
+pub const FROST_SATURATION: f32 = 1.3;
+
 pub trait Canvas {
     /// `text` on one line from (`x`, `y`), at the start or end of `width`,
     /// cut short with an ellipsis if it does not fit.
@@ -185,6 +188,12 @@ pub trait Canvas {
     /// that what is drawn in it shows through clear.
     #[allow(clippy::too_many_arguments)]
     fn shadow(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32, blur: f32, drop: f32);
+    /// Frosted glass over what `below` draws: that drawn, blurred by a deviation of `blur` DIPs and its colours
+    /// deepened by `FROST_SATURATION`, shown only inside the rounded rectangle (what a pane of coloured glass laid on
+    /// it shows of it; the pane's own tint is drawn over it as any fill is). What `below` draws is the pane's to
+    /// show, not drawn of itself: whoever wants it seen outside the pane draws it too.
+    #[allow(clippy::too_many_arguments)]
+    fn frosted(&self, x: f32, y: f32, width: f32, height: f32, radius: f32, blur: f32, below: &dyn Fn(&dyn Canvas));
     /// An arc of the circle `radius` round `centre`, from `from` (radians
     /// clockwise from twelve o'clock) through `sweep` more, `width` wide,
     /// its ends round. A sweep of a whole turn or more is the circle.

@@ -635,7 +635,7 @@ fn markdown_plain(line: &str) -> String {
     line.replace("**", "").replace('`', "").replace("__", "")
 }
 
-/// A note's colour: its dot on the panel and on its page (the same in every skin: its card is the skin's own).
+/// A note's colour's mark: its dot (chart paper's, a list's), its band (Windows 11's), its page's.
 pub(crate) fn note_colour(colour: crate::notes::Colour) -> Color {
     use crate::notes::Colour;
     match colour {
@@ -648,29 +648,116 @@ pub(crate) fn note_colour(colour: crate::notes::Colour) -> Color {
     }
 }
 
-/// A note's card at (`x`, `y`), `w` × `h`, as its skin draws what lies on its sheet (the station's things' plates):
-/// the skin's track, ruled round on Windows 11 and chart paper; no colour of its own (the note's colour is its dot,
-/// see `note_dot`: a card washed in it stood out from all else on the panel). Its corners rounded by `radius`.
-fn note_card_ground(frame: &dyn Canvas, theme: &Theme, x: f32, y: f32, w: f32, h: f32, radius: f32) {
-    frame.fill_rounded(theme.track, x, y, w, h, radius);
-    if theme.skin != Skin::Glass {
-        frame.stroke_rounded(Fill::Solid(theme.rule), x, y, w, h, radius, 1.0);
+/// A note's colour as a pane of coloured glass (glass's cards: the swatches of alexko0421/glass-card, MIT): its tint,
+/// laid over what it frosts `GLASS_TINT` strong, and the ink written on it in the light (a deep shade of the tint).
+fn note_glass(colour: crate::notes::Colour) -> (Color, Color) {
+    use crate::notes::Colour;
+    let (tint, ink) = match colour {
+        Colour::Blue => (0x3769F5, 0x18428E),
+        Colour::Yellow => (0xF2F766, 0x5A5E12),
+        Colour::Green => (0x68BD81, 0x1F5E33),
+        Colour::Pink => (0xEE556D, 0x881D2D),
+        Colour::Purple => (0x9B38EC, 0x4A1478),
+        Colour::Grey => (0x3A3F4A, 0x15181E),
+    };
+    (Color::hex(tint, 1.0), Color::hex(ink, 1.0))
+}
+
+/// How strong a glass note's tint is over what it frosts, in the light and in the dark (where white is written on
+/// it: a little less of it, the dark under it showing deeper).
+fn glass_tint(dark: bool) -> f32 {
+    if dark { 0.5 } else { 0.58 }
+}
+
+/// How blurred what lies under a glass note shows through it (DIPs).
+const NOTE_FROST: f32 = 7.0;
+
+/// What is written on a note's card in `theme`: its title's, its words', and the faint (when it was written). On glass
+/// the tint's ink (white in the dark); else the skin's own.
+fn note_inks(theme: &Theme, colour: crate::notes::Colour) -> (Color, Color, Color) {
+    match theme.skin {
+        Skin::Glass if theme.dark => (Color::hex(0xFFFFFF, 1.0), Color::hex(0xFFFFFF, 0.84), Color::hex(0xFFFFFF, 0.66)),
+        Skin::Glass => {
+            let ink = note_glass(colour).1;
+            (ink, ink.alpha(0.84), ink.alpha(0.7))
+        }
+        _ => (theme.text, theme.text2, theme.text3),
     }
 }
 
-/// A note's colour as it is shown on the panel: a dot of it, its middle at (`x` + its radius, `middle`); the room it
-/// takes before its title.
+/// Windows 11's note card's ground: its sheet, so much of the note's colour in it.
+fn fluent_note_ground(theme: &Theme, colour: crate::notes::Colour) -> Color {
+    let mark = note_colour(colour);
+    let sheet = if theme.dark { Color::hex(0x282A2E, 1.0) } else { Color::hex(0xFAFBFC, 1.0) };
+    let k = 0.16;
+    Color { r: sheet.r + (mark.r - sheet.r) * k, g: sheet.g + (mark.g - sheet.g) * k, b: sheet.b + (mark.b - sheet.b) * k, a: 0.94 }
+}
+
+/// What lies under a pane of glass, drawn (see `Canvas::frosted`).
+type Under<'a> = &'a dyn Fn(&dyn Canvas);
+
+/// A note's card at (`x`, `y`), `w` × `h`, its corners rounded by `radius`, as its skin draws it, `lit` under the
+/// pointer:
+/// - glass a pane of the note's coloured glass, frosting what `below` draws (the cards it lies over: none, where it
+///   lies over none), a soft white rim round it, its shadow under it; `plain` (drawn as what another frosts) its tint
+///   alone, as a pane under another shows through it;
+/// - Windows 11 its sheet a little of its colour, ruled round, a band of the colour along its top;
+/// - chart paper what lies on its sheet (the station's things' plates), ruled round; its colour a dot by its title
+///   (see `note_dot`).
+#[allow(clippy::too_many_arguments)]
+fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (x, y, w, h): (f32, f32, f32, f32), radius: f32, lit: bool, plain: bool, below: Option<Under>) {
+    match theme.skin {
+        Skin::Glass => {
+            let (tint, _) = note_glass(colour);
+            let tint = tint.alpha(glass_tint(theme.dark));
+            if plain {
+                frame.fill_rounded(tint, x, y, w, h, radius);
+                return;
+            }
+            let shade = if theme.dark { 2.5 } else { 1.0 };
+            frame.shadow(Color::hex(0, (if lit { 0.06 } else { 0.035 }) * shade), x, y, w, h, radius, 12.0, 8.0);
+            frame.shadow(Color::hex(0, 0.045 * shade), x, y, w, h, radius, 3.0, 2.0);
+            if let Some(below) = below {
+                frame.frosted(x, y, w, h, radius, NOTE_FROST, below);
+            }
+            frame.fill_rounded(tint, x, y, w, h, radius);
+            let rim = match (theme.dark, lit) {
+                (false, false) => 0.65,
+                (false, true) => 0.9,
+                (true, false) => 0.22,
+                (true, true) => 0.45,
+            };
+            frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, rim)), x, y, w, h, radius, 1.5);
+        }
+        Skin::Fluent => {
+            frame.fill_rounded(fluent_note_ground(theme, colour), x, y, w, h, radius);
+            frame.stroke_rounded(Fill::Solid(if lit { note_colour(colour).alpha(0.8) } else { theme.rule }), x, y, w, h, radius, if lit { 1.5 } else { 1.0 });
+            frame.clip(x, y, w, 4.0);
+            frame.fill_rounded(note_colour(colour), x, y, w, h.min(2.0 * radius + 4.0), radius);
+            frame.unclip();
+        }
+        Skin::Paper => {
+            frame.fill_rounded(theme.track, x, y, w, h, radius);
+            frame.stroke_rounded(Fill::Solid(theme.rule), x, y, w, h, radius, 1.0);
+            if lit {
+                frame.fill_rounded(theme.hover, x, y, w, h, radius);
+            }
+        }
+    }
+}
+
+/// A note's colour as a dot, its middle at (`x` + its radius, `middle`); the room it takes before its title.
 fn note_dot(frame: &dyn Canvas, colour: crate::notes::Colour, x: f32, middle: f32) -> f32 {
     frame.fill_circle(note_colour(colour), Point { x: x + 3.5, y: middle }, 3.5);
     15.0
 }
 
-/// How round a note's card's corners are in `theme`: as its skin rounds what lies on its sheet (glass's the most,
-/// chart paper's a little: the owner's, its square ones too stark).
+/// How round a note's card's corners are in `theme`: glass's round (its panes'), Windows 11's a little, chart paper's
+/// a little more (the owner's: its square ones too stark).
 fn note_radius(theme: &Theme, small: bool) -> f32 {
     match theme.skin {
-        Skin::Glass => if small { 12.0 } else { 14.0 },
-        Skin::Fluent => 4.0,
+        Skin::Glass => if small { 14.0 } else { 18.0 },
+        Skin::Fluent => 6.0,
         Skin::Paper => 6.0,
     }
 }
@@ -690,18 +777,23 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
     }
     let lit = |at: usize| notes.get(at).is_some_and(|note| scene.hover == Some(Hit::Note(note.at)));
     let bold = |font: Font, weight: f32| Font { weight, ..font };
-    let dot = |frame: &dyn Canvas, note: &NoteCard, x: f32, y: f32| note_dot(frame, note.colour, x, y);
+    // (Chart paper's colour a dot by the title; glass's card is of it, Windows 11's banded in it.)
+    let dotted = theme.skin == Skin::Paper;
+    let dot = |frame: &dyn Canvas, note: &NoteCard, x: f32, y: f32| if dotted { note_dot(frame, note.colour, x, y) } else { 0.0 };
+    // (Under Windows 11's band, what is on its card a little lower.)
+    let banded = if theme.skin == Skin::Fluent { 2.0 } else { 0.0 };
     let inset = 14.0;
-    frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
+    // (Glass's cards' shadows reach past them: room for them either side, and under.)
+    let reach = if theme.skin == Skin::Glass { 12.0 } else { 4.0 };
+    frame.clip(left - reach, top - 2.0, width + 2.0 * reach, tall + reach);
     match view {
-        NotesView::Deck => {
-            // The others' titles, a row each over the last written, ruled apart as the skin rules (the same lines as
-            // between its lanes), as many as leave it a card's room, the rest scrolled to; the last written whole at
-            // the foot, on a card.
+        NotesView::Deck if theme.skin == Skin::Paper => {
+            // The others' titles, a row each over the last written, ruled apart as chart paper rules (the same lines
+            // as between its lanes), as many as leave it a card's room, the rest scrolled to; the last written whole
+            // at the foot, on a card.
             let others = notes.len() - 1;
             let room = (others as f32 * NOTE_STRIP).min((tall - NOTE_CARD).max(0.0));
             let (most, scroll) = notes_scroll(scene, others as f32 * NOTE_STRIP, room);
-            let radius = note_radius(theme, false);
             frame.clip(left - 4.0, top - 2.0, width + 8.0, room + 2.0);
             for (at, note) in notes.iter().enumerate().skip(1) {
                 let y = top + (at - 1) as f32 * NOTE_STRIP - scroll;
@@ -709,7 +801,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                     continue;
                 }
                 if lit(at) {
-                    frame.fill_rounded(theme.hover, left, y + 1.0, width, NOTE_STRIP - 2.0, theme.control_radius.max(6.0).min(NOTE_STRIP / 2.0));
+                    frame.fill_rounded(theme.hover, left, y + 1.0, width, NOTE_STRIP - 2.0, theme.control_radius.clamp(6.0, NOTE_STRIP / 2.0));
                 }
                 frame.fill(theme.rule, left + inset, y + NOTE_STRIP - 1.0, width - 2.0 * inset, 1.0);
                 let line = y + (NOTE_STRIP - LINE) / 2.0;
@@ -720,33 +812,67 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 hits.extend(shown_in((left, y, width, NOTE_STRIP, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, room)));
             }
             frame.unclip();
+            // (After its rows: a press finds a row before the list they are on.)
+            if most > 0.0 {
+                hits.push((left, top, width, room, Hit::List(List::Notes, most.to_bits())));
+            }
+            let front_top = top + room + if others > 0 { 6.0 } else { 0.0 };
+            paint_front_note(frame, scene, &notes[0], (left, front_top, width, tall - (front_top - top)), lit(0), None, hits);
+        }
+        NotesView::Deck => {
+            // The others' titles as the tops of cards stacked over the last written, each lying over the one before
+            // it (a strip of each shows; on glass, the one under showing through it), as many as leave it a card's
+            // room, the rest scrolled to; the last written whole at the foot.
+            let others = notes.len() - 1;
+            let room = (others as f32 * NOTE_STRIP).min((tall - NOTE_CARD).max(0.0));
+            let (most, scroll) = notes_scroll(scene, others as f32 * NOTE_STRIP, room);
+            let radius = note_radius(theme, false);
+            // (As tall as reaches under the next: its foot hidden there, as a card's in a stack.)
+            let foot = radius + 6.0;
+            let strip_y = |at: usize| top + (at - 1) as f32 * NOTE_STRIP - scroll;
+            // (The strips cut off where they scroll out at the top only: their feet, and their shadows, reach on under
+            // the last written, which shows the last of them through it on glass.)
+            let (side, under_room) = (12.0, room + foot + 12.0);
+            let shows = |at: usize| strip_y(at) + NOTE_STRIP >= top && strip_y(at) <= top + room;
+            let strip = |frame: &dyn Canvas, at: usize, plain: bool| {
+                let note = &notes[at];
+                let y = strip_y(at);
+                // What it lies over: the strips before it, as they show.
+                let under = |frame: &dyn Canvas| {
+                    frame.clip(left - side, top - 2.0, width + 2.0 * side, under_room);
+                    for below in (1..at).filter(|below| shows(*below)) {
+                        note_card_ground(frame, theme, notes[below].colour, (left, strip_y(below), width, NOTE_STRIP + foot), radius, false, true, None);
+                    }
+                    frame.unclip();
+                };
+                note_card_ground(frame, theme, note.colour, (left, y, width, NOTE_STRIP + foot), radius, !plain && lit(at), plain, (at > 1).then_some(&under as Under));
+                let (title_ink, _, faint) = note_inks(theme, note.colour);
+                let line = y + (NOTE_STRIP - LINE) / 2.0 + banded;
+                let when_w = frame.measure(&note.when, theme.small);
+                let room_w = width - inset - when_w - 24.0;
+                frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), room_w), bold(theme.body, 600.0), title_ink, left + inset, line, room_w, Align::Start);
+                frame.text(&note.when, theme.small, faint, left, line + 1.0, width - 14.0, Align::End);
+            };
+            frame.clip(left - side, top - 2.0, width + 2.0 * side, under_room);
+            for at in (1..notes.len()).filter(|at| shows(*at)) {
+                strip(frame, at, false);
+                hits.extend(shown_in((left, strip_y(at), width, NOTE_STRIP, Hit::Note(notes[at].at)), (left - 4.0, top, width + 8.0, room)));
+            }
+            frame.unclip();
             // (After its strips: a press finds a strip before the list they are on.)
             if most > 0.0 {
                 hits.push((left, top, width, room, Hit::List(List::Notes, most.to_bits())));
             }
-            let y = top + room;
-            let front = &notes[0];
-            let card_top = y + if others > 0 { 6.0 } else { 0.0 };
-            let card = tall - (card_top - top);
-            let y = card_top;
-            note_card_ground(frame, theme, left, y, width, card, radius);
-            if lit(0) {
-                frame.fill_rounded(theme.hover, left, y, width, card, radius);
-            }
-            let x = left + inset;
-            let head = y + 12.0;
-            let dot_w = dot(frame, front, x, head + LINE / 2.0);
-            frame.text(&front.when, theme.small, theme.text3, x + dot_w, head + 1.0, width - (x - left) - dot_w - 14.0, Align::Start);
-            let title = Font { size: theme.title.size + 1.0, weight: 700.0, ..theme.title };
-            frame.text(&fitted(frame, &front.title, title, width - (x - left) - 14.0), title, theme.text, x, head + LINE + 6.0, width - (x - left) - 14.0, Align::Start);
-            for (at, line) in front.lines.iter().enumerate() {
-                let line_y = head + LINE + 6.0 + title.size * 1.4 + 4.0 + at as f32 * (LINE + 4.0);
-                if line_y + LINE > y + card - 8.0 {
-                    break;
+            // The last written over the strips' feet: on glass, the last of them showing through it.
+            let under = |frame: &dyn Canvas| {
+                frame.clip(left - side, top - 2.0, width + 2.0 * side, under_room);
+                for at in (1..notes.len()).filter(|at| shows(*at)) {
+                    strip(frame, at, true);
                 }
-                frame.text(&fitted(frame, line, theme.body, width - (x - left) - 14.0), theme.body, theme.text2, x, line_y, width - (x - left) - 14.0, Align::Start);
-            }
-            hits.push((left, y, width, card, Hit::Note(front.at)));
+                frame.unclip();
+            };
+            let front_top = top + room;
+            paint_front_note(frame, scene, &notes[0], (left, front_top, width, tall - room), lit(0), (others > 0).then_some(&under as Under), hits);
         }
         NotesView::Cards => {
             let across = 2;
@@ -760,19 +886,17 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 if y + NOTE_CARD < top || y > top + tall {
                     continue;
                 }
-                note_card_ground(frame, theme, x, y, card_w, NOTE_CARD, radius);
-                if lit(at) {
-                    frame.fill_rounded(theme.hover, x, y, card_w, NOTE_CARD, radius);
-                }
-                let inner = 11.0;
-                let head = y + 10.0;
+                note_card_ground(frame, theme, note.colour, (x, y, card_w, NOTE_CARD), radius, lit(at), false, None);
+                let (title_ink, words, faint) = note_inks(theme, note.colour);
+                let inner = if theme.skin == Skin::Glass { 13.0 } else { 11.0 };
+                let head = y + 10.0 + banded;
                 let tx = x + inner + dot(frame, note, x + inner, head + LINE / 2.0);
                 let room = card_w - (tx - x) - 10.0;
-                frame.text(&fitted(frame, &note.title, bold(theme.body, 700.0), room), bold(theme.body, 700.0), theme.text, tx, head, room, Align::Start);
+                frame.text(&fitted(frame, &note.title, bold(theme.body, 700.0), room), bold(theme.body, 700.0), title_ink, tx, head, room, Align::Start);
                 for (line_at, line) in note.lines.iter().take(2).enumerate() {
-                    frame.text(&fitted(frame, line, theme.small, card_w - inner - 10.0), theme.small, theme.text2, x + inner, head + LINE + 6.0 + line_at as f32 * (LINE + 1.0), card_w - inner - 10.0, Align::Start);
+                    frame.text(&fitted(frame, line, theme.small, card_w - inner - 10.0), theme.small, words, x + inner, head + LINE + 6.0 + line_at as f32 * (LINE + 1.0), card_w - inner - 10.0, Align::Start);
                 }
-                frame.text(&note.when, theme.small, theme.text3, x + inner, y + NOTE_CARD - LINE - 8.0, card_w - inner - 10.0, Align::Start);
+                frame.text(&note.when, theme.small, faint, x + inner, y + NOTE_CARD - LINE - 8.0, card_w - inner - 10.0, Align::Start);
                 hits.extend(shown_in((x, y, card_w, NOTE_CARD, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, tall)));
             }
             if most > 0.0 {
@@ -780,7 +904,8 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
             }
         }
         NotesView::List => {
-            // A row each: a dot of its colour, its title over its first line, when it was written; ruled apart.
+            // A row each: its colour (Windows 11's a band of it, the others' a dot), its title over its first line,
+            // when it was written; on chart paper ruled apart.
             let (most, scroll) = notes_scroll(scene, notes.len() as f32 * NOTE_ROW, tall);
             for (at, note) in notes.iter().enumerate() {
                 let y = top + at as f32 * NOTE_ROW - scroll;
@@ -790,12 +915,16 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 if lit(at) {
                     frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, NOTE_ROW - 2.0, theme.control_radius.max(6.0));
                 }
-                note_dot(frame, note.colour, left, y + 4.0 + LINE / 2.0);
-                if at + 1 < notes.len() {
+                if theme.skin == Skin::Fluent {
+                    frame.fill_rounded(note_colour(note.colour), left, y + 7.0, 4.0, NOTE_ROW - 14.0, 2.0);
+                } else {
+                    note_dot(frame, note.colour, left, y + 4.0 + LINE / 2.0);
+                }
+                if dotted && at + 1 < notes.len() {
                     frame.fill(theme.rule, left + 15.0, y + NOTE_ROW - 1.0, width - 15.0, 1.0);
                 }
                 let when_w = frame.measure(&note.when, theme.small);
-                let x = left + 15.0;
+                let x = left + if theme.skin == Skin::Fluent { 14.0 } else { 15.0 };
                 frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), width - 24.0 - when_w), bold(theme.body, 600.0), theme.text, x, y + 4.0, width - 24.0 - when_w, Align::Start);
                 frame.text(&fitted(frame, note.lines.first().map_or("", String::as_str), theme.small, width - 24.0), theme.small, theme.text3, x, y + 4.0 + LINE, width - 24.0, Align::Start);
                 frame.text(&note.when, theme.small, theme.text3, left, y + (NOTE_ROW - LINE) / 2.0, width, Align::End);
@@ -807,6 +936,39 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
         }
     }
     frame.unclip();
+}
+
+/// The deck's last written note, whole, in the box (`x`, `y`, `w`, `h`), `lit` under the pointer, over what `below`
+/// draws (see `note_card_ground`): when it was written, its title, as many of its lines as fit.
+#[allow(clippy::too_many_arguments)]
+fn paint_front_note(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (left, y, width, card): (f32, f32, f32, f32), lit: bool, below: Option<Under>, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    note_card_ground(frame, theme, note.colour, (left, y, width, card), note_radius(theme, false), lit, false, below);
+    let (title_ink, words, faint) = note_inks(theme, note.colour);
+    let x = left + if theme.skin == Skin::Glass { 16.0 } else { 14.0 };
+    let head = y + if theme.skin == Skin::Glass { 14.0 } else { 12.0 } + if theme.skin == Skin::Fluent { 2.0 } else { 0.0 };
+    // (Before when it was written: chart paper's its colour's dot, Windows 11's a note's mark; glass's nothing, the
+    // card of its colour.)
+    let lead = match theme.skin {
+        Skin::Paper => note_dot(frame, note.colour, x, head + LINE / 2.0),
+        Skin::Fluent => {
+            frame.icon(Icon::File, Point { x: x + 6.0, y: head + LINE / 2.0 }, 12.0, theme.text3);
+            18.0
+        }
+        Skin::Glass => 0.0,
+    };
+    let room = width - (x - left) - 14.0;
+    frame.text(&note.when, theme.small, if theme.skin == Skin::Fluent { theme.text2 } else { faint }, x + lead, head + 1.0, room - lead, Align::Start);
+    let title = Font { size: theme.title.size + 1.0, weight: 700.0, ..theme.title };
+    frame.text(&fitted(frame, &note.title, title, room), title, title_ink, x, head + LINE + 6.0, room, Align::Start);
+    for (at, line) in note.lines.iter().enumerate() {
+        let line_y = head + LINE + 6.0 + title.size * 1.4 + 4.0 + at as f32 * (LINE + 4.0);
+        if line_y + LINE > y + card - 8.0 {
+            break;
+        }
+        frame.text(&fitted(frame, line, theme.body, room), theme.body, words, x, line_y, room, Align::Start);
+    }
+    hits.push((left, y, width, card, Hit::Note(note.at)));
 }
 
 /// How far the notes scroll at most, their whole `whole` tall in room `tall`, and how far they are scrolled now.
@@ -4206,6 +4368,7 @@ six".into()));
         fn fill_shape(&self, _: &[Point], _: Fill) {}
         fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
         fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
         fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
         fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}

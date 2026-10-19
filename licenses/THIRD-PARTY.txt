@@ -46,6 +46,12 @@ Lucide (icons: cpu, gpu, memory-stick, hard-drive, arrow-down-up,
   Copyright (c) 2013-present Cole Bemis, under the MIT licence in the same
   file. Their path data is built into glance.exe.
 
+Glass Card (the coloured glass of the notes' cards: its swatches' tints and
+  inks, and how its material frosts what lies under a card)
+  Copyright (c) 2026 Chunlong Ko (https://github.com/alexko0421/glass-card).
+  Licence: MIT (glass-card-MIT.txt). Its colours and the way it is drawn are
+  reworked in glance.exe's own code.
+
 Unicode Character Database (Unihan, the first letters of Chinese characters'
   Mandarin readings, for searching programs by pinyin)
   Copyright (c) 1991-2026 Unicode, Inc.
