@@ -891,6 +891,53 @@ struct Stage {
     desktop: Option<Capture>,
     /// The desktop as a bitmap, for the zoom it was made at.
     bitmap: Option<(u32, ID2D1Bitmap1)>,
+    /// What was last measured of the desktop (see `tone` and `glass`): the same for as long as it is shown as it
+    /// is, and measured pixel by pixel, which took longer than drawing the rest of the preview.
+    measured: Measured,
+}
+
+/// How many areas' tones a stage keeps (see `Measured`).
+const TONES_KEPT: usize = 4;
+
+#[derive(Default)]
+struct Measured {
+    /// How light it is behind the areas last asked of (see `Capture::luminance`), the latest first: the preview's
+    /// panel, and the layout's editor's pictures, each frame.
+    tones: Vec<(RECT, (f32, f32))>,
+    /// The glass of an overlay over it (its ring around, and the hole the overlay is: see `overlay::glass`).
+    glass: Option<((RECT, RECT), super::overlay::Glass)>,
+}
+
+impl Stage {
+    fn new(size: (f32, f32), screen: Option<String>, work: RECT, desktop: Option<Capture>) -> Self {
+        Stage { size, screen, work, desktop, bitmap: None, measured: Measured::default() }
+    }
+
+    /// How light the desktop is behind `area` (mean and spread, one value a pixel); grey till it has been read.
+    fn tone(&mut self, area: RECT) -> (f32, f32) {
+        let Some(desktop) = &self.desktop else { return (0.5, 0.0) };
+        let tones = &mut self.measured.tones;
+        let tone = match tones.iter().position(|(at, _)| *at == area) {
+            Some(at) => tones.remove(at).1,
+            None => desktop.luminance(area, 1.0),
+        };
+        tones.insert(0, (area, tone));
+        tones.truncate(TONES_KEPT);
+        tone
+    }
+
+    /// The glass of an overlay at `hole`, tinted for the desktop in `ring` around it (as the overlay measures it,
+    /// see `Overlay::look`).
+    fn glass(&mut self, ring: RECT, hole: RECT) -> super::overlay::Glass {
+        match self.measured.glass {
+            Some((at, glass)) if at == (ring, hole) => glass,
+            _ => {
+                let glass = super::overlay::glass(&mut self.desktop.as_ref().map_or(Vec::new(), |desktop| desktop.luminances(ring, hole, 1)), None);
+                self.measured.glass = Some(((ring, hole), glass));
+                glass
+            }
+        }
+    }
 }
 
 /// The phone's page as it is used from here: how the remote last said the
@@ -1016,6 +1063,9 @@ struct Ui {
     /// What the pointer is over as the frame being drawn is drawn: found among the last frame's targets before they
     /// are made anew (found among those being made, it was none, and nothing lit under the pointer).
     hovered_now: Option<Target>,
+    /// Where what is drawn follows the pointer itself, not what it is over (what plays, in its preview), as the last
+    /// frame was drawn: a move there, or out of there, is drawn.
+    follows_pointer: Vec<Rect>,
     /// The screens, as the map shows them.
     screens: Vec<crate::screens::Screen>,
     /// The edge last pressed in the layout's editor: the panel it opens slides out from it there.
@@ -1156,7 +1206,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
         // On the desktop as it was last read, if it was (see `DESKTOPS`): light or dark as it is from the first frame
         // (read again on another thread, the window showing meanwhile).
         let desktop = screen.as_deref().and_then(|screen| kept_desktop(screen, work, size));
-        let stage = Stage { size, screen, work, desktop, bitmap: None };
+        let stage = Stage::new(size, screen, work, desktop);
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
         // (Taken out first: locked twice in the one statement below, it waited on itself.)
         let switches_read = SWITCHES_READ.lock().unwrap().unwrap_or((false, false));
@@ -1213,6 +1263,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             pointer: None,
             pressed: None,
             hovered_now: None,
+            follows_pointer: Vec::new(),
             screens: crate::screens::all(),
             shown_edge: None,
             view: None,
@@ -1360,8 +1411,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_MOUSELEAVE => {
             with_ui(|ui| {
+                // (Over nothing lit, nor what follows it, nothing changes as it goes.)
+                if ui.hovered().is_some() || ui.over_followed() {
+                    ui.next_frame = Instant::now();
+                }
                 ui.pointer = None;
-                ui.next_frame = Instant::now();
             });
             LRESULT(0)
         }
@@ -1776,7 +1830,7 @@ impl Ui {
             Some(at) => self.kept_stages.swap_remove(at),
             None => {
                 self.read_stage(screen.to_string(), work, size);
-                Stage { size, screen: Some(screen.to_string()), work, desktop: None, bitmap: None }
+                Stage::new(size, Some(screen.to_string()), work, None)
             }
         };
         let before = std::mem::replace(&mut self.stage, next);
@@ -1810,14 +1864,14 @@ impl Ui {
         for (screen, work, size) in &wanted {
             if let Some(desktop) = kept_desktop(screen, *work, *size) {
                 self.kept_stages.retain(|kept| kept.screen.as_deref() != Some(screen.as_str()));
-                self.kept_stages.push(Stage { size: *size, screen: Some(screen.clone()), work: *work, desktop: Some(desktop), bitmap: None });
+                self.kept_stages.push(Stage::new(*size, Some(screen.clone()), *work, Some(desktop)));
             }
         }
         let send = self.read.0.clone();
         std::thread::spawn(move || {
             for (screen, work, size) in wanted {
                 let desktop = read_and_keep(&screen, work, size);
-                let stage = Stage { size, screen: Some(screen), work, desktop: Some(desktop), bitmap: None };
+                let stage = Stage::new(size, Some(screen), work, Some(desktop));
                 if send.send(Read::Stage(stage)).is_err() {
                     break;
                 }
@@ -1830,7 +1884,7 @@ impl Ui {
         let send = self.read.0.clone();
         std::thread::spawn(move || {
             let desktop = read_and_keep(&screen, work, size);
-            let _ = send.send(Read::Stage(Stage { size, screen: Some(screen), work, desktop: Some(desktop), bitmap: None }));
+            let _ = send.send(Read::Stage(Stage::new(size, Some(screen), work, Some(desktop))));
         });
     }
 
@@ -2853,7 +2907,13 @@ impl Ui {
     }
 
     fn moved(&mut self, x: f32, y: f32) {
+        let was = (self.hovered(), self.over_followed());
         self.pointer = Some((x, y));
+        // Drawn again only where the pointer changes what shows: what it is over (lit), what it has in hand (a
+        // slider, a row, a component carried: they follow it), or where what is drawn follows it. Moved over the
+        // same, nothing changes: a frame drawn at every move had the window drawn whole as often as the mouse
+        // reports, the preview with it.
+        let held = self.phone.slid.is_some() || self.sliding.is_some() || self.drag.is_some() || self.carry.is_some();
         if let Some((part, track, at)) = &mut self.phone.slid {
             *at = part.along(*track, x, y);
         }
@@ -2865,7 +2925,14 @@ impl Ui {
             self.reorder();
         }
         self.carry_to(x, y);
-        self.next_frame = Instant::now();
+        if held || was != (self.hovered(), self.over_followed()) || was.1 {
+            self.next_frame = Instant::now();
+        }
+    }
+
+    /// Whether the pointer is where what is drawn follows it (see `follows_pointer`).
+    fn over_followed(&self) -> bool {
+        self.pointer.is_some_and(|(x, y)| self.follows_pointer.iter().any(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h))
     }
 
     fn press(&mut self, x: f32, y: f32) {
@@ -3506,6 +3573,7 @@ impl Ui {
         }
         self.hovered_now = self.hovered();
         self.targets.clear();
+        self.follows_pointer.clear();
         self.paint_nav(frame, &palette);
         // The preview before the list (they do not meet): it finds how large the panel can be on its screen, which the
         // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
@@ -4423,7 +4491,7 @@ impl Ui {
         let hole = RECT { left: whole(x), top: whole(y), right: whole(x + w), bottom: whole(y + h) };
         let ring = RECT { left: whole(x - around), top: whole(y - around), right: whole(x + w + around), bottom: whole(y + h + around) };
         let frost = 1.0 - overlay.clear.clamp(0.0, 1.0);
-        let glass = super::overlay::Glass { presence: frost, ..super::overlay::glass(&mut self.stage.desktop.as_ref().map_or(Vec::new(), |desktop| desktop.luminances(ring, hole, 1)), None) };
+        let glass = super::overlay::Glass { presence: frost, ..self.stage.glass(ring, hole) };
         // (Its tint alone over the screen as it is: the overlay does not blur what is behind it.)
         frame.place(placed);
         frame.crisp_text();
@@ -4458,6 +4526,7 @@ impl Ui {
         unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         let (at, scale) = ((ox + pos.0 * k, oy + pos.1 * k), zoom * k);
         let pointer = self.pointer.map(|(x, y)| ((x - at.0) / scale, (y - at.1) / scale)).filter(|(x, y)| *x >= 0.0 && *y >= 0.0 && *x < size.0 && *y < size.1);
+        self.follows_pointer.push(Rect { x: at.0, y: at.1, w: size.0 * scale, h: size.1 * scale });
         frame.place(Matrix3x2::scale(scale, scale) * Matrix3x2::translation(at.0, at.1));
         let ground = super::music::Ground::of(&shows);
         let now = Instant::now();
@@ -4595,8 +4664,7 @@ impl Ui {
         // The desktop behind the panel decides its theme when it follows the
         // backdrop, and how frosted glass is.
         let behind = RECT { left: pos.0 as i32, top: pos.1 as i32, right: (pos.0 + pw) as i32, bottom: (pos.1 + ph) as i32 };
-        // (As grey, till the desktop has been read.)
-        let tone = self.stage.desktop.as_ref().map_or((0.5, 0.0), |desktop| desktop.luminance(behind, 1.0));
+        let tone = self.stage.tone(behind);
         let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
@@ -4931,6 +4999,31 @@ mod pictures {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// What the preview measures of its desktop is what the desktop is where it is asked: kept while it is asked of
+    /// the same place, measured again for another.
+    #[test]
+    fn the_preview_measures_its_desktop_where_asked() {
+        // Black on the left half, white on the right.
+        let whole = RECT { left: 0, top: 0, right: 64, bottom: 32 };
+        let pixels: Vec<u8> = (0..32).flat_map(|_| (0..64).flat_map(|x| if x < 32 { [0, 0, 0, 255] } else { [255, 255, 255, 255] })).collect();
+        let desktop = Capture::from_pixels(whole, pixels);
+        let mut stage = Stage::new((64.0, 32.0), None, whole, desktop.copied());
+        let (left, right) = (RECT { right: 32, ..whole }, RECT { left: 32, ..whole });
+        assert_eq!(stage.tone(left), desktop.luminance(left, 1.0));
+        assert_eq!(stage.tone(left), (0.0, 0.0));
+        assert_eq!(stage.tone(right), desktop.luminance(right, 1.0));
+        assert!(stage.tone(right).0 > 0.99);
+        // (Both kept: each frame may ask of several.)
+        assert_eq!(stage.measured.tones.iter().map(|(at, _)| *at).collect::<Vec<_>>(), [right, left]);
+        let (ring, hole) = (whole, RECT { left: 8, top: 8, right: 56, bottom: 24 });
+        assert_eq!(stage.glass(ring, hole), super::super::overlay::glass(&mut desktop.luminances(ring, hole, 1), None));
+        assert_eq!(stage.glass(ring, hole), stage.glass(ring, hole));
+        // Not read yet: grey.
+        assert_eq!(Stage::new((64.0, 32.0), None, whole, None).tone(left), (0.5, 0.0));
+    }
+
     /// Choices wider than their room go on as many lines as they take, each whole, in order.
     #[test]
     fn choices_too_wide_go_on_lines() {
