@@ -197,11 +197,9 @@ impl Shared {
 /// None where the frame was put together before the windows behind were (the compositor puts them in a frame or
 /// so after it is asked, and says nothing of it, and a frame from just before holds the scene's own window: nothing,
 /// clear). Told by `opaque` (screen coordinates; the frame's top left at `area`'s): where the desktop's own window is
-/// put, a screen is, and no window is over it, which is wholly clear in such a frame and wholly opaque once it is put
-/// in (a live wallpaper is drawn in it too). Not where a window is over it: one may show nothing there (a game's
-/// drawn with no opacity, as an OpenGL program's can be), and every frame would be passed over while it stays. Wholly
-/// clear there, it is passed over: what the card made of each square of two by two pixels is clear only where all
-/// four are, wherever its squares fall.
+/// put and a screen is, which is wholly clear in such a frame and wholly opaque once it is put in (whatever the
+/// windows over it are; a live wallpaper is drawn in it too). Wholly clear there, it is passed over: what the card
+/// made of each square of two by two pixels is clear only where all four are, wherever its squares fall.
 #[allow(clippy::too_many_arguments)]
 fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, texture: &ID3D11Texture2D, width: u32, height: u32, area: RECT, opaque: &[RECT]) -> Option<(ID3D11Texture2D, Vec<u8>)> {
     unsafe {
@@ -473,30 +471,6 @@ pub fn leave_out(window: HWND, out: bool) {
     }
 }
 
-/// Where in `area` the desktop's own window (at `desktop`) shows, on a screen (`monitors`) and under none of the
-/// windows put over it (`over`): where a frame put together with it in holds it (see `keep`).
-fn desktop_showing(desktop: RECT, monitors: &[RECT], area: RECT, over: &[RECT]) -> Vec<RECT> {
-    let mut showing: Vec<RECT> = monitors.iter().filter_map(|monitor| meeting(meeting(desktop, *monitor)?, area)).collect();
-    for cut in over {
-        showing = showing.into_iter().flat_map(|rect| without(rect, *cut)).collect();
-    }
-    showing
-}
-
-/// What of `rect` is not in `cut`: as many as four rectangles (above it, below it, and beside it between them).
-fn without(rect: RECT, cut: RECT) -> Vec<RECT> {
-    let Some(inner) = meeting(rect, cut) else { return vec![rect] };
-    [
-        RECT { bottom: inner.top, ..rect },
-        RECT { top: inner.bottom, ..rect },
-        RECT { top: inner.top, bottom: inner.bottom, right: inner.left, ..rect },
-        RECT { top: inner.top, bottom: inner.bottom, left: inner.right, ..rect },
-    ]
-    .into_iter()
-    .filter(|part| part.right > part.left && part.bottom > part.top)
-    .collect()
-}
-
 fn meet(a: RECT, b: RECT) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
@@ -577,14 +551,12 @@ impl Scene {
         if same_windows && area == self.area && behind.iter().zip(&self.shown).all(|((_, a), (.., b))| a == b) {
             return false;
         }
-        // Where the desktop's own window will be put, on a screen, under no other window (see `keep`): worked out
-        // before anything is put in place, so that nothing comes between the last of that and when frames count from.
-        // (Between screens it holds nothing. Not behind, as while Explorer is not running, or wholly under other
-        // windows: nothing then tells such a frame.)
+        // Where the desktop's own window will be put, on a screen (see `keep`): worked out before anything is put in
+        // place, so that nothing comes between the last of that and when frames count from. (Between screens it
+        // holds nothing. Not behind, as while Explorer is not running: nothing then tells such a frame.)
         let shell = unsafe { GetShellWindow() };
         let opaque: Vec<RECT> = behind.iter().find(|(window, _)| *window == shell).map_or_else(Vec::new, |(_, desktop)| {
-            let over: Vec<RECT> = behind.iter().filter(|(window, _)| *window != shell).map(|(_, rect)| *rect).collect();
-            desktop_showing(*desktop, &crate::screens::monitors(), area, &over)
+            crate::screens::monitors().into_iter().filter_map(|monitor| meeting(meeting(*desktop, monitor)?, area)).collect()
         });
         let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
         if area != self.area {
@@ -764,29 +736,6 @@ impl Drop for Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Where the desktop shows: on the screens, not past them, and not under a window put over it (a window over it
-    /// may show nothing there, as a game's drawn with no opacity does: the desktop under it is not told by it).
-    #[test]
-    fn the_desktop_shows_on_screens_where_no_window_is_over_it() {
-        let rect = |left, top, right, bottom| RECT { left, top, right, bottom };
-        let desktop = rect(-2905, -1459, 2695, 2381);
-        let monitors = [rect(-745, -1440, 2695, 0), rect(0, 0, 1920, 1080)];
-        let area = rect(512, -1459, 2048, -1251);
-        // Bare: the screen's part of the area (none of it above the screen's top).
-        assert_eq!(desktop_showing(desktop, &monitors, area, &[]), vec![rect(512, -1440, 2048, -1251)]);
-        // A window over all of it (a game's, full screen): nowhere.
-        assert!(desktop_showing(desktop, &monitors, area, &[rect(-756, -1451, 2706, 11)]).is_empty());
-        // A window over its left part: the rest.
-        let shown = desktop_showing(desktop, &monitors, area, &[rect(0, -1500, 1200, 0)]);
-        assert_eq!(shown, vec![rect(1200, -1440, 2048, -1251)]);
-        // A window in its middle: round it.
-        let mut shown = desktop_showing(desktop, &monitors, area, &[rect(1000, -1400, 1100, -1300)]);
-        shown.sort_by_key(|r| (r.top, r.left));
-        let whole: i64 = shown.iter().map(|r| i64::from(r.right - r.left) * i64::from(r.bottom - r.top)).sum();
-        assert_eq!(whole, 1536 * 189 - 100 * 100);
-        assert!(shown.iter().all(|r| !meet(*r, rect(1000, -1400, 1100, -1300))));
-    }
 
     /// A scene's window is taken by the capture, and is in no task switcher (Alt+Tab, the task view), which lists a
     /// window shown that is not a tool window and is owned by none or by one that is not a tool window (measured on
