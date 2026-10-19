@@ -4764,6 +4764,34 @@ six".into()));
         within(&hits, top, APP_ROWS as f32 * APP_CELL_H + (APP_ROWS - 1) as f32 * APP_GAP, "apps");
     }
 
+    /// The panel's rail with one held: a point at each of its places finds that place first (what the panel takes it
+    /// to go to), whatever else lies there.
+    #[test]
+    #[cfg(feature = "studio")]
+    fn a_rail_s_places_are_found_while_one_is_dragged() {
+        let theme = Theme::new(Skin::Fluent, false);
+        let app = |target: &str| crate::station::apps::App { target: target.into(), name: target.into() };
+        crate::station::apps::pretend((0..5).map(|at| app(&format!("C:/{at}.exe"))).collect());
+        let order: Vec<String> = (0..5).map(|at| format!("C:/{at}.exe")).collect();
+        let mut moving = super::super::thumb::Dots::new();
+        moving.apps(std::time::Instant::now(), &order, Some((2, 2, Some((30.0, 30.0)))));
+        let moving: &'static super::super::thumb::Dots<Hit> = Box::leak(Box::new(moving));
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string(), "apps".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: moving, pinned: false, overlay: false, buttons: true, newer: false };
+        let lanes: Vec<Lane> = ["time", "apps"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
+        let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
+        let layout = Layout::with_columns(vec![heights[0].max(600.0)], 1, &theme).with_rail(1, RailSide::Start);
+        let hits = paint(&Nothing, &scene, &lanes, &layout, Pass::Content);
+        for at in 0..5u16 {
+            let Some(&(x, y, w, h, _)) = hits.iter().find(|hit| hit.4 == Hit::AppSlot(at)) else { panic!("no place {at}: {hits:?}") };
+            let (px, py) = (x + w / 2.0, y + h.min(RAIL_CELL) / 2.0 + if at == 0 { h - RAIL_CELL } else { 0.0 });
+            let first = hits.iter().find(|(hx, hy, hw, hh, _)| px >= *hx && px < hx + hw && py >= *hy && py < hy + hh).map(|hit| hit.4);
+            assert_eq!(first, Some(Hit::AppSlot(at)), "at {at}");
+        }
+    }
+
     /// One kept at hand held and dragged: the places it may go to stand still where the things were, whatever the
     /// others do to make room (what the pointer is over is not moved from under it: dragged to the top, it went no
     /// further than the next, which moved away under it), and the one held finds none of its own.

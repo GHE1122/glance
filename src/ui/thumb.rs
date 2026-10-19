@@ -173,7 +173,7 @@ impl<K: Copy + PartialEq> Dots<K> {
         moving
     }
 
-    /// Where the thing kept at hand `target` (shown at `at` among them) is drawn now: none, held (drawn where the
+    /// Where the thing kept at hand `target` (at `at` among them as kept) is drawn now: none, held (drawn where the
     /// pointer has it: see `app_held`); else in its place, or on its way to it, from a place among them or from a
     /// point (and how far it has come from there).
     pub fn app_place(&self, target: &str, at: usize) -> Option<(AppPlace, f32)> {
@@ -185,7 +185,8 @@ impl<K: Copy + PartialEq> Dots<K> {
                 AppPlace::Point(..) => (one.from, one.done),
                 _ => (one.place(), 1.0),
             },
-            None => (AppPlace::Slot(at as f32), 1.0),
+            // (In its place as they show: the one held where it would go, the others round it; not its place as kept.)
+            None => (AppPlace::Slot(self.apps.order.iter().position(|one| one == target).unwrap_or(at) as f32), 1.0),
         })
     }
 
@@ -302,7 +303,9 @@ mod tests {
         let Some((AppPlace::Slot(b), _)) = motion.app_place("b", 0) else { panic!() };
         assert!(b < 1.0 && b > 0.0, "{b}");
         motion.apps(at(400), &order, Some((0, 2, Some((5.0, 50.0)))));
-        assert_eq!(motion.app_place("b", 0), Some((AppPlace::Slot(0.0), 1.0)));
+        // (Asked by their places as kept: "b" and "c" are 1 and 2 there, and show at 0 and 1 once there.)
+        assert_eq!(motion.app_place("b", 1), Some((AppPlace::Slot(0.0), 1.0)));
+        assert_eq!(motion.app_place("c", 2), Some((AppPlace::Slot(1.0), 1.0)));
         // Let go there, the order not yet come: "a" from the pointer to the last place, "b" and "c" where they are.
         motion.apps(at(400), &order, Some((0, 2, None)));
         assert_eq!(motion.app_place("a", 2), Some((AppPlace::Point(5.0, 50.0), 0.0)));
