@@ -35,8 +35,7 @@ struct Kept {
     caret_shown: Cell<bool>,
     /// The words' look as written from here on, and their paragraphs'.
     char_format: Box<CHARFORMAT2W>,
-    /// (Read by the text services where it is: its least line height set once they are made, see `Editor::new`.)
-    para_format: Box<std::cell::RefCell<PARAFORMAT2>>,
+    para_format: Box<PARAFORMAT>,
     /// What was written changed since it was last asked.
     changed: Cell<bool>,
 }
@@ -100,11 +99,10 @@ impl Editor {
         for (unit, to) in face.encode_utf16().zip(char_format.Base.szFaceName.iter_mut().take(31)) {
             *to = unit;
         }
-        let mut para_format = Box::new(PARAFORMAT2::default());
-        para_format.Base.cbSize = std::mem::size_of::<PARAFORMAT2>() as u32;
-        para_format.Base.dwMask = PFM_ALL | PFM_LINESPACING;
-        para_format.Base.wAlignment = PFA_LEFT;
-        let para_format = Box::new(std::cell::RefCell::new(*para_format));
+        let mut para_format = Box::new(PARAFORMAT::default());
+        para_format.cbSize = std::mem::size_of::<PARAFORMAT>() as u32;
+        para_format.dwMask = PFM_ALL;
+        para_format.wAlignment = PFA_LEFT;
         let kept = Rc::new(Kept { hwnd, rect: Cell::new(rect), caret: Cell::new(None), caret_size: Cell::new((1, 16)), caret_shown: Cell::new(false), char_format, para_format, changed: Cell::new(false) });
         let host: ITextHost2 = Host { kept: kept.clone() }.into();
         let (make, iid) = services_maker()?;
@@ -130,18 +128,11 @@ impl Editor {
             let mut result = LRESULT(0);
             let _ = services.TxSendMessage(EM_SETEVENTMASK, WPARAM(0), LPARAM(ENM_CHANGE as isize), &mut result);
             let editor = Editor { services: std::mem::ManuallyDrop::new(services), _host: host, kept, typed: Cell::new(Typed::Nothing) };
-            // Each line at least as tall as a line of Chinese is in it (whose characters, in a face without them, come
-            // from another, taller one): a line that holds some no taller than one that does not. Measured as two such
-            // lines lie.
-            editor.set_text("你\n你");
-            let line = editor.top_of(2) - editor.top_of(0);
-            editor.set_text("");
-            {
-                let mut format = editor.kept.para_format.borrow_mut();
-                format.bLineSpacingRule = 3;
-                format.dyLineSpacing = line * 15;
-            }
-            let _ = editor.services.OnTxPropertyBitsChange(TXTBIT_PARAFORMATCHANGE, TXTBIT_PARAFORMATCHANGE);
+            // Its words all in its face, none put in another by the text services (as Chinese, in a face without it,
+            // went into a taller one, its lines standing taller than the rest): what the face has not, drawn by
+            // DirectWrite from the faces it falls back on, in the line as the face lays it.
+            let options = editor.answer(EM_GETLANGOPTIONS, WPARAM(0), LPARAM(0)).map_or(0, |options| options.0 as u32);
+            editor.answer(EM_SETLANGOPTIONS, WPARAM(0), LPARAM((options & !(IMF_AUTOFONT | IMF_DUALFONT | IMF_AUTOFONTSIZEADJUST)) as isize));
             Some(editor)
         }
     }
@@ -427,7 +418,7 @@ impl ITextHost_Impl for Host_Impl {
         Ok(())
     }
     fn TxGetParaFormat(&self, format: *const *const PARAFORMAT) -> windows::core::Result<()> {
-        unsafe { *(format as *mut *const PARAFORMAT) = &(*self.kept.para_format.as_ptr()).Base };
+        unsafe { *(format as *mut *const PARAFORMAT) = &*self.kept.para_format };
         Ok(())
     }
     fn TxGetSysColor(&self, index: SYS_COLOR_INDEX) -> COLORREF {
@@ -542,25 +533,13 @@ mod tests {
     use crate::notes::markdown::looks;
     use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
 
-    /// The caret where the words drawn end, the window aware of its screen's scale as Glance's are (on a screen scaled
-    /// past 100%: the text services count in the window's pixels whatever the scale, as Glance draws them).
-    #[test]
-    #[ignore = "makes a window of this session's"]
-    fn puts_the_caret_where_the_words_end() {
+    /// What `editor` draws on a white bitmap `wide` × `tall` (96 per inch, as the page draws it): each pixel's blue.
+    unsafe fn drawn(editor: &Editor, wide: u32, tall: u32) -> Vec<u8> {
         use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT};
         use windows::Win32::Graphics::Direct2D::{D2D1CreateFactory, ID2D1Factory, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT};
         use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
         use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory, WICBitmapCacheOnLoad};
         unsafe {
-            let _ = windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
-            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""), WS_POPUP, 0, 0, 800, 300, None, None, None, None).unwrap();
-            let (wide, tall) = (800u32, 300u32);
-            let editor = Editor::new(hwnd, RECT { left: 20, top: 30, right: 780, bottom: 280 }, "Segoe UI", 22.0, COLORREF(0)).expect("text services");
-            editor.set_text("MMMMMMMMMM second line");
-            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_SETFOCUS, WPARAM(0), LPARAM(0));
-            let document: ITextDocument = editor.services.cast().unwrap();
-            let _ = document.Range(i32::MAX, i32::MAX).unwrap().Select();
             let wic: IWICImagingFactory = windows::Win32::System::Com::CoCreateInstance(&CLSID_WICImagingFactory, None, windows::Win32::System::Com::CLSCTX_INPROC_SERVER).unwrap();
             let bitmap = wic.CreateBitmap(wide, tall, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad).unwrap();
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).unwrap();
@@ -572,7 +551,27 @@ mod tests {
             target.EndDraw(None, None).unwrap();
             let mut pixels = vec![0u8; (wide * tall * 4) as usize];
             bitmap.CopyPixels(std::ptr::null(), wide * 4, &mut pixels).unwrap();
-            let inked = |x: u32, y: u32| pixels[((y * wide + x) * 4) as usize] < 128;
+            pixels.chunks(4).map(|pixel| pixel[0]).collect()
+        }
+    }
+
+    /// The caret where the words drawn end, the window aware of its screen's scale as Glance's are (on a screen scaled
+    /// past 100%: the text services count in the window's pixels whatever the scale, as Glance draws them).
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn puts_the_caret_where_the_words_end() {
+        unsafe {
+            let _ = windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""), WS_POPUP, 0, 0, 800, 300, None, None, None, None).unwrap();
+            let (wide, tall) = (800u32, 300u32);
+            let editor = Editor::new(hwnd, RECT { left: 20, top: 30, right: 780, bottom: 280 }, "Segoe UI", 22.0, COLORREF(0)).expect("text services");
+            editor.set_text("MMMMMMMMMM second line");
+            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_SETFOCUS, WPARAM(0), LPARAM(0));
+            let document: ITextDocument = editor.services.cast().unwrap();
+            let _ = document.Range(i32::MAX, i32::MAX).unwrap().Select();
+            let pixels = drawn(&editor, wide, tall);
+            let inked = |x: u32, y: u32| pixels[(y * wide + x) as usize] < 128;
             // The words' right end, and their lines' top and bottom.
             let right = (0..wide).rev().find(|&x| (0..tall).any(|y| inked(x, y))).expect("words drawn");
             let bottom = (0..tall).rev().find(|&y| (0..wide).any(|x| inked(x, y))).unwrap();
@@ -596,7 +595,20 @@ mod tests {
             editor.set_text("abc\nabc 你好\nabc\nabc");
             // Each line's first character: 0, 4, 11, 15.
             let tops = [editor.top_of(0), editor.top_of(4), editor.top_of(11), editor.top_of(15)];
+            // On one line, the Chinese drawn (by DirectWrite's faces for it), its foot by the Latin's (not set higher
+            // or lower in a taller line).
+            editor.set_text("nnn你");
+            let split = {
+                let mut point = windows::Win32::Foundation::POINTL::default();
+                editor.answer(0x00D6, WPARAM(&mut point as *mut _ as usize), LPARAM(3));
+                point.x as u32
+            };
+            let pixels = drawn(&editor, 600, 400);
+            let foot = |xs: std::ops::Range<u32>| (0..400u32).rev().find(|&y| xs.clone().any(|x| pixels[(y * 600 + x) as usize] < 128));
+            let (latin, chinese) = (foot(0..split), foot(split..600));
             drop(editor);
+            let (latin, chinese) = (latin.expect("the Latin drawn"), chinese.expect("the Chinese drawn"));
+            assert!(latin.abs_diff(chinese) <= 1, "the Latin's foot at {latin}, the Chinese's at {chinese}");
             let _ = DestroyWindow(hwnd);
             let heights: Vec<i32> = tops.windows(2).map(|pair| pair[1] - pair[0]).collect();
             assert!(heights.iter().all(|height| (height - heights[2]).abs() <= 1), "lines {heights:?} tall");
