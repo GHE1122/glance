@@ -889,10 +889,27 @@ fn apps_rows(count: usize, theme: &Theme) -> usize {
 /// The picture of what is kept at hand (`target`, what opens it) in the square `side` wide at (`x`, `y`): as Explorer
 /// shows it; a web address, by its site's first letter.
 #[allow(clippy::too_many_arguments)]
-fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &str, x: f32, y: f32, side: f32) {
+pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &str, x: f32, y: f32, side: f32) {
     let web = target.starts_with("https://") || target.starts_with("http://");
-    match crate::station::thumbs::of(std::path::Path::new(target), TILE_PIXELS).filter(|_| !web) {
-        Some(picture) => frame.picture(&picture, x, y, side, side, side / 5.0, 1.0),
+    let path = std::path::Path::new(target);
+    // A file or folder on the disk: a folder, or a file not a program, by its mark on a plate (as the station draws
+    // them); a program by its picture. One no longer there, faint.
+    let on_disk = !web && !target.starts_with("shell:");
+    let found = on_disk.then(|| std::fs::metadata(path).ok()).flatten();
+    let gone = on_disk && found.is_none();
+    // (One gone: a folder where it has no extension.)
+    let folder = found.as_ref().map_or(gone && path.extension().is_none(), |found| found.is_dir());
+    if on_disk && (folder || !crate::station::apps::runs(path)) {
+        let round = side / 5.0;
+        frame.fill_rounded(theme.track, x, y, side, side, round);
+        if theme.skin != Skin::Glass {
+            frame.stroke_rounded(Fill::Solid(theme.rule), x, y, side, side, round, 1.0);
+        }
+        paint_file_mark(frame, theme, folder, path, Point { x: x + side / 2.0, y: y + side / 2.0 }, side * 0.62, side >= 26.0, gone);
+        return;
+    }
+    match crate::station::thumbs::of(path, TILE_PIXELS).filter(|_| !web) {
+        Some(picture) => frame.picture(&picture, x, y, side, side, side / 5.0, if gone { 0.4 } else { 1.0 }),
         None => {
             frame.fill_rounded(theme.track, x, y, side, side, side / 5.0);
             let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
@@ -922,7 +939,7 @@ fn paint_adder(frame: &dyn Canvas, scene: &Scene, x: f32, y: f32, side: f32, hit
 
 /// The outline of the box `w` × `h` at (`x`, `y`), its corners rounded by `radius`, as points round it (closed), for a
 /// dashed line to be drawn along.
-fn rounded_outline(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
+pub(crate) fn rounded_outline(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
     let radius = radius.min(w / 2.0).min(h / 2.0);
     let corners = [(x + w - radius, y + radius, -0.25), (x + w - radius, y + h - radius, 0.0), (x + radius, y + h - radius, 0.25), (x + radius, y + radius, 0.5)];
     let mut points = Vec::new();
@@ -2925,22 +2942,7 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
                     None => frame.icon(Icon::Image, centre, small * 0.4, theme.text3),
                 }
             } else {
-                let side = (small * 0.5).min(44.0);
-                if path.is_dir() {
-                    frame.icon(Icon::Folder, centre, side, theme.text3);
-                } else {
-                    frame.icon(Icon::File, centre, side, theme.text3);
-                    let kind = path.extension().map(|extension| extension.to_string_lossy().to_uppercase()).unwrap_or_default();
-                    if small >= 40.0 && !kind.is_empty() && kind.chars().count() <= 4 {
-                        // (Over the page's foot, from its left edge out, as the mockup has it.)
-                        let font = Font { size: (side * 0.2).clamp(7.5, 9.0), weight: 700.0, ..theme.small };
-                        let wide = frame.measure(&kind, font) + 8.0;
-                        let tall = font.size + 5.0;
-                        let (tx, ty) = (centre.x - side * 0.42, centre.y + side * 0.36 - tall);
-                        frame.fill_rounded(kind_colour(&kind), tx, ty, wide, tall, 3.0);
-                        centred(frame, &kind, font, Color::hex(0xFFFFFF, 1.0), tx, ty + (tall - font.size * 1.33) / 2.0, wide);
-                    }
-                }
+                paint_file_mark(frame, theme, path.is_dir(), path, centre, (small * 0.5).min(44.0), small >= 40.0, false);
             }
             // Files put on it together: how many more.
             if *more > 0 && small >= 40.0 {
@@ -2975,7 +2977,30 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
     }
 }
 
-/// The colour a file's kind is tagged with (see `paint_face`): by what it holds, as the programs that open it mark
+/// A folder's or a file's mark, as the panel's icons are drawn (a line, not the shell's picture of it), `side` wide
+/// round `centre`: a folder; a page, its kind (the file's extension) named on a tag of its colour where it is
+/// `tagged` (large enough to read). `faint`: as for one no longer where it was.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_file_mark(frame: &dyn Canvas, theme: &Theme, folder: bool, path: &std::path::Path, centre: Point, side: f32, tagged: bool, faint: bool) {
+    let shade = if faint { 0.45 } else { 1.0 };
+    if folder {
+        frame.icon(Icon::Folder, centre, side, theme.text3.alpha(theme.text3.a * shade));
+        return;
+    }
+    frame.icon(Icon::File, centre, side, theme.text3.alpha(theme.text3.a * shade));
+    let kind = path.extension().map(|extension| extension.to_string_lossy().to_uppercase()).unwrap_or_default();
+    if tagged && !kind.is_empty() && kind.chars().count() <= 4 {
+        // (Over the page's foot, from its left edge out, as the mockup has it.)
+        let font = Font { size: (side * 0.2).clamp(6.5, 9.0), weight: 700.0, ..theme.small };
+        let wide = frame.measure(&kind, font) + font.size * 0.9;
+        let tall = font.size + 4.0;
+        let (tx, ty) = (centre.x - side * 0.42, centre.y + side * 0.36 - tall);
+        frame.fill_rounded(kind_colour(&kind).alpha(shade), tx, ty, wide, tall, 2.5);
+        centred(frame, &kind, font, Color::hex(0xFFFFFF, shade), tx, ty + (tall - font.size * 1.33) / 2.0, wide);
+    }
+}
+
+/// The colour a file's kind is tagged with (see `paint_file_mark`): by what it holds, as the programs that open it mark
 /// it (a document's blue, a sheet's green, a slide's orange, a PDF's red), grey for one of no known kind.
 fn kind_colour(kind: &str) -> Color {
     let hex = match kind {

@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1
 use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_HIT_TEST_METRICS};
 use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, MonitorFromWindow, ScreenToClient, ValidateRect, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, ScreenToClient, ValidateRect, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::DataExchange::{AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RemoveClipboardFormatListener, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
@@ -1042,7 +1042,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 
 /// Asks `asked` in a window over `owner`: what the reader gave of their
 /// own (nothing, where they were not asked for it), if the answer was its
-/// `yes`; none, if not.
+/// `yes`; none, if not. With no `owner` (asked from a thread of its own, for
+/// what was pressed on the panel or a widget), it is at the pointer, over the
+/// windows kept above others as the panel is.
 pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
     let gfx = gfx::current().ok()?;
     // Shown till it returns (see `life`).
@@ -1052,7 +1054,22 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
         let class = w!("GlanceAsk");
         // (Registered once; again is refused, which is as well.)
         RegisterClassExW(&WNDCLASSEXW { cbSize: size_of::<WNDCLASSEXW>() as u32, lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: class, ..Default::default() });
-        let scale = GetDpiForWindow(owner).max(96) as f32 / 96.0;
+        // Where it goes: over its owner, or (none) at the pointer.
+        let owned = !owner.is_invalid();
+        let mut over = RECT::default();
+        if !owned || GetWindowRect(owner, &mut over).is_err() {
+            let mut pointer = POINT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pointer);
+            over = RECT { left: pointer.x, top: pointer.y, right: pointer.x, bottom: pointer.y };
+        }
+        let monitor = windows::Win32::Graphics::Gdi::MonitorFromRect(&over, MONITOR_DEFAULTTONEAREST);
+        let scale = if owned {
+            GetDpiForWindow(owner).max(96) as f32 / 96.0
+        } else {
+            let (mut dpi, mut unused) = (96u32, 96u32);
+            let _ = windows::Win32::UI::HiDpi::GetDpiForMonitor(monitor, windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI, &mut dpi, &mut unused);
+            dpi.max(96) as f32 / 96.0
+        };
         let own = asked.own.as_ref().map(|own| OwnText {
             words: own.words.into(),
             hint: own.hint.into(),
@@ -1097,15 +1114,14 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
         };
         // In the middle of the window it is over, within that window's screen, no taller than the screen (what
         // is sent scrolls the more).
-        let mut over = RECT::default();
-        let _ = GetWindowRect(owner, &mut over);
         let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let _ = GetMonitorInfoW(MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST), &mut screen);
+        let _ = GetMonitorInfoW(monitor, &mut screen);
         let room = screen.rcWork;
         let wide = ((WIDTH * scale) as i32).min(room.right - room.left);
         let tall = ((dialog.height() * scale) as i32).min((room.bottom - room.top) * 19 / 20);
         let (x, y) = (((over.left + over.right - wide) / 2).clamp(room.left, room.right - wide), ((over.top + over.bottom - tall) / 2).clamp(room.top, room.bottom - tall));
-        let window = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, class, &HSTRING::from(asked.title), WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, wide, tall, Some(owner), None, Some(module.into()), None).ok()?;
+        let above = if owned { WS_EX_NOREDIRECTIONBITMAP } else { WS_EX_NOREDIRECTIONBITMAP | windows::Win32::UI::WindowsAndMessaging::WS_EX_TOPMOST };
+        let window = CreateWindowExW(above, class, &HSTRING::from(asked.title), WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, wide, tall, owned.then_some(owner), None, Some(module.into()), None).ok()?;
         dialog.hwnd = window;
         // Its shadow and (on Windows 11) its round corners, as Windows gives a window with a frame.
         let _ = DwmExtendFrameIntoClientArea(window, &MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 });

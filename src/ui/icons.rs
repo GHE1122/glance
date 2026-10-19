@@ -49,6 +49,8 @@ pub enum Icon {
     Add,
     /// A folder (among the station's things).
     Folder,
+    /// Something dropped here.
+    ArrowDown,
     Search,
 }
 
@@ -91,6 +93,7 @@ impl Icon {
             Icon::Link => &["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71", "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"],
             Icon::Inbox => &["M22 12h-6l-2 3h-4l-2-3H2", "M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"],
             Icon::Add => &["M5 12h14", "M12 5v14"],
+            Icon::ArrowDown => &["M12 5v14", "m19 12-7 7-7-7"],
             Icon::Folder => &["M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"],
             Icon::Search => &["M19 11a8 8 0 1 1-16 0a8 8 0 1 1 16 0z", "m21 21-4.34-4.34"],
             Icon::Ellipsis => &["M13 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0z", "M20 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0z", "M6 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0z"],
@@ -344,7 +347,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::Search] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid.

@@ -2713,7 +2713,7 @@ impl Ui {
                 )),
             ),
             "notes" => (p("便签", "Notes"), Some(p("随手记下的想法和待办，每条是“文档”中的一个 Markdown 文件，可以贴到桌面", "Thoughts and to-dos noted down, each a Markdown file in Documents, which can be stuck on the desktop"))),
-            "apps" => (p("快捷 App", "Quick launch"), Some(p("常用的程序、文件夹和网址，点一下就打开", "Programs, folders and web addresses used often, opened with a click"))),
+            "apps" => (p("快捷 App", "Quick launch"), Some(p("常用的程序、文件、文件夹和网址，点击即可打开", "Programs, files, folders and web addresses used often, opened with a click"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
         }
     }

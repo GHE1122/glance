@@ -150,13 +150,19 @@ fn link_target(_: &Path) -> Option<PathBuf> {
 /// points at is a program installed to be set up when first opened). The Start menu lists documents, folders and
 /// web addresses beside them, which quick launch's picker leaves out.
 pub fn is_program(target: &str) -> bool {
-    const PROGRAMS: [&str; 8] = ["exe", "com", "bat", "cmd", "msc", "cpl", "appref-ms", "lnk"];
     let opened = opens(target);
     let named = opened.strip_prefix("shell:AppsFolder\\").unwrap_or(&opened);
     if named.starts_with("http://") || named.starts_with("https://") {
         return false;
     }
-    !named.contains('\\') || Path::new(named).extension().is_some_and(|extension| PROGRAMS.iter().any(|program| extension.eq_ignore_ascii_case(program)))
+    !named.contains('\\') || runs(Path::new(named))
+}
+
+/// Whether the file at `path` is one that runs (a program, a script Windows runs, a shortcut, by its extension), not
+/// a document opened by one.
+pub fn runs(path: &Path) -> bool {
+    const PROGRAMS: [&str; 8] = ["exe", "com", "bat", "cmd", "msc", "cpl", "appref-ms", "lnk"];
+    path.extension().is_some_and(|extension| PROGRAMS.iter().any(|program| extension.eq_ignore_ascii_case(program)))
 }
 
 /// What is kept at hand changed as `change` changes it (off the calling thread, which the settings then tell).

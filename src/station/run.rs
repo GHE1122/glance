@@ -223,6 +223,28 @@ fn open(given: &Content) {
 /// `act` done with the shell (opening, showing in Explorer) on a thread of its own, a single-threaded apartment as the
 /// shell wants: the station's thread never waits on Explorer (showing a file in a library's folder could keep it waiting
 /// for good, and with it everything the station does).
+/// The reader told that `app`, kept at hand, is no longer where it was, and asked whether it is to be taken off.
+fn ask_gone(app: &super::apps::App) {
+    let lang = crate::update::language();
+    let title = match lang {
+        crate::ui::text::Lang::Zh => format!("找不到“{}”", app.name),
+        crate::ui::text::Lang::En => format!("\"{}\" is not found", app.name),
+    };
+    let asked = crate::ui::ask::Asked {
+        title: &title,
+        intro: lang.pick("它可能已被移动、重命名或删除。可以将它从快捷 App 中移除。", "It may have been moved, renamed or deleted. It can be taken off quick launch."),
+        own: None,
+        sent: None,
+        yes: lang.pick("移除", "Take off"),
+        no: lang.pick("取消", "Cancel"),
+        dark: crate::os::apps_dark(),
+    };
+    if crate::ui::ask::show(windows::Win32::Foundation::HWND::default(), &asked).is_some() {
+        let gone = app.clone();
+        super::apps::change(move |apps| apps.retain(|kept| *kept != gone));
+    }
+}
+
 fn by_the_shell(act: impl FnOnce() + Send + 'static) {
     let _ = std::thread::Builder::new().name("glance: shell".into()).spawn(move || {
         unsafe {
@@ -444,8 +466,16 @@ impl Station {
                     FilesAct::Open => by_the_shell(move || open(&Content::Files(paths))),
                     FilesAct::Show => by_the_shell(move || show_in_explorer(&paths)),
                 },
-                Ask::Launch(target) => by_the_shell(move || unsafe {
-                    windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(target.as_str()), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
+                Ask::Launch(target) => by_the_shell(move || {
+                    // A file or folder no longer where it was kept: asked whether it is to be taken off.
+                    let kept = super::apps::shown().iter().find(|app| app.target == target).cloned();
+                    if let Some(app) = kept.filter(|app| app.location().is_some_and(|path| !path.exists())) {
+                        ask_gone(&app);
+                        return;
+                    }
+                    unsafe {
+                        windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(target.as_str()), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
+                    }
                 }),
                 Ask::CopyText(text) => {
                     if let Some(sequence) = clipboard::put(self.window, &Content::Text(text), false) {

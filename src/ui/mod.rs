@@ -28,7 +28,7 @@ pub mod seen;
 pub mod render;
 pub mod scene;
 #[cfg(windows)]
-mod ask;
+pub(crate) mod ask;
 pub(crate) mod picture;
 #[cfg(windows)]
 pub mod music;

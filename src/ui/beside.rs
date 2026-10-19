@@ -1,8 +1,9 @@
 //! The page beside the panel or a widget (see docs/station-and-notes.md, section 八): what opens from them and needs
 //! more room than they have, laid out beside them on their inner side, as tall as they are:
 //!
-//! - quick launch's choosing of programs: every program the Start menu lists, searched by name or pinyin, each added
-//!   or taken off at a press; what is not listed dropped on it, as on quick launch;
+//! - quick launch's adding: what is kept, in its order (dragged into another, taken off by its cross), and what may
+//!   be added, by its kind: every program the Start menu lists (searched by name or pinyin), files and folders used
+//!   lately; what is not listed chosen on the PC, or dropped on it, as on quick launch;
 //! - a note written: its words in a box the text services write (see `editor`: the keys, the input method, selection,
 //!   undo and the clipboard theirs), kept as they are typed (a moment after the last key), its colour chosen or it
 //!   taken to the Recycle Bin from its menu.
@@ -38,7 +39,7 @@ use crate::station::found::{self, Found};
 /// What the page shows.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Page {
-    /// Quick launch's choosing of programs.
+    /// Quick launch's adding.
     Picker,
     /// A note, by its file's name in the notes' folder (none: a new one, named by its title as it is first kept).
     Note(Option<String>),
@@ -85,6 +86,18 @@ const PAD: f32 = 16.0;
 const GAP: f32 = 8.0;
 /// How long a search may be.
 const SEARCH_MOST: usize = 64;
+/// Quick launch's adding (DIPs, from its top): what is kept, a cell each; its kinds' segment; the search; a row of
+/// a file or folder (its name and where it is); its foot (the button that chooses on the PC, and what it says).
+const STRIP_TOP: f32 = 50.0;
+const STRIP_CELL: f32 = 42.0;
+const KINDS_TOP: f32 = 102.0;
+const KINDS_H: f32 = 34.0;
+const SEARCH_TOP: f32 = 146.0;
+const LIST_TOP: f32 = 188.0;
+const ROW_TWO: f32 = 46.0;
+const PICK_FOOT: f32 = 74.0;
+/// How far a kept thing is moved, held, before it is dragged into another place (DIPs).
+const DRAG_FROM: f32 = 4.0;
 
 /// What is asked of its thread.
 enum Ask {
@@ -103,6 +116,8 @@ const GO_SOON: u32 = WM_APP + 8;
 /// The page's own part of what was written in a note's words' box (see `Beside::written`), done once the page is free:
 /// the box was given a message while the page was in the middle of another.
 const WRITTEN: u32 = WM_APP + 9;
+/// Something that may be added dragged over the page (wparam 1), or gone (0).
+const DROPPING: u32 = WM_APP + 10;
 /// Its timers: the caret's blink, drawn again while pictures are being made, and a note kept a moment after it was
 /// last written in (the text services' own timers are numbered past these).
 const BLINK: usize = 1;
@@ -157,6 +172,13 @@ struct Beside {
     page: Page,
     /// Windows' blurred desktop shows under it (see `ground`).
     acrylic: bool,
+    /// Quick launch's adding: the kind listed; something dragged over it to be added; a kept thing held (its place,
+    /// where it was pressed, whether it is being dragged); how far what is kept is scrolled along, and the most.
+    kind: Kinds,
+    dropping: bool,
+    holding: Option<(usize, (f32, f32), bool)>,
+    strip_scroll: f32,
+    strip_most: f32,
     search: Typing,
     /// How far its list is scrolled, and the most it can be.
     scroll: f32,
@@ -220,18 +242,42 @@ thread_local! {
     static MENU: RefCell<Option<(super::menu::Menu, Vec<NoteChoice>)>> = const { RefCell::new(None) };
 }
 
+/// What quick launch's adding lists: the Start menu's programs, files used lately, the folders they are in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kinds {
+    Programs,
+    Files,
+    Folders,
+}
+
+/// A row of what may be added: its name, what opens it, what is said under it, the letter its group is under (a
+/// program's), and whether it is a file or folder (drawn by its mark) or a program (by its picture).
+struct PickRow {
+    name: String,
+    target: String,
+    about: String,
+    letter: Option<char>,
+    on_disk: bool,
+}
+
 /// What a point on the page is on.
 #[derive(Clone, PartialEq, Debug)]
 enum Hit {
     Close,
     Search,
+    /// Quick launch's adding: a kind listed; a kept thing, by its place, and its cross; the button that chooses on
+    /// the PC.
+    Kind(Kinds),
+    Kept(usize),
+    Unkeep(usize),
+    Choose,
     /// A note's menu.
     NoteMenu,
     /// A thing previewed: copied, opened.
     PreviewCopy,
     PreviewOpen,
-    /// A program found, by what opens it: added, or taken off where it is kept already.
-    Program(String, String),
+    /// A thing listed, by what opens it and its name: added, or taken off where it is kept already.
+    Pick(String, String),
 }
 
 thread_local! {
@@ -380,6 +426,11 @@ fn show(opening: Opening) {
             lang: crate::update::language(),
             page: opening.page.clone(),
             acrylic,
+            kind: Kinds::Programs,
+            dropping: false,
+            holding: None,
+            strip_scroll: 0.0,
+            strip_most: 0.0,
             search: Typing::most(SEARCH_MOST),
             scroll: 0.0,
             scroll_most: 0.0,
@@ -435,8 +486,16 @@ fn show(opening: Opening) {
         found::look(move || {
             let _ = PostMessageW(Some(HWND(told as *mut _)), WM_TIMER, WPARAM(AGAIN), LPARAM(0));
         });
-        // What is dropped on it kept at hand, as on quick launch.
-        let target = crate::station::drop::Target::new(|dragged| crate::station::run::caught(dragged, None, crate::station::run::Lands::Apps));
+        // What is dropped on it kept at hand, as on quick launch; while it is dragged over, the page says so.
+        let told = hwnd.0 as isize;
+        let target = crate::station::drop::Target::new(move |dragged| {
+            use crate::station::drop::Dragged;
+            let over = matches!(dragged, Dragged::Over(_));
+            let _ = PostMessageW(Some(HWND(told as *mut _)), DROPPING, WPARAM(usize::from(over)), LPARAM(0));
+            if matches!(dragged, Dragged::Dropped(_)) {
+                crate::station::run::caught(dragged, None, crate::station::run::Lands::Apps);
+            }
+        });
         let _ = windows::Win32::System::Ole::RegisterDragDrop(hwnd, &target);
         DROP_TARGET.with(|held| *held.borrow_mut() = Some(target));
         let _ = SetTimer(Some(hwnd), BLINK, windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime(), None);
@@ -565,6 +624,18 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WRITTEN => {
             with(Beside::written);
         }
+        DROPPING => {
+            with(|beside| {
+                beside.dropping = wparam.0 == 1;
+                beside.redraw();
+                // (Drawn again once what was dropped is kept.)
+                let _ = unsafe { SetTimer(Some(hwnd), AGAIN, 300, None) };
+            });
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = point();
+            with(|beside| beside.hold(x / beside.scale, y / beside.scale));
+        }
         WM_PAINT => {
             with(Beside::draw);
             let _ = unsafe { ValidateRect(Some(hwnd), None) };
@@ -573,20 +644,34 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             let (x, y) = point();
             with(|beside| {
                 beside.pointer = Some((x / beside.scale, y / beside.scale));
+                if let Some((_, from, moved)) = beside.holding.as_mut() {
+                    *moved = *moved || ((x / beside.scale - from.0).powi(2) + (y / beside.scale - from.1).powi(2)).sqrt() > DRAG_FROM;
+                }
                 beside.redraw();
             });
         }
         WM_LBUTTONUP => {
             let (x, y) = point();
-            let close = with(|beside| beside.press(x / beside.scale, y / beside.scale)).unwrap_or(false);
+            let close = with(|beside| if beside.holding.is_some() { beside.let_go(x / beside.scale) } else { beside.press(x / beside.scale, y / beside.scale) }).unwrap_or(false);
             if close {
                 gone();
             }
         }
+        WM_CAPTURECHANGED => {
+            with(|beside| {
+                beside.holding = None;
+                beside.redraw();
+            });
+        }
         WM_MOUSEWHEEL => {
             let turns = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / 120.0;
             with(|beside| {
-                beside.scroll = (beside.scroll - turns * 3.0 * ROW).clamp(0.0, beside.scroll_most);
+                // (Over what is kept: along it; else down the list.)
+                if beside.pointer.is_some_and(|(_, y)| beside.page == Page::Picker && (STRIP_TOP..STRIP_TOP + STRIP_CELL).contains(&y)) {
+                    beside.strip_scroll = (beside.strip_scroll - turns * STRIP_CELL).clamp(0.0, beside.strip_most);
+                } else {
+                    beside.scroll = (beside.scroll - turns * 3.0 * ROW).clamp(0.0, beside.scroll_most);
+                }
                 beside.redraw();
             });
         }
@@ -869,10 +954,156 @@ impl Beside {
         }
     }
 
-    /// The programs it lists now: those the search asks for, in the Start menu's order; none till it has been read.
-    fn listed(&self) -> Vec<Found> {
+    /// What it lists now of the kind chosen, as the search asks: the Start menu's programs in its order, each under
+    /// its first letter (none till the menu has been read); the files come lately, the latest first; the folders they
+    /// are in, the one a file came to latest first.
+    fn rows(&self) -> Vec<PickRow> {
         let query = self.search.string();
-        found::all().map(|all| all.iter().filter(|found| found::matches(found, &query)).cloned().collect()).unwrap_or_default()
+        let searched = |name: &str| found::matches(&Found { name: name.to_string(), target: String::new(), initials: found::initials(name) }, &query);
+        match self.kind {
+            Kinds::Programs => found::all()
+                .map(|all| {
+                    all.iter()
+                        .filter(|found| found::matches(found, &query))
+                        .map(|found| PickRow {
+                            name: found.name.clone(),
+                            target: found.target.clone(),
+                            about: String::new(),
+                            letter: found.initials.first().map(|bits| if bits.trailing_zeros() < 26 { (b'A' + bits.trailing_zeros() as u8) as char } else { '#' }),
+                            on_disk: false,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Kinds::Files | Kinds::Folders => {
+                let mut came: Vec<crate::station::recent::Came> = crate::station::recent::shown().iter().cloned().collect();
+                came.sort_by_key(|came| std::cmp::Reverse(came.came_ms));
+                let now = crate::station::now_ms();
+                let mut seen = std::collections::HashSet::new();
+                let mut rows = Vec::new();
+                for came in came {
+                    let path = if self.kind == Kinds::Folders { came.path.parent().map(std::path::Path::to_path_buf) } else { Some(came.path.clone()) };
+                    let Some(path) = path.filter(|path| seen.insert(path.clone())) else { continue };
+                    let Some(app) = App::of_path(&path) else { continue };
+                    // (A file by its whole name: its kind is part of what tells it apart.)
+                    let name = path.file_name().map_or_else(|| app.name.clone(), |name| name.to_string_lossy().into_owned());
+                    if !searched(&name) {
+                        continue;
+                    }
+                    let place = path.parent().map(|parent| parent.display().to_string()).unwrap_or_default();
+                    rows.push(PickRow { name, target: app.target, about: format!("{place} · {}", super::text::since(came.came_ms, now, self.lang)), letter: None, on_disk: true });
+                }
+                rows
+            }
+        }
+    }
+
+    /// A press begun at (`x`, `y`) DIPs: on a kept thing, it is held (to be dragged into another place).
+    fn hold(&mut self, x: f32, y: f32) {
+        let held = self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4.clone());
+        if let Some(Hit::Kept(at)) = held {
+            self.holding = Some((at, (x, y), false));
+            unsafe {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.hwnd);
+            }
+        }
+    }
+
+    /// Where among what is kept a thing dragged at `x` goes: the gap nearest it.
+    fn gap_at(&self, x: f32, count: usize) -> usize {
+        (((x - PAD + self.strip_scroll) / STRIP_CELL).round().max(0.0) as usize).min(count)
+    }
+
+    /// A kept thing held let go at `x`: dragged, put in the gap it was dragged to. Never the page's going.
+    fn let_go(&mut self, x: f32) -> bool {
+        let Some((from, _, moved)) = self.holding.take() else { return false };
+        unsafe {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+        }
+        if moved {
+            let to = self.gap_at(x, crate::station::apps::shown().len());
+            crate::station::apps::change(move |apps| {
+                if from < apps.len() {
+                    let moving = apps.remove(from);
+                    apps.insert(if to > from { to - 1 } else { to }.min(apps.len()), moving);
+                }
+            });
+            unsafe {
+                let _ = SetTimer(Some(self.hwnd), AGAIN, 120, None);
+            }
+        }
+        self.redraw();
+        false
+    }
+
+    /// What is chosen on the PC, in Windows' own chooser, as the kind listed asks: programs (or shortcuts to them),
+    /// any files, or folders, several at once; none where it is closed.
+    fn choose(&self) -> Vec<std::path::PathBuf> {
+        use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+        use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+        use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_NODEREFERENCELINKS, FOS_PICKFOLDERS, SIGDN_FILESYSPATH};
+        let lang = self.lang;
+        unsafe {
+            let Ok(dialog) = CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) else { return Vec::new() };
+            let Ok(options) = dialog.GetOptions() else { return Vec::new() };
+            // (A shortcut chosen is kept as the shortcut, as one dropped is.)
+            let mut options = options | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_NODEREFERENCELINKS;
+            let title = match self.kind {
+                Kinds::Programs => lang.pick("选择程序", "Choose programs"),
+                Kinds::Files => lang.pick("选择文件", "Choose files"),
+                Kinds::Folders => lang.pick("选择文件夹", "Choose folders"),
+            };
+            if self.kind == Kinds::Folders {
+                options |= FOS_PICKFOLDERS;
+            }
+            let _ = dialog.SetOptions(options);
+            let _ = dialog.SetTitle(&HSTRING::from(title));
+            if self.kind == Kinds::Programs {
+                let (programs, all) = (HSTRING::from(lang.pick("程序", "Programs")), HSTRING::from(lang.pick("所有文件", "All files")));
+                let (programs_spec, all_spec) = (HSTRING::from("*.exe;*.lnk;*.appref-ms;*.bat;*.cmd"), HSTRING::from("*.*"));
+                let kinds = [
+                    COMDLG_FILTERSPEC { pszName: windows::core::PCWSTR(programs.as_ptr()), pszSpec: windows::core::PCWSTR(programs_spec.as_ptr()) },
+                    COMDLG_FILTERSPEC { pszName: windows::core::PCWSTR(all.as_ptr()), pszSpec: windows::core::PCWSTR(all_spec.as_ptr()) },
+                ];
+                let _ = dialog.SetFileTypes(&kinds);
+            }
+            if dialog.Show(Some(self.hwnd)).is_err() {
+                return Vec::new();
+            }
+            let Ok(chosen) = dialog.GetResults() else { return Vec::new() };
+            let count = chosen.GetCount().unwrap_or(0);
+            (0..count)
+                .filter_map(|at| {
+                    let item = chosen.GetItemAt(at).ok()?;
+                    let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+                    let path = name.to_string().ok().map(std::path::PathBuf::from);
+                    CoTaskMemFree(Some(name.0 as *const _));
+                    path
+                })
+                .collect()
+        }
+    }
+
+    /// `paths` kept at hand after what is there (what opens what is kept already, however it is named, not twice).
+    fn add_paths(&self, paths: Vec<std::path::PathBuf>) {
+        let added: Vec<App> = paths.iter().filter_map(|path| App::of_path(path)).collect();
+        // (Shortcuts read for what they open here, in this thread's apartment: see `apps::opens`.)
+        added.iter().for_each(|app| {
+            crate::station::apps::opens(&app.target);
+        });
+        if added.is_empty() {
+            return;
+        }
+        crate::station::apps::change(move |apps| {
+            for app in added {
+                if !apps.iter().any(|kept| crate::station::apps::same(&kept.target, &app.target)) {
+                    apps.push(app);
+                }
+            }
+        });
+        unsafe {
+            let _ = SetTimer(Some(self.hwnd), AGAIN, 120, None);
+        }
     }
 
     /// A press let go at (`x`, `y`) DIPs: done; whether the page is to go.
@@ -880,7 +1111,24 @@ impl Beside {
         let Some(hit) = self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4.clone()) else { return false };
         match hit {
             Hit::Close => return true,
-            Hit::Search => {}
+            Hit::Search | Hit::Kept(_) => {}
+            Hit::Kind(kind) => {
+                self.kind = kind;
+                self.search = Typing::most(SEARCH_MOST);
+                self.scroll = 0.0;
+            }
+            Hit::Unkeep(at) => {
+                if let Some(app) = crate::station::apps::shown().get(at).cloned() {
+                    crate::station::apps::change(move |apps| apps.retain(|kept| *kept != app));
+                    unsafe {
+                        let _ = SetTimer(Some(self.hwnd), AGAIN, 120, None);
+                    }
+                }
+            }
+            Hit::Choose => {
+                let chosen = self.choose();
+                self.add_paths(chosen);
+            }
             Hit::PreviewCopy | Hit::PreviewOpen => {
                 if let Page::Preview(id) = self.page {
                     crate::station::run::ask(if hit == Hit::PreviewCopy { crate::station::run::Ask::Copy(id) } else { crate::station::run::Ask::Open(id) });
@@ -893,8 +1141,12 @@ impl Beside {
                 }
                 self.note_menu(at);
             }
-            Hit::Program(target, name) => {
-                let app = App { target, name };
+            Hit::Pick(target, name) => {
+                // (A file or folder by its name as it is kept: see `App::of_path`.)
+                let app = match self.kind {
+                    Kinds::Programs => App { target, name },
+                    _ => App::of_path(std::path::Path::new(&target)).unwrap_or(App { target, name }),
+                };
                 crate::station::apps::change(move |apps| {
                     match apps.iter().position(|kept| crate::station::apps::same(&kept.target, &app.target)) {
                         Some(at) => {
@@ -925,13 +1177,15 @@ impl Beside {
             VK_END => self.search.go(self.search.text.len(), false),
             VK_BACK => self.search.erase(false),
             VK_DELETE => self.search.erase(true),
-            // Enter: the first one found added.
+            // Enter: the first one listed added.
             VK_RETURN => {
-                if let Some(first) = self.listed().into_iter().next() {
+                if let Some(first) = self.rows().into_iter().next() {
                     let kept = crate::station::apps::shown().iter().any(|app| crate::station::apps::same(&app.target, &first.target));
                     if !kept {
-                        let app = App { target: first.target, name: first.name };
-                        crate::station::apps::change(move |apps| apps.push(app));
+                        let app = if first.on_disk { App::of_path(std::path::Path::new(&first.target)) } else { Some(App { target: first.target, name: first.name }) };
+                        if let Some(app) = app {
+                            crate::station::apps::change(move |apps| apps.push(app));
+                        }
                     }
                 }
             }
@@ -1187,37 +1441,111 @@ impl Beside {
         self.hits = hits;
     }
 
+    /// Quick launch's adding: its head (what it is, how much is kept, its close); what is kept, a picture each, in its
+    /// order (dragged into another, taken off by the cross over the one under the pointer); the kinds of what may be
+    /// added, side by side; the search; what is listed of the kind chosen, each added or taken off at a press; at its
+    /// foot, the button that chooses on the PC. Something dragged over it to be added: the whole page says so.
     fn paint_picker(&mut self, frame: &Frame, (width, height): (f32, f32)) {
         let theme = self.theme.clone();
         let lang = self.lang;
         let mut hits = Vec::new();
-        let lit = |hits_at: (f32, f32, f32, f32), pointer: Option<(f32, f32)>| pointer.is_some_and(|(x, y)| x >= hits_at.0 && x < hits_at.0 + hits_at.2 && y >= hits_at.1 && y < hits_at.1 + hits_at.3);
+        let pointer = self.pointer;
+        let lit = |at: (f32, f32, f32, f32)| pointer.is_some_and(|(x, y)| x >= at.0 && x < at.0 + at.2 && y >= at.1 && y < at.1 + at.3);
+        let round = |tall: f32| if theme.skin == Skin::Glass { tall / 2.0 } else { theme.control_radius.max(4.0).min(tall / 2.0) };
         self.paint_ground(frame, (width, height));
-        // Its head: what it is, how many are kept, and its close.
+        // Its head.
         let kept = crate::station::apps::shown();
         let inner = width - 2.0 * PAD;
-        frame.text(lang.pick("添加程序", "Add programs"), theme.title, theme.text, PAD, 16.0, inner, Align::Start);
+        let title = lang.pick("添加到快捷 App", "Add to quick launch");
+        let title_w = frame.measure(title, theme.title);
+        frame.text(title, theme.title, theme.text, PAD, 16.0, inner, Align::Start);
         let said = match lang {
-            super::text::Lang::Zh => format!("已添加 {} 个", kept.len()),
-            super::text::Lang::En => format!("{} kept at hand", kept.len()),
+            super::text::Lang::Zh => format!("已添加 {} 项", kept.len()),
+            super::text::Lang::En => format!("{} added", kept.len()),
         };
-        let title_w = frame.measure(lang.pick("添加程序", "Add programs"), theme.title);
         frame.text(&said, theme.small, theme.text3, PAD + title_w + 10.0, 19.0, inner - title_w - 40.0, Align::Start);
         let close = (width - PAD - 28.0, 12.0, 28.0, 28.0);
-        if lit(close, self.pointer) {
-            frame.fill_rounded(theme.hover, close.0, close.1, close.2, close.3, theme.control_radius.min(14.0));
+        if lit(close) {
+            frame.fill_rounded(theme.hover, close.0, close.1, close.2, close.3, round(28.0));
         }
         frame.icon(Icon::Close, Point { x: close.0 + 14.0, y: close.1 + 14.0 }, 16.0, theme.text2);
         hits.push((close.0, close.1, close.2, close.3, Hit::Close));
+        // What is kept, along a strip scrolled by the wheel where it is more than fits.
+        let strip = (PAD - 4.0, STRIP_TOP, inner + 8.0, STRIP_CELL);
+        self.strip_most = (kept.len() as f32 * STRIP_CELL - inner).max(0.0);
+        self.strip_scroll = self.strip_scroll.clamp(0.0, self.strip_most);
+        frame.clip(strip.0, strip.1, strip.2, strip.3);
+        if kept.is_empty() {
+            frame.text(lang.pick("尚未添加任何项目", "Nothing added yet"), theme.small, theme.text3, PAD, STRIP_TOP + (STRIP_CELL - 16.0) / 2.0, inner, Align::Start);
+        }
+        let held = self.holding.filter(|(_, _, moved)| *moved);
+        let mut placed = Vec::new();
+        for (at, app) in kept.iter().enumerate() {
+            let x = PAD + at as f32 * STRIP_CELL - self.strip_scroll;
+            if x + STRIP_CELL < strip.0 || x > strip.0 + strip.2 {
+                continue;
+            }
+            let cell = (x, STRIP_TOP, STRIP_CELL, STRIP_CELL);
+            let over = lit(cell) && held.is_none();
+            if over || held.is_some_and(|(from, ..)| from == at) {
+                frame.fill_rounded(theme.hover, cell.0, cell.1, cell.2, cell.3, round(STRIP_CELL).min(12.0));
+            }
+            super::view::paint_app(frame, &theme, &app.name, &app.target, x + 6.0, STRIP_TOP + 6.0, STRIP_CELL - 12.0);
+            // Its cross, over the one under the pointer.
+            if over {
+                let centre = Point { x: x + STRIP_CELL - 8.0, y: STRIP_TOP + 8.0 };
+                frame.fill_circle(theme.text2, centre, 7.5);
+                frame.icon(Icon::Close, centre, 9.0, self.ground_colour());
+                placed.push((centre.x - 8.0, centre.y - 8.0, 16.0, 16.0, Hit::Unkeep(at)));
+            }
+            placed.push((cell.0, cell.1, cell.2, cell.3, Hit::Kept(at)));
+        }
+        // One dragged: the gap it goes to.
+        if let (Some(_), Some((px, _))) = (held, pointer) {
+            let gap = self.gap_at(px, kept.len());
+            frame.fill_rounded(self.accent(), PAD + gap as f32 * STRIP_CELL - self.strip_scroll - 1.0, STRIP_TOP + 6.0, 2.0, STRIP_CELL - 12.0, 1.0);
+        }
+        frame.unclip();
+        hits.extend(placed);
+        // The kinds, side by side on a ground of their own, the one listed lit (as the notes' views are).
+        let kinds = [(Kinds::Programs, Icon::LayoutGrid, lang.pick("程序", "Programs")), (Kinds::Files, Icon::File, lang.pick("文件", "Files")), (Kinds::Folders, Icon::Folder, lang.pick("文件夹", "Folders"))];
+        frame.fill_rounded(theme.track, PAD, KINDS_TOP, inner, KINDS_H, round(KINDS_H));
+        let cell_w = (inner - 6.0) / kinds.len() as f32;
+        for (at, (kind, icon, name)) in kinds.into_iter().enumerate() {
+            let cell = (PAD + 3.0 + at as f32 * cell_w, KINDS_TOP + 3.0, cell_w, KINDS_H - 6.0);
+            let chosen = kind == self.kind;
+            if chosen {
+                let face = if theme.skin == Skin::Paper { theme.text.alpha(0.12) } else { Color::hex(0xFFFFFF, if theme.dark { 0.16 } else { 0.9 }) };
+                frame.fill_rounded(face, cell.0, cell.1, cell.2, cell.3, (round(KINDS_H) - 3.0).max(2.0));
+            } else if lit(cell) {
+                frame.fill_rounded(theme.hover, cell.0, cell.1, cell.2, cell.3, (round(KINDS_H) - 3.0).max(2.0));
+            }
+            let font = if chosen { super::canvas::Font { weight: 650.0, ..theme.body } } else { theme.body };
+            let ink = match (chosen, theme.skin) {
+                (true, Skin::Fluent) => self.accent(),
+                (true, _) => theme.text,
+                (false, _) => theme.text2,
+            };
+            let name_w = frame.measure(name, font);
+            let start = cell.0 + (cell.2 - 15.0 - 6.0 - name_w) / 2.0;
+            frame.icon(icon, Point { x: start + 7.5, y: cell.1 + cell.3 / 2.0 }, 15.0, ink);
+            frame.text(name, font, ink, start + 21.0, cell.1 + (cell.3 - font.size * 1.35) / 2.0, name_w + 2.0, Align::Start);
+            hits.push((cell.0, cell.1, cell.2, cell.3, Hit::Kind(kind)));
+        }
         // The search, its caret blinking.
-        let field = (PAD, HEAD, inner, SEARCH);
-        frame.fill_rounded(theme.track, field.0, field.1, field.2, field.3, theme.control_radius.max(4.0).min(SEARCH / 2.0));
+        let field = (PAD, SEARCH_TOP, inner, SEARCH);
+        frame.fill_rounded(theme.track, field.0, field.1, field.2, field.3, round(SEARCH));
         frame.icon(Icon::Search, Point { x: field.0 + 16.0, y: field.1 + SEARCH / 2.0 }, 14.0, theme.text3);
         let text_x = field.0 + 32.0;
         let text_y = field.1 + (SEARCH - theme.body.size * 1.35) / 2.0;
         let words = self.search.string();
         if words.is_empty() {
-            frame.text(lang.pick("搜索程序，可以用拼音首字母", "Search by name"), theme.body, theme.text3, text_x, text_y, field.2 - 40.0, Align::Start);
+            let asked = match self.kind {
+                Kinds::Programs => lang.pick("搜索程序，可以用拼音首字母", "Search programs by name"),
+                Kinds::Files => lang.pick("搜索最近用过的文件", "Search the files used lately"),
+                Kinds::Folders => lang.pick("搜索最近用过的文件夹", "Search the folders used lately"),
+            };
+            frame.text(asked, theme.body, theme.text3, text_x, text_y, field.2 - 40.0, Align::Start);
         } else {
             frame.text(&words, theme.body, theme.text, text_x, text_y, field.2 - 40.0, Align::Start);
         }
@@ -1229,73 +1557,95 @@ impl Beside {
             frame.fill(theme.text, caret_x, text_y + 1.0, 1.2, caret_h - 2.0);
         }
         hits.push((field.0, field.1, field.2, field.3, Hit::Search));
-        // The list: under each first letter (none while searching), each with its picture, its name, and what a press
-        // does (added; kept already: taken off).
-        let top = HEAD + SEARCH + 12.0;
-        let bottom = height - FOOT;
-        let listed = self.listed();
+        // The list: programs under each first letter (none while searching); files and folders used lately, each with
+        // where it is and when it came; each with what a press does (added; kept already, taken off).
+        let top = LIST_TOP;
+        let bottom = height - PICK_FOOT;
+        let rows = self.rows();
         let searching = !words.trim().is_empty();
-        let mut rows: Vec<(f32, Option<char>, Option<&Found>)> = Vec::new();
+        let tall = if self.kind == Kinds::Programs { ROW } else { ROW_TWO };
+        let mut laid: Vec<(f32, Option<String>, Option<&PickRow>)> = Vec::new();
         let mut y = 0.0;
         let mut letter = None;
-        for found in &listed {
-            let first = found.initials.first().map(|bits| if bits.trailing_zeros() < 26 { (b'A' + bits.trailing_zeros() as u8) as char } else { '#' });
-            if !searching && first != letter {
-                letter = first;
-                rows.push((y, first, None));
+        if self.kind != Kinds::Programs && !rows.is_empty() {
+            laid.push((y, Some(lang.pick("最近用过", "Used lately").to_string()), None));
+            y += LETTER;
+        }
+        for row in &rows {
+            if self.kind == Kinds::Programs && !searching && row.letter != letter {
+                letter = row.letter;
+                laid.push((y, row.letter.map(String::from), None));
                 y += LETTER;
             }
-            rows.push((y, None, Some(found)));
-            y += ROW;
+            laid.push((y, None, Some(row)));
+            y += tall;
         }
         self.scroll_most = (y - (bottom - top)).max(0.0);
         self.scroll = self.scroll.clamp(0.0, self.scroll_most);
         frame.clip(0.0, top, width, bottom - top);
         let mut waiting = false;
-        if found::all().is_none() {
-            frame.text(lang.pick("正在读取开始菜单里的程序…", "Reading the Start menu's programs…"), theme.small, theme.text3, PAD, top + 8.0, inner, Align::Start);
-        } else if listed.is_empty() {
-            frame.text(lang.pick("没有找到这个程序", "No program found by that"), theme.small, theme.text3, PAD, top + 8.0, inner, Align::Start);
+        let none = match self.kind {
+            Kinds::Programs if found::all().is_none() => Some(lang.pick("正在读取开始菜单中的程序…", "Reading the Start menu's programs…")),
+            Kinds::Programs => lang.pick("没有找到匹配的程序", "No program found by that").into(),
+            _ if !crate::station::recent::on() => Some(lang.pick("最近文件未开启，可以从电脑中选择", "Recent files is off: choose on the PC")),
+            Kinds::Files => Some(lang.pick("最近用过的文件中没有找到", "None of the files used lately")),
+            Kinds::Folders => Some(lang.pick("最近用过的文件夹中没有找到", "None of the folders used lately")),
+        };
+        if rows.is_empty() {
+            if let Some(none) = none {
+                frame.text(none, theme.small, theme.text3, PAD, top + 8.0, inner, Align::Start);
+            }
         }
-        for (at, letter, found) in rows {
+        for (at, heading, row) in laid {
             let ry = top + at - self.scroll;
-            if ry + ROW < top || ry > bottom {
+            if ry + tall < top || ry > bottom {
                 continue;
             }
-            if let Some(letter) = letter {
-                frame.text(&letter.to_string(), theme.small, theme.text3, PAD, ry + (LETTER - 16.0) / 2.0 + 2.0, inner, Align::Start);
+            if let Some(heading) = heading {
+                frame.text(&heading, theme.small, theme.text3, PAD, ry + (LETTER - 16.0) / 2.0 + 2.0, inner, Align::Start);
                 continue;
             }
-            let Some(found) = found else { continue };
-            let row = (PAD - 6.0, ry, inner + 12.0, ROW);
-            let hovered = lit(row, self.pointer) && self.pointer.is_some_and(|(_, py)| py >= top && py < bottom);
+            let Some(row) = row else { continue };
+            let place = (PAD - 6.0, ry, inner + 12.0, tall);
+            let hovered = lit(place) && pointer.is_some_and(|(_, py)| py >= top && py < bottom);
             if hovered {
-                frame.fill_rounded(theme.hover, row.0, row.1 + 1.0, row.2, row.3 - 2.0, theme.control_radius.max(6.0));
+                frame.fill_rounded(theme.hover, place.0, place.1 + 1.0, place.2, place.3 - 2.0, round(tall).min(10.0));
             }
-            match crate::station::thumbs::of(std::path::Path::new(&found.target), 64) {
-                Some(picture) => frame.picture(&picture, PAD, ry + (ROW - 26.0) / 2.0, 26.0, 26.0, 5.0, 1.0),
-                None => {
-                    waiting = true;
-                    frame.fill_rounded(theme.track, PAD, ry + (ROW - 26.0) / 2.0, 26.0, 26.0, 5.0);
+            let face = 28.0;
+            if row.on_disk {
+                super::view::paint_app(frame, &theme, &row.name, &row.target, PAD, ry + (tall - face) / 2.0, face);
+            } else {
+                match crate::station::thumbs::of(std::path::Path::new(&row.target), 64) {
+                    Some(picture) => frame.picture(&picture, PAD, ry + (tall - face) / 2.0, face, face, 5.0, 1.0),
+                    None => {
+                        waiting = true;
+                        frame.fill_rounded(theme.track, PAD, ry + (tall - face) / 2.0, face, face, 5.0);
+                    }
                 }
             }
             // What a press does, at its end as the panel's buttons are drawn: a plus, on a plate while the pointer is on
-            // the row; kept already, a tick in the accent and its word (a press takes it off).
-            let is_kept = kept.iter().any(|app| crate::station::apps::same(&app.target, &found.target));
-            let mark = (PAD + inner - 28.0, ry + (ROW - 28.0) / 2.0, 28.0, 28.0);
-            let said_w = if is_kept { frame.measure(lang.pick("已添加", "Kept"), theme.small) + 6.0 } else { 0.0 };
-            frame.text(&found.name, theme.body, theme.text, PAD + 38.0, ry + (ROW - theme.body.size * 1.35) / 2.0, inner - 38.0 - mark.2 - said_w - 8.0, Align::Start);
+            // the row; kept already, a tick in the accent.
+            let is_kept = kept.iter().any(|app| crate::station::apps::same(&app.target, &row.target));
+            let mark = (PAD + inner - 28.0, ry + (tall - 28.0) / 2.0, 28.0, 28.0);
+            let words_w = inner - 38.0 - mark.2 - 8.0;
+            let ink = if is_kept { theme.text2 } else { theme.text };
+            if row.about.is_empty() {
+                frame.text(&row.name, theme.body, ink, PAD + 38.0, ry + (tall - theme.body.size * 1.35) / 2.0, words_w, Align::Start);
+            } else {
+                let name_top = ry + (tall - theme.body.size * 1.35 - 15.0) / 2.0;
+                frame.text(&row.name, theme.body, ink, PAD + 38.0, name_top, words_w, Align::Start);
+                frame.text(&row.about, theme.small, theme.text3, PAD + 38.0, name_top + theme.body.size * 1.35, words_w, Align::Start);
+            }
             let centre = Point { x: mark.0 + mark.2 / 2.0, y: mark.1 + mark.3 / 2.0 };
             if is_kept {
                 frame.icon(Icon::Check, centre, 15.0, self.accent());
-                frame.text(lang.pick("已添加", "Kept"), theme.small, theme.text3, mark.0 - said_w, ry + (ROW - 16.0) / 2.0, said_w, Align::Start);
             } else {
                 if hovered {
-                    frame.fill_rounded(theme.hover, mark.0, mark.1, mark.2, mark.3, theme.control_radius.min(mark.3 / 2.0));
+                    frame.fill_rounded(theme.hover, mark.0, mark.1, mark.2, mark.3, round(28.0));
                 }
                 frame.icon(Icon::Add, centre, 15.0, if hovered { theme.text } else { theme.text2 });
             }
-            hits.push((row.0, row.1.max(top), row.2, (row.1 + row.3).min(bottom) - row.1.max(top), Hit::Program(found.target.clone(), found.name.clone())));
+            hits.push((place.0, place.1.max(top), place.2, (place.1 + place.3).min(bottom) - place.1.max(top), Hit::Pick(row.target.clone(), row.name.clone())));
         }
         frame.unclip();
         // A thin thumb where in the list the view is.
@@ -1304,12 +1654,56 @@ impl Beside {
             let thumb = (tall * tall / (tall + self.scroll_most)).max(16.0);
             frame.fill_rounded(theme.text3.alpha(0.6), width - 6.0, top + (tall - thumb) * self.scroll / self.scroll_most, 2.0, thumb, 1.0);
         }
-        // Its foot: what to do with what is not listed.
-        frame.fill(theme.rule, PAD, bottom, inner, 1.0);
-        frame.icon(Icon::Add, Point { x: PAD + 8.0, y: bottom + FOOT / 2.0 }, 14.0, theme.text3);
-        frame.text(lang.pick("这里没有的程序：把它的 exe 或快捷方式拖到这里", "Not listed: drag its program or shortcut here"), theme.small, theme.text2, PAD + 24.0, bottom + (FOOT - 16.0) / 2.0, inner - 24.0, Align::Start);
+        // Its foot: what is not listed, chosen on the PC.
+        frame.fill(theme.rule, 0.0, bottom, width, 1.0);
+        let button = (PAD, bottom + 10.0, inner, 32.0);
+        frame.fill_rounded(theme.track, button.0, button.1, button.2, button.3, round(32.0));
+        if lit(button) {
+            frame.fill_rounded(theme.hover, button.0, button.1, button.2, button.3, round(32.0));
+        }
+        if theme.skin != Skin::Glass {
+            frame.stroke_rounded(super::canvas::Fill::Solid(theme.rule), button.0, button.1, button.2, button.3, round(32.0), 1.0);
+        }
+        let (label, hint, icon) = match self.kind {
+            Kinds::Programs => (lang.pick("列表中没有？从电脑中选择程序", "Not listed? Choose a program on the PC"), lang.pick("可以选择 exe 或快捷方式", "A program or a shortcut to one"), Icon::File),
+            Kinds::Files => (lang.pick("从电脑中选择文件", "Choose files on the PC"), lang.pick("也可以把文件拖到此页面上", "Or drag files onto this page"), Icon::File),
+            Kinds::Folders => (lang.pick("从电脑中选择文件夹", "Choose folders on the PC"), lang.pick("也可以把文件夹拖到此页面上", "Or drag folders onto this page"), Icon::Folder),
+        };
+        let label_w = frame.measure(label, theme.body);
+        let start = button.0 + (button.2 - 15.0 - 8.0 - label_w) / 2.0;
+        frame.icon(icon, Point { x: start + 7.5, y: button.1 + button.3 / 2.0 }, 15.0, theme.text2);
+        frame.text(label, theme.body, theme.text, start + 23.0, button.1 + (button.3 - theme.body.size * 1.35) / 2.0, label_w + 2.0, Align::Start);
+        hits.push((button.0, button.1, button.2, button.3, Hit::Choose));
+        let hint_w = frame.measure(hint, theme.small);
+        frame.text(hint, theme.small, theme.text3, (width - hint_w) / 2.0, bottom + 48.0, hint_w + 2.0, Align::Start);
+        // Something dragged over it to be added: the whole page says so.
+        if self.dropping {
+            self.paint_ground(frame, (width, height));
+            let mark = self.accent();
+            frame.fill(mark.alpha(0.06), 0.0, 0.0, width, height);
+            let (x, y, w, h) = (8.0, 8.0, width - 16.0, height - 16.0);
+            frame.stroke_dashed(&super::view::rounded_outline(x, y, w, h, round(32.0).max(8.0)), mark, 1.5);
+            let middle = height / 2.0;
+            frame.icon(Icon::ArrowDown, Point { x: width / 2.0, y: middle - 26.0 }, 28.0, mark);
+            let bold = super::canvas::Font { weight: 650.0, ..theme.body };
+            let says = lang.pick("松开即可添加到快捷 App", "Let go to add it to quick launch");
+            let says_w = frame.measure(says, bold);
+            frame.text(says, bold, mark, (width - says_w) / 2.0, middle, says_w + 2.0, Align::Start);
+            let more = lang.pick("可以添加程序、文件和文件夹", "Programs, files and folders");
+            let more_w = frame.measure(more, theme.small);
+            frame.text(more, theme.small, theme.text2, (width - more_w) / 2.0, middle + 24.0, more_w + 2.0, Align::Start);
+        }
         self.waiting = waiting;
         self.hits = hits;
+    }
+
+    /// The colour its ground comes to, for what is drawn on a mark over it (a kept thing's cross).
+    fn ground_colour(&self) -> Color {
+        match (self.theme.skin, self.theme.dark) {
+            (Skin::Paper, _) => self.theme.paper,
+            (_, true) => Color::hex(0x2C2C2C, 1.0),
+            (_, false) => Color::hex(0xF9F9F9, 1.0),
+        }
     }
 }
 
@@ -1339,7 +1733,20 @@ otepad.exe"),
         ];
         listed.sort_by(|a, b| (a.initials.first().map(|bits| bits.trailing_zeros()), &a.name).cmp(&(b.initials.first().map(|bits| bits.trailing_zeros()), &b.name)));
         found::pretend(listed);
-        crate::station::apps::pretend(vec![App { target: r"C:\Windows\System32\cmd.exe".into(), name: "微信".into() }]);
+        let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
+        crate::station::apps::pretend(vec![
+            App { target: r"C:\Windows\System32\cmd.exe".into(), name: "微信".into() },
+            App { target: r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into(), name: "计算器".into() },
+            App { target: file("docs").display().to_string(), name: "docs".into() },
+            App { target: file("Cargo.toml").display().to_string(), name: "Cargo".into() },
+            App { target: file("gone.pdf").display().to_string(), name: "gone".into() },
+        ]);
+        {
+            use crate::station::recent::{Came, Key, Kind};
+            let now = crate::station::now_ms();
+            let came = |id: u128, name: &str, ago_min: u64| Came { key: Key { drive: 'D', file: id }, path: file(name), came_ms: now - ago_min * 60_000, bytes: 1000, kind: Kind::Document, downloaded: false, site: None };
+            crate::station::recent::pretend(vec![came(1, "Cargo.toml", 3), came(2, "README.md", 30), came(3, "docs/station-and-notes.md", 90), came(4, "website/apple-touch-icon.png", 600), came(5, "scripts/release.ps1", 2000)]);
+        }
         let gfx = gfx::current().unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
@@ -1347,7 +1754,7 @@ otepad.exe"),
         for pass in 0..2 {
             for (skin, name) in [(Skin::Glass, "glass"), (Skin::Fluent, "fluent"), (Skin::Paper, "paper")] {
                 for dark in [false, true] {
-                    for search in ["", "wy"] {
+                    for (kind, search, dropping, label) in [(Kinds::Programs, "", false, "programs"), (Kinds::Programs, "wy", false, "wy"), (Kinds::Files, "", false, "files"), (Kinds::Folders, "", false, "folders"), (Kinds::Files, "", true, "drop")] {
                         let mut beside = Beside {
                             hwnd: HWND::default(),
                             gfx: gfx.clone(),
@@ -1358,10 +1765,15 @@ otepad.exe"),
                             lang: super::super::text::Lang::Zh,
                             page: Page::Picker,
                             acrylic: false,
+                            kind,
+                            dropping,
+                            holding: None,
+                            strip_scroll: 0.0,
+                            strip_most: 0.0,
                             search: Typing::most(SEARCH_MOST),
                             scroll: 0.0,
                             scroll_most: 0.0,
-                            pointer: Some((100.0, HEAD + SEARCH + 12.0 + 30.0 + 26.0)),
+                            pointer: Some((100.0, LIST_TOP + 30.0 + 26.0)),
                             hits: Vec::new(),
                             caret: None,
                             caret_on: true,
@@ -1373,7 +1785,7 @@ otepad.exe"),
                         beside.search.put(&search.encode_utf16().collect::<Vec<_>>());
                         let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, h))).unwrap();
                         if pass == 1 {
-                            let file = format!("{name}-{}-{}.png", if dark { "dark" } else { "light" }, if search.is_empty() { "all" } else { search });
+                            let file = format!("{name}-{}-{label}.png", if dark { "dark" } else { "light" });
                             crate::studio::save_png(&out.join(file), (w * 1.5) as u32, (h * 1.5) as u32, &pixels).unwrap();
                         }
                     }

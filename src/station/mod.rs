@@ -194,7 +194,7 @@ pub fn app_menu(at: u16, point: windows::Win32::Foundation::POINT, over_the_pane
     if app.location().is_some() {
         rows.push((AppChoice::Show, lang.pick("打开文件所在的位置", "Open its location"), Icon::Panel, false));
     }
-    rows.push((AppChoice::Remove, lang.pick("从快捷栏移除", "Take off quick launch"), Icon::Close, true));
+    rows.push((AppChoice::Remove, lang.pick("从快捷 App 移除", "Take off quick launch"), Icon::Close, true));
     let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
     let menu = Menu::open_at(items, crate::os::apps_dark(), point, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
