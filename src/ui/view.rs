@@ -457,17 +457,17 @@ enum Block {
     /// it; `said`, what it says instead of them (nothing on it), or over them (no room left); `over`, something
     /// dragged over it, to be dropped.
     Shelf { tiles: Vec<Tile>, shows: Shows, tall: f32, said: Option<String>, over: bool },
-    /// What was copied lately, the newest first, a row each, in room `tall` high, scrolled through past it.
-    Copies { rows: Vec<Tile>, tall: f32 },
+    /// What was copied lately, the newest first, as `view` shows them, in room `tall` high, scrolled through past it.
+    Copies { rows: Vec<Tile>, view: ShelfView, tall: f32 },
     /// The notes, the last written first, as `view` shows them, in room `tall` high (scrolled through past it); in a
     /// small lane, the last written alone.
     Notes { notes: Vec<NoteCard>, view: crate::settings::NotesView, tall: f32 },
     /// What is kept at hand (quick launch's), each by its name and what opens it, in `rows` rows (named, as a whole
     /// lane shows them; else one row of their pictures alone), and the place to add more.
     Apps { apps: Vec<(String, String)>, rows: usize, named: bool },
-    /// The files come lately that `filter` takes, the newest first, under the day each came, a row each, in room
-    /// `tall` high under the filter's choices, scrolled through past it.
-    Recent { rows: Vec<Lately>, filter: crate::station::recent::Filter, tall: f32 },
+    /// The files come lately that `filter` takes, the newest first, as `view` shows them (a list under the day each
+    /// came), in room `tall` high under the filter's choices, scrolled through past it.
+    Recent { rows: Vec<Lately>, filter: crate::station::recent::Filter, view: ShelfView, tall: f32 },
 }
 
 /// A note as its card shows it: its title, its first lines, how long ago it was written, its colour.
@@ -911,7 +911,8 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
         }
         return;
     }
-    match crate::station::thumbs::of(path, TILE_PIXELS).filter(|_| !web) {
+    // (A program by its icon alone: its thumbnail is, for some, its icon on a white square.)
+    match crate::station::thumbs::icon(path, TILE_PIXELS).filter(|_| !web) {
         Some(picture) => frame.picture(&picture, x, y, side, side, side / 5.0, if gone { 0.4 } else { 1.0 }),
         None => {
             frame.fill_rounded(theme.track, x, y, side, side, side / 5.0);
@@ -1083,19 +1084,25 @@ const STATION_TALL: f32 = 284.0;
 /// A row of the station's list, and of what was copied lately; the side of the picture at its start.
 const LIST_ROW: f32 = 40.0;
 const LIST_PICTURE: f32 = 30.0;
-/// How many pictures go across the pictures' view.
-const PICTURES_ACROSS: usize = 3;
+/// How many large cards go across (see `ShelfView::Large`), their plate as tall as so much of their width.
+const LARGE_ACROSS: usize = 2;
+const LARGE_PLATE: f32 = 0.75;
 /// A tab's height, and the room round its name.
 const TAB_H: f32 = 24.0;
 const TAB_PAD: f32 = 8.0;
-/// The side of a picture as it is asked for (physical px: as large as it is drawn up to 225%): a tile's, and one of
-/// the pictures' view.
+/// The side of a picture as it is asked for (physical px: as large as it is drawn up to 225%): a tile's, and a large
+/// card's.
 const TILE_PIXELS: u32 = 128;
 const LARGE_PIXELS: u32 = 256;
 
 /// A card's plate as tall as so much of its width, and the room under it for its name and what it is.
 const PLATE: f32 = 0.74;
 const CARD_WORDS: f32 = 5.0 + 2.0 * LINE;
+
+/// The side a page's pictures are asked for at, shown `view`'s way.
+fn pixels_for(view: ShelfView) -> u32 {
+    if view == ShelfView::Large { LARGE_PIXELS } else { TILE_PIXELS }
+}
 
 /// How many cards go across `width`: three in a column (as many as fit in a wider one), each at least a tile wide.
 fn cards_across(width: f32) -> usize {
@@ -1143,13 +1150,19 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     let fresh = shown.items.iter().filter(|item| item.copied && item.id > seen).count();
     let recent = crate::station::recent::on();
     let tab = if !recent && matches!(tab, Tab::Recent(_)) { Tab::Shelf } else { tab };
-    let mut blocks = vec![Block::Tabs { tab, count: tiles.len(), copies: copies.then_some(fresh), recent, view: shown.view }];
+    let view = match tab {
+        Tab::Shelf => shown.view,
+        Tab::Copies => shown.copies_view,
+        Tab::Recent(_) => shown.recent_view,
+    };
+    let mut blocks = vec![Block::Tabs { tab, count: tiles.len(), copies: copies.then_some(fresh), recent, view }];
     blocks.push(match tab {
-        Tab::Shelf => Block::Shelf { tiles, shows: Shows::View(shown.view), tall: STATION_TALL, said, over: shown.over },
-        Tab::Copies => Block::Copies { rows: shown.items.iter().rev().filter(|item| item.copied).map(|item| Tile::of(item, &folder, lang, now)).collect(), tall: STATION_TALL },
+        Tab::Shelf => Block::Shelf { tiles, shows: Shows::View(view), tall: STATION_TALL, said, over: shown.over },
+        Tab::Copies => Block::Copies { rows: shown.items.iter().rev().filter(|item| item.copied).map(|item| Tile::of(item, &folder, lang, now)).collect(), view, tall: STATION_TALL },
         Tab::Recent(filter) => Block::Recent {
             rows: crate::station::recent::shown().iter().filter(|came| filter.takes(came)).map(|came| Lately::of(came, lang, now)).collect(),
             filter,
+            view,
             tall: STATION_TALL,
         },
     });
@@ -1208,17 +1221,17 @@ impl Hash for Block {
                 (apps, rows, named).hash(state);
                 apps.iter().for_each(|(_, target)| face_key(std::path::Path::new(target), TILE_PIXELS).hash(state));
             }
-            Block::Recent { rows, filter, tall } => {
-                (rows, filter, tall.to_bits()).hash(state);
+            Block::Recent { rows, filter, view, tall } => {
+                (rows, filter, view, tall.to_bits()).hash(state);
                 rows.iter().for_each(|row| face_key(&row.path, TILE_PIXELS).hash(state));
             }
             Block::Shelf { tiles, shows, tall, said, over } => {
                 (tiles, shows, tall.to_bits(), said, over).hash(state);
-                pictures_made(tiles, if *shows == Shows::View(ShelfView::Pictures) { LARGE_PIXELS } else { TILE_PIXELS }, state);
+                pictures_made(tiles, if let Shows::View(view) = shows { pixels_for(*view) } else { TILE_PIXELS }, state);
             }
-            Block::Copies { rows, tall } => {
-                (rows, tall.to_bits()).hash(state);
-                pictures_made(rows, TILE_PIXELS, state);
+            Block::Copies { rows, view, tall } => {
+                (rows, view, tall.to_bits()).hash(state);
+                pictures_made(rows, pixels_for(*view), state);
             }
         }
     }
@@ -2754,14 +2767,14 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (Block::Apps { apps, rows, named }, Pass::Content) => {
                 paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, *rows, *named, hits);
             }
-            (Block::Recent { rows, filter, tall }, Pass::Content) => {
-                paint_recent(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *filter, *tall + spare, hits);
+            (Block::Recent { rows, filter, view, tall }, Pass::Content) => {
+                paint_recent(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *filter, *view, *tall + spare, hits);
             }
             (Block::Shelf { tiles, shows, tall, said, over }, Pass::Content) => {
                 paint_shelf(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, *shows, *tall + spare, said.as_deref(), *over, hits);
             }
-            (Block::Copies { rows, tall }, Pass::Content) => {
-                paint_copies(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *tall + spare, hits);
+            (Block::Copies { rows, view, tall }, Pass::Content) => {
+                paint_copies(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *view, *tall + spare, hits);
             }
         }
         frame.key("");
@@ -2842,7 +2855,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
     // At the end, the rest's menu; before it, while what is on it shows, how it shows (its view's mark, and a chevron).
     let more = left + width - MEDIA_ROW;
     pressed(frame, scene, hits, Hit::StationMore, Icon::Ellipsis, more, row, false);
-    if tab == Tab::Shelf {
+    {
         let wide = MEDIA_ROW + 12.0;
         let vx = more - 2.0 - wide;
         let lit = scene.hover == Some(Hit::StationView);
@@ -2852,8 +2865,8 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
         let color = if lit { theme.text } else { theme.text2 };
         let icon = match view {
             ShelfView::Cards => Icon::LayoutGrid,
+            ShelfView::Large => Icon::Image,
             ShelfView::List => Icon::List,
-            ShelfView::Pictures => Icon::Image,
         };
         frame.icon(icon, Point { x: vx + MEDIA_ROW / 2.0, y: row + MEDIA_ROW / 2.0 }, 15.0, color);
         frame.icon(Icon::ChevronDown, Point { x: vx + MEDIA_ROW + 3.0, y: row + MEDIA_ROW / 2.0 + 0.5 }, 10.0, color);
@@ -2913,9 +2926,9 @@ fn shelf_places(shows: Shows, count: usize, width: f32) -> (Vec<Rect>, f32) {
             (places, TILE_H)
         }
         Shows::View(ShelfView::List) => grid(1, width, LIST_ROW, 0.0),
-        Shows::View(ShelfView::Pictures) => {
-            let side = (width - (PICTURES_ACROSS - 1) as f32 * TILE_GAP) / PICTURES_ACROSS as f32;
-            grid(PICTURES_ACROSS, side, side, TILE_GAP)
+        Shows::View(ShelfView::Large) => {
+            let w = (width - (LARGE_ACROSS - 1) as f32 * TILE_GAP) / LARGE_ACROSS as f32;
+            grid(LARGE_ACROSS, w, w * LARGE_PLATE + CARD_WORDS, TILE_GAP)
         }
     }
 }
@@ -3006,10 +3019,8 @@ fn paint_shell_icon(frame: &dyn Canvas, theme: &Theme, path: &std::path::Path, c
 fn face_key(path: &std::path::Path, side: u32) -> Option<u64> {
     let picture = if shows_itself(path) {
         crate::station::thumbs::filling(path, side)
-    } else if path.is_absolute() && !crate::station::apps::pictured(path) {
-        crate::station::thumbs::icon(path, side)
     } else {
-        crate::station::thumbs::of(path, side)
+        crate::station::thumbs::icon(path, side)
     };
     picture.map(|picture| picture.key)
 }
@@ -3085,24 +3096,43 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         centred(frame, said.unwrap_or_default(), theme.small, theme.text2, left, middle + 4.0, width);
         return;
     }
+    paint_tiles(frame, scene, ink, (left, top, width), tiles, shows, tall, List::Shelf, &|tile: &Tile, _| Hit::Shelf(tile.id), hits);
+    // Where something dragged may be dropped: all of its lane, its head too (after its things: a press finds the
+    // first box it is in, a thing before the list it is on).
+    hits.push(drop_area(left, top, width, tall));
+    // No room left: said over it.
+    if let Some(said) = said {
+        let wide = (frame.measure(said, theme.small) + 20.0).min(width);
+        frame.fill_rounded(theme.signal, left + (width - wide) / 2.0, top + tall - 24.0, wide, 22.0, 11.0);
+        centred(frame, said, theme.small, Color::hex(0xFFFFFF, 1.0), left + (width - wide) / 2.0, top + tall - 21.0, wide);
+    }
+}
+
+/// A page's things (`tiles`, each pressed as `hit` says, by it and its place) from (`left`, `top`), `width` across,
+/// laid out as `shows` says, in room `tall` high, scrolled through past it (as `list`): a card each (its picture,
+/// its name and what it is under it; larger, two across), a line each, or (a small lane) one row of pictures, named.
+#[allow(clippy::too_many_arguments)]
+fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], shows: Shows, tall: f32, list: List, hit: &dyn Fn(&Tile, usize) -> Hit, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
     let (places, whole) = shelf_places(shows, tiles.len(), width);
     let most = (whole - tall).max(0.0);
-    let scroll = scene.scrolls.at(List::Shelf).clamp(0.0, most);
+    let scroll = scene.scrolls.at(list).clamp(0.0, most);
     frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
-    for (tile, place) in tiles.iter().zip(&places) {
+    for (at, (tile, place)) in tiles.iter().zip(&places).enumerate() {
         let (x, y) = (left + place.x, top + place.y - scroll);
         if y + place.h < top || y > top + tall {
             continue;
         }
-        let lit = scene.hover == Some(Hit::Shelf(tile.id));
+        let pressed = hit(tile, at);
+        let lit = scene.hover == Some(pressed);
         let words = if lit { theme.text } else { theme.text2 };
         match shows {
-            Shows::View(ShelfView::Cards) => {
+            Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
                 if lit {
                     frame.fill_rounded(theme.hover, x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0, theme.control_radius.max(6.0));
                 }
-                let plate = place.w * PLATE;
-                paint_face(frame, theme, ink, tile, x, y, place.w, plate, TILE_PIXELS);
+                let plate = place.w * if view == ShelfView::Large { LARGE_PLATE } else { PLATE };
+                paint_face(frame, theme, ink, tile, x, y, place.w, plate, pixels_for(view));
                 frame.text(&fitted(frame, &tile.label, theme.small, place.w), theme.small, words, x, y + plate + 5.0, place.w, Align::Start);
                 let tiny = Font { size: theme.small.size - 1.0, ..theme.small };
                 frame.text(&fitted(frame, &tile.about, tiny, place.w), tiny, theme.text3, x, y + plate + 5.0 + LINE, place.w, Align::Start);
@@ -3128,35 +3158,13 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                     frame.icon(Icon::Pin, Point { x: x + width - 7.0, y: y + LIST_ROW / 2.0 }, 12.0, ink.trace);
                 }
             }
-            Shows::View(ShelfView::Pictures) => {
-                paint_face(frame, theme, ink, tile, x, y, place.w, place.h, LARGE_PIXELS);
-                // A picture's or a file's name over its foot; under the pointer, the whole lit.
-                if matches!(tile.face, Face::Picture { .. }) {
-                    let band = LINE + 6.0;
-                    frame.clip(x, y + place.h - band, place.w, band);
-                    frame.fill_rounded(Color::hex(0x000000, 0.45), x, y, place.w, place.h, (place.w / 9.0).clamp(4.0, 10.0));
-                    frame.unclip();
-                    frame.text(&fitted(frame, &tile.label, theme.small, place.w - 12.0), theme.small, Color::hex(0xFFFFFF, 1.0), x + 6.0, y + place.h - band + 3.0, place.w - 12.0, Align::Start);
-                }
-                if lit {
-                    frame.stroke_rounded(Fill::Solid(ink.trace), x, y, place.w, place.h, (place.w / 9.0).clamp(4.0, 10.0), 2.0);
-                }
-            }
         }
-        hits.extend(shown_in((x, y, place.w, place.h, Hit::Shelf(tile.id)), (left - 4.0, top, width + 8.0, tall)));
+        hits.extend(shown_in((x, y, place.w, place.h, pressed), (left - 4.0, top, width + 8.0, tall)));
     }
     frame.unclip();
-    // What the wheel scrolls, and where something dragged may be dropped: all of its lane, its head too (after its
-    // things: a press finds the first box it is in, a thing before the list it is on).
+    // What the wheel scrolls (after its things: a press finds a thing before the list it is on).
     if most > 0.0 {
-        hits.push((left, top, width, tall, Hit::List(List::Shelf, most.to_bits())));
-    }
-    hits.push(drop_area(left, top, width, tall));
-    // No room left: said over it.
-    if let Some(said) = said {
-        let wide = (frame.measure(said, theme.small) + 20.0).min(width);
-        frame.fill_rounded(theme.signal, left + (width - wide) / 2.0, top + tall - 24.0, wide, 22.0, 11.0);
-        centred(frame, said, theme.small, Color::hex(0xFFFFFF, 1.0), left + (width - wide) / 2.0, top + tall - 21.0, wide);
+        hits.push((left, top, width, tall, Hit::List(list, most.to_bits())));
     }
     scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
 }
@@ -3165,7 +3173,7 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
 /// choices in a row, the chosen marked as its skin marks what is chosen; under them the files it takes, under the day
 /// each came, scrolled through.
 #[allow(clippy::too_many_arguments)]
-fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), rows: &[Lately], filter: crate::station::recent::Filter, tall: f32, hits: &mut Vec<HitBox>) {
+fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), rows: &[Lately], filter: crate::station::recent::Filter, view: ShelfView, tall: f32, hits: &mut Vec<HitBox>) {
     use crate::station::recent::Filter;
     let theme = scene.theme;
     let lang = scene.lang;
@@ -3209,6 +3217,12 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         frame.icon(Icon::File, Point { x: left + width / 2.0, y: middle - 12.0 }, 22.0, theme.text3);
         let said = if filter == Filter::All { lang.pick("下载、截图和新保存的文件会出现在这里", "Files you download, capture or save show here") } else { lang.pick("这一类没有新文件", "No new files of this kind") };
         centred(frame, said, theme.small, theme.text2, left, middle + 4.0, width);
+        return;
+    }
+    // As cards: each its picture, its name, and when it came under it (the newest first).
+    if view != ShelfView::List {
+        let tiles: Vec<Tile> = rows.iter().map(|row| Tile { id: 0, label: row.label.clone(), about: row.when.clone(), face: Face::Picture { path: row.path.clone(), more: 0 }, pinned: false }).collect();
+        paint_tiles(frame, scene, ink, (left, list_top, width), &tiles, Shows::View(view), list_tall, List::Recent, &|_, at| Hit::Recent(rows[at].file), hits);
         return;
     }
     // Each row's top (and each day's heading's, before its first row), from the list's top.
@@ -3314,13 +3328,18 @@ fn fitted<'t>(frame: &dyn Canvas, text: &'t str, font: Font, room: f32) -> std::
 /// What was copied lately (see `Block::Copies`) from (`left`, `top`), `width` across, in room `tall` high: a row each
 /// (what it is, its first words, and what and when under them), pressed to be copied again.
 #[allow(clippy::too_many_arguments)]
-fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), rows: &[Tile], tall: f32, hits: &mut Vec<HitBox>) {
+fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), rows: &[Tile], view: ShelfView, tall: f32, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let lang = scene.lang;
     if rows.is_empty() {
         let middle = top + tall / 2.0;
         frame.icon(Icon::Clipboard, Point { x: left + width / 2.0, y: middle - 12.0 }, 22.0, theme.text3);
         centred(frame, lang.pick("复制的文字、图片和文件会出现在这里", "What you copy shows here"), theme.small, theme.text2, left, middle + 4.0, width);
+        return;
+    }
+    // As cards: each its picture (words, their first lines), what it is and when under it.
+    if view != ShelfView::List {
+        paint_tiles(frame, scene, ink, (left, top, width), rows, Shows::View(view), tall, List::Copies, &|tile, _| Hit::Copied(tile.id), hits);
         return;
     }
     let whole = rows.len() as f32 * LIST_ROW;
@@ -3825,7 +3844,7 @@ otepad.exe", "Notepad"),
                 came(5, "README.md", 4 * 24 * 60, 64_000, Kind::Document, None),
             ]);
         }
-        let (pages, lanes) = ([ShelfView::Cards, ShelfView::List, ShelfView::Pictures], 5);
+        let (pages, lanes) = ([ShelfView::Cards, ShelfView::List, ShelfView::Large], 5);
         let (lane_w, lane_h) = (COLUMN_WIDTH, 360.0);
         let rows = [(Skin::Glass, false), (Skin::Glass, true), (Skin::Fluent, false), (Skin::Fluent, true), (Skin::Paper, false), (Skin::Paper, true)];
         let (w, h) = (lanes as f32 * (lane_w + 12.0), rows.len() as f32 * (lane_h + 12.0));
@@ -4165,17 +4184,17 @@ six".into()));
         let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false };
         let first = |hits: &[HitBox], x: f32, y: f32| hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4);
         let many: Vec<Tile> = (1..=40).map(tile).collect();
-        for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Pictures)] {
+        for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large)] {
             let mut hits = Vec::new();
             paint_shelf(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, shows, STATION_TALL, None, false, &mut hits);
             assert_eq!(first(&hits, 10.0, 10.0), Some(Hit::Shelf(1)), "{shows:?}");
         }
         let mut hits = Vec::new();
-        paint_copies(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, STATION_TALL, &mut hits);
+        paint_copies(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, ShelfView::List, STATION_TALL, &mut hits);
         assert_eq!(first(&hits, 10.0, 10.0), Some(Hit::Copied(1)));
         let rows: Vec<Lately> = (1..=40).map(|file| Lately { file: crate::station::recent::Key { drive: 'C', file }, day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new() }).collect();
         let mut hits = Vec::new();
-        paint_recent(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &rows, Default::default(), STATION_TALL, &mut hits);
+        paint_recent(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &rows, Default::default(), ShelfView::List, STATION_TALL, &mut hits);
         let row = hits.iter().find(|hit| hit.4 == Hit::Recent(crate::station::recent::Key { drive: 'C', file: 1 })).copied().unwrap();
         assert_eq!(first(&hits, row.0 + 5.0, row.1 + 5.0), Some(Hit::Recent(crate::station::recent::Key { drive: 'C', file: 1 })));
     }
@@ -4205,17 +4224,17 @@ six".into()));
             }
         };
         let (top, width) = (100.0, 320.0);
-        for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Pictures)] {
+        for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large)] {
             let mut hits = Vec::new();
             paint_shelf(&Nothing, &scene, ink, (0.0, top, width), &many, shows, STATION_TALL, None, false, &mut hits);
             within(&hits, top, STATION_TALL, &format!("{shows:?}"));
         }
         let mut hits = Vec::new();
-        paint_copies(&Nothing, &scene, ink, (0.0, top, width), &many, STATION_TALL, &mut hits);
+        paint_copies(&Nothing, &scene, ink, (0.0, top, width), &many, ShelfView::List, STATION_TALL, &mut hits);
         within(&hits, top, STATION_TALL, "copies");
         let rows: Vec<Lately> = (1..=40).map(|file| Lately { file: crate::station::recent::Key { drive: 'C', file }, day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new() }).collect();
         let mut hits = Vec::new();
-        paint_recent(&Nothing, &scene, ink, (0.0, top, width), &rows, Default::default(), STATION_TALL, &mut hits);
+        paint_recent(&Nothing, &scene, ink, (0.0, top, width), &rows, Default::default(), ShelfView::List, STATION_TALL, &mut hits);
         within(&hits, top + CHIP_H + 6.0, STATION_TALL - CHIP_H - 6.0, "recent");
         let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default() }).collect();
         for view in [crate::settings::NotesView::Deck, crate::settings::NotesView::Cards, crate::settings::NotesView::List] {
@@ -4313,7 +4332,7 @@ six".into()));
                 }
             }
             let mut hits = Vec::new();
-            paint_recent(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, width), &[], Default::default(), STATION_TALL, &mut hits);
+            paint_recent(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, width), &[], Default::default(), ShelfView::List, STATION_TALL, &mut hits);
             let chips: Vec<HitBox> = hits.iter().filter(|hit| matches!(hit.4, Hit::Tab(Tab::Recent(_)))).copied().collect();
             assert_eq!(chips.len(), 5, "{skin:?}");
             assert!(chips.iter().all(|chip| chip.0 + chip.2 <= width + 0.01), "{skin:?}: {chips:?}");
@@ -4346,7 +4365,7 @@ six".into()));
     }
 
     /// The station's places as each view lays them out: cards three across a column, filling it, each a plate as wide
-    /// and its words under it; a list a row each; three pictures across, square; a small lane's one row, as many as fit.
+    /// and its words under it; a list a row each; large cards two across; a small lane's one row, as many as fit.
     #[test]
     fn lays_the_station_out_as_its_view_says() {
         let width = COLUMN_WIDTH - 32.0;
@@ -4361,8 +4380,11 @@ six".into()));
         assert!((tall - (3.0 * card.h + 2.0 * TILE_GAP)).abs() < 0.01);
         let (list, tall) = shelf_places(Shows::View(ShelfView::List), 3, width);
         assert_eq!((list[2].y, list[2].w, tall), (2.0 * LIST_ROW, width, 3.0 * LIST_ROW));
-        let (pictures, _) = shelf_places(Shows::View(ShelfView::Pictures), 4, width);
-        assert_eq!((pictures[3].x, pictures[3].w, pictures[3].h), (0.0, pictures[0].w, pictures[0].w));
+        // Large cards: two across, filling it, each a plate three quarters as tall as wide and its words under it.
+        let (large, _) = shelf_places(Shows::View(ShelfView::Large), 4, width);
+        assert!((large[0].w * 2.0 + TILE_GAP - width).abs() < 0.01);
+        assert_eq!((large[2].x, large[3].x), (0.0, large[1].x));
+        assert!((large[0].h - (large[0].w * LARGE_PLATE + CARD_WORDS)).abs() < 0.01);
         let (row, tall) = shelf_places(Shows::Row, 9, width);
         assert_eq!((row.len(), tall), (tiles_across(width), TILE_H));
     }

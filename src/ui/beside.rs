@@ -1260,9 +1260,11 @@ impl Beside {
             Skin::Fluent => theme.tint,
             Skin::Glass => theme.glass.alpha(theme.glass_clear + theme.glass_frosted),
         };
-        if !self.acrylic {
-            frame.fill(if theme.dark { Color::hex(0x2C2C2C, 1.0) } else { Color::hex(0xF9F9F9, 1.0) }, 0.0, 0.0, width, height);
-        }
+        // Over the blurred desktop, Windows 11's sheet's luminosity layer, as the panel lays it (Windows' own blur
+        // under it alone is greyer than the panel); with no blurred desktop, a flyout's ground.
+        let luminosity = Theme::new(Skin::Fluent, theme.dark).luminosity;
+        let under = if self.acrylic { luminosity } else if theme.dark { Color::hex(0x2C2C2C, 1.0) } else { Color::hex(0xF9F9F9, 1.0) };
+        frame.fill(under, 0.0, 0.0, width, height);
         frame.fill(tint, 0.0, 0.0, width, height);
     }
 
@@ -1596,7 +1598,7 @@ impl Beside {
             if row.on_disk {
                 super::view::paint_app(frame, &theme, &row.name, &row.target, PAD, ry + (tall - face) / 2.0, face);
             } else {
-                match crate::station::thumbs::of(std::path::Path::new(&row.target), 64) {
+                match crate::station::thumbs::icon(std::path::Path::new(&row.target), 64) {
                     Some(picture) => frame.picture(&picture, PAD, ry + (tall - face) / 2.0, face, face, 5.0, 1.0),
                     None => {
                         waiting = true;

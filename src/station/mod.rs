@@ -218,7 +218,7 @@ pub fn app_chose(app: apps::App, choice: AppChoice) {
 /// it or of what was copied lately; keeps no more of what is copied; opens the settings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HeadChoice {
-    View(crate::settings::ShelfView),
+    View(crate::settings::StationPage, crate::settings::ShelfView),
     Clear,
     ClearCopies,
     StopCopies,
@@ -237,10 +237,18 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
     let view = run::shown().view;
     // Each row: what it does, its name, its icon, whether it is ticked, and whether a rule sets it off.
     let rows: Vec<(HeadChoice, &'static str, Icon, bool, bool)> = match (hit, tab) {
-        (Hit::StationView, _) => [(ShelfView::Cards, lang.pick("卡片", "Cards"), Icon::LayoutGrid), (ShelfView::List, lang.pick("列表", "List"), Icon::List), (ShelfView::Pictures, lang.pick("图片", "Pictures"), Icon::Image)]
-            .into_iter()
-            .map(|(shows, label, icon)| (HeadChoice::View(shows), label, icon, shows == view, false))
-            .collect(),
+        (Hit::StationView, tab) => {
+            // (Each page shown its own way.)
+            let (page, view) = match tab {
+                Tab::Shelf => (crate::settings::StationPage::Shelf, view),
+                Tab::Copies => (crate::settings::StationPage::Copies, run::shown().copies_view),
+                Tab::Recent(_) => (crate::settings::StationPage::Recent, run::shown().recent_view),
+            };
+            [(ShelfView::Cards, lang.pick("小卡片", "Small cards"), Icon::LayoutGrid), (ShelfView::Large, lang.pick("大卡片", "Large cards"), Icon::Image), (ShelfView::List, lang.pick("列表", "List"), Icon::List)]
+                .into_iter()
+                .map(|(shows, label, icon)| (HeadChoice::View(page, shows), label, icon, shows == view, false))
+                .collect()
+        }
         (Hit::StationMore, Tab::Shelf) => vec![
             (HeadChoice::Clear, lang.pick("全部清空（保留固定的项目）", "Clear all but the pinned"), Icon::Close, false, false),
             (HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true),
@@ -265,8 +273,14 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
 /// which they tell to restyle).
 pub fn head_chose(choice: HeadChoice) {
     match choice {
-        HeadChoice::View(view) => {
-            std::thread::spawn(move || crate::app().change(|settings| settings.station.view = view));
+        HeadChoice::View(page, view) => {
+            std::thread::spawn(move || {
+                crate::app().change(|settings| match page {
+                    crate::settings::StationPage::Shelf => settings.station.view = view,
+                    crate::settings::StationPage::Copies => settings.station.copies_view = view,
+                    crate::settings::StationPage::Recent => settings.station.recent_view = view,
+                })
+            });
         }
         HeadChoice::Clear => run::ask(run::Ask::Clear(false)),
         HeadChoice::ClearCopies => run::ask(run::Ask::Clear(true)),

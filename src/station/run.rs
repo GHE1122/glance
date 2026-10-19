@@ -75,8 +75,10 @@ pub struct Shown {
     pub items: Vec<Item>,
     /// Recently copied on.
     pub history: bool,
-    /// How what is on it shows.
+    /// How what is on it shows, what was copied, and the files come lately.
     pub view: crate::settings::ShelfView,
+    pub copies_view: crate::settings::ShelfView,
+    pub recent_view: crate::settings::ShelfView,
     /// What was last given could not be taken: no room but what is pinned holds.
     pub full: bool,
     /// Something is dragged over a station, to be dropped.
@@ -205,7 +207,7 @@ pub fn shown() -> Arc<Shown> {
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(all(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
-    *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, view, full: false, over: false }));
+    *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, full: false, over: false }));
 }
 
 /// `given` opened as Explorer opens it: each file (a folder in Explorer), or a web address in the browser.
@@ -559,7 +561,7 @@ impl Station {
     /// What it shows now, for the other threads, who are told.
     fn show(&self) {
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, full: self.keep.full, over: self.over };
+        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, full: self.keep.full, over: self.over };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();
