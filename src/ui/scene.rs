@@ -751,6 +751,13 @@ pub fn leave_out(window: HWND, out: bool) {
     }
 }
 
+/// The least box holding the screens (`monitors`) `area` meets: what of the desktop is behind it, past which there
+/// is no screen and nothing (the desktop's box reaches past a screen where screens of other heights stand beside it).
+/// None where it meets none.
+fn screens_of(area: RECT, monitors: &[RECT]) -> Option<RECT> {
+    monitors.iter().filter(|monitor| meet(**monitor, area)).copied().reduce(|a, b| RECT { left: a.left.min(b.left), top: a.top.min(b.top), right: a.right.max(b.right), bottom: a.bottom.max(b.bottom) })
+}
+
 fn meet(a: RECT, b: RECT) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
@@ -797,7 +804,7 @@ impl Scene {
         // The room to spare on the desktop (what reaches past it is of no screen): on whichever side there is room,
         // all of what was asked held. Against the desktop's edge (a panel, a widget stuck to it), it spares room
         // towards the middle. Not on one screen alone: what is behind a window across two is behind it on both.
-        let screen = Some(crate::mouse::desktop());
+        let screen = Some(screens_of(area, &crate::screens::monitors()).unwrap_or_else(crate::mouse::desktop));
         let span = |from: i32, to: i32, length: i32, low: Option<i32>, high: Option<i32>| {
             // As far as it goes from `from`, moved back from the screen's far side, never past where it begins.
             let start = high.map_or(from, |high| from.min(high - length));
@@ -1047,6 +1054,18 @@ impl Drop for Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What is behind an area reaches as far as the screens it is on, not the desktop's whole box: a widget at the top
+    /// of a screen lower than the one beside it has no screen above it.
+    #[test]
+    fn behind_reaches_the_screens_met() {
+        let rect = |left, top, right, bottom| RECT { left, top, right, bottom };
+        let monitors = [rect(-2905, -1459, -745, 2381), rect(-745, -1440, 2695, 0), rect(0, 0, 1920, 1080)];
+        assert_eq!(screens_of(rect(512, -1440, 2048, -1300), &monitors), Some(monitors[1]));
+        // Across two: both.
+        assert_eq!(screens_of(rect(-800, -1000, -700, -900), &monitors), Some(rect(-2905, -1459, 2695, 2381)));
+        assert_eq!(screens_of(rect(5000, 5000, 5100, 5100), &monitors), None);
+    }
 
     /// A window is put in a scene as opaque as it is drawn: a layered one at its opacity (one at none, as an overlay
     /// kept up and showing nothing is, as none at all), any other whole.
