@@ -16,6 +16,14 @@
 //! windows show, those of elevated programs too, and live (a video plays
 //! on in them); not the shadows the system draws around windows.
 //!
+//! Where the desktop is drawn in windows of its own under the desktop's window
+//! (a live wallpaper's, on Windows 11 24H2 and later, where they are its
+//! children), a thumbnail of the desktop's window leaves them out: it holds
+//! nothing there. Then the desktop's window itself is captured (one capture
+//! for every scene, without the border a capture is shown by), and each
+//! scene's part of it put in its window's own visual, under the thumbnails of
+//! the other windows (see `Feed`).
+//!
 //! A frame is taken only when one is wanted, on a thread other than the one
 //! that draws: as it comes, or at once if one has come meanwhile.
 //!
@@ -59,6 +67,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+use windows::Win32::Graphics::DirectComposition::{DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, GetShellWindow, GetWindowRect, IsIconic, IsWindowVisible, RegisterClassW, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
     SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WM_CLOSE,
@@ -85,7 +94,12 @@ impl Device {
         if !gfx.guarded {
             return None;
         }
-        let device = gfx.d3d().ok()?;
+        Device::on(&gfx.d3d().ok()?)
+    }
+
+    /// `device`'s (one whose context is guarded).
+    fn on(device: &ID3D11Device) -> Option<Device> {
+        let device = device.clone();
         let context = unsafe { device.GetImmediateContext() }.ok()?;
         let dxgi: IDXGIDevice = device.cast().ok()?;
         let direct3d: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.ok()?.cast().ok()?;
@@ -350,6 +364,255 @@ fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) ->
     Some((pool, session, arrived))
 }
 
+/// The desktop's own window captured itself, for every scene that is to show it so (see the top): its newest frame
+/// held (one of its pool's two), and the scenes' layers it is put in as each comes. Made once, as first wanted, and
+/// kept (a pool made anew keeps some of the card's memory till Glance ends); made anew only as the desktop's size
+/// changes.
+struct Feed {
+    shell: HWND,
+    pool: Direct3D11CaptureFramePool,
+    session: GraphicsCaptureSession,
+    size: SizeInt32,
+    shared: Arc<FeedShared>,
+}
+
+// (Its capture's objects are free-threaded; its window's handle only names it.)
+unsafe impl Send for Feed {}
+
+/// What a feed's frames meet as they come: its newest frame, the layers it is put in, and the device it is copied
+/// and composed with.
+struct FeedShared {
+    latest: Mutex<Option<Direct3D11CaptureFrame>>,
+    layers: Mutex<Vec<std::sync::Weak<Layer>>>,
+    device: Device,
+    /// The composition device the layers are made on (one for all, used under its lock).
+    composer: Mutex<Composer>,
+}
+
+struct Composer(IDCompositionDesktopDevice);
+// (Used only under its lock.)
+unsafe impl Send for Composer {}
+
+/// A scene's part of the desktop, in its window's own visual: where it is (the scene's area), the surface it is copied
+/// into (as large as the area), and whether the scene rests (nothing is put in it then).
+struct Layer {
+    held: Mutex<LayerHeld>,
+}
+
+struct LayerHeld {
+    area: RECT,
+    resting: bool,
+    /// (Held: let go of, its visual leaves the window.)
+    _target: IDCompositionTarget,
+    visual: IDCompositionVisual2,
+    surface: Option<(IDCompositionSurface, (i32, i32))>,
+}
+
+// (Used only under its lock.)
+unsafe impl Send for LayerHeld {}
+
+static FEED: Mutex<Option<Feed>> = Mutex::new(None);
+
+/// Whether a thumbnail of the desktop's window `shell` leaves out what it shows: a window under it, shown, drawn
+/// through a surface of its own (a live wallpaper's), which its thumbnail does not hold.
+fn drawn_apart(shell: HWND) -> bool {
+    unsafe extern "system" fn each(window: HWND, found: LPARAM) -> BOOL {
+        let apart = unsafe { IsWindowVisible(window).as_bool() && GetWindowLongPtrW(window, GWL_EXSTYLE) as u32 & WS_EX_NOREDIRECTIONBITMAP.0 != 0 };
+        if apart {
+            unsafe { *(found.0 as *mut bool) = true };
+        }
+        (!apart).into()
+    }
+    let mut found = false;
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::EnumChildWindows(Some(shell), Some(each), LPARAM(&mut found as *mut bool as isize));
+    }
+    found
+}
+
+impl FeedShared {
+    /// `frame` (the desktop's window, its top left at the window's) put in `layer`, where it does not rest: the part of
+    /// it in the layer's area copied into its surface (made anew as the area's size changes), what of the area is
+    /// past it clear.
+    fn put(&self, layer: &Layer, frame: &Direct3D11CaptureFrame, desktop: RECT) -> Option<()> {
+        use windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext1;
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_ALPHA_MODE_PREMULTIPLIED;
+        let mut held = layer.held.lock().unwrap();
+        if held.resting {
+            return Some(());
+        }
+        let area = held.area;
+        let size = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
+        let composer = self.composer.lock().unwrap();
+        unsafe {
+            if held.surface.as_ref().is_none_or(|(_, made)| *made != size) {
+                let surface = composer.0.CreateSurface(size.0 as u32, size.1 as u32, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED).ok()?;
+                held.visual.SetContent(&surface).ok()?;
+                held.surface = Some((surface, size));
+            }
+            let (surface, _) = held.surface.as_ref()?;
+            let texture: ID3D11Texture2D = frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface().ok()?;
+            let mut description = D3D11_TEXTURE2D_DESC::default();
+            texture.GetDesc(&mut description);
+            let mut offset = windows::Win32::Foundation::POINT::default();
+            let into: ID3D11Texture2D = surface.BeginDraw(None, &mut offset).ok()?;
+            // Clear first (only its own part: a surface may share its texture with others).
+            let mut view = None;
+            if self.device.device.CreateRenderTargetView(&into, None, Some(&mut view)).is_ok() {
+                if let (Some(view), Ok(context)) = (view, self.device.context.cast::<ID3D11DeviceContext1>()) {
+                    let whole = RECT { left: offset.x, top: offset.y, right: offset.x + size.0, bottom: offset.y + size.1 };
+                    context.ClearView(&view, &[0.0; 4], Some(&[whole]));
+                }
+            }
+            // What of the desktop is in the area, from the frame (as far as it goes).
+            let frame_rect = RECT { left: desktop.left, top: desktop.top, right: desktop.left + description.Width as i32, bottom: desktop.top + description.Height as i32 };
+            if let Some(part) = meeting(area, frame_rect) {
+                let region = D3D11_BOX { left: (part.left - desktop.left) as u32, top: (part.top - desktop.top) as u32, front: 0, right: (part.right - desktop.left) as u32, bottom: (part.bottom - desktop.top) as u32, back: 1 };
+                self.device.context.CopySubresourceRegion(&into, 0, (offset.x + part.left - area.left) as u32, (offset.y + part.top - area.top) as u32, 0, &texture, 0, Some(&region));
+            }
+            surface.EndDraw().ok()?;
+            composer.0.Commit().ok()?;
+        }
+        Some(())
+    }
+
+    /// The newest frame put in every layer that does not rest (the layers gone, forgotten).
+    fn put_all(&self, frame: &Direct3D11CaptureFrame, desktop: RECT) {
+        let layers: Vec<Arc<Layer>> = {
+            let mut layers = self.layers.lock().unwrap();
+            layers.retain(|layer| layer.strong_count() > 0);
+            layers.iter().filter_map(std::sync::Weak::upgrade).collect()
+        };
+        for layer in layers {
+            let _ = self.put(&layer, frame, desktop);
+        }
+    }
+}
+
+/// Where the desktop's window `shell` is (physical screen coordinates).
+fn desktop_rect(shell: HWND) -> RECT {
+    let mut rect = RECT::default();
+    let _ = unsafe { GetWindowRect(shell, &mut rect) };
+    rect
+}
+
+impl Feed {
+    /// The desktop's window `shell` captured on `gfx`'s device, without a border (none where the system cannot leave
+    /// it out: a border round every screen is not to be shown), each frame put in the layers as it comes.
+    fn new(shell: HWND, d3d: &ID3D11Device) -> Option<Feed> {
+        let device = Device::on(d3d)?;
+        let composer = unsafe { DCompositionCreateDevice2::<_, IDCompositionDesktopDevice>(&device.device.cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>().ok()?) }.ok()?;
+        let item = unsafe { windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().ok()?.CreateForWindow::<GraphicsCaptureItem>(shell) }.ok()?;
+        let size = item.Size().ok()?;
+        let shared = Arc::new(FeedShared { latest: Mutex::new(None), layers: Mutex::new(Vec::new()), device, composer: Mutex::new(Composer(composer)) });
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).ok()?;
+        let told = shared.clone();
+        let shell_handle = shell.0 as isize;
+        pool.FrameArrived(&TypedEventHandler::new(move |pool: windows::core::Ref<Direct3D11CaptureFramePool>, _| {
+            let Ok(pool) = pool.ok() else { return Ok(()) };
+            let mut newest: Option<Direct3D11CaptureFrame> = None;
+            while let Ok(frame) = pool.TryGetNextFrame() {
+                close(newest.replace(frame));
+            }
+            let Some(frame) = newest else { return Ok(()) };
+            let desktop = desktop_rect(HWND(shell_handle as *mut _));
+            told.put_all(&frame, desktop);
+            // Held as the newest (the one before closed once no lock is held).
+            let older = told.latest.lock().unwrap().replace(frame);
+            close(older);
+            Ok(())
+        }))
+        .ok()?;
+        let session = pool.CreateCaptureSession(&item).ok()?;
+        session.SetIsBorderRequired(false).ok()?;
+        let _ = session.SetIsCursorCaptureEnabled(false);
+        session.StartCapture().ok()?;
+        Some(Feed { shell, pool, session, size, shared })
+    }
+
+    /// A layer in `window` (a scene's) for `area`, the newest frame put in it at once.
+    fn layer(&self, window: HWND, area: RECT) -> Option<Arc<Layer>> {
+        let (target, visual) = {
+            let composer = self.shared.composer.lock().unwrap();
+            unsafe {
+                let target = composer.0.CreateTargetForHwnd(window, false).ok()?;
+                let visual: IDCompositionVisual2 = composer.0.CreateVisual().ok()?;
+                target.SetRoot(&visual).ok()?;
+                composer.0.Commit().ok()?;
+                (target, visual)
+            }
+        };
+        let layer = Arc::new(Layer { held: Mutex::new(LayerHeld { area, resting: false, _target: target, visual, surface: None }) });
+        self.shared.layers.lock().unwrap().push(Arc::downgrade(&layer));
+        self.show(&layer);
+        Some(layer)
+    }
+
+    /// The newest frame put in `layer` (as it is arranged anew: no frame may come while the desktop is as it was).
+    fn show(&self, layer: &Layer) {
+        let newest = self.shared.latest.lock().unwrap().clone();
+        if let Some(frame) = newest {
+            let _ = self.shared.put(layer, &frame, desktop_rect(self.shell));
+        }
+    }
+
+    /// Made anew for the desktop's size, where it changed (a screen came or went).
+    fn follow_size(&mut self) {
+        let desktop = desktop_rect(self.shell);
+        let size = SizeInt32 { Width: desktop.right - desktop.left, Height: desktop.bottom - desktop.top };
+        if size != self.size && size.Width > 0 && size.Height > 0 {
+            let _ = self.pool.Recreate(&self.shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+            self.size = size;
+        }
+    }
+}
+
+/// A layer of the desktop for a scene's `window` at `area`, from the feed (made as first wanted, for the desktop's
+/// window as it is now: made anew where that is another, as Explorer started again).
+fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device) -> Option<Arc<Layer>> {
+    let mut feed = FEED.lock().unwrap();
+    if feed.as_ref().is_some_and(|feed| feed.shell != shell) {
+        if let Some(old) = feed.take() {
+            let _ = old.session.Close();
+            let _ = old.pool.Close();
+            close(old.shared.latest.lock().unwrap().take());
+        }
+    }
+    if feed.is_none() {
+        *feed = Feed::new(shell, d3d);
+    }
+    let feed = feed.as_mut()?;
+    feed.follow_size();
+    feed.layer(window, area)
+}
+
+/// `layer` moved to `area` (and no longer resting), the newest frame put in it.
+fn move_layer(layer: &Layer, area: RECT) {
+    {
+        let mut held = layer.held.lock().unwrap();
+        held.area = area;
+        held.resting = false;
+    }
+    if let Some(feed) = FEED.lock().unwrap().as_mut() {
+        feed.follow_size();
+        feed.show(layer);
+    }
+}
+
+/// `layer` emptied (the desktop shown as a thumbnail again, or its scene gone): nothing in it from now on.
+fn empty_layer(layer: &Layer) {
+    let mut held = layer.held.lock().unwrap();
+    held.resting = true;
+    held.surface = None;
+    if let Some(feed) = FEED.lock().unwrap().as_ref() {
+        let composer = feed.shared.composer.lock().unwrap();
+        unsafe {
+            let _ = held.visual.SetContent(None);
+            let _ = composer.0.Commit();
+        }
+    }
+}
+
 /// A window of Glance's own that no one sees, the windows behind an area put together in it, and its capture.
 pub struct Scene {
     owner: HWND,
@@ -365,6 +628,10 @@ pub struct Scene {
     /// The size the frames are made at.
     size: SizeInt32,
     shared: Arc<Shared>,
+    /// The desktop, captured itself and put under the windows behind, where a thumbnail of its window would leave out
+    /// what it shows (see `Feed`); the device to start that on.
+    desktop: Option<Arc<Layer>>,
+    d3d: ID3D11Device,
 }
 
 /// `frame` read on a thread of its own, then closed (one of what was there before is not read, and the next is
@@ -512,7 +779,8 @@ impl Scene {
                 let _ = DestroyWindow(owner);
                 return None;
             };
-            Some(Scene { owner, window, area, shown: Vec::new(), pool, session, arrived, size, shared })
+            let d3d = shared.device.device.clone();
+            Some(Scene { owner, window, area, shown: Vec::new(), pool, session, arrived, size, shared, desktop: None, d3d })
         }
     }
 
@@ -560,16 +828,28 @@ impl Scene {
             })
             .collect();
         behind.reverse();
+        // The desktop, where its window's thumbnail would leave out what it shows (see `Feed`): captured itself and put
+        // in this scene's own layer, not as a thumbnail.
+        let shell = unsafe { GetShellWindow() };
+        let desktop_at = behind.iter().find(|(window, _)| *window == shell).map(|(_, rect)| *rect);
+        let apart = desktop_at.is_some() && drawn_apart(shell);
+        if apart {
+            behind.retain(|(window, _)| *window != shell);
+        }
         let same_windows = behind.len() == self.shown.len() && behind.iter().zip(&self.shown).all(|((a, _), (b, ..))| a == b);
-        if same_windows && area == self.area && behind.iter().zip(&self.shown).all(|((_, a), (.., b))| a == b) {
+        // (Nor the desktop's layer: there where it is to be, and not resting.)
+        let layer_as_it_was = match &self.desktop {
+            Some(layer) => apart && !layer.held.lock().unwrap().resting,
+            None => !apart,
+        };
+        if same_windows && layer_as_it_was && area == self.area && behind.iter().zip(&self.shown).all(|((_, a), (.., b))| a == b) {
             return false;
         }
         // Where the desktop's own window will be put, on a screen (see `keep`): worked out before anything is put in
         // place, so that nothing comes between the last of that and when frames count from. (Between screens it
         // holds nothing. Not behind, as while Explorer is not running: nothing then tells such a frame.)
-        let shell = unsafe { GetShellWindow() };
-        let opaque: Vec<RECT> = behind.iter().find(|(window, _)| *window == shell).map_or_else(Vec::new, |(_, desktop)| {
-            crate::screens::monitors().into_iter().filter_map(|monitor| meeting(meeting(*desktop, monitor)?, area)).collect()
+        let opaque: Vec<RECT> = desktop_at.map_or_else(Vec::new, |desktop| {
+            crate::screens::monitors().into_iter().filter_map(|monitor| meeting(meeting(desktop, monitor)?, area)).collect()
         });
         let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
         if area != self.area {
@@ -580,6 +860,16 @@ impl Scene {
                 let _ = SetWindowPos(self.window, None, area.left, area.top, width, height, flags);
             }
             self.area = area;
+        }
+        match (&self.desktop, apart) {
+            (Some(layer), true) => move_layer(layer, area),
+            (None, true) => self.desktop = desktop_layer(shell, self.window, area, &self.d3d),
+            (Some(_), false) => {
+                if let Some(layer) = self.desktop.take() {
+                    empty_layer(&layer);
+                }
+            }
+            (None, false) => {}
         }
         let screen_size = screen.map(|s| SizeInt32 { Width: s.right - s.left, Height: s.bottom - s.top });
         // (Not made larger, the frames that come are too small, and are not taken: see `Shared::read`.)
@@ -624,6 +914,9 @@ impl Scene {
         // (A frame being read meanwhile is of what was there: marked so first, see `Shared::read`.)
         *self.shared.of.lock().unwrap() = (least, now_100ns(), Vec::new());
         self.shared.resting.store(true, Ordering::Release);
+        if let Some(layer) = &self.desktop {
+            layer.held.lock().unwrap().resting = true;
+        }
         self.forget();
         self.shared.wanted.store(false, Ordering::Release);
         let stale = self.shared.latest.lock().unwrap().take();
@@ -736,6 +1029,10 @@ impl Scene {
 
 impl Drop for Scene {
     fn drop(&mut self) {
+        // (Its layer let go of before its window.)
+        if let Some(layer) = self.desktop.take() {
+            empty_layer(&layer);
+        }
         self.unhook();
         let _ = self.session.Close();
         let _ = self.pool.Close();
