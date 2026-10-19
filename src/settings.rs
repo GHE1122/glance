@@ -425,6 +425,10 @@ pub struct WidgetAt {
     pub parts: Option<Vec<PanelLayout>>,
     #[serde(default)]
     pub beside: bool,
+    /// What it showed before it was stuck to an edge and made a rail or a strip there (as widgets were up to 0.3.13:
+    /// stuck now, one shows what it showed): read, to show that again (see `Settings::carry_over`), never written.
+    #[serde(default, skip_serializing)]
+    pub before: Option<PanelLayout>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -926,9 +930,14 @@ impl Settings {
         if self.shortcut.is_some_and(|shortcut| !shortcut.usable()) {
             self.shortcut = Some(Shortcut::default());
         }
+        for widget in &mut self.widgets {
+            if let Some(before) = widget.before.take() {
+                widget.layout = before;
+            }
+        }
     }
 
-    /// What each screen edge opens, as settings from before 0.3.12 had the panel open: the readings, at the edges that
+    /// What each screen edge opens, as settings up to 0.3.13 had the panel open: the readings, at the edges that
     /// opened it (pushed into, or rested on where screens meet).
     fn places_before(&self) -> Places {
         let holds = |edges: &[Edge]| edges.iter().map(|edge| Hold { edge: *edge, part: Part::Monitor }).collect::<Vec<_>>();
@@ -1182,6 +1191,18 @@ mod tests {
         assert_eq!(both.nearest((0, 0, 1000, 500), (700, 20)), Some(Edge::Right));
         assert_eq!(both.nearest((0, 0, 1000, 500), (300, 20)), Some(Edge::Left));
         assert_eq!(Lit::default().nearest((0, 0, 1000, 500), (300, 20)), None);
+    }
+
+    /// A widget made a rail as it was stuck to an edge (up to 0.3.13) shows again what it showed before (stuck now, a
+    /// widget keeps what it shows: kept a rail, pulled away it stayed one, and what it showed was lost).
+    #[test]
+    fn a_widget_made_a_rail_shows_what_it_did() {
+        let json = r#"{"widgets":[{"at":[10,20],"layout":{"form":"rail","scale":1.0,"extra":[0.0,0.0]},"stuck":"right","before":{"form":"full-2","scale":1.2,"extra":[4.0,0.0]}}]}"#;
+        let mut settings: Settings = serde_json::from_str(json).unwrap();
+        settings.carry_over();
+        let widget = &settings.widgets[0];
+        assert_eq!((widget.layout.form.as_str(), widget.layout.scale, widget.stuck), ("full-2", 1.2, Some(WidgetSide::Right)));
+        assert!(!serde_json::to_string(&settings).unwrap().contains("\"before\""));
     }
 
     #[test]

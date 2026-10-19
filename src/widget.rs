@@ -2046,6 +2046,7 @@ impl Widget {
     fn new(contact: Contact, at: POINT, content: Content) -> Option<Self> {
         let gfx = gfx::current().ok()?;
         let window = Window::new().ok()?;
+        window.under_the_panel();
         let surface = Surface::new(&gfx, window.hwnd).ok();
         Some(Widget {
             window,
@@ -2162,6 +2163,7 @@ impl Widget {
             size,
             parts,
             beside,
+            before: None,
         }
     }
 
@@ -2909,6 +2911,14 @@ impl Widget {
         // what it shows.
         let work = self.contact.work;
         let work = ((work.right - work.left) as f32 / self.contact.scale, (work.bottom - work.top) as f32 / self.contact.scale);
+        // What plays and widgets merged are as large as they are made, within the screen they are on, the room round
+        // them for their shadow and buttons too (made larger on a larger screen, or kept so, they were larger than another, and part of them, their
+        // buttons with it, was past its edge).
+        let margin = self.margin;
+        let within = |size: (f32, f32), least: (f32, f32)| {
+            let most = ((work.0 - 2.0 * margin).max(least.0), (work.1 - 2.0 * margin).max(least.1));
+            (size.0.clamp(least.0, most.0), size.1.clamp(least.1, most.1))
+        };
         // Moved or flung, it shows what it showed (laid out again once at
         // rest, as the readings step); else laid out for what it shows, or
         // for the room it is sized to.
@@ -2958,8 +2968,9 @@ impl Widget {
             // past it, and between one layout's range and the next's it held back.)
             Content::Music(shown) => {
                 if let Some(room) = sized_to {
-                    shown.size = (room.0.max(music::LEAST.0), room.1.max(music::LEAST.1));
+                    shown.size = room;
                 }
+                shown.size = within(shown.size, music::LEAST);
                 self.zoom = 1.0;
                 self.shown = shown.size;
                 moving |= shown.busy;
@@ -2975,6 +2986,7 @@ impl Widget {
                 if sized_to.is_some() {
                     merged.size = (merged.size.0.max(merged.least.0), merged.size.1.max(merged.least.1));
                 }
+                merged.size = within(merged.size, merged.least);
                 self.zoom = 1.0;
                 self.shown = merged.size;
                 moving |= merged.busy();

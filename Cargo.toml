@@ -23,6 +23,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Notes' Markdown, parsed as they are written (to show it as it will read).
 pulldown-cmark = { version = "0.13", default-features = false }
+# Inflating what is deflated (zlib): Kugou's lyrics come so.
+miniz_oxide = "0.9"
 
 # macOS's own APIs: the kernel's counters, and IOKit for drives, graphics,
 # sensors and power.
@@ -44,6 +46,7 @@ features = [
     "Wdk_Graphics_Direct3D",
     "Wdk_System_Threading",
     "Foundation",
+    "Foundation_Metadata",
     "Media_Control",
     "Storage_Streams",
     "Graphics",

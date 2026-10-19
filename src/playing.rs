@@ -183,6 +183,35 @@ static RECKONING: [Mutex<Option<Reckoning>>; 2] = [Mutex::new(None), Mutex::new(
 #[cfg(windows)]
 static LOOKING: Mutex<()> = Mutex::new(());
 
+/// What is followed for `follow` moved `at` that far along its track at `now`, and what is followed for the other where
+/// it is the same player's same track (moved along too: left as it was, it was reckoned on from where it had been, its
+/// lines with it, till the player said where it is, which some never do): each shown there at once and till its
+/// player says it is, reckoned from there on from now (what its player said before stands for where it was then).
+/// Each moved, and how it was reckoned before (to be put back, the player not moved).
+#[cfg(windows)]
+fn moved_along(follow: Follow, at: f64, now: std::time::Instant) -> Vec<(usize, Option<Reckoning>)> {
+    let of = |reckoning: &Option<Reckoning>| reckoning.as_ref().map(|reckoning| (reckoning.app_id.clone(), reckoning.title.clone()));
+    let this = of(&RECKONING[follow as usize].lock().unwrap());
+    let mut moved = Vec::new();
+    for g in [Follow::Any as usize, Follow::Music as usize] {
+        let before = {
+            let mut reckoning = RECKONING[g].lock().unwrap();
+            if g != follow as usize && (this.is_none() || of(&reckoning) != this) {
+                continue;
+            }
+            let before = reckoning.clone();
+            if let Some(reckoning) = reckoning.as_mut() {
+                let said = Some(reckoning.said.unwrap_or(i64::MIN).max(said_now()));
+                *reckoning = Reckoning { at, when: now, said, ..reckoning.clone() };
+            }
+            before
+        };
+        *SEEKING[g].lock().unwrap() = Some((at, Some(now + SETTLES)));
+        moved.push((g, before));
+    }
+    moved
+}
+
 /// Where along its track something is reckoned to be: `at` (seconds) as of `when`, playing or not, at `rate`, of
 /// its program and track; and the player's report it rests on (see `media::Playing::said`).
 ///
@@ -435,7 +464,6 @@ pub fn act(act: Act) {
 /// player says it has changed: a program says that it has paused a little after it was asked to; see `watch`).
 #[cfg(windows)]
 pub fn act_on(follow: Follow, act: Act) {
-    let f = follow as usize;
     std::thread::spawn(move || {
         match act {
             Act::Key(Key::Previous) => {
@@ -457,22 +485,12 @@ pub fn act_on(follow: Follow, act: Act) {
             }
             Act::Volume(level) => sound_to(Some(level), None),
             Act::Seek(at) => {
-                // Shown there at once, and till the player says it is.
-                // Reckoned from there, on from now: what its player said before stands for where it was then.
-                let now = std::time::Instant::now();
-                *SEEKING[f].lock().unwrap() = Some((at, Some(now + SETTLES)));
-                let before = {
-                    let mut reckoning = RECKONING[f].lock().unwrap();
-                    let before = reckoning.clone();
-                    if let Some(reckoning) = reckoning.as_mut() {
-                        let said = Some(reckoning.said.unwrap_or(i64::MIN).max(said_now()));
-                        *reckoning = Reckoning { at, when: now, said, ..reckoning.clone() };
-                    }
-                    before
-                };
+                let moved = moved_along(follow, at, std::time::Instant::now());
                 if !crate::media::seek_of(follow, at) {
-                    *SEEKING[f].lock().unwrap() = None;
-                    *RECKONING[f].lock().unwrap() = before;
+                    for (g, before) in moved {
+                        *SEEKING[g].lock().unwrap() = None;
+                        *RECKONING[g].lock().unwrap() = before;
+                    }
                 }
             }
         }
@@ -687,6 +705,29 @@ mod tests {
         assert_eq!(shown.timeline.map(|timeline| timeline.at), Some(50.0));
         assert!(position(Follow::Any).is_some_and(|at| (50.0..51.0).contains(&at)));
         *SEEKING[Follow::Any as usize].lock().unwrap() = None;
+    }
+
+    /// Moved along by what is followed for either, what is followed for the other is moved along too where it is the
+    /// same player's same track (left, it was reckoned on from where it had been: its lines and its time stayed
+    /// behind the music, with a player that does not say where it is after it is moved); not another's.
+    #[test]
+    fn moved_along_moves_what_follows_the_same_track() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
+        let reckoned = |app_id: &str, title: &str| Some(Reckoning { at: 10.0, when: now, playing: false, rate: 1.0, app_id: app_id.into(), title: title.into(), said: None });
+        let at = |follow: Follow| RECKONING[follow as usize].lock().unwrap().as_ref().map(|reckoning| reckoning.at);
+        *RECKONING[Follow::Any as usize].lock().unwrap() = reckoned("player", "Song");
+        *RECKONING[Follow::Music as usize].lock().unwrap() = reckoned("player", "Song");
+        assert_eq!(moved_along(Follow::Any, 50.0, now).len(), 2);
+        assert_eq!((at(Follow::Any), at(Follow::Music)), (Some(50.0), Some(50.0)));
+        // Another track: only its own.
+        *RECKONING[Follow::Music as usize].lock().unwrap() = reckoned("player", "Other");
+        assert_eq!(moved_along(Follow::Any, 80.0, now).len(), 1);
+        assert_eq!((at(Follow::Any), at(Follow::Music)), (Some(80.0), Some(10.0)));
+        for f in [Follow::Any as usize, Follow::Music as usize] {
+            *RECKONING[f].lock().unwrap() = None;
+            *SEEKING[f].lock().unwrap() = None;
+        }
     }
 
     /// A player's reports, one look after another, `seconds` after the first: where each puts it.

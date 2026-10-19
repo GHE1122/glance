@@ -543,10 +543,12 @@ impl Controller {
             let layout = arrange::Choice { form: Form::Lanes { detail: Detail::Full, columns: 2 }, scale: 1.0, extra: (0.0, 0.0) }.kept();
             // Its corner, as near as can be told from its middle.
             let corner = (at.screen.0 - 356, at.screen.1 - 270);
-            widgets.adopt(crate::settings::WidgetAt { at: corner, layout, pinned: at.locked, click_through: false, game_only: false, on_desktop: false, stuck: None, size: None, parts: None, beside: false });
+            widgets.adopt(crate::settings::WidgetAt { at: corner, layout, pinned: at.locked, click_through: false, game_only: false, on_desktop: false, stuck: None, size: None, parts: None, beside: false, before: None });
             std::thread::spawn(|| crate::app().change(|settings| settings.panel_at = None));
         }
         let mut restore = false;
+        // How many times a widget had come to the top, as last seen (see `window::on_top`).
+        let mut widgets_on_top = crate::ui::window::on_top();
         // Pinned open at its edge as Glance last ran: opened so again once
         // there are readings to show.
         let mut pinned_at = self.config.lock().unwrap().panel_pinned;
@@ -595,6 +597,15 @@ impl Controller {
                         let look = crate::widget::Look { prefs: &panel.prefs, skin: panel.skin, lang: panel.lang, live: panel.live };
                         if let Some(due) = widgets.tick(now, &look, &kept, samples, &seen, self) {
                             wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
+                        }
+                    }
+                    // A widget come to the top over the open panel (giving way to the settings and back, shown, torn
+                    // off): the panel over it again.
+                    let on_top = crate::ui::window::on_top();
+                    if on_top != widgets_on_top {
+                        widgets_on_top = on_top;
+                        if panel.is_shown() {
+                            panel.window.stand_again();
                         }
                     }
                     self.widget_put_away.store(widgets.any_put_away(), Ordering::Relaxed);
@@ -2090,7 +2101,8 @@ impl<'a> Panel<'a> {
             return;
         }
         let (Some(placement), Some(cursor)) = (&self.placement, cursor_position()) else { return };
-        let on_panel = contains(&placement.panel, cursor);
+        // (Its buttons' row outside it is on it: see `Placement::rack`.)
+        let on_panel = contains(&placement.panel, cursor) || placement.rack.is_some_and(|(rack, _)| contains(&rack, cursor));
         let in_reach = contains(&placement.reach, cursor);
         let close_delay = self.controller.config.lock().unwrap().close_delay;
         // Down now, or pressed (and perhaps let go) since it last looked.
@@ -2373,6 +2385,10 @@ impl<'a> Panel<'a> {
             Some(placement) if !self.pinned && self.is_open() => placement.px,
             _ => return None,
         };
+        // (Its buttons' row outside it is no edge of it: a press there is the buttons'.)
+        if self.on_rack(client) {
+            return None;
+        }
         let (x, y) = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
         let edges = self.edges_at(x, y);
         if edges.any() {
@@ -2406,7 +2422,15 @@ impl<'a> Panel<'a> {
     fn on_panel(&self, client: POINT) -> bool {
         self.placement.as_ref().is_some_and(|placement| {
             let at = POINT { x: client.x + placement.window.left, y: client.y + placement.window.top };
-            contains(&placement.panel, at) || placement.rack.is_some_and(|(rack, _)| contains(&rack, at))
+            contains(&placement.panel, at)
+        }) || self.on_rack(client)
+    }
+
+    /// Whether `client` (physical px in the window) is on the panel's buttons' row outside it (see `Placement::rack`).
+    fn on_rack(&self, client: POINT) -> bool {
+        self.placement.as_ref().is_some_and(|placement| {
+            let at = POINT { x: client.x + placement.window.left, y: client.y + placement.window.top };
+            placement.rack.is_some_and(|(rack, _)| contains(&rack, at))
         })
     }
 
@@ -3120,10 +3144,22 @@ impl<'a> Panel<'a> {
             if t >= 1.0 {
                 self.music_settle = None;
                 self.sized_room = None;
+                // Away from the edge: kept where it came to rest, as it is kept where it is let go (see `let_go`; kept
+                // where it was let go, larger, it was placed there as its corner was let go, and jumped).
+                let rested = if self.floating() { self.kept_at() } else { None };
                 if let Some(placement) = &mut self.placement {
                     placement.held = None;
+                    if let Some(rested) = &rested {
+                        placement.floating = Some(rested.at);
+                    }
                 }
                 self.arrange();
+                if let Some(rested) = rested {
+                    if let Some(placement) = &mut self.placement {
+                        placement.anchor = POINT { x: rested.screen.0, y: rested.screen.1 };
+                    }
+                    crate::app().change(|settings| settings.panel_at = Some(rested));
+                }
             }
         }
         let size = self.music_size();
@@ -3212,7 +3248,8 @@ impl<'a> Panel<'a> {
         self.corner = (x + offset.0 as f32 / px, y + offset.1 as f32 / px);
         self.show_stations();
         self.bar = view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
-        let moving = !self.shift.done(now) || !self.opacity.done(now) || painted.busy;
+        // (Settling after it was sized, too: see `music_settle`.)
+        let moving = !self.shift.done(now) || !self.opacity.done(now) || painted.busy || self.music_settle.is_some();
         self.next_frame = if moving { now } else { now + Duration::from_millis(250) };
     }
 

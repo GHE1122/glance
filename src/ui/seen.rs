@@ -155,6 +155,9 @@ impl Seen {
                 flag(self.cpu_clock, other.cpu_clock, Item::CpuClock);
                 flag(self.threads >= other.threads, true, Item::Threads(other.threads));
                 news.extend(other.ccds.iter().filter(|ccd| !self.ccds.contains(ccd)).map(|ccd| Item::Ccd(*ccd)));
+                // A fan seen turning (the CPU's shows from then: see `BoardSeen::turning`).
+                let (ours, theirs) = (self.board.clone().unwrap_or_default(), other.board.clone().unwrap_or_default());
+                news.extend(theirs.turning.into_iter().filter(|name| !ours.turning.contains(name)).map(Item::FanTurning));
             }
             // A module's temperature at a time.
             "memory" => news.extend((self.dimms + 1..=other.dimms).map(Item::Dimms)),
@@ -249,13 +252,17 @@ impl Seen {
             Item::Link => seen.link = true,
             Item::Drive(id) => add(&mut seen.drives, &other.drives, |key| key.0 == *id, |a, b| a.0 == b.0),
             Item::Volume(name) => add(&mut seen.volumes, &other.volumes, |key| key == name, |a, b| a == b),
-            Item::BoardTemp(name) | Item::BoardFan(name) => {
+            Item::BoardTemp(name) | Item::BoardFan(name) | Item::FanTurning(name) => {
                 let theirs = other.board.clone().unwrap_or_default();
                 let ours = seen.board.get_or_insert_with(BoardSeen::default);
-                if matches!(item, Item::BoardTemp(_)) {
-                    add(&mut ours.temps, &theirs.temps, |key| key == name, |a, b| a == b);
-                } else {
-                    add(&mut ours.fans, &theirs.fans, |key| key == name, |a, b| a == b);
+                match item {
+                    Item::BoardTemp(_) => add(&mut ours.temps, &theirs.temps, |key| key == name, |a, b| a == b),
+                    Item::BoardFan(_) => add(&mut ours.fans, &theirs.fans, |key| key == name, |a, b| a == b),
+                    // (Its name with it: a fan turning is a fan.)
+                    _ => {
+                        add(&mut ours.fans, &theirs.fans, |key| key == name, |a, b| a == b);
+                        add(&mut ours.turning, &theirs.turning, |key| key == name, |a, b| a == b);
+                    }
                 }
             }
             Item::Battery => seen.battery = true,
@@ -311,6 +318,8 @@ pub enum Item {
     Volume(String),
     BoardTemp(String),
     BoardFan(String),
+    /// A board's fan seen turning.
+    FanTurning(String),
     Battery,
     BatteryPower,
     BatteryHealth,
@@ -390,6 +399,12 @@ mod tests {
         let theirs = Seen { volumes: vec!["C:".into(), "D:".into(), "E:".into()], ..Seen::default() };
         assert_eq!(ours.news(&theirs, "storage", &info()), [Item::Volume("D:".into())]);
         assert_eq!(ours.with(&Item::Volume("D:".into()), &theirs).volumes, ["C:", "D:", "E:"]);
+        // A fan seen turning after the lane was laid out: the CPU's lane's news (its row shows from then).
+        let board = |turning: &[&str]| Some(BoardSeen { temps: Vec::new(), fans: vec!["cpu_fan".into()], turning: turning.iter().map(|n| n.to_string()).collect() });
+        let ours = Seen { board: board(&[]), ..Seen::default() };
+        let theirs = Seen { board: board(&["cpu_fan"]), ..Seen::default() };
+        assert_eq!(ours.news(&theirs, "cpu", &info()), [Item::FanTurning("cpu_fan".into())]);
+        assert_eq!(ours.with(&Item::FanTurning("cpu_fan".into()), &theirs).board.unwrap().turning, ["cpu_fan"]);
     }
 
     #[test]

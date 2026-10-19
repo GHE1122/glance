@@ -405,10 +405,15 @@ fn cloaked(window: HWND) -> bool {
     unsafe { DwmGetWindowAttribute(window, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4) }.is_ok() && cloaked != 0
 }
 
-/// Whether the system can capture a window (Windows.Graphics.Capture: Windows 10 1903 and later).
+/// Whether the system can capture a window (Windows.Graphics.Capture's capture of a window by its handle: Windows 10
+/// 1903 and later, the Universal API contract 8). (Its capture alone came in 1803: there, asked whether it captures,
+/// 1809 says it does, and a scene could not be made, again and again, with no other way to what is behind.)
 pub fn supported() -> bool {
     static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *SUPPORTED.get_or_init(|| GraphicsCaptureSession::IsSupported().unwrap_or(false))
+    *SUPPORTED.get_or_init(|| {
+        let by_window = windows::Foundation::Metadata::ApiInformation::IsApiContractPresentByMajor(&windows::core::HSTRING::from("Windows.Foundation.UniversalApiContract"), 8).unwrap_or(false);
+        by_window && GraphicsCaptureSession::IsSupported().unwrap_or(false)
+    })
 }
 
 /// Glance's windows left out of every scene, while they are: what is not part of what is behind (the panel as a

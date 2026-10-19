@@ -49,6 +49,17 @@ pub struct Window {
     on_desktop: Cell<bool>,
     /// Above them all for now, kept on the desktop or not (see `lift`).
     lifted: Cell<bool>,
+    /// Kept under the panel while it is open (a widget's: see `under_the_panel`).
+    under_panel: Cell<bool>,
+}
+
+/// How many times a window kept under the panel has come to the top of the windows above all (see
+/// `Window::under_the_panel`): the panel, open, comes over it again as this changes (see `panel`).
+static ON_TOP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times a window kept under the panel has come to the top (see `ON_TOP`).
+pub fn on_top() -> u64 {
+    ON_TOP.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -152,11 +163,32 @@ impl Window {
             let _ = unsafe { DestroyWindow(hwnd) };
             return Err(error);
         }
-        Ok(Window { hwnd, click_through: false, layered, under: Cell::new(None), placed: Cell::new(RECT::default()), on_desktop: Cell::new(false), lifted: Cell::new(false) })
+        Ok(Window { hwnd, click_through: false, layered, under: Cell::new(None), placed: Cell::new(RECT::default()), on_desktop: Cell::new(false), lifted: Cell::new(false), under_panel: Cell::new(false) })
     }
 
     pub fn place(&self, rect: RECT) {
         self.place_under(rect, None);
+    }
+
+    /// Kept under the panel while it is open (a widget: one stuck to the edge the panel opens at was over it,
+    /// taking its presses, after it came to the top giving way to the settings and back).
+    pub fn under_the_panel(&self) {
+        self.under_panel.set(true);
+    }
+
+    /// Back at the top of the windows above all (but under the window it gives way to): over a window kept under
+    /// it that came there since (see `under_the_panel`).
+    pub fn stand_again(&self) {
+        if !self.low() {
+            self.stand(HWND_TOPMOST);
+        }
+    }
+
+    /// Come to the top: told, where it is kept under the panel.
+    fn came_to_top(&self) {
+        if self.under_panel.get() {
+            ON_TOP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Placed at `rect`, above all, or just below `above` (another window
@@ -180,6 +212,7 @@ impl Window {
                 SWP_NOACTIVATE,
             );
         }
+        self.came_to_top();
     }
 
     pub fn show(&self) {
@@ -236,6 +269,7 @@ impl Window {
         unsafe {
             let _ = SetWindowPos(self.hwnd, Some(after), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         }
+        self.came_to_top();
     }
 
     /// Whether it is giving way to another window (see `yield_to`).

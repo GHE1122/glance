@@ -20,6 +20,9 @@ use crate::ui::icons::Icon;
 use crate::ui::smoke::{self, Smoke};
 use crate::ui::window::Window;
 
+/// Its smoke's colours with no cover (as it begins, and for a track with none).
+const TINT: [f32; 3] = [0.40, 0.95, 0.88];
+const TINT2: [f32; 3] = [0.84, 0.97, 0.92];
 /// How long the controls stay after the pointer rests.
 const AWAKE: Duration = Duration::from_millis(1200);
 /// How long they take to come or go.
@@ -121,8 +124,8 @@ impl FullMusic {
             beat: 0.0,
             last: None,
             began: now,
-            tint: [0.40, 0.95, 0.88],
-            tint2: [0.84, 0.97, 0.92],
+            tint: TINT,
+            tint2: TINT2,
             now: None,
             leaving: None,
             lines: None,
@@ -193,10 +196,17 @@ impl FullMusic {
         // What plays, and its cover's colours.
         let heard_now = crate::playing::music();
         if let Some(playing) = heard_now.as_ref().filter(|playing| !playing.title.is_empty()) {
-            if let Some(cover) = crate::cover::of(playing) {
-                let top = cover.base.iter().fold(0.01f32, |top, c| top.max(*c));
-                let tint = cover.base.map(|c| (c / top * 0.96).min(1.0));
-                let tint2 = tint.map(|c| c + (1.0 - c) * 0.55);
+            // (A track with none: back toward its own.)
+            let toward = match crate::cover::of(playing) {
+                Some(cover) => {
+                    let top = cover.base.iter().fold(0.01f32, |top, c| top.max(*c));
+                    let tint = cover.base.map(|c| (c / top * 0.96).min(1.0));
+                    Some((tint, tint.map(|c| c + (1.0 - c) * 0.55)))
+                }
+                None if crate::cover::has_none(playing) => Some((TINT, TINT2)),
+                None => None,
+            };
+            if let Some((tint, tint2)) = toward {
                 let ease = 1.0 - (-dt / 0.6).exp();
                 self.tint = std::array::from_fn(|i| self.tint[i] + (tint[i] - self.tint[i]) * ease);
                 self.tint2 = std::array::from_fn(|i| self.tint2[i] + (tint2[i] - self.tint2[i]) * ease);
