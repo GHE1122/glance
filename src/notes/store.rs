@@ -224,6 +224,12 @@ impl Folder {
             let _ = std::fs::remove_file(&beside);
         })?;
         let written = written_ms(&self.path.join(&apart)).unwrap_or_default();
+        // (In the colour of the note it is kept apart from.)
+        let mut kept = self.kept();
+        if let Some(colour) = kept.colours.get(name).copied() {
+            kept.colours.insert(apart.clone(), colour);
+            let _ = self.keep(&kept);
+        }
         Ok(Written::Apart(apart, Stamp::of(text.as_bytes(), written)))
     }
 
@@ -467,10 +473,13 @@ mod tests {
     fn never_writes_over_what_changed_outside() {
         let folder = folder("conflict");
         let Written::Done(stamp) = folder.write("a.md", "here", None).unwrap() else { panic!("written") };
+        folder.colour("a.md", Colour::Yellow).unwrap();
         std::fs::write(folder.path.join("a.md"), "outside, longer").unwrap();
         let Written::Apart(apart, _) = folder.write("a.md", "here again", Some(stamp)).unwrap() else { panic!("put apart") };
         assert_eq!(folder.read("a.md").unwrap().0, "outside, longer");
         assert_eq!(folder.read(&apart).unwrap().0, "here again");
+        // (The copy in the note's colour.)
+        assert_eq!(folder.notes().iter().find(|note| note.name == apart).map(|note| note.colour), Some(Colour::Yellow));
         // A note new here whose name was taken meanwhile: put apart too.
         assert!(matches!(folder.write("a.md", "new", None).unwrap(), Written::Apart(..)));
         // One deleted outside since it was read: not made again in its place, what was written kept apart.

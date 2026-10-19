@@ -546,14 +546,29 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_ENTERSIZEMOVE => {
             with(|beside| beside.moved_from = Some(beside.corner()));
         }
+        // Moved by its head: kept within its screen's work area, as the note under it is (the two move together, by
+        // as much, and so stay one over the other).
+        WM_MOVING => {
+            let place = unsafe { &mut *(lparam.0 as *mut RECT) };
+            let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            let _ = unsafe { GetMonitorInfoW(MonitorFromRect(place, MONITOR_DEFAULTTONEAREST), &mut screen) };
+            let room = screen.rcWork;
+            let (wide, tall) = (place.right - place.left, place.bottom - place.top);
+            let left = place.left.min(room.right - wide).max(room.left);
+            let top = place.top.min(room.bottom - tall).max(room.top);
+            *place = RECT { left, top, right: left + wide, bottom: top + tall };
+            return LRESULT(1);
+        }
         WM_MOVE => {
             with(|beside| beside.carry_note(false));
         }
         WM_EXITSIZEMOVE => {
             with(|beside| beside.carry_note(true));
         }
+        // (The choosing of programs stays: a program is dragged onto it from another window, Explorer pressed to take
+        // it. It goes by its own close, Esc, or as the panel or widget it opened from goes.)
         WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
-            if !ours(HWND(lparam.0 as *mut _)) {
+            if !ours(HWND(lparam.0 as *mut _)) && !with(|beside| beside.page == Page::Picker).unwrap_or(false) {
                 // (Gone once the page is free: this may come in the middle of what it does.)
                 let post = POST.load(Ordering::Acquire);
                 let _ = unsafe { PostMessageW(Some(HWND(post as *mut _)), GO_SOON, WPARAM(0), LPARAM(0)) };
@@ -840,7 +855,7 @@ impl Beside {
             Hit::Program(target, name) => {
                 let app = App { target, name };
                 crate::station::apps::change(move |apps| {
-                    match apps.iter().position(|kept| kept.target == app.target) {
+                    match apps.iter().position(|kept| crate::station::apps::same(&kept.target, &app.target)) {
                         Some(at) => {
                             apps.remove(at);
                         }
@@ -872,7 +887,7 @@ impl Beside {
             // Enter: the first one found added.
             VK_RETURN => {
                 if let Some(first) = self.listed().into_iter().next() {
-                    let kept = crate::station::apps::shown().iter().any(|app| app.target == first.target);
+                    let kept = crate::station::apps::shown().iter().any(|app| crate::station::apps::same(&app.target, &first.target));
                     if !kept {
                         let app = App { target: first.target, name: first.name };
                         crate::station::apps::change(move |apps| apps.push(app));
@@ -1217,7 +1232,7 @@ impl Beside {
                 }
             }
             // What a press does: added, outlined in the accent; kept already, ticked (a press takes it off).
-            let is_kept = kept.iter().any(|app| app.target == found.target);
+            let is_kept = kept.iter().any(|app| crate::station::apps::same(&app.target, &found.target));
             let (label, ink) = if is_kept { (lang.pick("已添加", "Kept"), theme.text3) } else { (lang.pick("添加", "Add"), self.accent()) };
             let label_w = frame.measure(label, theme.small);
             let pill_w = label_w + if is_kept { 18.0 } else { 20.0 };

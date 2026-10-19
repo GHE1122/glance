@@ -136,9 +136,21 @@ pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Land
             let paths: Vec<std::path::PathBuf> = given.iter().flat_map(|content| if let Content::Files(paths) = content { paths.clone() } else { Vec::new() }).collect();
             let urls: Vec<String> = given.iter().filter_map(|content| if let Content::Text(text) = content { Some(text.trim().to_string()) } else { None }).collect();
             std::thread::spawn(move || {
+                // (In a COM apartment: a shortcut dropped is read for what it opens, see `apps::opens`.)
+                let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
                 let added: Vec<super::apps::App> = paths.iter().filter_map(|path| super::apps::App::of_path(path)).chain(urls.iter().filter_map(|url| super::apps::App::of_url(url))).collect();
+                // (What opens what is kept already, however it is named, is not kept twice.)
+                added.iter().for_each(|app| {
+                    super::apps::opens(&app.target);
+                });
                 if !added.is_empty() {
-                    super::apps::change(move |apps| apps.extend(added.into_iter().filter(|app| !apps.contains(app)).collect::<Vec<_>>()));
+                    super::apps::change(move |apps| {
+                        for app in added {
+                            if !apps.iter().any(|kept| super::apps::same(&kept.target, &app.target)) {
+                                apps.push(app);
+                            }
+                        }
+                    });
                 }
             });
         }

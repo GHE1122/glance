@@ -61,6 +61,90 @@ pub fn pretend(apps: Vec<App>) {
     *SHOWN.lock().unwrap() = Some(Arc::new(apps));
 }
 
+/// What `target` (a thing kept at hand, or a program the Start menu lists) opens, as one thing however it is named:
+/// a desktop program the Start menu names by a known folder and its path in it (`shell:AppsFolder\{folder}\a.exe`)
+/// by the file's path, a shortcut by what it points at, a path the same in any case; a Store app, a folder, a web
+/// address as it is. Two that open the same are one thing kept (a program dropped on quick launch is the Start
+/// menu's). Shortcuts are read through the shell (a thread in a COM apartment); found once each.
+pub fn opens(target: &str) -> String {
+    static FOUND: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
+    if let Some(found) = FOUND.lock().unwrap().as_ref().and_then(|found| found.get(target).cloned()) {
+        return found;
+    }
+    let found = resolved(target);
+    let mut held = FOUND.lock().unwrap();
+    let held = held.get_or_insert_with(Default::default);
+    if held.len() > 2000 {
+        held.clear();
+    }
+    held.insert(target.to_string(), found.clone());
+    found
+}
+
+/// Whether two things kept at hand (or listed) open the same (see `opens`).
+pub fn same(a: &str, b: &str) -> bool {
+    a == b || opens(a) == opens(b)
+}
+
+fn resolved(target: &str) -> String {
+    if target.starts_with("https://") || target.starts_with("http://") {
+        return target.to_string();
+    }
+    let path = match target.strip_prefix("shell:AppsFolder\\") {
+        // (A known folder's number, then the path in it; or a path; else a Store app's name.)
+        Some(named) => match named.strip_prefix('{').and_then(|rest| rest.split_once("}\\")) {
+            Some((folder, rest)) => match known_folder(folder) {
+                Some(folder) => folder.join(rest),
+                None => return target.to_string(),
+            },
+            None if Path::new(named).is_absolute() => PathBuf::from(named),
+            None => return target.to_string(),
+        },
+        None => PathBuf::from(target),
+    };
+    let path = if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("lnk")) { link_target(&path).unwrap_or(path) } else { path };
+    path.to_string_lossy().to_lowercase()
+}
+
+/// The path of the known folder numbered `id` (its GUID's digits, without braces).
+#[cfg(windows)]
+fn known_folder(id: &str) -> Option<PathBuf> {
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    let guid = windows::core::GUID::try_from(id).ok()?;
+    unsafe {
+        let found = SHGetKnownFolderPath(&guid, KF_FLAG_DEFAULT, None).ok()?;
+        let path = found.to_string().ok().map(PathBuf::from);
+        windows::Win32::System::Com::CoTaskMemFree(Some(found.0 as *const _));
+        path
+    }
+}
+
+/// What the shortcut at `path` points at, where it says (on a thread in a COM apartment).
+#[cfg(windows)]
+fn link_target(path: &Path) -> Option<PathBuf> {
+    use windows::core::Interface;
+    use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        link.cast::<IPersistFile>().ok()?.Load(&windows::core::HSTRING::from(path.as_os_str()), STGM_READ).ok()?;
+        let mut found = [0u16; 1024];
+        link.GetPath(&mut found, std::ptr::null_mut(), 0).ok()?;
+        let length = found.iter().position(|unit| *unit == 0).unwrap_or(found.len());
+        (length > 0).then(|| PathBuf::from(String::from_utf16_lossy(&found[..length])))
+    }
+}
+
+#[cfg(not(windows))]
+fn known_folder(_: &str) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(windows))]
+fn link_target(_: &Path) -> Option<PathBuf> {
+    None
+}
+
 /// What is kept at hand changed as `change` changes it (off the calling thread, which the settings then tell).
 pub fn change(change: impl FnOnce(&mut Vec<App>) + Send + 'static) {
     std::thread::spawn(move || crate::app().change(|settings| change(&mut settings.apps)));
@@ -69,6 +153,20 @@ pub fn change(change: impl FnOnce(&mut Vec<App>) + Send + 'static) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A program the Start menu names by a known folder and the path in it is the program dropped from that folder,
+    /// in any case; a Store app and a web address are only themselves.
+    #[test]
+    #[cfg(windows)]
+    fn knows_one_program_however_it_is_named() {
+        let system = known_folder("1AC14E77-02E7-4E5D-B744-2EB1AE5198B7").expect("the System folder");
+        let dropped = system.join("charmap.exe").to_string_lossy().to_uppercase();
+        assert!(same(r"shell:AppsFolder\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\charmap.exe", &dropped));
+        assert!(!same(r"shell:AppsFolder\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\charmap.exe", &system.join("notepad.exe").to_string_lossy()));
+        assert!(!same(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App"));
+        assert!(same("https://github.com", "https://github.com"));
+        assert!(!same("https://github.com", "https://GITHUB.com/a"));
+    }
 
     /// A dropped file by its name without its extension, a web address by its site; where each is on the disk.
     #[test]

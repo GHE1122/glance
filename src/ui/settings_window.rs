@@ -1606,8 +1606,8 @@ impl Ui {
                 rows.extend(super::prefs::items("lyrics").iter().map(|item| Row::Element(item.name)));
                 rows.push(Row::Note(pick(
                     self.lang,
-                    "查找歌词时会把歌名发给网易云音乐、QQ 音乐或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
-                    "To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
+                    "查找歌词时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
+                    "To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
                 )));
             }
             (Page::General, _) => {
@@ -1791,7 +1791,17 @@ impl Ui {
                 }
                 // Inside its module's card, right under the row above.
                 Row::Item(..) => (0.0, (self.words_height(&row) - ROW + ITEM_ROW).max(ITEM_ROW)),
-                Row::ModuleChoice(..) => (0.0, ITEM_ROW),
+                // Its choices under its name where they do not fit beside it.
+                Row::ModuleChoice(_, field) => {
+                    let (name, options, _) = self.choices(*field);
+                    let room = Self::module_choices_room();
+                    let under = if self.beside_name(name, &options, room) { 0.0 } else { CHOICE_LINE * self.choice_lines(&options, room).len() as f32 };
+                    (0.0, ITEM_ROW + under)
+                }
+                Row::Choice(field) if self.choice_hint(*field).is_none() && !self.beside_name(self.choices(*field).0, &self.choices(*field).1, Self::choices_room()) => {
+                    let lines = self.choice_lines(&self.choices(*field).1, Self::choices_room()).len() as f32;
+                    (if after_heading { 8.0 } else { ROW_GAP }, ROW + CHOICE_LINE * lines)
+                }
                 // As tall as the code, or as the words beside it where those are taller.
                 Row::Code => {
                     let words = self.code.as_ref().map_or(0.0, |(_, what)| 22.0 + self.gfx.wrapped_height(&code_words(self.lang, *what, self.web_address.as_deref()).1, Font::new(Family::Segoe, 12.0, 400.0), CODE_WORDS));
@@ -2032,6 +2042,18 @@ impl Ui {
     /// to read (a few characters to a line).
     fn stacked(&self, options: &[String]) -> bool {
         Self::choices_room() - self.segmented_width(options) - 16.0 < MIN_WORDS
+    }
+
+    /// Whether a row of choices named `name` (with no word under it) has them beside its name, `room` across from
+    /// where the name begins to where they end: else they go on lines of their own under it (beside it, as in a
+    /// longer language or at a larger size, they lay over it).
+    fn beside_name(&self, name: &str, options: &[String], room: f32) -> bool {
+        self.gfx.measure(name, Font::new(Family::Segoe, 14.0, 400.0)) + 16.0 + self.segmented_width(options) <= room
+    }
+
+    /// The room a row of choices has in a module's card, from where its name begins to where they end.
+    fn module_choices_room() -> f32 {
+        Self::choices_room() + 2.0 * ROW_SIDE - ITEM_INSET - ROW_SIDE - CHEVRON_ROOM
     }
 
     /// What a row of buttons says, its word, and its buttons, right to left:
@@ -2686,10 +2708,12 @@ impl Ui {
             "lyrics" => (
                 p("音乐", "Music"),
                 Some(p(
-                    "正在播放的歌曲：封面、播放进度、播放控制、音量，以及随播放滚动的歌词。查找歌词时会把歌名发给网易云音乐、QQ 音乐或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
-                    "What plays: its cover, its track, its controls, how loud, and its lyrics as it plays. To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
+                    "正在播放的歌曲：封面、播放进度、播放控制、音量，以及随播放滚动的歌词。查找歌词时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
+                    "What plays: its cover, its track, its controls, how loud, and its lyrics as it plays. To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
                 )),
             ),
+            "notes" => (p("便签", "Notes"), Some(p("随手记下的想法和待办，每条是“文档”中的一个 Markdown 文件，可以贴到桌面", "Thoughts and to-dos noted down, each a Markdown file in Documents, which can be stuck on the desktop"))),
+            "apps" => (p("快捷 App", "Quick launch"), Some(p("常用的程序、文件夹和网址，点一下就打开", "Programs, folders and web addresses used often, opened with a click"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
         }
     }
@@ -2835,7 +2859,7 @@ impl Ui {
             ("overlay" | "time", "twelve") => (p("12 小时制", "12-hour clock"), Some(p("关闭时为 24 小时制", "Off, a 24-hour clock"))),
             ("time", "sound") => (p("音量", "Volume"), Some(p("拖动调节音量，可静音", "Dragged to set how loud the sound is; muted too"))),
             ("time", "media") => (p("正在播放", "Now playing"), Some(p("可暂停、播放和切换曲目", "Paused, played and skipped"))),
-            ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在唱的这一句和下一句。查找时会把歌名发给网易云音乐、QQ 音乐或 LRCLIB", "The line sung now and the next. To find them the track's title is sent to NetEase Cloud Music, QQ Music or LRCLIB"))),
+            ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在唱的这一句和下一句。查找时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB", "The line sung now and the next. To find them the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB"))),
             ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在正在唱的这一句下面", "Under the line sung now, where there is one"))),
             ("lyrics", "cover") => (p("封面", "Cover"), Some(p("音乐组件显示专辑封面", "The music widget shows the album cover"))),
             ("lyrics", "title") => (p("歌名与歌手", "Title and artist"), None),
@@ -3865,9 +3889,16 @@ impl Ui {
                             field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + row_height / 2.0, room);
                             self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
                         }
-                        None => {
+                        None if self.beside_name(name, &options, Self::choices_room()) => {
                             text_centred(frame, name, label, palette.text, left + ROW_SIDE, y + row_height / 2.0, width / 2.0, Align::Start);
                             self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
+                        }
+                        // (Not beside its name: on lines of their own under it.)
+                        None => {
+                            let lines = self.choice_lines(&options, Self::choices_room()).len() as f32;
+                            let words = row_height - CHOICE_LINE * lines;
+                            text_centred(frame, name, label, palette.text, left + ROW_SIDE, y + words / 2.0, width - 2.0 * ROW_SIDE, Align::Start);
+                            self.segmented(frame, palette, field, &options, chosen, true, right, y + words + CHOICE_LINE / 2.0 - 8.0, Self::choices_room(), now, &hovered);
                         }
                     }
                 }
@@ -3914,10 +3945,17 @@ impl Ui {
                     let active = self.module_on(&id);
                     let (name, options, chosen) = self.choices(field);
                     let color = if active { palette.text } else { palette.text3 };
-                    text_centred(frame, name, label, color, left + ITEM_INSET, y + row_height / 2.0, width / 2.0 - ITEM_INSET, Align::Start);
                     let right = left + width - ROW_SIDE - CHEVRON_ROOM;
                     let targets = self.targets.len();
-                    self.segmented(frame, palette, field, &options, chosen, active, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
+                    let room = Self::module_choices_room();
+                    if self.beside_name(name, &options, room) {
+                        text_centred(frame, name, label, color, left + ITEM_INSET, y + row_height / 2.0, width / 2.0 - ITEM_INSET, Align::Start);
+                        self.segmented(frame, palette, field, &options, chosen, active, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
+                    } else {
+                        // (Not beside its name: on lines of their own under it.)
+                        text_centred(frame, name, label, color, left + ITEM_INSET, y + ITEM_ROW / 2.0, room, Align::Start);
+                        self.segmented(frame, palette, field, &options, chosen, active, right, y + ITEM_ROW + CHOICE_LINE / 2.0 - 8.0, room, now, &hovered);
+                    }
                     if !usable {
                         self.targets.truncate(targets);
                     }
