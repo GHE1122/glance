@@ -5,9 +5,14 @@
 //! order; and that window is captured (Windows.Graphics.Capture), a frame
 //! each time something in it changes, none while nothing does.
 //!
-//! The window is cloaked (no one sees it, it is in no list of windows), and
-//! owned, with no surface of its own and no other extended style: the capture refuses tool windows and
-//! windows that are not to be activated. The thumbnails show what the
+//! The window is cloaked (no one sees it), and owned, with no surface of
+//! its own and no other extended style: the capture refuses to take a tool
+//! window, one that is not to be activated, a disabled one, or one owned by
+//! a tool window (on Windows 10 and on Windows 11 before 26300, measured).
+//! It looks only as it is taken: its owner is made a tool window after, which
+//! keeps the window out of the task switcher and the task view (which list
+//! a window owned by one that is not shown, cloaked or not), and its frames
+//! come as before. The thumbnails show what the
 //! windows show, those of elevated programs too, and live (a video plays
 //! on in them); not the shadows the system draws around windows.
 //!
@@ -56,7 +61,8 @@ use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDe
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, GetShellWindow, GetWindowRect, IsIconic, IsWindowVisible, RegisterClassW, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP,
+    SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WM_CLOSE,
+    WS_EX_TOOLWINDOW,
 };
 
 use super::backdrop::{Capture, Spare, Texture};
@@ -392,7 +398,43 @@ fn now_100ns() -> i64 {
 }
 
 unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // Closed only with its scene (see `Drop`): asked to close by another program, it stays.
+    if message == WM_CLOSE {
+        return LRESULT(0);
+    }
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
+}
+
+/// The window a scene is put together in, for `area`, cloaked and shown, its owner, and the capture of it: in no
+/// task switcher (see the top).
+fn windows(area: RECT) -> Option<(HWND, HWND, GraphicsCaptureItem)> {
+    unsafe {
+        let module = GetModuleHandleW(None).ok()?;
+        let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: w!("GlanceScene"), ..Default::default() };
+        RegisterClassW(&class);
+        let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
+        let owner = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!(""), WS_POPUP, 0, 0, 0, 0, None, None, Some(module.into()), None).ok()?;
+        // With no surface of its own (nothing draws it): where no window behind is put, it holds nothing (clear),
+        // never what its surface would hold, which no one wrote (what was in that memory before, on some cards).
+        let Ok(window) = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, class.lpszClassName, w!("Glance scene"), WS_POPUP, area.left, area.top, width, height, Some(owner), None, Some(module.into()), None) else {
+            let _ = DestroyWindow(owner);
+            return None;
+        };
+        let item = (|| {
+            let cloak: BOOL = true.into();
+            DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).ok()?;
+            let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
+            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().ok()?.CreateForWindow::<GraphicsCaptureItem>(window).ok()
+        })();
+        let Some(item) = item else {
+            let _ = DestroyWindow(window);
+            let _ = DestroyWindow(owner);
+            return None;
+        };
+        // Taken: now out of the task switcher.
+        SetWindowLongPtrW(owner, GWL_EXSTYLE, GetWindowLongPtrW(owner, GWL_EXSTYLE) | WS_EX_TOOLWINDOW.0 as isize);
+        Some((owner, window, item))
+    }
 }
 
 unsafe extern "system" fn each(window: HWND, found: LPARAM) -> BOOL {
@@ -445,26 +487,9 @@ impl Scene {
     pub fn new(area: RECT, wake: Arc<dyn Fn() + Send + Sync>, gfx: &super::gfx::Gfx) -> Option<Scene> {
         let device = Device::of(gfx)?;
         unsafe {
-            let module = GetModuleHandleW(None).ok()?;
-            let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: w!("GlanceScene"), ..Default::default() };
-            RegisterClassW(&class);
-            let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
-            let owner = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!(""), WS_POPUP, 0, 0, 0, 0, None, None, Some(module.into()), None).ok()?;
-            // With no surface of its own (nothing draws it): where no window behind is put, it holds nothing (clear),
-            // never what its surface would hold, which no one wrote (what was in that memory before, on some cards).
-            let window = match CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, class.lpszClassName, w!("Glance scene"), WS_POPUP, area.left, area.top, width, height, Some(owner), None, Some(module.into()), None) {
-                Ok(window) => window,
-                Err(_) => {
-                    let _ = DestroyWindow(owner);
-                    return None;
-                }
-            };
+            let (owner, window, item) = windows(area)?;
             let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns(), Vec::new())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), spare: Arc::default(), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0), reading: std::sync::atomic::AtomicU32::new(0) });
             let made = (|| {
-                let cloak: BOOL = true.into();
-                DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).ok()?;
-                let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
-                let item: GraphicsCaptureItem = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().ok()?.CreateForWindow(window).ok()?;
                 let size = item.Size().ok()?;
                 let (pool, session, arrived) = capture(&shared, &item, size)?;
                 Some((pool, session, arrived, size))
@@ -711,6 +736,30 @@ impl Drop for Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scene's window is taken by the capture, and is in no task switcher (Alt+Tab, the task view), which lists a
+    /// window shown that is not a tool window and is owned by none or by one that is not a tool window (measured on
+    /// Windows 10 and 11, owned by one never shown); it stays as another program asks it to close. (Made a tool
+    /// window, or owned by one, before it is taken, it is not taken on Windows 10 nor on Windows 11 before 26300.)
+    #[test]
+    fn a_scenes_window_is_taken_and_in_no_task_switcher() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, IsWindow, SendMessageW, GA_ROOTOWNER, WS_EX_APPWINDOW};
+        let (owner, window, item) = windows(RECT { left: 100, top: 100, right: 300, bottom: 200 }).expect("its windows, taken by the capture");
+        let style = |window: HWND| WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } as u32);
+        unsafe {
+            assert!(item.Size().is_ok_and(|size| size.Width > 0));
+            assert!(IsWindowVisible(window).as_bool() && cloaked(window));
+            let root = GetAncestor(window, GA_ROOTOWNER);
+            assert_eq!(root, owner);
+            assert!(style(root).contains(WS_EX_TOOLWINDOW), "its owner is no tool window: it is listed in the task switcher");
+            assert!(!style(window).contains(WS_EX_APPWINDOW));
+            SendMessageW(window, WM_CLOSE, None, None);
+            assert!(IsWindow(Some(window)).as_bool(), "closed by another program's asking");
+            drop(item);
+            let _ = DestroyWindow(window);
+            let _ = DestroyWindow(owner);
+        }
+    }
 
     /// A scene arranged again and again at another place and size (as a widget moved and shown), one frame taken
     /// after each: how many of those were not yet of what is behind (dark, where the windows behind are light).
