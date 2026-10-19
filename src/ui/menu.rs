@@ -39,6 +39,13 @@ impl Look {
     }
 }
 
+/// What a menu's window shows: what is drawn, or (glass's) that over a pane of the screen behind it, frosted by the
+/// compositor as the screen changes (see `glass::Frosted`), as the panel's lanes are frosted over the desktop.
+enum Drawn {
+    Plain(Surface),
+    Frosted(super::glass::Frosted),
+}
+
 /// One choice: what it says, its icon, whether it is on (ticked), and
 /// whether a rule sets it off from the choices before it.
 pub struct Item<'a> {
@@ -81,7 +88,7 @@ pub enum Handled {
 pub struct Menu {
     gfx: Rc<gfx::Gfx>,
     window: Window,
-    surface: Surface,
+    surface: Drawn,
     items: Vec<Item<'static>>,
     sheet: Sheet,
     look: Look,
@@ -113,10 +120,20 @@ impl Menu {
         let gfx = gfx::current().ok()?;
         let showing = super::life::Showing::of(&gfx);
         let window = Window::activating().ok()?;
-        let Ok(surface) = Surface::new(&gfx, window.hwnd) else {
-            window.destroy();
-            gfx::lost();
-            return None;
+        let frosted = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::glass::Frosted::new(&gfx, window.hwnd).ok()).flatten();
+        let surface = match frosted {
+            Some(mut frosted) => {
+                frosted.set_frost(1.0);
+                Drawn::Frosted(frosted)
+            }
+            None => match Surface::new(&gfx, window.hwnd) {
+                Ok(surface) => Drawn::Plain(surface),
+                Err(_) => {
+                    window.destroy();
+                    gfx::lost();
+                    return None;
+                }
+            },
         };
         let scale = contact.scale;
         let sheet = Sheet::new(&gfx, &items);
@@ -247,10 +264,21 @@ impl Menu {
 
     fn draw(&mut self) -> bool {
         let (sheet, items, look, lit) = (&self.sheet, &self.items, self.look, self.lit);
-        let drawn = self.surface.draw(&self.gfx, (self.size.0 as u32, self.size.1 as u32), self.scale, |frame| {
-            frame.origin(SHADOW, SHADOW);
-            sheet.paint(frame, items, look, lit);
-        });
+        let size = (self.size.0 as u32, self.size.1 as u32);
+        let drawn = match &mut self.surface {
+            Drawn::Plain(surface) => surface.draw(&self.gfx, size, self.scale, |frame| {
+                frame.origin(SHADOW, SHADOW);
+                sheet.paint(frame, items, look, lit, false);
+            }),
+            Drawn::Frosted(frosted) => {
+                let px = self.scale;
+                let pane = (SHADOW * px, SHADOW * px, sheet.width * px, sheet.height * px, Colours::new(look, true).radius * px);
+                frosted.draw(&self.gfx, size, px, pane, |frame| {
+                    frame.origin(SHADOW, SHADOW);
+                    sheet.paint(frame, items, look, lit, true);
+                })
+            }
+        };
         if drawn.is_err() {
             gfx::lost();
         }
@@ -299,10 +327,11 @@ impl Sheet {
     }
 
     /// Draws it, its corner at the frame's origin (its shadow beyond),
-    /// as `look` has it, the choice `lit` highlighted.
-    pub fn paint(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>) {
+    /// as `look` has it, the choice `lit` highlighted; over the screen behind
+    /// it, `frosted` (see `Drawn`).
+    pub fn paint(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
         let (width, height) = (self.width, self.height);
-        let colours = Colours::new(look);
+        let colours = Colours::new(look, frosted);
         let (radius, highlight_radius) = (colours.radius, colours.radius - INSET);
         frame.shadow(colours.shadow, 0.0, 0.0, width, height, radius, 12.0, 6.0);
         frame.fill_rounded(colours.sheet, 0.0, 0.0, width, height, radius);
@@ -347,13 +376,20 @@ struct Colours {
 }
 
 impl Colours {
-    fn new(look: Look) -> Self {
+    fn new(look: Look, frosted: bool) -> Self {
         use super::theme::Skin;
         let dark = look.dark;
         let theme = look.skin.map(|skin| super::theme::Theme::new(skin, dark));
         match (look.skin, theme) {
             (Some(Skin::Glass), Some(theme)) => Colours {
-                sheet: if dark { Color::hex(0x2A2D35, 0.94) } else { Color::hex(0xF7F8FA, 0.94) },
+                // (Over the screen frosted, a tint of it as the lanes' over the desktop; else near opaque, what is
+                // behind it sharp.)
+                sheet: match (dark, frosted) {
+                    (true, true) => Color::hex(0x23262E, 0.6),
+                    (false, true) => Color::hex(0xFFFFFF, 0.55),
+                    (true, false) => Color::hex(0x2A2D35, 0.94),
+                    (false, false) => Color::hex(0xF7F8FA, 0.94),
+                },
                 stroke: if dark { Color::hex(0x000000, 0.35) } else { Color::hex(0x000000, 0.08) },
                 rim: Some(Color::hex(0xFFFFFF, if dark { 0.16 } else { 0.9 })),
                 shadow: Color::hex(0x000000, if dark { 0.4 } else { 0.16 }),
@@ -430,7 +466,7 @@ mod tests {
             frame.fill(Color::hex(0x223344, 1.0), 0.0, cell_h, 3.0 * cell_w, cell_h);
             for (at, look) in looks.iter().enumerate() {
                 frame.origin((at % 3) as f32 * cell_w + SHADOW, (at / 3) as f32 * cell_h + SHADOW);
-                sheet.paint(frame, &items, *look, Some(1));
+                sheet.paint(frame, &items, *look, Some(1), false);
             }
         }).expect("drawn");
         let out = std::path::PathBuf::from(format!("{}/target/looks", env!("CARGO_MANIFEST_DIR")));

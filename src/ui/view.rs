@@ -193,11 +193,10 @@ pub enum Hit {
     NewNote,
     /// The notes shown so (one of their views, chosen in their head).
     NotesShow(crate::settings::NotesView),
-    /// One of the station's pages chosen (see `Tab`; Recent files', with which of them it shows); the menu of how what
-    /// is on it shows; its menu of the rest.
+    /// One of the station's pages chosen (see `Tab`; Recent files', with which of them it shows); its menu (how what is
+    /// on the page shows, and the rest).
     Tab(Tab),
     StationView,
-    StationMore,
     /// Where a station is: what is dragged there may be dropped on it (see `station::run::shows_at`).
     Station,
     /// The thing whose box was put just before it, its name shown shortened there (see `named`).
@@ -243,7 +242,7 @@ impl Hit {
 
     /// Whether a press on it opens a menu (the station's head's buttons: see `station::head_menu`).
     pub fn opens_menu(self) -> bool {
-        matches!(self, Hit::StationView | Hit::StationMore)
+        matches!(self, Hit::StationView)
     }
 
     /// Whether it is the sound's: its key, or its slider (the wheel over it turns the sound).
@@ -791,9 +790,12 @@ fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Col
             frame.fill_rounded(note_colour(colour), x, y, w, h.min(2.0 * radius + 4.0), radius);
             frame.unclip();
         }
+        // (Opaque, as an index card is: in a deck, the one under it hidden where it lies; ruled round in the sheet's
+        // ink, as chart paper's rules are.)
         Skin::Paper => {
-            frame.fill_rounded(theme.track, x, y, w, h, radius);
-            frame.stroke_rounded(Fill::Solid(theme.rule), x, y, w, h, radius, 1.0);
+            let card = over(theme.paper, theme.track);
+            frame.fill_rounded(card, x, y, w, h, radius);
+            frame.stroke_rounded(Fill::Solid(theme.stroke), x, y, w, h, radius, 1.0);
             if lit {
                 frame.fill_rounded(theme.hover, x, y, w, h, radius);
             }
@@ -821,6 +823,12 @@ pub(crate) fn note_page(frame: &dyn Canvas, theme: &Theme, colour: crate::notes:
         }
         Skin::Paper => {}
     }
+}
+
+/// `top` laid over `under` (an opaque colour): the opaque colour they make.
+fn over(under: Color, top: Color) -> Color {
+    let mix = |a: f32, b: f32| a + (b - a) * top.a;
+    Color { r: mix(under.r, top.r), g: mix(under.g, top.g), b: mix(under.b, top.b), a: 1.0 }
 }
 
 /// A note's colour as a dot, its middle at (`x` + its radius, `middle`); the room it takes before its title.
@@ -866,38 +874,6 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
     let reach = if theme.skin == Skin::Glass { 12.0 } else { 4.0 };
     frame.clip(left - reach, top - 2.0, width + 2.0 * reach, tall + reach);
     match view {
-        NotesView::Deck if theme.skin == Skin::Paper => {
-            // The others' titles, a row each over the last written, ruled apart as chart paper rules (the same lines
-            // as between its lanes), as many as leave it a card's room, the rest scrolled to; the last written whole
-            // at the foot, on a card.
-            let others = notes.len() - 1;
-            let room = (others as f32 * NOTE_STRIP).min((tall - NOTE_CARD).max(0.0));
-            let (most, scroll) = notes_scroll(scene, others as f32 * NOTE_STRIP, room);
-            frame.clip(left - 4.0, top - 2.0, width + 8.0, room + 2.0);
-            for (at, note) in notes.iter().enumerate().skip(1) {
-                let y = top + (at - 1) as f32 * NOTE_STRIP - scroll;
-                if y + NOTE_STRIP < top || y > top + room {
-                    continue;
-                }
-                if lit(at) {
-                    frame.fill_rounded(theme.hover, left, y + 1.0, width, NOTE_STRIP - 2.0, theme.control_radius.clamp(6.0, NOTE_STRIP / 2.0));
-                }
-                frame.fill(theme.rule, left + inset, y + NOTE_STRIP - 1.0, width - 2.0 * inset, 1.0);
-                let line = y + (NOTE_STRIP - LINE) / 2.0;
-                let x = left + inset + dot(frame, note, left + inset, line + LINE / 2.0);
-                let when_w = frame.measure(&note.when, theme.small);
-                frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), width - (x - left) - when_w - 24.0), bold(theme.body, 600.0), theme.text, x, line, width - (x - left) - when_w - 24.0, Align::Start);
-                frame.text(&note.when, theme.small, theme.text3, left, line + 1.0, width - 14.0, Align::End);
-                hits.extend(shown_in((left, y, width, NOTE_STRIP, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, room)));
-            }
-            frame.unclip();
-            // (After its rows: a press finds a row before the list they are on.)
-            if most > 0.0 {
-                hits.push((left, top, width, room, Hit::List(List::Notes, most.to_bits())));
-            }
-            let front_top = top + room + if others > 0 { 6.0 } else { 0.0 };
-            paint_front_note(frame, scene, &notes[0], (left, front_top, width, tall - (front_top - top)), lit(0), None, hits);
-        }
         NotesView::Deck => {
             // The others' titles as the tops of cards stacked over the last written, each lying over the one before
             // it (a strip of each shows; on glass, the one under showing through it), as many as leave it a card's
@@ -920,7 +896,12 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
             // so as it scrolls too), as a stack drawn away: its sides inside the corners of the one over it. Of the
             // same width, a card under showed sharp in the corners of the one over it and blurred under it, broken
             // off at its edge.
-            let recede = if theme.skin == Skin::Glass { radius * 2.0 / 3.0 } else { 0.0 };
+            // (Chart paper's index cards so too, a little more: of one width and ruled alike, they read as rows.)
+            let recede = match theme.skin {
+                Skin::Glass => radius * 2.0 / 3.0,
+                Skin::Paper => 8.0,
+                Skin::Fluent => 0.0,
+            };
             let across = |at: usize| {
                 let back = recede * ((top + room - strip_y(at)) / NOTE_STRIP).max(0.0);
                 (left + back, width - 2.0 * back)
@@ -942,8 +923,9 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 let (title_ink, _, faint) = note_inks(theme, note.colour);
                 let line = y + (NOTE_STRIP - LINE) / 2.0 + banded;
                 let when_w = frame.measure(&note.when, theme.small);
-                let room_w = w - inset - when_w - 24.0;
-                frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), room_w), bold(theme.body, 600.0), title_ink, x + inset, line, room_w, Align::Start);
+                let lead = dot(frame, note, x + inset, line + LINE / 2.0);
+                let room_w = w - inset - lead - when_w - 24.0;
+                frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), room_w), bold(theme.body, 600.0), title_ink, x + inset + lead, line, room_w, Align::Start);
                 frame.text(&note.when, theme.small, faint, x, line + 1.0, w - 14.0, Align::End);
             };
             frame.clip(left - side, top - 2.0, width + 2.0 * side, under_room);
@@ -3041,7 +3023,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     // (In the room the buttons at the end leave, whichever page shows: names that do not fit there shortened, each
     // to a like share of it. A tab's room never reaches a button's.)
     let gap = if theme.skin == Skin::Paper { 16.0 } else { 2.0 };
-    let room = left + width - (MEDIA_ROW + 2.0 + MEDIA_ROW + 12.0 + 6.0) - start;
+    let room = left + width - (MEDIA_ROW + 12.0 + 6.0) - start;
     let measured: Vec<(f32, f32)> = pages.iter().map(|(_, name, aside)| (frame.measure(name, font), if aside.is_empty() { 0.0 } else { frame.measure(aside, small) })).collect();
     let whole: f32 = measured.iter().map(|(name_w, aside_w)| 2.0 * pad + name_w + if *aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).sum::<f32>() + gap * (pages.len() - 1) as f32;
     let share = (room - gap * (pages.len() - 1) as f32) / pages.len() as f32;
@@ -3101,13 +3083,11 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         }
         hits.push((x, row, wide, TAB_H, Hit::Tab(page)));
     }
-    // At the end, the rest's menu; before it, while what is on it shows, how it shows (its view's mark, and a chevron).
-    let more = left + width - MEDIA_ROW;
+    // At the end, its menu: how what is on the page shows (its view's mark, and a chevron), and the rest.
     let row = middle - MEDIA_ROW / 2.0;
-    pressed(frame, scene, hits, Hit::StationMore, Icon::Ellipsis, more, row, false);
     {
         let wide = MEDIA_ROW + 12.0;
-        let vx = more - 2.0 - wide;
+        let vx = left + width - wide;
         let lit = scene.hover == Some(Hit::StationView);
         if lit {
             frame.fill_rounded(theme.hover, vx, row, wide, MEDIA_ROW, theme.control_radius.min(MEDIA_ROW / 2.0));
@@ -4759,8 +4739,8 @@ six".into()));
             let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
             let mut hits = Vec::new();
             paint_tabs(&Nothing, &scene, (0.0, 0.0, width), Tab::Shelf, 128, true, true, ShelfView::Cards, &mut hits);
-            let buttons: Vec<HitBox> = hits.iter().filter(|hit| matches!(hit.4, Hit::StationView | Hit::StationMore)).copied().collect();
-            assert_eq!(buttons.len(), 2, "{skin:?}");
+            let buttons: Vec<HitBox> = hits.iter().filter(|hit| matches!(hit.4, Hit::StationView)).copied().collect();
+            assert_eq!(buttons.len(), 1, "{skin:?}");
             for tab in hits.iter().filter(|hit| matches!(hit.4, Hit::Tab(_))) {
                 for button in &buttons {
                     assert!(tab.0 + tab.2 <= button.0, "{skin:?}: {tab:?} over {button:?}");

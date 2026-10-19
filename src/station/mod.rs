@@ -234,35 +234,29 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
     use crate::ui::view::{Hit, Tab};
     let lang = crate::update::language();
     let view = run::shown().view;
-    // Each row: what it does, its name, its icon, whether it is ticked, and whether a rule sets it off.
-    let rows: Vec<(HeadChoice, &'static str, Icon, bool, bool)> = match (hit, tab) {
-        (Hit::StationView, tab) => {
-            // (Each page shown its own way.)
-            let (page, view) = match tab {
-                Tab::Shelf => (crate::settings::StationPage::Shelf, view),
-                Tab::Copies => (crate::settings::StationPage::Copies, run::shown().copies_view),
-                Tab::Recent(_) => (crate::settings::StationPage::Recent, run::shown().recent_view),
-            };
-            [(ShelfView::Cards, lang.pick("小卡片", "Small cards"), Icon::LayoutGrid), (ShelfView::Large, lang.pick("大卡片", "Large cards"), Icon::Image), (ShelfView::List, lang.pick("列表", "List"), Icon::List)]
-                .into_iter()
-                .map(|(shows, label, icon)| (HeadChoice::View(page, shows), label, icon, shows == view, false))
-                .collect()
-        }
-        (Hit::StationMore, Tab::Shelf) => vec![
-            (HeadChoice::Clear, lang.pick("全部清空（保留固定的项目）", "Clear all but the pinned"), Icon::Close, false, false),
-            (HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true),
-        ],
-        (Hit::StationMore, Tab::Recent(_)) => vec![
-            (HeadChoice::StopRecent, lang.pick("不再列出最近文件", "Stop listing recent files"), Icon::Close, false, false),
-            (HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true),
-        ],
-        (Hit::StationMore, Tab::Copies) => vec![
-            (HeadChoice::ClearCopies, lang.pick("清空最近复制（保留固定的项目）", "Clear Recently copied but the pinned"), Icon::Close, false, false),
-            (HeadChoice::StopCopies, lang.pick("不再记录复制的内容", "Stop keeping what is copied"), Icon::Clipboard, false, false),
-            (HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true),
-        ],
-        _ => return None,
+    if hit != Hit::StationView {
+        return None;
+    }
+    // Each row: what it does, its name, its icon, whether it is ticked, and whether a rule sets it off. How the page
+    // shows (each page its own way); under a rule, what else is done with it; the settings last.
+    let (page, view) = match tab {
+        Tab::Shelf => (crate::settings::StationPage::Shelf, view),
+        Tab::Copies => (crate::settings::StationPage::Copies, run::shown().copies_view),
+        Tab::Recent(_) => (crate::settings::StationPage::Recent, run::shown().recent_view),
     };
+    let mut rows: Vec<(HeadChoice, &'static str, Icon, bool, bool)> = [(ShelfView::Cards, lang.pick("小卡片", "Small cards"), Icon::LayoutGrid), (ShelfView::Large, lang.pick("大卡片", "Large cards"), Icon::Image), (ShelfView::List, lang.pick("列表", "List"), Icon::List)]
+        .into_iter()
+        .map(|(shows, label, icon)| (HeadChoice::View(page, shows), label, icon, shows == view, false))
+        .collect();
+    rows.extend(match tab {
+        Tab::Shelf => vec![(HeadChoice::Clear, lang.pick("全部清空（保留固定的项目）", "Clear all but the pinned"), Icon::Close, false, true)],
+        Tab::Recent(_) => vec![(HeadChoice::StopRecent, lang.pick("不再列出最近文件", "Stop listing recent files"), Icon::Close, false, true)],
+        Tab::Copies => vec![
+            (HeadChoice::ClearCopies, lang.pick("清空最近复制（保留固定的项目）", "Clear Recently copied but the pinned"), Icon::Close, false, true),
+            (HeadChoice::StopCopies, lang.pick("不再记录复制的内容", "Stop keeping what is copied"), Icon::Clipboard, false, false),
+        ],
+    });
+    rows.push((HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true));
     let items = rows.iter().map(|(_, label, icon, checked, rule_before)| Item { label, icon: Some(*icon), checked: *checked, rule_before: *rule_before }).collect();
     let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
