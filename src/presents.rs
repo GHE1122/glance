@@ -24,6 +24,7 @@ use windows::Win32::System::Diagnostics::Etw::{
     EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
     PROCESS_TRACE_MODE_RAW_TIMESTAMP, PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION, TRACE_LEVEL_VERBOSE, WNODE_FLAG_TRACED_GUID,
 };
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetCursorPos, GetForegroundWindow, GetShellWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
@@ -318,6 +319,51 @@ fn ours(pid: u32) -> bool {
     pid == std::process::id() || pid == PARTNER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The shell's process: the one whose window is the desktop (none, 0, while it is not running).
+fn shell() -> u32 {
+    pid_of(unsafe { GetShellWindow() })
+}
+
+fn pid_of(window: HWND) -> u32 {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+    pid
+}
+
+/// What a top-level window is, as a game's is looked for.
+#[derive(Clone, Copy)]
+struct Look {
+    visible: bool,
+    minimized: bool,
+    /// Cloaked: drawn by none, as a window on another virtual desktop, or one the shell keeps hidden till it is
+    /// called up.
+    cloaked: bool,
+}
+
+fn look(window: HWND) -> Look {
+    let mut cloaked = 0u32;
+    let cloaked = unsafe { DwmGetWindowAttribute(window, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, size_of::<u32>() as u32) }.is_ok() && cloaked != 0;
+    Look { visible: unsafe { IsWindowVisible(window) }.as_bool(), minimized: unsafe { IsIconic(window) }.as_bool(), cloaked }
+}
+
+/// Of the top-level `windows` (topmost first, each with its program), the topmost that shows of each program
+/// `presenting`, topmost first, as `look` tells them. None is Glance's own, nor the shell's (`shell`): what the
+/// shell shows over everything as the virtual desktops are switched covers the screen and is drawn anew all the
+/// while, and is no game, as the desktop and the taskbar are none.
+fn fronts(windows: &[(HWND, u32)], presenting: impl Fn(u32) -> bool, shell: u32, look: impl Fn(HWND) -> Look) -> Vec<(HWND, u32)> {
+    let mut found: Vec<(HWND, u32)> = Vec::new();
+    for &(window, pid) in windows {
+        if !presenting(pid) || ours(pid) || pid == shell || found.iter().any(|(_, seen)| *seen == pid) {
+            continue;
+        }
+        let Look { visible, minimized, cloaked } = look(window);
+        if visible && !minimized && !cloaked {
+            found.push((window, pid));
+        }
+    }
+    found
+}
+
 /// The games presenting and the game mode, as the sensors' process last told them (where it reads them): what
 /// `presenting` and `game_mode` say here then.
 static MIRRORED: Mutex<Option<Vec<Presenting>>> = Mutex::new(None);
@@ -371,20 +417,15 @@ pub fn presenting() -> Vec<Presenting> {
         BOOL(1)
     }
     let _ = unsafe { EnumWindows(Some(gather), LPARAM(&mut windows as *mut Vec<HWND> as isize)) };
+    let windows: Vec<(HWND, u32)> = windows.into_iter().map(|window| (window, pid_of(window))).collect();
     let mut found: Vec<Presenting> = Vec::new();
-    for window in windows {
-        let mut pid = 0u32;
-        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
-        let Some(&frames) = stats.get(&pid) else { continue };
-        if ours(pid) || found.iter().any(|seen| seen.pid == pid) || !unsafe { IsWindowVisible(window) }.as_bool() || unsafe { IsIconic(window) }.as_bool() {
-            continue;
-        }
+    for (window, pid) in fronts(&windows, |pid| stats.contains_key(&pid), shell(), look) {
         let (fills_screen, refresh_hz, monitor) = screen_of(window);
         let mut title = [0u16; 256];
         let length = unsafe { GetWindowTextW(window, &mut title) };
         found.push(Presenting {
             pid,
-            stats: frames,
+            stats: stats[&pid],
             title: String::from_utf16_lossy(&title[..length.max(0) as usize]).trim().to_string(),
             fills_screen,
             under_pointer: monitor.is_some() && monitor.map(|(monitor, _)| monitor) == pointer_screen,
@@ -402,13 +443,8 @@ pub fn presenting() -> Vec<Presenting> {
 /// the desktop's and the taskbar's (no program's window).
 pub fn in_front() -> Option<Presenting> {
     let front = unsafe { GetForegroundWindow() };
-    let pid_of = |window: HWND| {
-        let mut pid = 0u32;
-        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
-        pid
-    };
     let pid = pid_of(front);
-    if front.is_invalid() || pid == 0 || ours(pid) || pid == pid_of(unsafe { GetShellWindow() }) {
+    if front.is_invalid() || pid == 0 || ours(pid) || pid == shell() {
         return None;
     }
     let (fills_screen, refresh_hz, monitor) = screen_of(front);
@@ -455,6 +491,21 @@ fn screen_of(window: HWND) -> (bool, Option<u32>, Option<(HMONITOR, RECT)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the shell shows over everything as the virtual desktops are switched (covering the screen, drawn anew
+    /// all the while) stands for no program; nor does a window that is cloaked (on another virtual desktop): the
+    /// topmost of a program's that shows does.
+    #[test]
+    fn no_window_of_the_shells_nor_one_cloaked_is_a_games() {
+        let window = |n: usize| HWND(n as *mut _);
+        let (shell, game, player, idle) = (4_000_001, 4_000_003, 4_000_005, 4_000_007);
+        // Topmost first: the shell's switching preview, the game's window on another desktop, the same game's
+        // window shown, a window of a program presenting nothing, a player's window, the shell's desktop.
+        let windows = [(window(1), shell), (window(2), game), (window(3), game), (window(4), idle), (window(5), player), (window(6), shell)];
+        let look = |w: HWND| Look { visible: true, minimized: false, cloaked: w == window(2) };
+        let found = fronts(&windows, |pid| pid != idle, shell, look);
+        assert_eq!(found, [(window(3), game), (window(5), player)]);
+    }
 
     /// For a look at a game in front: run elevated, with the game in front
     /// (`PRESENTS_OUT` names the file the readings go to).
