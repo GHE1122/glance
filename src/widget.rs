@@ -2067,7 +2067,7 @@ impl Widget {
             false => Side::Right,
         };
         let (skin, dark) = self.drawn_look;
-        crate::ui::beside::open(Opening { page, by, side, skin, dark, folder: None });
+        crate::ui::beside::open(Opening { page, by, side, skin, dark, folder: None, owner: self.window.hwnd.0 as isize });
     }
 
     /// Moved by (`dx`, `dy`) physical px by something other than the hand on it (a note written in over it, moved):

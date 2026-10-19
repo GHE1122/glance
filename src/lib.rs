@@ -273,13 +273,11 @@ impl App {
         self.change(|settings| settings.panel_at = at);
     }
 
-    /// The panel pinned open at its edge, along it at `at` (physical px), or
-    /// no longer.
-    pub fn pin_panel(&self, at: Option<((i32, i32), settings::Edge)>) {
-        self.change(|settings| {
-            settings.panel_pinned = at.map(|(point, _)| point);
-            settings.panel_pinned_edge = at.map(|(_, edge)| edge);
-        });
+    /// The panel at `edge` of the screen `point` (physical px) is on pinned open there, along it at `point`, or
+    /// (not `pinned`) no longer: kept for that edge alone, the other edges' as they are.
+    pub fn pin_panel(&self, point: (i32, i32), edge: settings::Edge, pinned: bool) {
+        let screen = |(x, y): (i32, i32)| crate::mouse::monitor_at(windows::Win32::Foundation::POINT { x, y }).map(|contact| contact.monitor);
+        self.change(|settings| settings::pin(&mut settings.panels_pinned, point, edge, pinned, |a, b| screen(a) == screen(b)));
     }
 
     /// The overlay was dragged where, and to the size, `placed` says.

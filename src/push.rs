@@ -113,11 +113,6 @@ impl Pusher {
         self.detector.dwelling()
     }
 
-    /// Nothing opens till the pointer has left the edge (the panel is up, or a push was turned down).
-    pub fn hold(&mut self) {
-        self.armed = false;
-    }
-
     fn pushed(&mut self, cursor: POINT, contact: Contact, edge: Edge) -> Pushed {
         self.detector.reset();
         self.armed = false;

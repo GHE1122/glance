@@ -1,7 +1,13 @@
-//! Shows and hides the panel, and draws it while it is up.
+//! Shows and hides the panels, and draws them while they are up.
 //!
-//! One thread does all of it: it reads the pointer, owns the panel's window
-//! and draws every frame while the panel is on screen. Whether the pointer is
+//! Each edge that holds something (of each screen) has a panel of its own:
+//! pushed into, or rested on where screens meet, it opens there whatever
+//! the others do, and is pinned there or not on its own; several may be up
+//! at once. A panel made is kept, hidden, for the next edge opened (made
+//! anew, what it captures of the desktop keeps some of the card's memory).
+//!
+//! One thread does all of it: it reads the pointer, owns the panels' windows
+//! and draws every frame while a panel is on screen. Whether the pointer is
 //! "on the panel" is decided from the global cursor position against where
 //! the panel rests, so nothing that moves on screen feeds back into it.
 
@@ -142,7 +148,8 @@ struct Config {
     size: f32,
     overlay: OverlaySettings,
     panel_at: Option<PanelAt>,
-    panel_pinned: Option<((i32, i32), Option<Edge>)>,
+    /// The panels pinned open at their edges (see `Settings::panels_pinned`).
+    panels_pinned: Vec<((i32, i32), Option<Edge>)>,
     music_rooms: crate::settings::MusicRooms,
     /// (Shared: taken at every frame of the widgets, as they are, not copied.)
     widgets: Arc<[crate::settings::WidgetAt]>,
@@ -165,7 +172,7 @@ fn config_from(settings: &Settings) -> Config {
         size: settings.panel_size.clamp(SIZES.0, SIZES.1),
         overlay: settings.overlay.clone(),
         panel_at: settings.panel_at,
-        panel_pinned: settings.panel_pinned.map(|point| (point, settings.panel_pinned_edge)),
+        panels_pinned: settings.panels_pinned.clone(),
         music_rooms: settings.music_rooms,
         widgets: settings.widgets.as_slice().into(),
         over_fullscreen: settings.over_fullscreen,
@@ -477,7 +484,7 @@ impl Controller {
     /// Runs the input loop, which also carries the panel. Raw input is
     /// read-only: unlike a mouse hook it cannot delay the pointer, and Windows
     /// never silently disconnects it.
-    pub fn run(&self) {
+    pub fn run<'s>(&'s self) {
         let sink = unsafe {
             let class = WNDCLASSW {
                 lpfnWndProc: Some(sink_procedure),
@@ -508,12 +515,18 @@ impl Controller {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        let mut panel = Panel::new(self).expect("panel window");
+        // The panels, each up at an edge or hidden to serve the next (see the top): the first made at once.
+        let mut panels: Vec<Panel<'s>> = vec![Panel::new(self).expect("panel window")];
+        // The edge a panel was last opened at, by where along it (on its screen): what the shortcut and the tray open
+        // again (see `hand_target`).
+        let mut last_place: Option<(POINT, Edge)> = None;
+        // The panel a menu up was opened on, where it was opened on one.
+        let mut menu_of: Option<usize> = None;
         // Made when first wanted; with no graphics device just then, tried
         // again at the next sample.
         let mut overlay: Option<Overlay> = None;
         let mut widgets = crate::widget::Widgets::default();
-        let draw_overlay = |overlay: &mut Option<Overlay>, panel: &Panel| {
+        let draw_overlay = |overlay: &mut Option<Overlay>, panels: &[Panel]| {
             let playing = self.playing();
             let wanted = self.overlay_wanted();
             if overlay.is_none() && wanted {
@@ -522,8 +535,8 @@ impl Controller {
             let Some(overlay) = overlay else { return };
             let settings = self.config.lock().unwrap().overlay.clone();
             let history = self.history.read().unwrap();
-            let beneath = panel.is_shown().then_some(panel.window.hwnd);
-            overlay.show(&history, &settings, panel.lang, playing, wanted, beneath);
+            let beneath = panels.iter().find(|panel| panel.is_shown()).map(|panel| panel.window.hwnd);
+            overlay.show(&history, &settings, panels[0].lang, playing, wanted, beneath);
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
 
@@ -568,9 +581,9 @@ impl Controller {
         let mut restore = false;
         // How many times a widget had come to the top, as last seen (see `window::on_top`).
         let mut widgets_on_top = crate::ui::window::on_top();
-        // Pinned open at its edge as Glance last ran: opened so again once
+        // Pinned open at their edges as Glance last ran: opened so again once
         // there are readings to show.
-        let mut pinned_at = self.config.lock().unwrap().panel_pinned;
+        let mut pinned_at = self.config.lock().unwrap().panels_pinned.clone();
         // A menu up, and what it is for: run by this loop, as every other window of this thread is (see `menu::Menu`).
         let mut menu: Option<(crate::ui::menu::Menu, MenuFor)> = None;
         // The windows in front the panel and the widgets give way to: the settings, the page beside.
@@ -595,20 +608,26 @@ impl Controller {
                 frame_at = None;
                 // A menu left for another window come to the front, or for the panel come since it opened (by its
                 // shortcut, an edge).
-                if menu.as_ref().is_some_and(|(open, _)| open.left() || (panel.is_shown() && !open.over_the_panel())) {
-                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
+                if menu.as_ref().is_some_and(|(open, _)| open.left() || (panels.iter().any(Panel::is_shown) && !open.over_the_panel())) {
+                    self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                 }
-                let mut wait = None;
-                // A capture of the desktop behind the panel come back, up or
-                // not (see `collect_behind`).
-                panel.collect_behind(now);
-                panel.menu_up = menu.is_some();
-                if panel.is_shown() {
-                    panel.tick(now);
+                let mut wait: Option<Duration> = None;
+                for (at, panel) in panels.iter_mut().enumerate() {
+                    // A capture of the desktop behind the panel come back, up or
+                    // not (see `collect_behind`).
+                    panel.collect_behind(now);
+                    panel.menu_up = menu.is_some() && menu_of == Some(at);
                     if panel.is_shown() {
-                        // The pointer is followed at least this often.
-                        wait = Some(panel.next_frame.saturating_duration_since(now).min(Duration::from_millis(TICK_MS as u64)));
+                        panel.tick(now);
+                        if panel.is_shown() {
+                            // The pointer is followed at least this often.
+                            let due = panel.next_frame.saturating_duration_since(now).min(Duration::from_millis(TICK_MS as u64));
+                            wait = Some(wait.map_or(due, |wait| wait.min(due)));
+                        }
                     }
+                }
+                if !panels.iter().any(Panel::is_shown) {
+                    self.shown.store(false, Ordering::Relaxed);
                 }
                 {
                     let kept = self.config.lock().unwrap().widgets.clone();
@@ -616,7 +635,7 @@ impl Controller {
                     let history = self.history.read().unwrap();
                     let samples = crate::panel::contiguous(&history);
                     if !samples.is_empty() {
-                        let look = crate::widget::Look { prefs: &panel.prefs, skin: panel.skin, lang: panel.lang, live: panel.live };
+                        let look = crate::widget::Look { prefs: &panels[0].prefs, skin: panels[0].skin, lang: panels[0].lang, live: panels[0].live };
                         if let Some(due) = widgets.tick(now, &look, &kept, samples, &seen, self) {
                             wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
                         }
@@ -626,7 +645,7 @@ impl Controller {
                     let on_top = crate::ui::window::on_top();
                     if on_top != widgets_on_top {
                         widgets_on_top = on_top;
-                        if panel.is_shown() {
+                        for panel in panels.iter().filter(|panel| panel.is_shown()) {
                             panel.window.stand_again();
                         }
                     }
@@ -634,35 +653,34 @@ impl Controller {
                     self.widget_processes.store(widgets.any_showing_processes(), Ordering::Relaxed);
                     self.set_seen(&self.widgets_seen, widgets.any_seen());
                 }
-                // A pinned panel that gave way to another edge's: back where it was once that one is gone.
-                if !panel.is_shown() && pinned_at.is_none() {
-                    if let Some((point, edge)) = panel.yielded.take() {
+                if !pinned_at.is_empty() && !self.history.read().unwrap().is_empty() {
+                    for (point, edge) in std::mem::take(&mut pinned_at) {
+                        let point = POINT { x: point.0, y: point.1 };
+                        // On its screen, or the nearest, if it is gone; at its edge, each its own panel (one up there
+                        // already, as two were kept for one edge, left as it is).
                         if let Some(contact) = monitor_at(point) {
-                            let edge = panel.pinned_edge(point, contact, Some(edge));
-                            panel.open(point, contact, edge, None, false, now);
-                            panel.pinned = panel.is_open();
+                            let edge = panels[0].pinned_edge(point, contact, edge);
+                            if panels.iter().any(|panel| panel.at(contact.monitor, edge)) {
+                                continue;
+                            }
+                            let at = panel_for(&mut panels, self, contact.monitor, edge);
+                            panels[at].open(point, contact, edge, None, false, now);
+                            panels[at].pinned = panels[at].is_open();
+                            last_place = Some((point, edge));
                         }
                     }
                 }
-                if let Some((point, edge)) = pinned_at.filter(|_| !self.history.read().unwrap().is_empty()) {
-                    pinned_at = None;
-                    let point = POINT { x: point.0, y: point.1 };
-                    // On its screen, or the nearest, if it is gone.
-                    if let Some(contact) = monitor_at(point) {
-                        let edge = panel.pinned_edge(point, contact, edge);
-                        panel.open(point, contact, edge, None, false, now);
-                        panel.pinned = panel.is_open();
+                for panel in panels.iter_mut() {
+                    // Torn off, the widget now on the screen in its place (it may
+                    // wait on the desktop behind it first): the panel goes.
+                    if panel.torn && widgets.torn_shown() {
+                        panel.torn = false;
+                        panel.dismiss();
+                    } else if panel.torn && !widgets.torn_waiting() {
+                        // The widget gone before it showed: the panel is itself again.
+                        panel.torn = false;
+                        panel.exclude();
                     }
-                }
-                // Torn off, the widget now on the screen in its place (it may
-                // wait on the desktop behind it first): the panel goes.
-                if panel.torn && widgets.torn_shown() {
-                    panel.torn = false;
-                    panel.dismiss();
-                } else if panel.torn && !widgets.torn_waiting() {
-                    // The widget gone before it showed: the panel is itself again.
-                    panel.torn = false;
-                    panel.exclude();
                 }
                 match wait {
                     // In motion: the next frame comes with the screen's, and
@@ -698,8 +716,10 @@ impl Controller {
             }
             // A press on the panel, or while its menu is up (which takes every press: one away from it only closes
             // it): one of its own, not one elsewhere (see `Panel::track`).
+            // The panel whose window the message is for, where it is one's.
+            let owner = panels.iter().position(|panel| panel.window.hwnd == msg.hwnd);
             if matches!(msg.message, windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN | windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONDOWN | windows::Win32::UI::WindowsAndMessaging::WM_MBUTTONDOWN)
-                && (msg.hwnd == panel.window.hwnd || menu.as_ref().is_some_and(|(open, _)| open.owns(msg.hwnd)))
+                && (owner.is_some() || menu.as_ref().is_some_and(|(open, _)| open.owns(msg.hwnd)))
             {
                 OURS.fetch_add(1, Ordering::Relaxed);
             }
@@ -716,7 +736,7 @@ impl Controller {
                 };
                 match handled {
                     Handled::Done(choice) => {
-                        self.end_menu(&mut menu, choice, &mut panel, &mut widgets, &mut overlay);
+                        self.end_menu(&mut menu, choice, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                         // (A shortcut, the panel's too, does what it is for as well; Esc only leaves the menu.)
                         let shortcut = matches!(msg.message, WM_HOTKEY | TOGGLE | OPEN_FROM_TRAY);
                         if !shortcut || (msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize) {
@@ -746,17 +766,18 @@ impl Controller {
             // A push into the edge, seen here or by the sensors' process: the
             // panel opens, unless over a game the settings keep it from (and
             // then not again till the pointer has left the edge).
-            let open_pushed = |(cursor, contact, edge): crate::push::Pushed, panel: &mut Panel| {
+            // (That edge's panel: the one up there already, which stays as it is, else one opened there.)
+            let open_pushed = |(cursor, contact, edge): crate::push::Pushed, panels: &mut Vec<Panel<'s>>, last_place: &mut Option<(POINT, Edge)>| {
                 if may_open(fullscreen_edge) {
-                    panel.open(cursor, contact, edge, None, true, now);
+                    let at = panel_for(panels, self, contact.monitor, edge);
+                    if !panels[at].is_open() {
+                        panels[at].open(cursor, contact, edge, None, true, now);
+                        *last_place = Some((cursor, edge));
+                    }
                 }
             };
-            if panel.holds_edges() {
-                pusher.hold();
-                seam_armed = false;
-            }
-            // The pointer resting on the seam, where the panel opens.
-            let mut on_seam = |cursor: POINT, panel: &mut Panel| {
+            // The pointer resting on the seam, where that edge's panel opens.
+            let mut on_seam = |cursor: POINT, panels: &mut Vec<Panel<'s>>, last_place: &mut Option<(POINT, Edge)>| {
                 let here = monitor_at(cursor).map(|contact| contact.monitor);
                 if here != on_screen {
                     crossed = on_screen.map(|from| (from, now));
@@ -779,10 +800,11 @@ impl Controller {
                     .min_by_key(|(contact, _)| Some(contact.monitor) != here);
                 let Some((contact, edge)) = found else {
                     seam_rest = None;
-                    seam_armed = !panel.holds_edges();
+                    seam_armed = true;
                     return;
                 };
-                if !seam_armed || !panel.watching() {
+                // (Its panel up already: it stays as it is.)
+                if !seam_armed || panels.iter().any(|panel| panel.at(contact.monitor, edge)) {
                     return;
                 }
                 let still = (SEAM_STILL * contact.scale).round() as i32;
@@ -793,34 +815,51 @@ impl Controller {
                 if now.duration_since(since) >= SEAM_DWELL {
                     seam_rest = None;
                     if may_open(fullscreen_edge) {
-                        panel.open(cursor, contact, edge, None, true, now);
-                    } else {
-                        seam_armed = false;
+                        let at = panel_for(panels, self, contact.monitor, edge);
+                        panels[at].open(cursor, contact, edge, None, true, now);
+                        *last_place = Some((cursor, edge));
                     }
+                    seam_armed = false;
                 }
             };
             match msg.message {
-                OPEN_FROM_TRAY => panel.open_by_hand(now),
-                TOGGLE if panel.is_open() => panel.begin_close(now),
-                TOGGLE if !may_open(fullscreen_hotkey) => {}
-                TOGGLE => panel.open_by_hand(now),
+                // The shortcut and the tray: the panel of the edge last opened (see `hand_target`), opened, or (the
+                // shortcut) closed where it is up.
+                OPEN_FROM_TRAY | TOGGLE => {
+                    let at = self.hand_target(&mut panels, last_place);
+                    if panels[at].is_open() {
+                        if msg.message == TOGGLE {
+                            panels[at].begin_close(now);
+                        }
+                    } else if msg.message == OPEN_FROM_TRAY || may_open(fullscreen_hotkey) {
+                        self.open_by_hand(&mut panels[at], last_place, now);
+                        last_place = panels[at].place().or(last_place);
+                    }
+                }
                 // A panel that stays (pinned, or moved away from the edge)
                 // stays, the settings window coming up or not.
-                DISMISS if panel.stays() => {}
-                DISMISS => panel.dismiss(),
+                DISMISS => {
+                    for panel in panels.iter_mut().filter(|panel| !panel.stays()) {
+                        panel.dismiss();
+                    }
+                }
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == PASTE_HOTKEY as usize => crate::station::run::ask(crate::station::run::Ask::Paste),
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize => {
-                    if panel.is_open() && !panel.stays() {
+                    for panel in panels.iter_mut().filter(|panel| panel.is_open() && !panel.stays()) {
                         panel.begin_close(now);
                     }
                 }
                 // Placed, zoomed and backed for screens that are no longer
                 // so: taken down, and opened afresh.
-                // The panel's own (the overlay's follows its game's screen).
-                crate::ui::window::SCREENS_CHANGED if msg.hwnd == panel.window.hwnd => {
-                    crate::screens::changed();
-                    panel.screens_changed(msg.wParam.0 as u32, now);
-                    widgets.screens_changed();
+                // The panels' own (the overlay's follows its game's screen); what is shared seen to once, as the first
+                // panel's window is told.
+                crate::ui::window::SCREENS_CHANGED if owner.is_some() => {
+                    let at = owner.unwrap();
+                    if at == 0 {
+                        crate::screens::changed();
+                        widgets.screens_changed();
+                    }
+                    panels[at].screens_changed(msg.wParam.0 as u32, now);
                 }
                 crate::ui::window::SCREENS_CHANGED if widgets.owns(msg.hwnd) || widgets.full_owns(msg.hwnd) => widgets.screens_changed(),
                 crate::widget::CAPTURED if widgets.owns(msg.hwnd) => widgets.captured(msg.hwnd),
@@ -836,15 +875,17 @@ impl Controller {
                 }
                 TRAY_MENU => {
                     let (x, y) = ((msg.lParam.0 & 0xFFFF) as u16 as i16 as i32, ((msg.lParam.0 >> 16) & 0xFFFF) as u16 as i16 as i32);
-                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
-                    menu = crate::tray::open_menu(x, y, panel.is_shown()).map(|(open, choices)| (open, MenuFor::Tray(choices)));
+                    self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
+                    menu = crate::tray::open_menu(x, y, panels.iter().any(Panel::is_shown)).map(|(open, choices)| (open, MenuFor::Tray(choices)));
                     keep_menu_above(&menu, &mut overlay);
                 }
                 RECALL_WIDGET => {
                     widgets.recall();
                 }
                 LYRIC => {
-                    panel.next_frame = now;
+                    for panel in panels.iter_mut() {
+                        panel.next_frame = now;
+                    }
                     widgets.draw_soon();
                 }
                 // The settings, or the page beside, in front or no longer: the panel gives way to the settings, the
@@ -853,15 +894,19 @@ impl Controller {
                     let front = (msg.wParam.0 != 0).then(|| HWND(msg.wParam.0 as *mut _));
                     if msg.lParam.0 == 0 {
                         in_front.0 = front;
-                        panel.settings_front(front);
+                        for panel in panels.iter_mut() {
+                            panel.settings_front(front);
+                        }
                     } else {
                         in_front.1 = front;
                     }
                     widgets.settings_front(in_front.1.or(in_front.0));
                 }
                 RESTYLE => {
-                    panel.restyle();
-                    draw_overlay(&mut overlay, &panel);
+                    for panel in panels.iter_mut() {
+                        panel.restyle();
+                    }
+                    draw_overlay(&mut overlay, &panels);
                     // An open settings window takes what was changed elsewhere.
                     settings_window::follow_settings();
                 }
@@ -870,17 +915,19 @@ impl Controller {
                     // closed comes back with the first sample.
                     if restore {
                         restore = false;
-                        if !panel.is_shown() && may_open(fullscreen_hotkey) {
-                            panel.open_by_hand(now);
+                        let at = self.hand_target(&mut panels, last_place);
+                        if !panels[at].is_shown() && may_open(fullscreen_hotkey) {
+                            self.open_by_hand(&mut panels[at], last_place, now);
                         }
                     }
-                    draw_overlay(&mut overlay, &panel);
+                    draw_overlay(&mut overlay, &panels);
                 }
                 // The pinned panel dragged by its bar.
-                WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => panel.press(lparam_point(msg.lParam)),
-                WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd && panel.shelf_press.is_some() => panel.shelf_moved(),
+                WM_LBUTTONDOWN if owner.is_some() => panels[owner.unwrap()].press(lparam_point(msg.lParam)),
+                WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].shelf_press.is_some()) => panels[owner.unwrap()].shelf_moved(),
                 // A thing kept at hand pressed and moved: put elsewhere among them as it is let go, over another.
-                WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd && panel.app_press.is_some() => {
+                WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].app_press.is_some()) => {
+                    let panel = &mut panels[owner.unwrap()];
                     if let (Some((at, from, false)), Some(now)) = (panel.app_press, cursor_position()) {
                         if crate::station::run::drag_begins(from, now) {
                             panel.app_press = Some((at, from, true));
@@ -888,7 +935,8 @@ impl Controller {
                     }
                     panel.hover_at(lparam_point(msg.lParam));
                 }
-                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.app_press.is_some() => {
+                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if owner.is_some_and(|at| panels[at].app_press.is_some()) => {
+                    let panel = &mut panels[owner.unwrap()];
                     let (from, _, moved) = panel.app_press.take().unwrap();
                     let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
                     let over = panel.hit_at(lparam_point(msg.lParam));
@@ -910,8 +958,9 @@ impl Controller {
                     }
                 }
                 // (The pointer taken from it as a thing on its station was pressed: nothing pressed.)
-                crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.shelf_press.is_some() => panel.shelf_press = None,
-                WM_TIMER if msg.hwnd == panel.window.hwnd && panel.held() => {
+                crate::ui::window::CAPTURE_LOST if owner.is_some_and(|at| panels[at].shelf_press.is_some()) => panels[owner.unwrap()].shelf_press = None,
+                WM_TIMER if owner.is_some_and(|at| panels[at].held()) => {
+                    let panel = &mut panels[owner.unwrap()];
                     panel.dragged(now);
                     if let Some((form, scale, at, grab, size, only)) = panel.tear.take() {
                         // The widget takes the desktop behind it before the
@@ -976,8 +1025,8 @@ impl Controller {
                     widgets.release(msg.hwnd, now, false);
                     // A button of its station's head: its menu.
                     if let Some((hit, tab)) = widgets.take_menu_asked() {
-                        self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
-                        menu = cursor_position().and_then(|at| crate::station::head_menu(hit, tab, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
+                        self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
+                        menu = cursor_position().and_then(|at| crate::station::head_menu(hit, tab, at, panels.iter().any(Panel::is_shown))).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
                         keep_menu_above(&menu, &mut overlay);
                     }
                 }
@@ -985,33 +1034,37 @@ impl Controller {
                 // pressed is done.
                 crate::ui::window::CAPTURE_LOST if widgets.owns(msg.hwnd) => widgets.release(msg.hwnd, now, true),
                 WM_MOUSEMOVE if widgets.owns(msg.hwnd) && widgets.held(msg.hwnd) && let_go(&msg) => widgets.release(msg.hwnd, now, false),
-                WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam), panel.lang),
+                WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam), panels[0].lang),
                 WM_RBUTTONUP if widgets.owns(msg.hwnd) => {
-                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
+                    self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                     // On a thing on the station, its menu; else the widget's.
+                    let panel_shown = panels.iter().any(Panel::is_shown);
                     menu = match widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
-                        Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
-                        Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
-                        Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel.is_shown())).map(|(open, choices, app)| (open, MenuFor::App(app, choices))),
-                        _ => widgets.menu(msg.hwnd, panel.lang, panel.is_shown()).map(|open| (open, MenuFor::Widget(msg.hwnd))),
+                        Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel_shown)).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
+                        Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel_shown)).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
+                        Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel_shown)).map(|(open, choices, app)| (open, MenuFor::App(app, choices))),
+                        _ => widgets.menu(msg.hwnd, panels[0].lang, panel_shown).map(|open| (open, MenuFor::Widget(msg.hwnd))),
                     };
                     keep_menu_above(&menu, &mut overlay);
                 }
                 // On a thing on the station in the panel, its menu.
-                WM_RBUTTONUP if msg.hwnd == panel.window.hwnd => {
-                    match panel.hit_at(lparam_point(msg.lParam)) {
+                WM_RBUTTONUP if owner.is_some() => {
+                    let hit = panels[owner.unwrap()].hit_at(lparam_point(msg.lParam));
+                    if matches!(hit, Some(Hit::Shelf(_) | Hit::App(_) | Hit::Recent(_))) {
+                        // (Before `end_menu`, which forgets whose the menu up was.)
+                        self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
+                        menu_of = owner;
+                    }
+                    match hit {
                         Some(Hit::Shelf(id)) => {
-                            self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
                             menu = cursor_position().and_then(|at| crate::station::menu(id, at, true)).map(|(open, choices)| (open, MenuFor::Station(id, choices, None)));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         Some(Hit::App(at)) => {
-                            self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
                             menu = cursor_position().and_then(|point| crate::station::app_menu(at, point, true)).map(|(open, choices, app)| (open, MenuFor::App(app, choices)));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         Some(Hit::Recent(file)) => {
-                            self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
                             menu = cursor_position().and_then(|at| crate::station::recent_menu(file, at, true)).map(|(open, choices)| (open, MenuFor::Recent(file, choices)));
                             keep_menu_above(&menu, &mut overlay);
                         }
@@ -1021,8 +1074,9 @@ impl Controller {
                 // Let go: the button up, the capture lost, or the pointer moved with the button up (its going up
                 // told to another window).
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST | WM_MOUSEMOVE
-                    if msg.hwnd == panel.window.hwnd && panel.drag.is_some() && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
+                    if owner.is_some_and(|at| panels[at].drag.is_some()) && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
                 {
+                    let panel = &mut panels[owner.unwrap()];
                     // Kept here, in the order things happened (an unpin just
                     // after stands).
                     let tapped = msg.message == WM_LBUTTONUP && panel.tapped();
@@ -1068,33 +1122,35 @@ impl Controller {
                 }
                 // The sound's track let go (or the button found up as the pointer moves, or the capture lost).
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST | WM_MOUSEMOVE
-                    if msg.hwnd == panel.window.hwnd && panel.sliding.is_some() && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
+                    if owner.is_some_and(|at| panels[at].sliding.is_some()) && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
                 {
                     // (The pointer taken from it mid-drag: given up, nowhere sought.)
-                    panel.slid(msg.message != crate::ui::window::CAPTURE_LOST)
+                    panels[owner.unwrap()].slid(msg.message != crate::ui::window::CAPTURE_LOST)
                 }
                 // Let go of the panel after a widget was torn off it (the button went up before the widget took
                 // the pointer): the widget is let go.
-                WM_LBUTTONUP if msg.hwnd == panel.window.hwnd && widgets.torn_in_hand().is_some() => {
+                WM_LBUTTONUP if owner.is_some() && widgets.torn_in_hand().is_some() => {
                     let torn = widgets.torn_in_hand().unwrap();
                     widgets.release(torn, now, false)
                 }
                 // A note stuck on the desktop pressed in the panel: the one stuck shown, not opened a second time.
                 WM_LBUTTONUP
-                    if msg.hwnd == panel.window.hwnd
-                        && panel.hit_at(lparam_point(msg.lParam)).and_then(|hit| if let Hit::Note(at) = hit { crate::notes::shown().get(usize::from(at)).map(|note| note.name.clone()) } else { None }).is_some_and(|name| widgets.raise_note(&name)) =>
+                    if owner.is_some_and(|at| panels[at].hit_at(lparam_point(msg.lParam)).and_then(|hit| if let Hit::Note(at) = hit { crate::notes::shown().get(usize::from(at)).map(|note| note.name.clone()) } else { None }).is_some_and(|name| widgets.raise_note(&name))) =>
                 {
-                    panel.dismiss();
+                    panels[owner.unwrap()].dismiss();
                 }
                 // The station's head's buttons: their menus.
-                WM_LBUTTONUP if msg.hwnd == panel.window.hwnd && panel.hit_at(lparam_point(msg.lParam)).is_some_and(Hit::opens_menu) => {
-                    let hit = panel.hit_at(lparam_point(msg.lParam)).unwrap();
-                    panel.click(lparam_point(msg.lParam));
-                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
-                    menu = cursor_position().and_then(|at| crate::station::head_menu(hit, panel.tab, at, true)).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
+                WM_LBUTTONUP if owner.is_some_and(|at| panels[at].hit_at(lparam_point(msg.lParam)).is_some_and(Hit::opens_menu)) => {
+                    let at = owner.unwrap();
+                    let hit = panels[at].hit_at(lparam_point(msg.lParam)).unwrap();
+                    panels[at].click(lparam_point(msg.lParam));
+                    self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
+                    menu = cursor_position().and_then(|point| crate::station::head_menu(hit, panels[at].tab, point, true)).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
+                    menu_of = Some(at);
                     keep_menu_above(&menu, &mut overlay);
                 }
-                WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => {
+                WM_LBUTTONUP if owner.is_some() => {
+                    let panel = &mut panels[owner.unwrap()];
                     panel.click(lparam_point(msg.lParam));
                     // Its music asked to be shown over the whole of its screen.
                     if let Some(contact) = panel.full_asked.take() {
@@ -1120,16 +1176,16 @@ impl Controller {
                 WM_MOUSEMOVE if overlay.as_ref().is_some_and(|o| o.owns_bar(msg.hwnd)) => overlay.as_mut().unwrap().bar_hover(),
                 // Its menu, or one of its buttons: the same is done (see `overlay_chosen`).
                 WM_RBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
-                    self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
-                    menu = overlay.as_ref().unwrap().menu(panel.is_shown()).map(|open| (open, MenuFor::Overlay));
+                    self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
+                    menu = overlay.as_ref().unwrap().menu(panels.iter().any(Panel::is_shown)).map(|open| (open, MenuFor::Overlay));
                     keep_menu_above(&menu, &mut overlay);
                 }
                 WM_LBUTTONUP if overlay.as_ref().is_some_and(|o| o.owns_bar(msg.hwnd)) => {
                     if let Some(choice) = overlay.as_mut().unwrap().bar_press() {
-                        self.overlay_chosen(choice, &mut panel);
+                        self.overlay_chosen(choice, &mut panels);
                     }
                 }
-                WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd => panel.hover_at(lparam_point(msg.lParam)),
+                WM_MOUSEMOVE if owner.is_some() => panels[owner.unwrap()].hover_at(lparam_point(msg.lParam)),
                 // The wheel over the overlay: its glass clearer (up) or
                 // less clear, a step of the settings' slider a notch.
                 WM_MOUSEWHEEL if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
@@ -1137,16 +1193,16 @@ impl Controller {
                     std::thread::spawn(move || crate::app().clear_overlay(notches * 0.05));
                 }
                 WM_MOUSEWHEEL if widgets.owns(msg.hwnd) => widgets.wheel(msg.hwnd, lparam_point(msg.lParam), (msg.wParam.0 >> 16) as u16 as i16),
-                WM_MOUSEWHEEL if msg.hwnd == panel.window.hwnd => {
+                WM_MOUSEWHEEL if owner.is_some() => {
                     let delta = (msg.wParam.0 >> 16) as u16 as i16;
-                    panel.wheel(lparam_point(msg.lParam), delta);
+                    panels[owner.unwrap()].wheel(lparam_point(msg.lParam), delta);
                 }
                 // A push the sensors' process saw (it watches the edges while
                 // there is one).
-                PUSHED if !panel.holds_edges() => {
+                PUSHED => {
                     let (edge, cursor) = pushed_from(msg.wParam, msg.lParam);
                     if let Some(contact) = monitor_at(cursor) {
-                        open_pushed((cursor, contact, edge), &mut panel);
+                        open_pushed((cursor, contact, edge), &mut panels, &mut last_place);
                     }
                 }
                 // Their process gone: the edges are watched here from now on.
@@ -1157,15 +1213,13 @@ impl Controller {
                 // passed on: what touches the PC is listened for here meanwhile too).
                 WM_INPUT => {
                     crate::touches::mouse_input(msg.lParam);
-                    if panel.watching() {
-                        if let Some(cursor) = cursor_position() {
-                            on_seam(cursor, &mut panel);
-                        }
-                        if let (Some((moved, _)), Some(cursor)) = (read_mouse(HRAWINPUT(msg.lParam.0 as *mut _)), cursor_position()) {
-                            let pushed = pusher.heard(&self.config.lock().unwrap().edges, moved, cursor, now);
-                            if let Some(pushed) = pushed {
-                                open_pushed(pushed, &mut panel);
-                            }
+                    if let Some(cursor) = cursor_position() {
+                        on_seam(cursor, &mut panels, &mut last_place);
+                    }
+                    if let (Some((moved, _)), Some(cursor)) = (read_mouse(HRAWINPUT(msg.lParam.0 as *mut _)), cursor_position()) {
+                        let pushed = pusher.heard(&self.config.lock().unwrap().edges, moved, cursor, now);
+                        if let Some(pushed) = pushed {
+                            open_pushed(pushed, &mut panels, &mut last_place);
                         }
                     }
                 }
@@ -1176,27 +1230,25 @@ impl Controller {
                         overlay.watch();
                     }
                     let Some(cursor) = cursor_position() else { continue };
-                    if panel.watching() {
-                        on_seam(cursor, &mut panel);
-                    }
+                    on_seam(cursor, &mut panels, &mut last_place);
                     if own_input {
                         pusher.looked(&self.config.lock().unwrap().edges, cursor, now);
                     }
                 }
-                WM_TIMER if msg.wParam.0 == TRACK_TIMER && panel.watching() => {
+                WM_TIMER if msg.wParam.0 == TRACK_TIMER => {
                     let Some(cursor) = cursor_position() else { continue };
-                    on_seam(cursor, &mut panel);
+                    on_seam(cursor, &mut panels, &mut last_place);
                     if own_input {
                         let pushed = pusher.rested(&self.config.lock().unwrap().edges, cursor, now);
                         if let Some(pushed) = pushed {
-                            open_pushed(pushed, &mut panel);
+                            open_pushed(pushed, &mut panels, &mut last_place);
                         }
                     }
                 }
                 _ => {}
             }
 
-            let wanted = panel.is_open() && !panel.stays();
+            let wanted = panels.iter().any(|panel| panel.is_open() && !panel.stays());
             if wanted != escape {
                 escape = wanted;
                 unsafe {
@@ -1220,7 +1272,7 @@ impl Controller {
                     }
                 }
             }
-            let needed = panel.watching() && (pusher.resting() || seam_rest.is_some());
+            let needed = pusher.resting() || seam_rest.is_some();
             if needed != ticking {
                 ticking = needed;
                 unsafe {
@@ -1271,9 +1323,42 @@ enum MenuFor {
 }
 
 impl Controller {
+    /// The panel the shortcut and the tray are for: the one moved away from its edge, where the panel is kept so (see
+    /// `PanelAt`); else that of the edge a panel was last opened at (`last`), on its screen. Up already, or (none up
+    /// there) one to open: hidden, or made.
+    fn hand_target<'a>(&'a self, panels: &mut Vec<Panel<'a>>, last: Option<(POINT, Edge)>) -> usize {
+        let floating = self.config.lock().unwrap().panel_at.is_some();
+        let found = if floating {
+            panels.iter().position(|panel| panel.is_shown() && panel.floating())
+        } else {
+            last.and_then(|(point, edge)| {
+                let monitor = monitor_at(point)?.monitor;
+                panels.iter().position(|panel| panel.at(monitor, edge))
+            })
+        };
+        found.unwrap_or_else(|| match panels.iter().position(|panel| !panel.is_shown()) {
+            Some(at) => at,
+            None => {
+                panels.push(Panel::new(self).expect("panel window"));
+                panels.len() - 1
+            }
+        })
+    }
+
+    /// `panel` opened by hand (the shortcut, the tray): where the panel is kept moved away from its edge, or at the
+    /// edge a panel was last opened at (`last`), where it was; else as by hand ever (see `Panel::open_by_hand`).
+    fn open_by_hand(&self, panel: &mut Panel, last: Option<(POINT, Edge)>, now: Instant) {
+        let floating = self.config.lock().unwrap().panel_at.is_some();
+        match last.filter(|_| !floating).and_then(|(point, edge)| Some((point, edge, monitor_at(point)?))) {
+            Some((point, edge, contact)) => panel.open(point, contact, edge, None, false, now),
+            None => panel.open_by_hand(now),
+        }
+    }
+
     /// The menu up, if one is, gone, `choice` chosen in it (the index of one, or none, left): done.
-    fn end_menu(&self, menu: &mut Option<(crate::ui::menu::Menu, MenuFor)>, choice: Option<usize>, panel: &mut Panel, widgets: &mut crate::widget::Widgets, overlay: &mut Option<Overlay>) {
+    fn end_menu(&self, menu: &mut Option<(crate::ui::menu::Menu, MenuFor)>, choice: Option<usize>, panels: &mut [Panel], menu_of: &mut Option<usize>, widgets: &mut crate::widget::Widgets, overlay: &mut Option<Overlay>) {
         let Some((open, of)) = menu.take() else { return };
+        let menu_panel = menu_of.take();
         open.close();
         if let Some(overlay) = overlay.as_mut() {
             overlay.under_menu(None);
@@ -1281,7 +1366,9 @@ impl Controller {
         // The pointer, where the menu left it (past the panel's edge, as a menu longer than it reaches), taken to
         // have not yet come onto the panel: it stays till the pointer comes and goes again, or a press elsewhere, as
         // opened by its shortcut. (Else gone from under it a moment after its choice, before what was chosen showed.)
-        panel.menu_closed();
+        for panel in panels.iter_mut() {
+            panel.menu_closed();
+        }
         match of {
             MenuFor::Tray(choices) => crate::tray::chosen(choice, &choices),
             MenuFor::Widget(hwnd) => {
@@ -1291,12 +1378,16 @@ impl Controller {
             }
             MenuFor::Overlay => {
                 if let (Some(row), Some(overlay)) = (choice, overlay.as_ref()) {
-                    self.overlay_chosen(overlay.chose(row), panel);
+                    self.overlay_chosen(overlay.chose(row), panels);
                 }
             }
             MenuFor::Station(id, choices, on) => match (choice.and_then(|row| choices.get(row)), on) {
                 (Some(crate::station::Choice::Preview), Some(widget)) => widgets.open_beside(widget, crate::ui::beside::Page::Preview(id)),
-                (Some(crate::station::Choice::Preview), None) => panel.open_beside(crate::ui::beside::Page::Preview(id)),
+                (Some(crate::station::Choice::Preview), None) => {
+                    if let Some(panel) = menu_panel.and_then(|at| panels.get(at)) {
+                        panel.open_beside(crate::ui::beside::Page::Preview(id));
+                    }
+                }
                 (Some(choice), _) => crate::station::chose(id, *choice),
                 (None, _) => {}
             },
@@ -1319,10 +1410,10 @@ impl Controller {
     }
 
     /// What was chosen of the overlay, in its menu or by one of its buttons: done.
-    fn overlay_chosen(&self, choice: OverlayChoice, panel: &mut Panel) {
+    fn overlay_chosen(&self, choice: OverlayChoice, panels: &mut [Panel]) {
         match choice {
             OverlayChoice::Settings => {
-                if !panel.stays() {
+                for panel in panels.iter_mut().filter(|panel| !panel.stays()) {
                     panel.dismiss();
                 }
                 settings_window::open_at_overlay();
@@ -1336,6 +1427,19 @@ impl Controller {
             OverlayChoice::Close => self.set_overlay(false),
         }
     }
+}
+
+/// The panel to open at `edge` of the screen `monitor`: the one up there already, else one hidden (kept from before),
+/// else one made (see the top).
+fn panel_for<'a>(panels: &mut Vec<Panel<'a>>, controller: &'a Controller, monitor: RECT, edge: Edge) -> usize {
+    if let Some(at) = panels.iter().position(|panel| panel.at(monitor, edge)) {
+        return at;
+    }
+    if let Some(at) = panels.iter().position(|panel| !panel.is_shown()) {
+        return at;
+    }
+    panels.push(Panel::new(controller).expect("panel window"));
+    panels.len() - 1
 }
 
 /// A point as a message carries it (x low, y high: physical px, each within what 16 bits hold).
@@ -1629,8 +1733,6 @@ struct Panel<'a> {
     pinned: bool,
     /// Its music asked to be shown over the whole of its screen (see `Widgets::open_full`): on which screen.
     full_asked: Option<Contact>,
-    /// Pinned at its edge, it gave way to another's (see `open`): where it was, to come back once that one goes.
-    yielded: Option<(POINT, Edge)>,
     /// A game holding the screen in exclusive fullscreen when the panel
     /// opened over it, which sent it to the background: brought back when
     /// the panel has closed, unless a press elsewhere closed it.
@@ -1771,7 +1873,6 @@ impl<'a> Panel<'a> {
             hover: None,
             pinned: false,
             full_asked: None,
-            yielded: None,
             game: None,
             opening: None,
             game_at: (false, false),
@@ -1820,24 +1921,18 @@ impl<'a> Panel<'a> {
         !matches!(self.phase, Phase::Hidden)
     }
 
+    /// Whether it is up at `edge` of the screen `monitor` (not moved away from it): the panel of that edge.
+    fn at(&self, monitor: RECT, edge: Edge) -> bool {
+        self.is_shown() && self.edge == edge && !self.floating() && self.placement.as_ref().is_some_and(|placement| placement.contact.monitor == monitor)
+    }
+
     fn is_open(&self) -> bool {
         matches!(self.phase, Phase::Open { .. })
     }
 
-    /// Whether a push into an edge is still looked for while it is up: pinned at an edge, it gives way to the
-    /// panel asked for at another (see `open`), so the edges are watched as if it were not there.
-    fn gives_way(&self) -> bool {
-        self.is_open() && self.pinned && !self.floating()
-    }
-
-    /// Whether the edges are watched for a push: not open (on its way in or out at most), or what is open gives way.
-    fn watching(&self) -> bool {
-        !self.is_open() || self.gives_way()
-    }
-
-    /// Whether it keeps the edges from opening it again: up (on its way out too), and not giving way.
-    fn holds_edges(&self) -> bool {
-        self.is_shown() && !self.gives_way()
+    /// Where it is up at its edge: along it where it centres, and the edge (none, moved away from it, or hidden).
+    fn place(&self) -> Option<(POINT, Edge)> {
+        self.placement.as_ref().filter(|_| self.is_shown() && !self.floating()).map(|placement| (placement.anchor, self.edge))
     }
 
     /// The settings changed: what is shown, and how.
@@ -1949,16 +2044,9 @@ impl<'a> Panel<'a> {
         if self.controller.history.read().unwrap().is_empty() {
             return;
         }
+        // (Up already: it stays as it is. Each edge has a panel of its own: another edge's opens beside it.)
         if self.is_open() {
-            // Pinned at its edge where another is pushed (another edge, or the same on another screen): it gives way
-            // to that edge's, and comes back where it was once that one goes (see `yielded`). (Each edge holds its
-            // own; pinned, one stood in the way of every other.)
-            let elsewhere = self.edge != edge || self.placement.as_ref().is_some_and(|placement| placement.contact.monitor != contact.monitor);
-            if !(self.pinned && elsewhere && !self.floating()) {
-                return;
-            }
-            self.yielded = self.placement.as_ref().map(|placement| (placement.anchor, self.edge));
-            self.dismiss();
+            return;
         }
         let began = Instant::now();
         let mut taking = Duration::ZERO;
@@ -2067,7 +2155,10 @@ impl<'a> Panel<'a> {
         self.phase = Phase::Closing;
         // Pinned and closed by hand: no longer opened as Glance starts.
         if std::mem::take(&mut self.pinned) && !self.floating() {
-            std::thread::spawn(|| crate::app().pin_panel(None));
+            if let Some(placement) = &self.placement {
+                let (point, edge) = ((placement.anchor.x, placement.anchor.y), self.edge);
+                std::thread::spawn(move || crate::app().pin_panel(point, edge, false));
+            }
         }
         self.window.set_click_through(true);
         if reduced_motion() || self.floating() {
@@ -2134,7 +2225,10 @@ impl<'a> Panel<'a> {
         if !self.is_shown() {
             return;
         }
-        crate::ui::beside::close();
+        // (Its own page beside it goes with it; another's stays.)
+        if crate::ui::beside::up_for(self.window.hwnd) {
+            crate::ui::beside::close();
+        }
         self.end_drag();
         // (What it said under what the pointer was on goes with it: a drive's row, the line that switches players.)
         if self.hover.take().is_some_and(|hit| says(hit, self.lang).is_some()) {
@@ -2154,7 +2248,6 @@ impl<'a> Panel<'a> {
         self.capturing = None;
         self.hidden();
         self.placement = None;
-        self.controller.shown.store(false, Ordering::Relaxed);
     }
 
     /// What was pressed since it last looked (`down`: a button is down now): whether anything was, and whether any of
@@ -2429,7 +2522,7 @@ impl<'a> Panel<'a> {
         // (With the page beside it up: the two are one place, left by the page's own going. With a menu of its own up,
         // as large as it may be past its edge: a press on the menu is on the panel's behalf, and one away from both
         // closes the menu first.)
-        self.pinned || self.floating() || crate::ui::beside::is_up() || self.menu_up
+        self.pinned || self.floating() || crate::ui::beside::up_for(self.window.hwnd) || self.menu_up
     }
 
     /// `page` opened beside it on its inner side (under it at the top edge): quick launch's choosing, a note.
@@ -2441,7 +2534,7 @@ impl<'a> Panel<'a> {
             Edge::Right => Side::Left,
             Edge::Top => Side::Below,
         };
-        crate::ui::beside::open(Opening { page, by: placement.panel, side, skin: self.theme.skin, dark: self.theme.dark, folder: None });
+        crate::ui::beside::open(Opening { page, by: placement.panel, side, skin: self.theme.skin, dark: self.theme.dark, folder: None, owner: self.window.hwnd.0 as isize });
     }
 
     /// The edges of the panel a point `(x, y)` from its corner (DIPs) is
@@ -3438,9 +3531,10 @@ impl<'a> Panel<'a> {
                 if self.floating() {
                     crate::app().place_panel(self.kept_at());
                 } else {
-                    // At its edge, kept so across restarts too.
-                    let at = self.placement.as_ref().filter(|_| self.pinned).map(|p| ((p.anchor.x, p.anchor.y), self.edge));
-                    crate::app().pin_panel(at);
+                    // At its edge, kept so across restarts too (that edge's alone).
+                    if let Some(placement) = &self.placement {
+                        crate::app().pin_panel((placement.anchor.x, placement.anchor.y), self.edge, self.pinned);
+                    }
                 }
             }
             Some(Hit::Game) => {

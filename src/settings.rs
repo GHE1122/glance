@@ -698,6 +698,12 @@ pub struct Settings {
     /// The edge it was pinned at (none, pinned before this was kept: the edge nearest that point).
     #[serde(default)]
     pub panel_pinned_edge: Option<Edge>,
+    /// The panels pinned open at their edges, each along its edge where its point is (physical px; its screen's),
+    /// and the edge (none, pinned before this was kept: the edge nearest that point): open so again as Glance starts.
+    /// (Each edge has a panel of its own: those of several may be pinned at once. Settings that kept one alone, in
+    /// `panel_pinned`, are carried over into it.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub panels_pinned: Vec<((i32, i32), Option<Edge>)>,
     /// Each GPU's number in the module that shows it ("gpu:N"), by what it is (see `GpuInfo::identity`), as it was
     /// first given (see `slot_gpus`).
     #[serde(default)]
@@ -736,6 +742,16 @@ pub enum ShelfView {
     #[serde(alias = "pictures")]
     Large,
     List,
+}
+
+/// The panel at `edge` of the screen `point` is on pinned there along it at `point`, or (not `pinned`) no longer, in
+/// `pinned_panels` (see `Settings::panels_pinned`): that edge's of that screen alone (`same_screen` tells two points
+/// on one), the others' as they are (one kept with no edge, from before, is that screen's).
+pub fn pin(pinned_panels: &mut Vec<((i32, i32), Option<Edge>)>, point: (i32, i32), edge: Edge, pinned: bool, same_screen: impl Fn((i32, i32), (i32, i32)) -> bool) {
+    pinned_panels.retain(|(at, at_edge)| !(at_edge.is_none_or(|at_edge| at_edge == edge) && same_screen(*at, point)));
+    if pinned {
+        pinned_panels.push((point, Some(edge)));
+    }
 }
 
 /// The station's pages, each shown its own way (see `ShelfView`).
@@ -820,6 +836,7 @@ impl Default for Settings {
             panel_at: None,
             panel_pinned: None,
             panel_pinned_edge: None,
+            panels_pinned: Vec::new(),
             gpu_slots: Vec::new(),
             music_rooms: MusicRooms::default(),
             widgets: Vec::new(),
@@ -935,6 +952,9 @@ impl Settings {
         if self.places.is_none() {
             self.places = Some(self.places_before());
         }
+        if let Some(point) = self.panel_pinned.take() {
+            self.panels_pinned.push((point, self.panel_pinned_edge.take()));
+        }
         if self.hotkey.take() == Some(false) {
             self.shortcut = None;
         }
@@ -1037,6 +1057,28 @@ pub fn merged(held: &Settings, base: &Settings, mine: &Settings) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each edge's panel is pinned or not on its own: pinned at the left and the top at once, the left unpinned, the
+    /// top stays; pinned again along its edge elsewhere, the one before is replaced; another screen's left is its own.
+    /// One kept from before with no edge is its screen's and goes as any of that screen's is pinned anew.
+    #[test]
+    fn pins_each_edges_panel_on_its_own() {
+        // (Two screens: x below 1000, and from it.)
+        let same = |a: (i32, i32), b: (i32, i32)| (a.0 < 1000) == (b.0 < 1000);
+        let mut pinned = Vec::new();
+        pin(&mut pinned, (0, 300), Edge::Left, true, same);
+        pin(&mut pinned, (500, 0), Edge::Top, true, same);
+        assert_eq!(pinned, vec![((0, 300), Some(Edge::Left)), ((500, 0), Some(Edge::Top))]);
+        pin(&mut pinned, (1000, 300), Edge::Left, true, same);
+        assert_eq!(pinned.len(), 3);
+        pin(&mut pinned, (0, 300), Edge::Left, false, same);
+        assert_eq!(pinned, vec![((500, 0), Some(Edge::Top)), ((1000, 300), Some(Edge::Left))]);
+        pin(&mut pinned, (700, 0), Edge::Top, true, same);
+        assert_eq!(pinned, vec![((1000, 300), Some(Edge::Left)), ((700, 0), Some(Edge::Top))]);
+        let mut from_before = vec![((0, 300), None)];
+        pin(&mut from_before, (0, 500), Edge::Right, true, same);
+        assert_eq!(from_before, vec![((0, 500), Some(Edge::Right))]);
+    }
 
     /// A file that does not read whole keeps every part that does: a field of the wrong kind and a widget that does
     /// not read leave the others, and only they are named. (Before, every setting went back to its default, and the

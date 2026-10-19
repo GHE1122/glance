@@ -61,6 +61,8 @@ pub struct Opening {
     /// A note's folder, where it is not the one the settings name (a note opened again where it was read: see
     /// `WM_DPICHANGED`).
     pub folder: Option<std::path::PathBuf>,
+    /// The window it opens from (a panel's, a widget's): that one stays up while it is (see `up_for`).
+    pub owner: isize,
 }
 
 /// Which side of what it opens from the page goes on, where there is room: left of it, right of it, or under it (the
@@ -136,6 +138,14 @@ const KEEP_AFTER_MS: u32 = 600;
 /// Whether the page is up.
 pub fn is_up() -> bool {
     UP.load(Ordering::Acquire)
+}
+
+/// The window the page up opened from (see `Opening::owner`).
+static OWNER: AtomicIsize = AtomicIsize::new(0);
+
+/// Whether the page is up, opened from `window`.
+pub fn up_for(window: HWND) -> bool {
+    is_up() && OWNER.load(Ordering::Acquire) == window.0 as isize
 }
 
 /// The page `opening` asks for opened (another up goes), on its thread (started when first asked).
@@ -519,6 +529,7 @@ fn show(opening: Opening) {
                 with(|beside| beside.writing = Some(writing));
             }
         }
+        OWNER.store(opening.owner, Ordering::Release);
         UP.store(true, Ordering::Release);
         // The widgets kept under it while it is up (one drawn again under it, as a note stuck on the desktop is as
         // it is written in over it, came over it: on top of what is written, the input method's words broken off).
