@@ -20,9 +20,13 @@
 //! (a live wallpaper's, on Windows 11 24H2 and later, where they are its
 //! children), a thumbnail of the desktop's window leaves them out: it holds
 //! nothing there. Then the desktop's window itself is captured (one capture
-//! for every scene, without the border a capture is shown by), and each
-//! scene's part of it put in its window's own visual, under the thumbnails of
-//! the other windows (see `Feed`).
+//! for every scene, without the border a capture is shown by), each scene's
+//! part of it put in a window of the scene's own (cloaked, owned as its window
+//! is), and that window's thumbnail put in in the desktop's place, under the
+//! others: the thumbnails come into a frame together, and a frame put together
+//! before them is told as before (see `keep`). Put in the scene's window's own
+//! visual, the desktop came in before the windows over it, and a frame of it
+//! alone was taken (see `Feed`).
 //!
 //! A frame is taken only when one is wanted, on a thread other than the one
 //! that draws: as it comes, or at once if one has come meanwhile.
@@ -393,8 +397,8 @@ struct Composer(IDCompositionDesktopDevice);
 // (Used only under its lock.)
 unsafe impl Send for Composer {}
 
-/// A scene's part of the desktop, in its window's own visual: where it is (the scene's area), the surface it is copied
-/// into (as large as the area), and whether the scene rests (nothing is put in it then).
+/// A scene's part of the desktop, in a window of its own (see the top): where it is (the scene's area), the surface it
+/// is copied into (as large as the area), and whether the scene rests (nothing is put in it then).
 struct Layer {
     held: Mutex<LayerHeld>,
 }
@@ -530,7 +534,7 @@ impl Feed {
         Some(Feed { shell, pool, session, size, shared })
     }
 
-    /// A layer in `window` (a scene's) for `area`, the newest frame put in it at once.
+    /// A layer in `window` (a scene's desktop window) for `area`, the newest frame put in it at once.
     fn layer(&self, window: HWND, area: RECT) -> Option<Arc<Layer>> {
         let (target, visual) = {
             let composer = self.shared.composer.lock().unwrap();
@@ -629,8 +633,8 @@ pub struct Scene {
     size: SizeInt32,
     shared: Arc<Shared>,
     /// The desktop, captured itself and put under the windows behind, where a thumbnail of its window would leave out
-    /// what it shows (see `Feed`); the device to start that on.
-    desktop: Option<Arc<Layer>>,
+    /// what it shows (see `Feed`): the window it is put in, and its layer; the device to start that on.
+    desktop: Option<(HWND, Arc<Layer>)>,
     d3d: ID3D11Device,
 }
 
@@ -840,13 +844,17 @@ impl Scene {
         let shell = unsafe { GetShellWindow() };
         let desktop_at = behind.iter().find(|(window, _)| *window == shell).map(|(_, rect)| *rect);
         let apart = desktop_at.is_some() && drawn_apart(shell);
-        if apart {
-            behind.retain(|(window, _)| *window != shell);
+        // (Its window where the desktop's was: the bottom. Its own place is the area: see below.)
+        let own = if apart { self.desktop.as_ref().map(|(window, _)| *window).or_else(|| self.desktop_window(area)) } else { None };
+        if let Some(own) = own {
+            for entry in behind.iter_mut().filter(|(window, _)| *window == shell) {
+                *entry = (own, area);
+            }
         }
         let same_windows = behind.len() == self.shown.len() && behind.iter().zip(&self.shown).all(|((a, _), (b, ..))| a == b);
         // (Nor the desktop's layer: there where it is to be, and not resting.)
         let layer_as_it_was = match &self.desktop {
-            Some(layer) => apart && !layer.held.lock().unwrap().resting,
+            Some((_, layer)) => apart && !layer.held.lock().unwrap().resting,
             None => !apart,
         };
         if same_windows && layer_as_it_was && area == self.area && behind.iter().zip(&self.shown).all(|((_, a), (.., b))| a == b) {
@@ -868,15 +876,22 @@ impl Scene {
             }
             self.area = area;
         }
-        match (&self.desktop, apart) {
-            (Some(layer), true) => move_layer(layer, area),
-            (None, true) => self.desktop = desktop_layer(shell, self.window, area, &self.d3d),
-            (Some(_), false) => {
-                if let Some(layer) = self.desktop.take() {
-                    empty_layer(&layer);
+        // The desktop's part in the scene's own window for it, where it is to be (before the thumbnails are).
+        match (&self.desktop, own) {
+            (Some((window, layer)), Some(_)) => {
+                unsafe {
+                    let _ = SetWindowPos(*window, None, area.left, area.top, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
                 }
+                move_layer(layer, area);
             }
-            (None, false) => {}
+            (None, Some(window)) => match desktop_layer(shell, window, area, &self.d3d) {
+                Some(layer) => self.desktop = Some((window, layer)),
+                None => unsafe {
+                    let _ = DestroyWindow(window);
+                },
+            },
+            (Some(_), None) => self.let_desktop_go(),
+            (None, None) => {}
         }
         let screen_size = screen.map(|s| SizeInt32 { Width: s.right - s.left, Height: s.bottom - s.top });
         // (Not made larger, the frames that come are too small, and are not taken: see `Shared::read`.)
@@ -912,6 +927,34 @@ impl Scene {
         true
     }
 
+    /// A window of its own for the desktop's part (see `Feed`), at `area`: cloaked and shown, owned by its owner (in
+    /// no task switcher), with no surface of its own.
+    fn desktop_window(&self, area: RECT) -> Option<HWND> {
+        unsafe {
+            let module = GetModuleHandleW(None).ok()?;
+            let (width, height) = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
+            let window = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, w!("GlanceScene"), w!("Glance desktop"), WS_POPUP, area.left, area.top, width, height, Some(self.owner), None, Some(module.into()), None).ok()?;
+            let cloak: BOOL = true.into();
+            if DwmSetWindowAttribute(window, DWMWA_CLOAK, &cloak as *const BOOL as *const _, 4).is_err() {
+                let _ = DestroyWindow(window);
+                return None;
+            }
+            let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
+            Some(window)
+        }
+    }
+
+    /// Its desktop's part let go of, and the window it was in (its layer first).
+    fn let_desktop_go(&mut self) {
+        if let Some((window, layer)) = self.desktop.take() {
+            empty_layer(&layer);
+            drop(layer);
+            unsafe {
+                let _ = DestroyWindow(window);
+            }
+        }
+    }
+
     /// Holds nothing till it is arranged again: no thumbnails (the compositor puts nothing together in it), its window
     /// a pixel, and what its frames were read through given back (its pool of frames kept: see `fit`). For whoever
     /// wants what is behind only as it was when last looked at, not as it changes, or is hidden (see `life`);
@@ -921,7 +964,7 @@ impl Scene {
         // (A frame being read meanwhile is of what was there: marked so first, see `Shared::read`.)
         *self.shared.of.lock().unwrap() = (least, now_100ns(), Vec::new());
         self.shared.resting.store(true, Ordering::Release);
-        if let Some(layer) = &self.desktop {
+        if let Some((_, layer)) = &self.desktop {
             layer.held.lock().unwrap().resting = true;
         }
         self.forget();
@@ -1036,10 +1079,7 @@ impl Scene {
 
 impl Drop for Scene {
     fn drop(&mut self) {
-        // (Its layer let go of before its window.)
-        if let Some(layer) = self.desktop.take() {
-            empty_layer(&layer);
-        }
+        self.let_desktop_go();
         self.unhook();
         let _ = self.session.Close();
         let _ = self.pool.Close();
@@ -1054,6 +1094,79 @@ impl Drop for Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window over the desktop is in the first frame taken after a scene is arranged, as the desktop is (a frame of
+    /// the desktop alone is not taken): a red window put up on the main screen a moment, a scene arranged over it and
+    /// the desktop round it, again and again, each first frame's red counted.
+    /// `cargo test --lib -- --ignored --exact ui::scene::tests::scene_first_frame_holds_the_windows --nocapture`.
+    #[test]
+    #[ignore = "puts a window on this PC's screen and captures it"]
+    fn scene_first_frame_holds_the_windows() {
+        use windows::Win32::Graphics::Gdi::{CreateSolidBrush, HBRUSH};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+            let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        unsafe extern "system" fn answer(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
+        let red = unsafe {
+            let class = WNDCLASSW { lpfnWndProc: Some(answer), lpszClassName: w!("GlanceRedTest"), hbrBackground: HBRUSH(CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x0000FF)).0), ..Default::default() };
+            RegisterClassW(&class);
+            let window = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!(""), WS_POPUP, 1300, 700, 300, 200, None, None, None, None).expect("a window");
+            let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
+            window
+        };
+        let pump = || unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        };
+        for _ in 0..20 {
+            pump();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut all: Vec<HWND> = Vec::new();
+        unsafe {
+            let _ = EnumWindows(Some(each), LPARAM(&mut all as *mut _ as isize));
+        }
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let mut scene = Scene::new(RECT { left: 1100, top: 600, right: 1800, bottom: 1000 }, wake, &gfx).expect("scene");
+        let mut reds = Vec::new();
+        for step in 0..12 {
+            let area = RECT { left: 1100 + (step % 3) * 20, top: 600 + (step % 4) * 10, right: 1800, bottom: 1000 };
+            if step % 4 == 3 {
+                scene.rest();
+            }
+            scene.arrange(area, all[0]);
+            let began = std::time::Instant::now();
+            scene.want();
+            let mut capture = None;
+            while began.elapsed() < std::time::Duration::from_secs(2) && capture.is_none() {
+                pump();
+                capture = scene.ready();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let Some(capture) = capture else {
+                reds.push(-1);
+                continue;
+            };
+            // The red window's middle, as the frame holds it.
+            let seen = capture.luminances(RECT { left: 1400, top: 750, right: 1500, bottom: 850 }, RECT::default(), 10);
+            let mean = seen.iter().sum::<f32>() / seen.len().max(1) as f32;
+            reds.push((mean * 100.0).round() as i32);
+        }
+        unsafe {
+            let _ = DestroyWindow(red);
+        }
+        // (Pure red is 21 light.)
+        println!("the red window's light in each first frame: {reds:?}");
+        assert!(reds.iter().all(|light| (18..=24).contains(light)), "{reds:?}");
+    }
 
     /// What is behind an area reaches as far as the screens it is on, not the desktop's whole box: a widget at the top
     /// of a screen lower than the one beside it has no screen above it.
