@@ -185,7 +185,7 @@ pub enum AppChoice {
 
 /// The menu of the thing kept at hand at `at` among them (a right click on it), at `point` on the screen: up, with
 /// what its rows do (where it is is shown only for what is on the disk).
-pub fn app_menu(at: u16, point: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<AppChoice>)> {
+pub fn app_menu(at: u16, point: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<AppChoice>, apps::App)> {
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
     let app = apps::shown().get(usize::from(at))?.clone();
@@ -197,12 +197,12 @@ pub fn app_menu(at: u16, point: windows::Win32::Foundation::POINT, over_the_pane
     rows.push((AppChoice::Remove, lang.pick("从快捷 App 移除", "Take off quick launch"), Icon::Close, true));
     let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
     let menu = Menu::open_at(items, crate::os::apps_dark(), point, false, over_the_panel)?;
-    Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
+    Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect(), app))
 }
 
-/// `choice` made in the menu of the thing kept at hand at `at` (see `app_menu`): done.
-pub fn app_chose(at: u16, choice: AppChoice) {
-    let Some(app) = apps::shown().get(usize::from(at)).cloned() else { return };
+/// `choice` made in the menu of `app`, kept at hand (see `app_menu`: the one its menu was opened on, whatever is
+/// kept now): done.
+pub fn app_chose(app: apps::App, choice: AppChoice) {
     match choice {
         AppChoice::Open => run::ask(run::Ask::Launch(app.target)),
         AppChoice::Show => {

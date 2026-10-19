@@ -895,11 +895,15 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
     // A file or folder on the disk: a folder, or a file not a program, by its mark on a plate (as the station draws
     // them); a program by its picture. One no longer there, faint.
     let on_disk = !web && !target.starts_with("shell:");
-    let found = on_disk.then(|| std::fs::metadata(path).ok()).flatten();
-    let gone = on_disk && found.is_none();
-    // (One gone: a folder where it has no extension.)
-    let folder = found.as_ref().map_or(gone && path.extension().is_none(), |found| found.is_dir());
-    if on_disk && (folder || !crate::station::apps::runs(path)) {
+    let found = on_disk.then(|| crate::station::thumbs::looked(path)).flatten();
+    let gone = found == Some(crate::station::thumbs::Looked::Gone);
+    // (One gone, or not yet looked at: a folder where it has no extension.)
+    let folder = match found {
+        Some(crate::station::thumbs::Looked::Folder) => true,
+        Some(crate::station::thumbs::Looked::File(_)) => false,
+        _ => path.extension().is_none(),
+    };
+    if on_disk && (folder || !crate::station::apps::pictured(path)) {
         let round = side / 5.0;
         frame.fill_rounded(theme.track, x, y, side, side, round);
         if theme.skin != Skin::Glass {
@@ -914,7 +918,8 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
             frame.fill_rounded(theme.track, x, y, side, side, side / 5.0);
             let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
             let font = Font { size: side * 0.45, weight: 650.0, ..theme.body };
-            centred(frame, &letter, font, theme.text2, x, y + (side - font.size * 1.3) / 2.0, side);
+            let ink = if gone { theme.text2.alpha(theme.text2.a * 0.45) } else { theme.text2 };
+            centred(frame, &letter, font, ink, x, y + (side - font.size * 1.3) / 2.0, side);
         }
     }
 }
@@ -2942,7 +2947,8 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
                     None => frame.icon(Icon::Image, centre, small * 0.4, theme.text3),
                 }
             } else {
-                paint_file_mark(frame, theme, path.is_dir(), path, centre, (small * 0.5).min(44.0), small >= 40.0, false);
+                let folder = crate::station::thumbs::looked(path) == Some(crate::station::thumbs::Looked::Folder);
+                paint_file_mark(frame, theme, folder, path, centre, (small * 0.5).min(44.0), small >= 40.0, false);
             }
             // Files put on it together: how many more.
             if *more > 0 && small >= 40.0 {

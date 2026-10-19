@@ -1,6 +1,8 @@
 //! Each thing on the station's picture: a file's as Explorer shows it (its thumbnail: a picture's, a video's, a
 //! PDF's; else its icon), through the shell, on a thread of its own (a thumbnail may take a while to be made: never
-//! on a thread that draws), kept once made.
+//! on a thread that draws), kept once made. And what a path is (a folder, a file and when it was last written, or
+//! nothing), looked at on a thread of its own too (a drive may be slow to answer, one on the network gone: never on a
+//! thread that draws), and looked at again a while after.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -45,10 +47,28 @@ struct Kept {
     /// Asked for, in the order they were (the oldest first), and being made.
     order: Vec<Key>,
     asked: HashSet<Key>,
+    /// What each path was found to be, and when; those being looked at.
+    looked: HashMap<PathBuf, (std::time::Instant, Looked)>,
+    looking: HashSet<PathBuf>,
 }
+
+/// What a path is: a folder; a file, when it was last written (as far as that is told); nothing (gone, or on a drive
+/// that is not there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Looked {
+    Folder,
+    File(Option<std::time::SystemTime>),
+    Gone,
+}
+
+/// How long what a path was found to be stands before it is looked at again.
+const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_secs(3);
+/// The most paths kept looked at (all let go of past it: looked at again as asked).
+const LOOKED_MOST: usize = 4096;
 
 static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
 static ASKS: OnceLock<Mutex<Sender<Key>>> = OnceLock::new();
+static LOOKS: OnceLock<Mutex<Sender<PathBuf>>> = OnceLock::new();
 /// Called (on the pictures' thread) as one is made.
 static TOLD: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
@@ -59,8 +79,50 @@ pub fn start(told: impl Fn() + Send + Sync + 'static) {
     if ASKS.set(Mutex::new(sender)).is_err() {
         return;
     }
-    *KEPT.lock().unwrap() = Some(Kept { made: HashMap::new(), order: Vec::new(), asked: HashSet::new() });
+    *KEPT.lock().unwrap() = Some(Kept { made: HashMap::new(), order: Vec::new(), asked: HashSet::new(), looked: HashMap::new(), looking: HashSet::new() });
     std::thread::Builder::new().name("glance: station pictures".into()).spawn(move || make(asks)).expect("a thread started");
+    let (sender, looks) = std::sync::mpsc::channel();
+    let _ = LOOKS.set(Mutex::new(sender));
+    std::thread::Builder::new().name("glance: station files".into()).spawn(move || look(looks)).expect("a thread started");
+}
+
+/// What the path `path` is, as last looked at (none yet: asked, and told when it is); looked at again where that was
+/// a while ago (what it was standing meanwhile).
+pub fn looked(path: &Path) -> Option<Looked> {
+    let mut kept = KEPT.lock().unwrap();
+    let kept = kept.as_mut()?;
+    let found = kept.looked.get(path).copied();
+    if found.is_none_or(|(at, _)| at.elapsed() >= LOOK_AGAIN) && kept.looking.insert(path.to_path_buf()) {
+        if let Some(looks) = LOOKS.get() {
+            let _ = looks.lock().unwrap().send(path.to_path_buf());
+        }
+    }
+    found.map(|(_, looked)| looked)
+}
+
+/// Paths looked at as they are asked for (see `looked`); told as what one is changed, or is first found.
+fn look(looks: Receiver<PathBuf>) {
+    while let Ok(path) = looks.recv() {
+        let found = match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_dir() => Looked::Folder,
+            Ok(meta) => Looked::File(meta.modified().ok()),
+            Err(_) => Looked::Gone,
+        };
+        let changed = {
+            let mut kept = KEPT.lock().unwrap();
+            let Some(kept) = kept.as_mut() else { continue };
+            kept.looking.remove(&path);
+            if kept.looked.len() >= LOOKED_MOST {
+                kept.looked.clear();
+            }
+            kept.looked.insert(path, (std::time::Instant::now(), found)).is_none_or(|(_, was)| was != found)
+        };
+        if changed {
+            if let Some(told) = TOLD.get() {
+                told();
+            }
+        }
+    }
 }
 
 /// The picture of the file at `path`, `side` physical px square (its own shape in its middle): as made; none yet
@@ -75,7 +137,17 @@ pub fn filling(path: &Path, side: u32) -> Option<Picture> {
 }
 
 fn asked(path: &Path, side: u32, made: Made) -> Option<Picture> {
-    let key = Key { path: path.to_path_buf(), written: std::fs::metadata(path).and_then(|meta| meta.modified()).ok(), side, made };
+    // (Pictured as it was last written: a file written again pictured again. Not yet looked at, none yet. A name
+    // that is not a path, a Store app's, is pictured as it is.)
+    let written = if path.is_absolute() {
+        match looked(path)? {
+            Looked::File(written) => written,
+            Looked::Folder | Looked::Gone => None,
+        }
+    } else {
+        None
+    };
+    let key = Key { path: path.to_path_buf(), written, side, made };
     let mut kept = KEPT.lock().unwrap();
     let kept = kept.as_mut()?;
     if let Some(made) = kept.made.get(&key) {

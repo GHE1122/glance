@@ -894,13 +894,14 @@ impl Controller {
                     let over = panel.hit_at(lparam_point(msg.lParam));
                     match (msg.message == WM_LBUTTONUP, moved, over) {
                         (true, true, Some(Hit::App(to))) if to != from => {
-                            crate::station::apps::change(move |apps| {
-                                let (from, to) = (usize::from(from), usize::from(to));
-                                if from < apps.len() && to < apps.len() {
-                                    let moving = apps.remove(from);
-                                    apps.insert(to, moving);
-                                }
-                            });
+                            // (Each by what opens it, as shown: what is kept may change before this is done.)
+                            let shown = crate::station::apps::shown();
+                            let (from, to) = (usize::from(from), usize::from(to));
+                            if let Some(moving) = shown.get(from).map(|app| app.target.clone()) {
+                                // (Dropped on a later one: after it; on an earlier one: before it.)
+                                let before = shown.get(if to > from { to + 1 } else { to }).map(|app| app.target.clone());
+                                crate::station::apps::change(move |apps| crate::station::apps::put_before(apps, &moving, before.as_deref()));
+                            }
                         }
                         (true, false, Some(Hit::App(at))) if at == from => {
                             crate::station::pressed(Hit::App(at));
@@ -991,7 +992,7 @@ impl Controller {
                     menu = match widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
                         Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
                         Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel.is_shown())).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
-                        Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel.is_shown())).map(|(open, choices)| (open, MenuFor::App(at, choices))),
+                        Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel.is_shown())).map(|(open, choices, app)| (open, MenuFor::App(app, choices))),
                         _ => widgets.menu(msg.hwnd, panel.lang, panel.is_shown()).map(|open| (open, MenuFor::Widget(msg.hwnd))),
                     };
                     keep_menu_above(&menu, &mut overlay);
@@ -1006,7 +1007,7 @@ impl Controller {
                         }
                         Some(Hit::App(at)) => {
                             self.end_menu(&mut menu, None, &mut panel, &mut widgets, &mut overlay);
-                            menu = cursor_position().and_then(|point| crate::station::app_menu(at, point, true)).map(|(open, choices)| (open, MenuFor::App(at, choices)));
+                            menu = cursor_position().and_then(|point| crate::station::app_menu(at, point, true)).map(|(open, choices, app)| (open, MenuFor::App(app, choices)));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         Some(Hit::Recent(file)) => {
@@ -1265,8 +1266,8 @@ enum MenuFor {
     StationHead(Vec<crate::station::HeadChoice>),
     /// A file come lately, by its number, and what each row does (see `station::recent_menu`).
     Recent(crate::station::recent::Key, Vec<crate::station::RecentChoice>),
-    /// A thing kept at hand, by its place, and what each row does (see `station::app_menu`).
-    App(u16, Vec<crate::station::AppChoice>),
+    /// A thing kept at hand, as its menu was opened on it, and what each row does (see `station::app_menu`).
+    App(crate::station::apps::App, Vec<crate::station::AppChoice>),
 }
 
 impl Controller {
@@ -1299,9 +1300,9 @@ impl Controller {
                 (Some(choice), _) => crate::station::chose(id, *choice),
                 (None, _) => {}
             },
-            MenuFor::App(at, choices) => {
+            MenuFor::App(app, choices) => {
                 if let Some(choice) = choice.and_then(|row| choices.get(row)) {
-                    crate::station::app_chose(at, *choice);
+                    crate::station::app_chose(app, *choice);
                 }
             }
             MenuFor::Recent(file, choices) => {

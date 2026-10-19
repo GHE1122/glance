@@ -172,11 +172,15 @@ struct Beside {
     page: Page,
     /// Windows' blurred desktop shows under it (see `ground`).
     acrylic: bool,
-    /// Quick launch's adding: the kind listed; something dragged over it to be added; a kept thing held (its place,
-    /// where it was pressed, whether it is being dragged); how far what is kept is scrolled along, and the most.
+    /// What a press began on (a press acts only let go on the same), and Windows' chooser asked for by one (opened
+    /// once the page is free: see `WM_LBUTTONUP`).
+    pressed: Option<Hit>,
+    choosing: bool,
+    /// Quick launch's adding: the kind listed; something dragged over it to be added; a kept thing held (what opens
+    /// it, where it was pressed, whether it is being dragged); how far what is kept is scrolled along, and the most.
     kind: Kinds,
     dropping: bool,
-    holding: Option<(usize, (f32, f32), bool)>,
+    holding: Option<(String, (f32, f32), bool)>,
     strip_scroll: f32,
     strip_most: f32,
     search: Typing,
@@ -268,8 +272,8 @@ enum Hit {
     /// Quick launch's adding: a kind listed; a kept thing, by its place, and its cross; the button that chooses on
     /// the PC.
     Kind(Kinds),
-    Kept(usize),
-    Unkeep(usize),
+    Kept(String),
+    Unkeep(String),
     Choose,
     /// A note's menu.
     NoteMenu,
@@ -407,13 +411,19 @@ fn show(opening: Opening) {
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const _, size_of_val(&round) as u32);
         // The picker and a thing's page on the desktop blurred, as the panel's glass and Windows 11's sheet show it,
         // where Windows has its material for that (a note's page is on its paper).
-        let acrylic = opening.skin != Skin::Paper && !matches!(opening.page, Page::Note(_)) && super::settings_window::windows_build() >= super::settings_window::FIRST_MICA_BUILD;
-        if acrylic {
+        // (Only where Windows took it: else on its own ground, as where it has none.)
+        let wanted = opening.skin != Skin::Paper && !matches!(opening.page, Page::Note(_)) && super::settings_window::windows_build() >= super::settings_window::FIRST_MICA_BUILD;
+        let acrylic = wanted && {
             let dark = windows::core::BOOL::from(opening.dark);
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, size_of_val(&dark) as u32);
-            let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_TRANSIENTWINDOW as *const _ as *const _, size_of_val(&DWMSBT_TRANSIENTWINDOW) as u32);
-            let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 });
-        } else {
+            DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_TRANSIENTWINDOW as *const _ as *const _, size_of_val(&DWMSBT_TRANSIENTWINDOW) as u32).is_ok()
+                && DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 }).is_ok()
+        };
+        if !acrylic {
+            let none = windows::Win32::Graphics::Dwm::DWMSBT_NONE;
+            if wanted {
+                let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &none as *const _ as *const _, size_of_val(&none) as u32);
+            }
             let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 });
         }
         let beside = Beside {
@@ -426,6 +436,8 @@ fn show(opening: Opening) {
             lang: crate::update::language(),
             page: opening.page.clone(),
             acrylic,
+            pressed: None,
+            choosing: false,
             kind: Kinds::Programs,
             dropping: false,
             holding: None,
@@ -656,10 +668,21 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             if close {
                 gone();
             }
+            // Windows' chooser, asked for: opened with the page free (its own loop hands the page its messages
+            // meanwhile), what is chosen added after.
+            let asked = with(|beside| std::mem::take(&mut beside.choosing).then_some((beside.kind, beside.lang))).flatten();
+            if let Some((kind, lang)) = asked {
+                let chosen = choose(hwnd, kind, lang);
+                with(|beside| beside.add_paths(chosen));
+                // (Asks come meanwhile are its thread's loop's: looked at now.)
+                let post = POST.load(Ordering::Acquire);
+                let _ = unsafe { PostMessageW(Some(HWND(post as *mut _)), ASKED, WPARAM(0), LPARAM(0)) };
+            }
         }
         WM_CAPTURECHANGED => {
             with(|beside| {
                 beside.holding = None;
+                beside.pressed = None;
                 beside.redraw();
             });
         }
@@ -984,25 +1007,27 @@ impl Beside {
                 for came in came {
                     let path = if self.kind == Kinds::Folders { came.path.parent().map(std::path::Path::to_path_buf) } else { Some(came.path.clone()) };
                     let Some(path) = path.filter(|path| seen.insert(path.clone())) else { continue };
-                    let Some(app) = App::of_path(&path) else { continue };
-                    // (A file by its whole name: its kind is part of what tells it apart.)
-                    let name = path.file_name().map_or_else(|| app.name.clone(), |name| name.to_string_lossy().into_owned());
+                    // (A file by its whole name: its kind is part of what tells it apart. Its path as it is kept, not
+                    // looked at here: the page draws with what it lists.)
+                    let Some(name) = path.file_name().map(|name| name.to_string_lossy().into_owned()) else { continue };
                     if !searched(&name) {
                         continue;
                     }
                     let place = path.parent().map(|parent| parent.display().to_string()).unwrap_or_default();
-                    rows.push(PickRow { name, target: app.target, about: format!("{place} · {}", super::text::since(came.came_ms, now, self.lang)), letter: None, on_disk: true });
+                    rows.push(PickRow { name, target: path.display().to_string(), about: format!("{place} · {}", super::text::since(came.came_ms, now, self.lang)), letter: None, on_disk: true });
                 }
                 rows
             }
         }
     }
 
-    /// A press begun at (`x`, `y`) DIPs: on a kept thing, it is held (to be dragged into another place).
+    /// A press begun at (`x`, `y`) DIPs: what it is on noted; on a kept thing, it is held (to be dragged into another
+    /// place).
     fn hold(&mut self, x: f32, y: f32) {
         let held = self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4.clone());
-        if let Some(Hit::Kept(at)) = held {
-            self.holding = Some((at, (x, y), false));
+        self.pressed = held.clone();
+        if let Some(Hit::Kept(target)) = held {
+            self.holding = Some((target, (x, y), false));
             unsafe {
                 let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.hwnd);
             }
@@ -1014,20 +1039,19 @@ impl Beside {
         (((x - PAD + self.strip_scroll) / STRIP_CELL).round().max(0.0) as usize).min(count)
     }
 
-    /// A kept thing held let go at `x`: dragged, put in the gap it was dragged to. Never the page's going.
+    /// A kept thing held let go at `x`: dragged, put in the gap it was dragged to (before the thing shown after that
+    /// gap, or last), each found by what opens it as what is kept is changed (it may have changed since). Never the
+    /// page's going.
     fn let_go(&mut self, x: f32) -> bool {
-        let Some((from, _, moved)) = self.holding.take() else { return false };
+        let Some((moving, _, moved)) = self.holding.take() else { return false };
+        self.pressed = None;
         unsafe {
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
         }
         if moved {
-            let to = self.gap_at(x, crate::station::apps::shown().len());
-            crate::station::apps::change(move |apps| {
-                if from < apps.len() {
-                    let moving = apps.remove(from);
-                    apps.insert(if to > from { to - 1 } else { to }.min(apps.len()), moving);
-                }
-            });
+            let shown = crate::station::apps::shown();
+            let before = shown.get(self.gap_at(x, shown.len())).map(|app| app.target.clone());
+            crate::station::apps::change(move |apps| crate::station::apps::put_before(apps, &moving, before.as_deref()));
             unsafe {
                 let _ = SetTimer(Some(self.hwnd), AGAIN, 120, None);
             }
@@ -1036,52 +1060,13 @@ impl Beside {
         false
     }
 
-    /// What is chosen on the PC, in Windows' own chooser, as the kind listed asks: programs (or shortcuts to them),
-    /// any files, or folders, several at once; none where it is closed.
-    fn choose(&self) -> Vec<std::path::PathBuf> {
-        use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
-        use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
-        use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_NODEREFERENCELINKS, FOS_PICKFOLDERS, SIGDN_FILESYSPATH};
-        let lang = self.lang;
-        unsafe {
-            let Ok(dialog) = CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) else { return Vec::new() };
-            let Ok(options) = dialog.GetOptions() else { return Vec::new() };
-            // (A shortcut chosen is kept as the shortcut, as one dropped is.)
-            let mut options = options | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_NODEREFERENCELINKS;
-            let title = match self.kind {
-                Kinds::Programs => lang.pick("选择程序", "Choose programs"),
-                Kinds::Files => lang.pick("选择文件", "Choose files"),
-                Kinds::Folders => lang.pick("选择文件夹", "Choose folders"),
-            };
-            if self.kind == Kinds::Folders {
-                options |= FOS_PICKFOLDERS;
-            }
-            let _ = dialog.SetOptions(options);
-            let _ = dialog.SetTitle(&HSTRING::from(title));
-            if self.kind == Kinds::Programs {
-                let (programs, all) = (HSTRING::from(lang.pick("程序", "Programs")), HSTRING::from(lang.pick("所有文件", "All files")));
-                let (programs_spec, all_spec) = (HSTRING::from("*.exe;*.lnk;*.appref-ms;*.bat;*.cmd"), HSTRING::from("*.*"));
-                let kinds = [
-                    COMDLG_FILTERSPEC { pszName: windows::core::PCWSTR(programs.as_ptr()), pszSpec: windows::core::PCWSTR(programs_spec.as_ptr()) },
-                    COMDLG_FILTERSPEC { pszName: windows::core::PCWSTR(all.as_ptr()), pszSpec: windows::core::PCWSTR(all_spec.as_ptr()) },
-                ];
-                let _ = dialog.SetFileTypes(&kinds);
-            }
-            if dialog.Show(Some(self.hwnd)).is_err() {
-                return Vec::new();
-            }
-            let Ok(chosen) = dialog.GetResults() else { return Vec::new() };
-            let count = chosen.GetCount().unwrap_or(0);
-            (0..count)
-                .filter_map(|at| {
-                    let item = chosen.GetItemAt(at).ok()?;
-                    let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-                    let path = name.to_string().ok().map(std::path::PathBuf::from);
-                    CoTaskMemFree(Some(name.0 as *const _));
-                    path
-                })
-                .collect()
+    /// A press let go at (`x`, `y`) DIPs on what it began on: done; whether the page is to go.
+    fn press(&mut self, x: f32, y: f32) -> bool {
+        let at = self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4.clone());
+        if at.is_none() || std::mem::take(&mut self.pressed) != at {
+            return false;
         }
+        self.pressed_on(at.unwrap(), x, y)
     }
 
     /// `paths` kept at hand after what is there (what opens what is kept already, however it is named, not twice).
@@ -1106,9 +1091,8 @@ impl Beside {
         }
     }
 
-    /// A press let go at (`x`, `y`) DIPs: done; whether the page is to go.
-    fn press(&mut self, x: f32, y: f32) -> bool {
-        let Some(hit) = self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4.clone()) else { return false };
+    /// A press on `hit`, let go at (`x`, `y`) DIPs: done; whether the page is to go.
+    fn pressed_on(&mut self, hit: Hit, x: f32, y: f32) -> bool {
         match hit {
             Hit::Close => return true,
             Hit::Search | Hit::Kept(_) => {}
@@ -1117,18 +1101,13 @@ impl Beside {
                 self.search = Typing::most(SEARCH_MOST);
                 self.scroll = 0.0;
             }
-            Hit::Unkeep(at) => {
-                if let Some(app) = crate::station::apps::shown().get(at).cloned() {
-                    crate::station::apps::change(move |apps| apps.retain(|kept| *kept != app));
-                    unsafe {
-                        let _ = SetTimer(Some(self.hwnd), AGAIN, 120, None);
-                    }
+            Hit::Unkeep(target) => {
+                crate::station::apps::change(move |apps| apps.retain(|kept| kept.target != target));
+                unsafe {
+                    let _ = SetTimer(Some(self.hwnd), AGAIN, 120, None);
                 }
             }
-            Hit::Choose => {
-                let chosen = self.choose();
-                self.add_paths(chosen);
-            }
+            Hit::Choose => self.choosing = true,
             Hit::PreviewCopy | Hit::PreviewOpen => {
                 if let Page::Preview(id) = self.page {
                     crate::station::run::ask(if hit == Hit::PreviewCopy { crate::station::run::Ask::Copy(id) } else { crate::station::run::Ask::Open(id) });
@@ -1180,12 +1159,14 @@ impl Beside {
             // Enter: the first one listed added.
             VK_RETURN => {
                 if let Some(first) = self.rows().into_iter().next() {
-                    let kept = crate::station::apps::shown().iter().any(|app| crate::station::apps::same(&app.target, &first.target));
-                    if !kept {
-                        let app = if first.on_disk { App::of_path(std::path::Path::new(&first.target)) } else { Some(App { target: first.target, name: first.name }) };
-                        if let Some(app) = app {
-                            crate::station::apps::change(move |apps| apps.push(app));
-                        }
+                    let app = if first.on_disk { App::of_path(std::path::Path::new(&first.target)) } else { Some(App { target: first.target, name: first.name }) };
+                    if let Some(app) = app {
+                        // (Kept already, as it is added: not twice, Enter pressed again before the first was kept.)
+                        crate::station::apps::change(move |apps| {
+                            if !apps.iter().any(|kept| crate::station::apps::same(&kept.target, &app.target)) {
+                                apps.push(app);
+                            }
+                        });
                     }
                 }
             }
@@ -1478,7 +1459,7 @@ impl Beside {
         if kept.is_empty() {
             frame.text(lang.pick("尚未添加任何项目", "Nothing added yet"), theme.small, theme.text3, PAD, STRIP_TOP + (STRIP_CELL - 16.0) / 2.0, inner, Align::Start);
         }
-        let held = self.holding.filter(|(_, _, moved)| *moved);
+        let held = self.holding.clone().filter(|(_, _, moved)| *moved);
         let mut placed = Vec::new();
         for (at, app) in kept.iter().enumerate() {
             let x = PAD + at as f32 * STRIP_CELL - self.strip_scroll;
@@ -1487,7 +1468,7 @@ impl Beside {
             }
             let cell = (x, STRIP_TOP, STRIP_CELL, STRIP_CELL);
             let over = lit(cell) && held.is_none();
-            if over || held.is_some_and(|(from, ..)| from == at) {
+            if over || held.as_ref().is_some_and(|(moving, ..)| *moving == app.target) {
                 frame.fill_rounded(theme.hover, cell.0, cell.1, cell.2, cell.3, round(STRIP_CELL).min(12.0));
             }
             super::view::paint_app(frame, &theme, &app.name, &app.target, x + 6.0, STRIP_TOP + 6.0, STRIP_CELL - 12.0);
@@ -1496,12 +1477,12 @@ impl Beside {
                 let centre = Point { x: x + STRIP_CELL - 8.0, y: STRIP_TOP + 8.0 };
                 frame.fill_circle(theme.text2, centre, 7.5);
                 frame.icon(Icon::Close, centre, 9.0, self.ground_colour());
-                placed.push((centre.x - 8.0, centre.y - 8.0, 16.0, 16.0, Hit::Unkeep(at)));
+                placed.push((centre.x - 8.0, centre.y - 8.0, 16.0, 16.0, Hit::Unkeep(app.target.clone())));
             }
-            placed.push((cell.0, cell.1, cell.2, cell.3, Hit::Kept(at)));
+            placed.push((cell.0, cell.1, cell.2, cell.3, Hit::Kept(app.target.clone())));
         }
         // One dragged: the gap it goes to.
-        if let (Some(_), Some((px, _))) = (held, pointer) {
+        if let (Some(_), Some((px, _))) = (held.as_ref(), pointer) {
             let gap = self.gap_at(px, kept.len());
             frame.fill_rounded(self.accent(), PAD + gap as f32 * STRIP_CELL - self.strip_scroll - 1.0, STRIP_TOP + 6.0, 2.0, STRIP_CELL - 12.0, 1.0);
         }
@@ -1707,6 +1688,53 @@ impl Beside {
     }
 }
 
+/// What is chosen on the PC, in Windows' own chooser over `hwnd` (the page), as the kind listed (`kind`) asks:
+/// programs (or shortcuts to them), any files, or folders, several at once; none where it is closed.
+fn choose(hwnd: HWND, kind: Kinds, lang: super::text::Lang) -> Vec<std::path::PathBuf> {
+        use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+        use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+        use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_NODEREFERENCELINKS, FOS_PICKFOLDERS, SIGDN_FILESYSPATH};
+        unsafe {
+            let Ok(dialog) = CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) else { return Vec::new() };
+            let Ok(options) = dialog.GetOptions() else { return Vec::new() };
+            // (A shortcut chosen is kept as the shortcut, as one dropped is.)
+            let mut options = options | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_NODEREFERENCELINKS;
+            let title = match kind {
+                Kinds::Programs => lang.pick("选择程序", "Choose programs"),
+                Kinds::Files => lang.pick("选择文件", "Choose files"),
+                Kinds::Folders => lang.pick("选择文件夹", "Choose folders"),
+            };
+            if kind == Kinds::Folders {
+                options |= FOS_PICKFOLDERS;
+            }
+            let _ = dialog.SetOptions(options);
+            let _ = dialog.SetTitle(&HSTRING::from(title));
+            if kind == Kinds::Programs {
+                let (programs, all) = (HSTRING::from(lang.pick("程序", "Programs")), HSTRING::from(lang.pick("所有文件", "All files")));
+                let (programs_spec, all_spec) = (HSTRING::from("*.exe;*.lnk;*.appref-ms;*.bat;*.cmd"), HSTRING::from("*.*"));
+                let kinds = [
+                    COMDLG_FILTERSPEC { pszName: windows::core::PCWSTR(programs.as_ptr()), pszSpec: windows::core::PCWSTR(programs_spec.as_ptr()) },
+                    COMDLG_FILTERSPEC { pszName: windows::core::PCWSTR(all.as_ptr()), pszSpec: windows::core::PCWSTR(all_spec.as_ptr()) },
+                ];
+                let _ = dialog.SetFileTypes(&kinds);
+            }
+            if dialog.Show(Some(hwnd)).is_err() {
+                return Vec::new();
+            }
+            let Ok(chosen) = dialog.GetResults() else { return Vec::new() };
+            let count = chosen.GetCount().unwrap_or(0);
+            (0..count)
+                .filter_map(|at| {
+                    let item = chosen.GetItemAt(at).ok()?;
+                    let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+                    let path = name.to_string().ok().map(std::path::PathBuf::from);
+                    CoTaskMemFree(Some(name.0 as *const _));
+                    path
+                })
+                .collect()
+        }
+    }
+
 #[cfg(all(test, feature = "studio"))]
 mod pictures {
     use super::*;
@@ -1765,6 +1793,8 @@ otepad.exe"),
                             lang: super::super::text::Lang::Zh,
                             page: Page::Picker,
                             acrylic: false,
+                            pressed: None,
+                            choosing: false,
                             kind,
                             dropping,
                             holding: None,

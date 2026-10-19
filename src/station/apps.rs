@@ -65,13 +65,17 @@ pub fn pretend(apps: Vec<App>) {
 /// a desktop program the Start menu names by a known folder and its path in it (`shell:AppsFolder\{folder}\a.exe`)
 /// by the file's path, a shortcut by what it points at, a path the same in any case; a Store app, a folder, a web
 /// address as it is. Two that open the same are one thing kept (a program dropped on quick launch is the Start
-/// menu's). Shortcuts are read through the shell (a thread in a COM apartment); found once each.
+/// menu's). Shortcuts are read through the shell (a thread in a COM apartment); found once each (a shortcut not
+/// read for want of an apartment is not kept as found: read again where there is one).
 pub fn opens(target: &str) -> String {
     static FOUND: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
     if let Some(found) = FOUND.lock().unwrap().as_ref().and_then(|found| found.get(target).cloned()) {
         return found;
     }
-    let found = resolved(target);
+    let (found, settled) = resolved(target);
+    if !settled {
+        return found;
+    }
     let mut held = FOUND.lock().unwrap();
     let held = held.get_or_insert_with(Default::default);
     if held.len() > 2000 {
@@ -86,24 +90,45 @@ pub fn same(a: &str, b: &str) -> bool {
     a == b || opens(a) == opens(b)
 }
 
-fn resolved(target: &str) -> String {
+/// What `target` opens (see `opens`), and whether that is settled: not where a shortcut could not be read and this
+/// thread is in no COM apartment (where the shell cannot be asked).
+fn resolved(target: &str) -> (String, bool) {
     if target.starts_with("https://") || target.starts_with("http://") {
-        return target.to_string();
+        return (target.to_string(), true);
     }
     let path = match target.strip_prefix("shell:AppsFolder\\") {
         // (A known folder's number, then the path in it; or a path; else a Store app's name.)
         Some(named) => match named.strip_prefix('{').and_then(|rest| rest.split_once("}\\")) {
             Some((folder, rest)) => match known_folder(folder) {
                 Some(folder) => folder.join(rest),
-                None => return target.to_string(),
+                None => return (target.to_string(), true),
             },
             None if Path::new(named).is_absolute() => PathBuf::from(named),
-            None => return target.to_string(),
+            None => return (target.to_string(), true),
         },
         None => PathBuf::from(target),
     };
-    let path = if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("lnk")) { link_target(&path).unwrap_or(path) } else { path };
-    path.to_string_lossy().to_lowercase()
+    let (path, settled) = if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("lnk")) {
+        match link_target(&path) {
+            Some(target) => (target, true),
+            None => (path, in_apartment()),
+        }
+    } else {
+        (path, true)
+    };
+    (path.to_string_lossy().to_lowercase(), settled)
+}
+
+/// Whether this thread is in a COM apartment (the shell may be asked from it).
+#[cfg(windows)]
+fn in_apartment() -> bool {
+    let (mut kind, mut qualifier) = (Default::default(), Default::default());
+    unsafe { windows::Win32::System::Com::CoGetApartmentType(&mut kind, &mut qualifier) }.is_ok()
+}
+
+#[cfg(not(windows))]
+fn in_apartment() -> bool {
+    true
 }
 
 /// The path of the known folder numbered `id` (its GUID's digits, without braces).
@@ -158,16 +183,40 @@ pub fn is_program(target: &str) -> bool {
     !named.contains('\\') || runs(Path::new(named))
 }
 
-/// Whether the file at `path` is one that runs (a program, a script Windows runs, a shortcut, by its extension), not
-/// a document opened by one.
+/// Whether the file at `path` is a program shown by its own picture (a program, a shortcut, a console Windows opens:
+/// one with an icon of its own), not a file shown by its kind (a document, or a script, which is a file to its user).
+pub fn pictured(path: &Path) -> bool {
+    const OWN: [&str; 6] = ["exe", "com", "msc", "cpl", "appref-ms", "lnk"];
+    path.extension().is_some_and(|extension| OWN.iter().any(|own| extension.eq_ignore_ascii_case(own)))
+}
+
+/// Whether the file at `path` is one that runs (a program, a script Windows runs: a batch file, Windows Script Host's,
+/// a shortcut, by its extension), not a document opened by one.
 pub fn runs(path: &Path) -> bool {
-    const PROGRAMS: [&str; 8] = ["exe", "com", "bat", "cmd", "msc", "cpl", "appref-ms", "lnk"];
+    const PROGRAMS: [&str; 14] = ["exe", "com", "bat", "cmd", "msc", "cpl", "appref-ms", "lnk", "vbs", "vbe", "js", "jse", "wsf", "wsh"];
     path.extension().is_some_and(|extension| PROGRAMS.iter().any(|program| extension.eq_ignore_ascii_case(program)))
+}
+
+/// The thing kept that opens `moving` put before the one that opens `before` (none: last), each found where it is
+/// now (what is kept may have changed since they were shown): nothing where it is gone, or put before itself.
+pub fn put_before(apps: &mut Vec<App>, moving: &str, before: Option<&str>) {
+    if before == Some(moving) {
+        return;
+    }
+    let Some(from) = apps.iter().position(|app| app.target == moving) else { return };
+    let app = apps.remove(from);
+    let to = before.and_then(|before| apps.iter().position(|app| app.target == before)).unwrap_or(apps.len());
+    apps.insert(to, app);
 }
 
 /// What is kept at hand changed as `change` changes it (off the calling thread, which the settings then tell).
 pub fn change(change: impl FnOnce(&mut Vec<App>) + Send + 'static) {
-    std::thread::spawn(move || crate::app().change(|settings| change(&mut settings.apps)));
+    std::thread::spawn(move || {
+        // (In a COM apartment: what is kept is told apart by what it opens, a shortcut read through the shell.)
+        #[cfg(windows)]
+        let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+        crate::app().change(|settings| change(&mut settings.apps));
+    });
 }
 
 #[cfg(test)]
@@ -211,6 +260,31 @@ mod tests {
         ] {
             assert!(!is_program(target), "{target}");
         }
+    }
+
+    /// A thing dragged among what is kept goes before the one it was dropped before, found where it is now: what
+    /// is kept changed meanwhile (one taken off) moves neither another nor it elsewhere.
+    #[test]
+    fn puts_a_dragged_thing_before_the_one_it_was_dropped_before() {
+        let kept = |names: &[&str]| names.iter().map(|name| App { target: (*name).into(), name: (*name).into() }).collect::<Vec<_>>();
+        let names = |apps: &[App]| apps.iter().map(|app| app.target.clone()).collect::<Vec<_>>();
+        let mut apps = kept(&["a", "b", "c", "d"]);
+        put_before(&mut apps, "d", Some("b"));
+        assert_eq!(names(&apps), ["a", "d", "b", "c"]);
+        put_before(&mut apps, "a", None);
+        assert_eq!(names(&apps), ["d", "b", "c", "a"]);
+        // Shown as [a, b, c], b dragged before c; a taken off meanwhile: b stays before c, c stays where it is.
+        let mut apps = kept(&["b", "c"]);
+        put_before(&mut apps, "b", Some("c"));
+        assert_eq!(names(&apps), ["b", "c"]);
+        // Gone meanwhile: nothing moves.
+        let mut apps = kept(&["a", "c"]);
+        put_before(&mut apps, "b", Some("a"));
+        assert_eq!(names(&apps), ["a", "c"]);
+        // Its neighbour gone meanwhile: last.
+        let mut apps = kept(&["a", "b"]);
+        put_before(&mut apps, "a", Some("x"));
+        assert_eq!(names(&apps), ["b", "a"]);
     }
 
     /// A dropped file by its name without its extension, a web address by its site; where each is on the disk.
