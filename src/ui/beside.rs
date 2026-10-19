@@ -9,7 +9,9 @@
 //!   taken to the Recycle Bin from its menu.
 //!
 //! A window of its own thread (a single-threaded apartment with OLE, for the shell's pictures and what is dropped on
-//! it), drawn as Glance draws, in the skin's colours. It takes the keyboard while it is up (words are typed into its
+//! it), drawn as Glance draws. The adding and a thing's page are drawn in the skin as the panel is: its sheet over
+//! what is behind it (taken as a widget takes it, see `ui::scene`), its corners, its edge and its shadow, in room left
+//! round it for that; a note's page on a ground of its own. It takes the keyboard while it is up (words are typed into its
 //! search); it goes as Esc is pressed, as its close is, or as another program's window is clicked (the panel, which
 //! takes no focus, leaves it up: the panel and the page are one place). The panel stays open while it is up.
 
@@ -21,7 +23,7 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
+use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, MonitorFromRect, ValidateRect, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM};
@@ -170,8 +172,10 @@ struct Beside {
     theme: Rc<Theme>,
     lang: super::text::Lang,
     page: Page,
-    /// Windows' blurred desktop shows under it (see `ground`).
-    acrylic: bool,
+    /// Drawn in the skin as the panel is (see the top), in room `inset` (DIPs) round it for its shadow; how frosted.
+    skinned: bool,
+    inset: f32,
+    frost: f32,
     /// What a press began on (a press acts only let go on the same), and Windows' chooser asked for by one (opened
     /// once the page is free: see `WM_LBUTTONUP`).
     pressed: Option<Hit>,
@@ -406,24 +410,19 @@ fn show(opening: Opening) {
         };
         let x = x.clamp(room.left, room.right - wide);
         let y = y.clamp(room.top, room.bottom - tall);
-        let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP, w!("GlanceBeside"), &HSTRING::from("Glance"), WS_POPUP, x, y, wide, tall, None, None, None, None) else { return };
-        let round = DWMWCP_ROUND;
-        let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const _, size_of_val(&round) as u32);
-        // The picker and a thing's page on the desktop blurred, as the panel's glass and Windows 11's sheet show it,
-        // where Windows has its material for that (a note's page is on its paper).
-        // (Only where Windows took it: else on its own ground, as where it has none.)
-        let wanted = opening.skin != Skin::Paper && !matches!(opening.page, Page::Note(_)) && super::settings_window::windows_build() >= super::settings_window::FIRST_MICA_BUILD;
-        let acrylic = wanted && {
-            let dark = windows::core::BOOL::from(opening.dark);
-            let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, size_of_val(&dark) as u32);
-            DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_TRANSIENTWINDOW as *const _ as *const _, size_of_val(&DWMSBT_TRANSIENTWINDOW) as u32).is_ok()
-                && DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 }).is_ok()
-        };
-        if !acrylic {
-            let none = windows::Win32::Graphics::Dwm::DWMSBT_NONE;
-            if wanted {
-                let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &none as *const _ as *const _, size_of_val(&none) as u32);
-            }
+        // Skinned (not a note's page): its window larger by its shadow's room each way, its corners and shadow drawn
+        // as the panel's are; a note's page rounded and shadowed by Windows.
+        let theme = Theme::new(opening.skin, opening.dark);
+        let skinned = !matches!(opening.page, Page::Note(_));
+        let inset = if skinned { theme.margin } else { 0.0 };
+        let room_px = (inset * scale).round() as i32;
+        let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP, w!("GlanceBeside"), &HSTRING::from("Glance"), WS_POPUP, x - room_px, y - room_px, wide + 2 * room_px, tall + 2 * room_px, None, None, None, None) else { return };
+        if skinned {
+            let square = DWMWCP_DONOTROUND;
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &square as *const _ as *const _, size_of_val(&square) as u32);
+        } else {
+            let round = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const _, size_of_val(&round) as u32);
             let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 });
         }
         let beside = Beside {
@@ -432,10 +431,12 @@ fn show(opening: Opening) {
             surface: None,
             _showing: showing,
             scale,
-            theme: Rc::new(Theme::new(opening.skin, opening.dark)),
+            theme: Rc::new(theme),
             lang: crate::update::language(),
             page: opening.page.clone(),
-            acrylic,
+            skinned,
+            inset,
+            frost: 0.0,
             pressed: None,
             choosing: false,
             kind: Kinds::Programs,
@@ -519,6 +520,16 @@ fn show(opening: Opening) {
     }
 }
 
+/// How long what is behind a page stands before it is taken again.
+const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+thread_local! {
+    /// What is behind the page (see `Beside::look_behind`): its scene (kept from page to page), what was taken last
+    /// (and its bitmap, made as it is drawn), and when it was last asked for.
+    #[allow(clippy::type_complexity)]
+    static BEHIND: RefCell<(Option<super::scene::Scene>, Option<(super::backdrop::Capture, Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>)>, Option<std::time::Instant>)> = const { RefCell::new((None, None, None)) };
+}
+
 thread_local! {
     /// What takes drops on the page, while it is up.
     static DROP_TARGET: RefCell<Option<windows::Win32::System::Ole::IDropTarget>> = const { RefCell::new(None) };
@@ -554,6 +565,14 @@ fn gone() {
             let _ = DestroyWindow(beside.hwnd);
         }
         DROP_TARGET.with(|held| held.borrow_mut().take());
+        BEHIND.with(|held| {
+            let mut held = held.borrow_mut();
+            if let Some(scene) = held.0.as_mut() {
+                scene.rest();
+            }
+            held.1 = None;
+            held.2 = None;
+        });
         crate::app().controller.page_front(None);
     }
     UP.store(false, Ordering::Release);
@@ -646,7 +665,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_LBUTTONDOWN => {
             let (x, y) = point();
-            with(|beside| beside.hold(x / beside.scale, y / beside.scale));
+            with(|beside| {
+                let (x, y) = beside.on_page(x, y);
+                beside.hold(x, y)
+            });
         }
         WM_PAINT => {
             with(Beside::draw);
@@ -655,16 +677,21 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_MOUSEMOVE => {
             let (x, y) = point();
             with(|beside| {
-                beside.pointer = Some((x / beside.scale, y / beside.scale));
+                let (x, y) = beside.on_page(x, y);
+                beside.pointer = Some((x, y));
                 if let Some((_, from, moved)) = beside.holding.as_mut() {
-                    *moved = *moved || ((x / beside.scale - from.0).powi(2) + (y / beside.scale - from.1).powi(2)).sqrt() > DRAG_FROM;
+                    *moved = *moved || ((x - from.0).powi(2) + (y - from.1).powi(2)).sqrt() > DRAG_FROM;
                 }
                 beside.redraw();
             });
         }
         WM_LBUTTONUP => {
             let (x, y) = point();
-            let close = with(|beside| if beside.holding.is_some() { beside.let_go(x / beside.scale) } else { beside.press(x / beside.scale, y / beside.scale) }).unwrap_or(false);
+            let close = with(|beside| {
+                let (x, y) = beside.on_page(x, y);
+                if beside.holding.is_some() { beside.let_go(x) } else { beside.press(x, y) }
+            })
+            .unwrap_or(false);
             if close {
                 gone();
             }
@@ -798,6 +825,19 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 impl Beside {
     fn redraw(&self) {
         let _ = unsafe { InvalidateRect(Some(self.hwnd), None, false) };
+    }
+
+    /// The point (`x`, `y`) physical px in its window, on its page (DIPs from the page's corner, past its shadow's room).
+    fn on_page(&self, x: f32, y: f32) -> (f32, f32) {
+        (x / self.scale - self.inset, y / self.scale - self.inset)
+    }
+
+    /// Where its page is on the screen (physical px): its window less its shadow's room.
+    fn page_on_screen(&self) -> RECT {
+        let mut place = RECT::default();
+        let _ = unsafe { GetWindowRect(self.hwnd, &mut place) };
+        let room = (self.inset * self.scale).round() as i32;
+        RECT { left: place.left + room, top: place.top + room, right: place.right - room, bottom: place.bottom - room }
     }
 
     /// The page's own part of what was written in a note's words' box: its words dressed as their Markdown reads (not
@@ -1204,6 +1244,7 @@ impl Beside {
             if context.is_invalid() {
                 return;
             }
+            let (x, y) = (x + self.inset, y + self.inset);
             let _ = ImmSetCompositionWindow(context, &COMPOSITIONFORM { dwStyle: CFS_POINT, ptCurrentPos: POINT { x: px(x), y: px(y) }, ..Default::default() });
             let around = RECT { left: px(x), top: px(y), right: px(x) + 1, bottom: px(y + h) };
             let _ = ImmSetCandidateWindow(context, &CANDIDATEFORM { dwIndex: 0, dwStyle: CFS_EXCLUDE, ptCurrentPos: POINT { x: around.left, y: around.bottom }, rcArea: around });
@@ -1233,8 +1274,19 @@ impl Beside {
         }
         let Some(mut surface) = self.surface.take() else { return };
         let gfx = self.gfx.clone();
-        let area = (size.0 as f32 / self.scale, size.1 as f32 / self.scale);
-        if surface.draw(&gfx, size, self.scale, |frame| self.paint(frame, area)).is_ok() {
+        let inset = self.inset;
+        let area = (size.0 as f32 / self.scale - 2.0 * inset, size.1 as f32 / self.scale - 2.0 * inset);
+        self.look_behind();
+        let drawn = surface.draw(&gfx, size, self.scale, |frame| {
+            let mut was = windows_numerics::Matrix3x2::default();
+            unsafe {
+                frame.dc.GetTransform(&mut was);
+                frame.dc.SetTransform(&(windows_numerics::Matrix3x2::translation(inset, inset) * was));
+            }
+            self.paint(frame, area);
+            unsafe { frame.dc.SetTransform(&was) };
+        });
+        if drawn.is_ok() {
             self.surface = Some(surface);
         } else {
             gfx::lost();
@@ -1250,22 +1302,75 @@ impl Beside {
         }
     }
 
-    /// Its ground, in the skin's colours, as the panel's sheet is: chart paper's paper; over the blurred desktop
-    /// (see `acrylic`), Windows 11's tint, or the glass's at its most frosted; where Windows has no blurred desktop
-    /// for it (or on a note's page), on a flyout's ground, light or dark.
+    /// What is behind its page taken, as a widget takes what is behind it (see `ui::scene`): asked for as it opens,
+    /// as it is moved, and again a while after (what is behind changes); how frosted it is drawn, as what is behind
+    /// asks. Its scene is its thread's, kept from page to page (one made anew keeps some of the card's memory).
+    fn look_behind(&mut self) {
+        if !self.skinned || self.theme.skin == Skin::Paper {
+            return;
+        }
+        let page = self.page_on_screen();
+        let told = self.hwnd.0 as isize;
+        BEHIND.with(|held| {
+            let mut held = held.borrow_mut();
+            let (scene, taken, asked) = &mut *held;
+            if scene.is_none() {
+                let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+                    let _ = unsafe { PostMessageW(Some(HWND(told as *mut _)), WM_TIMER, WPARAM(AGAIN), LPARAM(0)) };
+                });
+                *scene = super::scene::Scene::new(page, wake, &self.gfx);
+            }
+            let Some(scene) = scene.as_mut() else { return };
+            let arranged = scene.arrange(page, self.hwnd);
+            if arranged || taken.is_none() || asked.is_none_or(|at| at.elapsed() >= LOOK_AGAIN) {
+                scene.want();
+                *asked = Some(std::time::Instant::now());
+            }
+            if let Some(capture) = scene.ready() {
+                let (mean, spread) = capture.luminance(page, self.scale);
+                self.frost = super::skins::frost(mean, spread, self.theme.dark);
+                *taken = Some((capture, None));
+            }
+        });
+    }
+
+    /// Its ground: on a skinned page, the skin's sheet as the panel's is (its shadow, the desktop behind as the skin
+    /// shows it, its tint and edge, its corners), as one piece; on a note's page, a flyout's ground, light or dark.
     fn paint_ground(&self, frame: &Frame, (width, height): (f32, f32)) {
         let theme = &self.theme;
-        let tint = match theme.skin {
-            Skin::Paper => return frame.fill(theme.paper, 0.0, 0.0, width, height),
-            Skin::Fluent => theme.tint,
-            Skin::Glass => theme.glass.alpha(theme.glass_clear + theme.glass_frosted),
-        };
-        // Over the blurred desktop, Windows 11's sheet's luminosity layer, as the panel lays it (Windows' own blur
-        // under it alone is greyer than the panel); with no blurred desktop, a flyout's ground.
-        let luminosity = Theme::new(Skin::Fluent, theme.dark).luminosity;
-        let under = if self.acrylic { luminosity } else if theme.dark { Color::hex(0x2C2C2C, 1.0) } else { Color::hex(0xF9F9F9, 1.0) };
-        frame.fill(under, 0.0, 0.0, width, height);
-        frame.fill(tint, 0.0, 0.0, width, height);
+        if !self.skinned {
+            let ground = match theme.skin {
+                Skin::Paper => theme.paper,
+                _ if theme.dark => Color::hex(0x2C2C2C, 1.0),
+                _ => Color::hex(0xF9F9F9, 1.0),
+            };
+            return frame.fill(ground, 0.0, 0.0, width, height);
+        }
+        let piece = [super::view::Rect { x: 0.0, y: 0.0, w: width, h: height }];
+        BEHIND.with(|held| {
+            let mut held = held.borrow_mut();
+            let page = self.page_on_screen();
+            // (Made once for the frame's device, at its screen's scale.)
+            let backdrop = held.1.as_mut().and_then(|(capture, bitmap)| {
+                if bitmap.is_none() {
+                    *bitmap = capture.bitmap_into(&frame.dc, self.scale, None).ok();
+                }
+                let at = windows_numerics::Vector2 { X: (page.left - capture.rect.left) as f32 / self.scale, Y: (page.top - capture.rect.top) as f32 / self.scale };
+                bitmap.as_ref().map(|bitmap| (bitmap, at))
+            });
+            let ground = super::skins::Ground {
+                theme,
+                edge: None,
+                size: (width, height),
+                lanes: &piece,
+                bar: super::view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+                backdrop: backdrop.map(|(bitmap, at)| (bitmap, at, self.scale)),
+                frost: self.frost,
+            };
+            for part in super::skins::parts(theme.skin) {
+                let _ = super::skins::draw(frame, &ground, *part);
+            }
+        });
     }
 
     /// The colour of what is chosen and of the one thing to press: Windows 11's accent, chart paper's ink.
@@ -1794,7 +1899,9 @@ otepad.exe"),
                             theme: Rc::new(Theme::new(skin, dark)),
                             lang: super::super::text::Lang::Zh,
                             page: Page::Picker,
-                            acrylic: false,
+                            skinned: false,
+                            inset: 0.0,
+                            frost: 0.0,
                             pressed: None,
                             choosing: false,
                             kind,
