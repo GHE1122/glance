@@ -39,9 +39,10 @@ pub struct Dots<K> {
     slides: Vec<Slide<K>>,
 }
 
-/// A choice's mark: on `to`, come from `from` (none: it was first chosen so) since `start`, `done` of the way (eased).
+/// A choice's mark (of the choice `of`: see `choose`): on `to`, come from `from` (none: it was first chosen so) since `start`, `done` of the way (eased).
 #[derive(Clone)]
 struct Slide<K> {
+    of: usize,
     from: Option<K>,
     to: K,
     start: Instant,
@@ -57,14 +58,15 @@ impl<K: Copy + PartialEq> Dots<K> {
         Dots { now: Vec::new(), at: None, slides: Vec::new() }
     }
 
-    /// `chosen` now, one of each kind (`K`s of a kind: of one enum's variant): each that changed since its mark slides
-    /// from the one before, the others' come on. Whether any is still on its way (more frames wanted).
-    pub fn choose(&mut self, now: Instant, chosen: &[K]) -> bool {
-        for &to in chosen {
-            match self.slides.iter_mut().find(|slide| std::mem::discriminant(&slide.to) == std::mem::discriminant(&to)) {
-                Some(slide) if slide.to != to => *slide = Slide { from: Some(slide.to), to, start: now, done: 0.0 },
+    /// What is chosen now of each choice (`chosen`: each choice's number, and what of it is chosen): each that changed
+    /// since its mark slides from the one before, the others' come on. Whether any is still on its way (more frames
+    /// wanted).
+    pub fn choose(&mut self, now: Instant, chosen: &[(usize, K)]) -> bool {
+        for &(of, to) in chosen {
+            match self.slides.iter_mut().find(|slide| slide.of == of) {
+                Some(slide) if slide.to != to => *slide = Slide { of, from: Some(slide.to), to, start: now, done: 0.0 },
                 Some(_) => {}
-                None => self.slides.push(Slide { from: None, to, start: now, done: 1.0 }),
+                None => self.slides.push(Slide { of, from: None, to, start: now, done: 1.0 }),
             }
         }
         let mut moving = false;
@@ -144,19 +146,36 @@ mod tests {
     fn a_choice_slides_to_the_one_chosen() {
         let start = Instant::now();
         let mut marks: Dots<u8> = Dots::new();
-        assert!(!marks.choose(start, &[1]));
+        assert!(!marks.choose(start, &[(0, 1)]));
         assert_eq!(marks.slid(1), None);
-        assert!(marks.choose(start, &[2]));
+        assert!(marks.choose(start, &[(0, 2)]));
         let at = |ms: u64| start + std::time::Duration::from_millis(ms);
-        assert!(marks.choose(at(55), &[2]));
+        assert!(marks.choose(at(55), &[(0, 2)]));
         let quarter = marks.slid(2).unwrap();
         assert_eq!(quarter.0, 1);
-        assert!(marks.choose(at(165), &[2]));
+        assert!(marks.choose(at(165), &[(0, 2)]));
         let most = marks.slid(2).unwrap().1;
         // (Eased: more than a quarter of the way at a quarter of the time, the last quarter the least of it.)
         assert!(quarter.1 > 0.25 && most > 0.9 && most < 1.0, "{quarter:?} {most}");
-        assert!(!marks.choose(at(230), &[2]));
+        assert!(!marks.choose(at(230), &[(0, 2)]));
         assert_eq!(marks.slid(2), None);
+    }
+
+    /// The choices of an enum of no fields (quick launch's kinds), each value of another variant: one chosen after
+    /// another slides from it (taken by their variant for the choice they are of, none slid: each was a choice of its
+    /// own).
+    #[test]
+    fn a_choice_of_plain_variants_slides() {
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        enum Kind {
+            A,
+            B,
+        }
+        let start = Instant::now();
+        let mut marks: Dots<Kind> = Dots::new();
+        marks.choose(start, &[(0, Kind::A)]);
+        assert!(marks.choose(start, &[(0, Kind::B)]));
+        assert_eq!(marks.slid(Kind::B).map(|(from, _)| from), Some(Kind::A));
     }
 
     /// At rest the dot is small; under the pointer it grows over several frames, fast then slowing, not at once; held,

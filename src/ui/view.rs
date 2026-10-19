@@ -3119,17 +3119,30 @@ pub(crate) fn glass_choice(frame: &dyn Canvas, theme: &Theme, pills: (f32, f32),
         Some(((from_x, from_w), done)) => (from_x + (to_x - from_x) * done, from_w + (to_w - from_w) * done),
         None => (to_x, to_w),
     };
+    glass_pill(frame, theme, (x, py, w, ph), ph / 2.0, false);
+}
+
+/// A pill of glass's glass at (x, y, w, h), its corners `radius` round, as the lanes lie on the sheet (whiter than what
+/// is round it, a rim lit along its top, fainter round its foot): what is chosen, a button; `lit` under the pointer.
+pub(crate) fn glass_pill(frame: &dyn Canvas, theme: &Theme, (x, py, w, ph): (f32, f32, f32, f32), radius: f32, lit: bool) {
+    let dark = theme.dark;
     // (On a light sheet, white on white: its shadow and a faint dark edge under its lit one tell it from what is round
     // it, as the lanes' tell them from the sheet.)
     if !dark {
-        frame.shadow(Color::hex(0, 0.08), x, py, w, ph, ph / 2.0, 3.0, 1.0);
+        frame.shadow(Color::hex(0, 0.08), x, py, w, ph, radius, 3.0, 1.0);
     }
-    frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.12) } else { Color::hex(0xFFFFFF, 0.62) }, x, py, w, ph, ph / 2.0);
+    let fill = match (dark, lit) {
+        (true, false) => Color::hex(0xFFFFFF, 0.12),
+        (true, true) => Color::hex(0xFFFFFF, 0.18),
+        (false, false) => Color::hex(0xFFFFFF, 0.62),
+        (false, true) => Color::hex(0xFFFFFF, 0.85),
+    };
+    frame.fill_rounded(fill, x, py, w, ph, radius);
     if !dark {
-        frame.stroke_rounded(Fill::Solid(Color::hex(0, 0.07)), x, py, w, ph, ph / 2.0, 1.0);
+        frame.stroke_rounded(Fill::Solid(Color::hex(0, 0.07)), x, py, w, ph, radius, 1.0);
     }
-    let (lit, foot) = if dark { (Color::hex(0xFFFFFF, 0.3), Color::hex(0xFFFFFF, 0.08)) } else { (Color::hex(0xFFFFFF, 0.95), Color::hex(0xFFFFFF, 0.4)) };
-    frame.stroke_rounded(Fill::Down { top: py + 0.5, from: lit, bottom: py + ph, to: foot }, x + 0.5, py + 0.5, w - 1.0, ph - 1.0, ph / 2.0 - 0.5, 1.0);
+    let (top, foot) = if dark { (Color::hex(0xFFFFFF, 0.3), Color::hex(0xFFFFFF, 0.08)) } else { (Color::hex(0xFFFFFF, 0.95), Color::hex(0xFFFFFF, 0.4)) };
+    frame.stroke_rounded(Fill::Down { top: py + 0.5, from: top, bottom: py + ph, to: foot }, x + 0.5, py + 0.5, w - 1.0, ph - 1.0, radius - 0.5, 1.0);
 }
 
 /// A count's mark: a pill `BADGE` tall, as wide as its figures and the room either side of them (see `badge_width`).

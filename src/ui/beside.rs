@@ -134,6 +134,8 @@ const FOLLOW_MS: u32 = 1000;
 /// Its timer for showing it, drawn without the desktop behind it, where that does not come (it cannot be taken), and
 /// how long it waits for it.
 const SHOW: usize = 5;
+/// How far in from a listed row's plate (as wide as the search) what is in it is (DIPs).
+const ROW_IN: f32 = 8.0;
 /// Its timer for drawing again while a mark slides (each frame's time).
 const SLIDING: usize = 6;
 const SHOW_WITHIN_MS: u32 = 400;
@@ -1409,7 +1411,7 @@ impl Beside {
         let area = (size.0 as f32 / self.scale - 2.0 * inset, size.1 as f32 / self.scale - 2.0 * inset);
         self.look_behind();
         // (A mark sliding: drawn again a frame on, till it is where it is to be.)
-        let sliding = self.marks.choose(std::time::Instant::now(), &[self.kind]);
+        let sliding = self.marks.choose(std::time::Instant::now(), &[(0, self.kind)]);
         unsafe {
             if sliding {
                 let _ = SetTimer(Some(self.hwnd), SLIDING, 15, None);
@@ -1849,39 +1851,43 @@ impl Beside {
                 continue;
             }
             if let Some(heading) = heading {
-                frame.text(&heading, theme.small, theme.text3, PAD, ry + (LETTER - 16.0) / 2.0 + 2.0, inner, Align::Start);
+                frame.text(&heading, theme.small, theme.text3, PAD + ROW_IN, ry + (LETTER - 16.0) / 2.0 + 2.0, inner, Align::Start);
                 continue;
             }
             let Some(row) = row else { continue };
-            let place = (PAD - 6.0, ry, inner + 12.0, tall);
+            // (As wide as the search over it, what is in it a little in from its edges; its corners concentric with
+            // its picture's, as round as that and the room round it.)
+            let place = (PAD, ry, inner, tall);
             let hovered = lit(place) && pointer.is_some_and(|(_, py)| py >= top && py < bottom);
             if hovered {
-                frame.fill_rounded(theme.hover, place.0, place.1 + 1.0, place.2, place.3 - 2.0, round(tall).min(10.0));
+                frame.fill_rounded(theme.hover, place.0, place.1 + 1.0, place.2, place.3 - 2.0, round(tall).min(5.0 + ROW_IN));
             }
             let face = 28.0;
+            let face_x = PAD + ROW_IN;
             if row.on_disk {
-                super::view::paint_app(frame, &theme, &row.name, &row.target, PAD, ry + (tall - face) / 2.0, face);
+                super::view::paint_app(frame, &theme, &row.name, &row.target, face_x, ry + (tall - face) / 2.0, face);
             } else {
                 match crate::station::thumbs::icon(std::path::Path::new(&row.target), super::view::APP_PIXELS) {
-                    Some(picture) => frame.picture(&picture, PAD, ry + (tall - face) / 2.0, face, face, 5.0, 1.0),
+                    Some(picture) => frame.picture(&picture, face_x, ry + (tall - face) / 2.0, face, face, 5.0, 1.0),
                     None => {
                         waiting = true;
-                        frame.fill_rounded(theme.track, PAD, ry + (tall - face) / 2.0, face, face, 5.0);
+                        frame.fill_rounded(theme.track, face_x, ry + (tall - face) / 2.0, face, face, 5.0);
                     }
                 }
             }
             // What a press does, at its end as the panel's buttons are drawn: a plus, on a plate while the pointer is on
             // the row; kept already, a tick in the accent.
             let is_kept = kept.iter().any(|app| crate::station::apps::same(&app.target, &row.target));
-            let mark = (PAD + inner - 28.0, ry + (tall - 28.0) / 2.0, 28.0, 28.0);
-            let words_w = inner - 38.0 - mark.2 - 8.0;
+            let mark = (PAD + inner - ROW_IN - 28.0, ry + (tall - 28.0) / 2.0, 28.0, 28.0);
+            let words_x = face_x + 38.0;
+            let words_w = mark.0 - 8.0 - words_x;
             let ink = if is_kept { theme.text2 } else { theme.text };
             if row.about.is_empty() {
-                frame.text(&row.name, theme.body, ink, PAD + 38.0, ry + (tall - theme.body.size * 1.35) / 2.0, words_w, Align::Start);
+                frame.text(&row.name, theme.body, ink, words_x, ry + (tall - theme.body.size * 1.35) / 2.0, words_w, Align::Start);
             } else {
                 let name_top = ry + (tall - theme.body.size * 1.35 - 15.0) / 2.0;
-                frame.text(&row.name, theme.body, ink, PAD + 38.0, name_top, words_w, Align::Start);
-                frame.text(&row.about, theme.small, theme.text3, PAD + 38.0, name_top + theme.body.size * 1.35, words_w, Align::Start);
+                frame.text(&row.name, theme.body, ink, words_x, name_top, words_w, Align::Start);
+                frame.text(&row.about, theme.small, theme.text3, words_x, name_top + theme.body.size * 1.35, words_w, Align::Start);
             }
             let centre = Point { x: mark.0 + mark.2 / 2.0, y: mark.1 + mark.3 / 2.0 };
             if is_kept {
@@ -1904,11 +1910,14 @@ impl Beside {
         // Its foot: what is not listed, chosen on the PC.
         frame.fill(theme.rule, 0.0, bottom, width, 1.0);
         let button = (PAD, bottom + 10.0, inner, 32.0);
-        frame.fill_rounded(theme.track, button.0, button.1, button.2, button.3, round(32.0));
-        if lit(button) {
-            frame.fill_rounded(theme.hover, button.0, button.1, button.2, button.3, round(32.0));
-        }
-        if theme.skin != Skin::Glass {
+        // (Glass's a pill of its glass, as what is chosen is; the others' their plate, ruled round.)
+        if theme.skin == Skin::Glass {
+            super::view::glass_pill(frame, &theme, button, round(32.0), lit(button));
+        } else {
+            frame.fill_rounded(theme.track, button.0, button.1, button.2, button.3, round(32.0));
+            if lit(button) {
+                frame.fill_rounded(theme.hover, button.0, button.1, button.2, button.3, round(32.0));
+            }
             frame.stroke_rounded(super::canvas::Fill::Solid(theme.rule), button.0, button.1, button.2, button.3, round(32.0), 1.0);
         }
         let (label, hint, icon) = match self.kind {

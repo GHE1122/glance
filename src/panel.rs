@@ -3222,7 +3222,7 @@ impl<'a> Panel<'a> {
         let held = self.sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
         let thumbs_moving = self.thumbs.step(now, self.hover.filter(|hit| hit.eases()), held);
         // (What is chosen of several, its mark sliding to it as it changes: the station's page, the notes' view.)
-        let thumbs_moving = self.thumbs.choose(now, &[Hit::Tab(self.tab), Hit::NotesShow(crate::notes::view())]) | thumbs_moving;
+        let thumbs_moving = self.thumbs.choose(now, &[(0, Hit::Tab(self.tab)), (1, Hit::NotesShow(crate::notes::view()))]) | thumbs_moving;
         let scene = Scene { thumbs: &self.thumbs, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
