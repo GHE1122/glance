@@ -186,6 +186,9 @@ pub enum Hit {
     /// What is kept at hand, by its place (see `station::apps`); the place to add more; where something dragged may
     /// be dropped to be kept at hand.
     App(u16),
+    /// While one kept at hand is held and dragged: the place among them the pointer is at (where it would go; these
+    /// stand still as the others move to make room, so that what the pointer is over is not moved from under it).
+    AppSlot(u16),
     AddApp,
     AppsArea,
     /// A note, by its place among them (see `notes::shown`): opened beside; a new note; the menu of how they show.
@@ -1210,6 +1213,12 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         placed.push((x, y, if named { cell_w } else { APP_SIDE }, cell_h, hit));
     }
     if let Some((held, (px, py))) = scene.thumbs.app_held() {
+        // (The places it may go to, standing still: see `Hit::AppSlot`.)
+        placed.retain(|hit| !matches!(hit.4, Hit::App(_)));
+        for at in 0..apps.len() {
+            let (x, y) = cell(at);
+            placed.push((x, y, if named { cell_w } else { APP_SIDE }, cell_h, Hit::AppSlot(at as u16)));
+        }
         if let Some((name, target)) = apps.iter().find(|(_, target)| target == held) {
             paint_held_app(frame, scene, name, target, px - APP_SIDE / 2.0, py - APP_SIDE / 2.0, APP_SIDE);
         }
@@ -1297,7 +1306,16 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
         paint_app(frame, theme, name, target, x + inset, y + inset, RAIL_SIDE);
         placed.push((x, y, RAIL_CELL, RAIL_CELL, hit));
     }
-    // The one held, lifted where the pointer has it along the rail.
+    // The one held, lifted where the pointer has it along the rail; the places it may go to, standing still, all of
+    // the rail between them (before the first, past the last).
+    if scene.thumbs.app_held().is_some() && !apps.is_empty() {
+        placed.retain(|hit| !matches!(hit.4, Hit::App(_)));
+        for at in 0..apps.len() {
+            let (x, y) = shown_cell(at);
+            let (lead, tail) = (if at == 0 { 1000.0 } else { 0.0 }, if at + 1 == apps.len() { 1000.0 } else { 0.0 });
+            placed.push(if across { (x - lead, area.y, RAIL_CELL + lead + tail, area.h, Hit::AppSlot(at as u16)) } else { (area.x, y - lead, area.w, RAIL_CELL + lead + tail, Hit::AppSlot(at as u16)) });
+        }
+    }
     if let Some((held, (px, py))) = scene.thumbs.app_held() {
         if let Some((name, target)) = apps.iter().find(|(_, target)| target == held) {
             let (x, y) = if across { (px - RAIL_CELL / 2.0, area.y + (area.h - RAIL_CELL) / 2.0) } else { (area.x + (area.w - RAIL_CELL) / 2.0, py - RAIL_CELL / 2.0) };
@@ -2739,15 +2757,19 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let wide = views.len() as f32 * cell + 4.0;
                 let x0 = left + width - MEDIA_ROW - 8.0 - wide;
                 let round = theme.control_radius.min(MEDIA_ROW / 2.0 + 2.0);
-                if theme.skin == Skin::Glass {
+                {
                     let boxes: Vec<(f32, f32)> = (0..views.len()).map(|at| (x0 + 2.0 + at as f32 * cell, cell)).collect();
                     let at = |view: crate::settings::NotesView| views.iter().position(|(one, _)| *one == view);
                     let slid = scene.thumbs.slid(Hit::NotesShow(shown)).and_then(|(from, done)| match from {
                         Hit::NotesShow(from) => Some((at(from)?, done)),
                         _ => None,
                     });
-                    let hovered = views.iter().position(|(view, _)| scene.hover == Some(Hit::NotesShow(*view)));
-                    glass_choice(frame, theme, (button, MEDIA_ROW), &boxes, at(shown).unwrap_or(0), slid, hovered);
+                    if theme.skin == Skin::Glass {
+                        let hovered = views.iter().position(|(view, _)| scene.hover == Some(Hit::NotesShow(*view)));
+                        glass_choice(frame, theme, (button, MEDIA_ROW), &boxes, at(shown).unwrap_or(0), slid, hovered);
+                    } else {
+                        choice_mark(frame, theme, &boxes, at(shown).unwrap_or(0), slid, button + MEDIA_ROW + 1.0, 14.0, 4.0);
+                    }
                 }
                 for (at, (view, icon)) in views.into_iter().enumerate() {
                     let x = x0 + 2.0 + at as f32 * cell;
@@ -2755,8 +2777,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     let chosen = view == shown;
                     match theme.skin {
                         Skin::Glass => {}
-                        Skin::Fluent if chosen => frame.fill_rounded(super::theme::accent(theme.dark), x + cell / 2.0 - 7.0, button + MEDIA_ROW + 1.0, 14.0, 3.0, 1.5),
-                        Skin::Paper if chosen => frame.fill(theme.text, x + 4.0, button + MEDIA_ROW + 1.0, cell - 8.0, 2.0),
+                        _ if chosen => {}
                         _ if scene.hover == Some(hit) => frame.fill_rounded(theme.hover, x, button, cell, MEDIA_ROW, if theme.skin == Skin::Glass { MEDIA_ROW / 2.0 } else { round }),
                         _ => {}
                     }
@@ -3097,7 +3118,8 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
             (page, name, name_w, aside, aside_w, at, wide)
         })
         .collect();
-    if glass {
+    // The one chosen marked, sliding to it as another is chosen.
+    {
         let boxes: Vec<(f32, f32)> = laid.iter().map(|tab| (tab.5, tab.6)).collect();
         let at = |page: Tab| laid.iter().position(|tab| tab.0 == page);
         let chosen = at(tab).unwrap_or(0);
@@ -3105,21 +3127,18 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
             Hit::Tab(from) => Some((at(from)?, done)),
             _ => None,
         });
-        let hovered = laid.iter().position(|tab| scene.hover == Some(Hit::Tab(tab.0)));
-        glass_choice(frame, theme, (row, TAB_H), &boxes, chosen, slid, hovered);
+        if glass {
+            let hovered = laid.iter().position(|tab| scene.hover == Some(Hit::Tab(tab.0)));
+            glass_choice(frame, theme, (row, TAB_H), &boxes, chosen, slid, hovered);
+        } else {
+            choice_mark(frame, theme, &boxes, chosen, slid, name_top + ink_bottom + 4.0, 16.0, 0.0);
+        }
     }
     for (page, name, name_w, aside, aside_w, x, wide) in laid {
         let chosen = page == tab;
         let hovered = scene.hover == Some(Hit::Tab(page));
         if theme.skin == Skin::Fluent && hovered {
             frame.fill_rounded(theme.hover.alpha(0.6), x, row, wide, TAB_H, theme.control_radius.min(TAB_H / 2.0));
-        }
-        if chosen {
-            match theme.skin {
-                Skin::Fluent => frame.fill_rounded(super::theme::accent(theme.dark), x + wide / 2.0 - 8.0, name_top + ink_bottom + 4.0, 16.0, 3.0, 1.5),
-                Skin::Paper => frame.fill(theme.text, x, name_top + ink_bottom + 4.0, wide, 2.0),
-                Skin::Glass => {}
-            }
         }
         // (Glass's others a shade lighter than the chosen one's, none faint.)
         let words = match (chosen || hovered, glass) {
@@ -3164,12 +3183,31 @@ pub(crate) fn glass_choice(frame: &dyn Canvas, theme: &Theme, pills: (f32, f32),
     if let Some(&(x, w)) = hovered.filter(|at| *at != chosen).and_then(|at| boxes.get(at)) {
         frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.06) } else { Color::hex(0xFFFFFF, 0.24) }, x, py, w, ph, ph / 2.0);
     }
+    let (x, w) = slid_box(boxes, chosen, slid);
+    glass_pill(frame, theme, (x, py, w, ph), ph / 2.0, false);
+}
+
+/// Where the mark of what is chosen (`chosen` of `boxes`, each its left and width) is: on it, or on its way to it from
+/// the one chosen before (`slid`, so far: see `thumb::Dots::choose`).
+pub(crate) fn slid_box(boxes: &[(f32, f32)], chosen: usize, slid: Option<(usize, f32)>) -> (f32, f32) {
     let (to_x, to_w) = boxes[chosen];
-    let (x, w) = match slid.and_then(|(from, done)| Some((*boxes.get(from)?, done))) {
+    match slid.and_then(|(from, done)| Some((*boxes.get(from)?, done))) {
         Some(((from_x, from_w), done)) => (from_x + (to_x - from_x) * done, from_w + (to_w - from_w) * done),
         None => (to_x, to_w),
-    };
-    glass_pill(frame, theme, (x, py, w, ph), ph / 2.0, false);
+    }
+}
+
+/// The mark under what is chosen, as Windows 11 (a short bar of its accent under its middle, `bar` long) and chart
+/// paper (a line of ink under all of it) draw it, `y` down, on its way to it from the one before as it slides (see
+/// `slid_box`). Glass marks it otherwise (see `glass_choice`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn choice_mark(frame: &dyn Canvas, theme: &Theme, boxes: &[(f32, f32)], chosen: usize, slid: Option<(usize, f32)>, y: f32, bar: f32, inset: f32) {
+    let (x, w) = slid_box(boxes, chosen, slid);
+    match theme.skin {
+        Skin::Fluent => frame.fill_rounded(super::theme::accent(theme.dark), x + w / 2.0 - bar / 2.0, y, bar, 3.0, 1.5),
+        Skin::Paper => frame.fill(theme.text, x + inset, y, w - 2.0 * inset, 2.0),
+        Skin::Glass => {}
+    }
 }
 
 /// A pill of glass's glass at (x, y, w, h), its corners `radius` round, as the lanes lie on the sheet (whiter than what
@@ -4724,6 +4762,37 @@ six".into()));
         let mut hits = Vec::new();
         paint_apps(&Nothing, &scene, (0.0, top, width), &apps, APP_ROWS, true, &mut hits);
         within(&hits, top, APP_ROWS as f32 * APP_CELL_H + (APP_ROWS - 1) as f32 * APP_GAP, "apps");
+    }
+
+    /// One kept at hand held and dragged: the places it may go to stand still where the things were, whatever the
+    /// others do to make room (what the pointer is over is not moved from under it: dragged to the top, it went no
+    /// further than the next, which moved away under it), and the one held finds none of its own.
+    #[test]
+    fn places_stand_still_while_one_is_dragged() {
+        let theme = Theme::new(Skin::Glass, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let apps: Vec<(String, String)> = (0..4).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
+        let order: Vec<String> = apps.iter().map(|(_, target)| target.clone()).collect();
+        let still: &'static super::super::thumb::Dots<Hit> = Box::leak(Box::new(super::super::thumb::Dots::new()));
+        let scene = |thumbs: &'static super::super::thumb::Dots<Hit>| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs, pinned: false, overlay: false, buttons: true, newer: false };
+        let mut hits = Vec::new();
+        paint_apps(&Nothing, &scene(still), (0.0, 0.0, 300.0), &apps, APP_ROWS, true, &mut hits);
+        let at_rest: Vec<(f32, f32)> = (0..4).map(|at| hits.iter().find(|hit| hit.4 == Hit::App(at)).map(|hit| (hit.0, hit.1)).unwrap()).collect();
+        // The last held over the first's place, the others on their way down.
+        let mut moving = super::super::thumb::Dots::new();
+        let start = std::time::Instant::now();
+        moving.apps(start, &order, Some((3, 0, Some((10.0, 10.0)))));
+        moving.apps(start + std::time::Duration::from_millis(60), &order, Some((3, 0, Some((10.0, 10.0)))));
+        let moving: &'static super::super::thumb::Dots<Hit> = Box::leak(Box::new(moving));
+        let mut hits = Vec::new();
+        paint_apps(&Nothing, &scene(moving), (0.0, 0.0, 300.0), &apps, APP_ROWS, true, &mut hits);
+        for (at, place) in at_rest.iter().enumerate() {
+            let slot = hits.iter().find(|hit| hit.4 == Hit::AppSlot(at as u16)).map(|hit| (hit.0, hit.1));
+            assert_eq!(slot, Some(*place), "place {at}");
+        }
+        assert!(!hits.iter().any(|hit| matches!(hit.4, Hit::App(_))));
     }
 
     /// The deck's strips scroll to every note there is (thirteen: more than fit over the last written's card); the

@@ -1747,12 +1747,24 @@ impl Beside {
         let glass = theme.skin == Skin::Glass;
         let cell_w = inner / kinds.len() as f32;
         let cell_at = |at: usize| (PAD + at as f32 * cell_w, KINDS_TOP + 3.0, cell_w, KINDS_H - 6.0);
-        if glass {
-            let boxes: Vec<(f32, f32)> = (0..kinds.len()).map(|at| (cell_at(at).0, cell_w)).collect();
+        {
             let at = |kind: Kinds| kinds.iter().position(|(one, _, _)| *one == kind);
             let slid = self.marks.slid(self.kind).and_then(|(from, done)| Some((at(from)?, done)));
-            let hovered = (0..kinds.len()).find(|at| lit(cell_at(*at)));
-            super::view::glass_choice(frame, &theme, (KINDS_TOP + 3.0, KINDS_H - 6.0), &boxes, at(self.kind).unwrap_or(0), slid, hovered);
+            let chosen = at(self.kind).unwrap_or(0);
+            if glass {
+                let boxes: Vec<(f32, f32)> = (0..kinds.len()).map(|at| (cell_at(at).0, cell_w)).collect();
+                let hovered = (0..kinds.len()).find(|at| lit(cell_at(*at)));
+                super::view::glass_choice(frame, &theme, (KINDS_TOP + 3.0, KINDS_H - 6.0), &boxes, chosen, slid, hovered);
+            } else {
+                // (Chart paper's line under its icon and name, Windows 11's bar under its middle.)
+                let boxes: Vec<(f32, f32)> = kinds.iter().enumerate().map(|(at, (_, _, name))| {
+                    let content = 15.0 + 6.0 + frame.measure(name, theme.body);
+                    (cell_at(at).0 + (cell_w - content) / 2.0, content)
+                }).collect();
+                let (_, y, _, h) = cell_at(0);
+                let y = if theme.skin == Skin::Paper { y + h - 2.0 } else { y + h - 3.0 };
+                super::view::choice_mark(frame, &theme, &boxes, chosen, slid, y, 16.0, 0.0);
+            }
         }
         for (at, (kind, icon, name)) in kinds.into_iter().enumerate() {
             let cell = cell_at(at);
@@ -1764,13 +1776,6 @@ impl Beside {
             match theme.skin {
                 Skin::Fluent if hovered && !chosen => frame.fill_rounded(theme.hover, cell.0, cell.1, cell.2, cell.3, round(cell.3)),
                 _ => {}
-            }
-            if chosen {
-                match theme.skin {
-                    Skin::Fluent => frame.fill_rounded(super::theme::accent(theme.dark), cell.0 + cell.2 / 2.0 - 8.0, cell.1 + cell.3 - 3.0, 16.0, 3.0, 1.5),
-                    Skin::Paper => frame.fill(theme.text, start, cell.1 + cell.3 - 2.0, content, 2.0),
-                    Skin::Glass => {}
-                }
             }
             let ink = match (chosen || hovered, glass) {
                 (true, _) => theme.text,

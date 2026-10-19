@@ -189,12 +189,6 @@ impl<K: Copy + PartialEq> Dots<K> {
         })
     }
 
-    /// The place `target` shows at among what is kept at hand (the one held where it would go): what one dragged over
-    /// it goes to.
-    pub fn app_slot(&self, target: &str) -> Option<usize> {
-        self.apps.order.iter().position(|one| one == target)
-    }
-
     /// The thing kept at hand held, by what opens it, and where the pointer has it.
     pub fn app_held(&self) -> Option<(&str, (f32, f32))> {
         self.apps.held.as_ref().map(|(target, point)| (target.as_str(), *point))

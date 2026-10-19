@@ -3533,11 +3533,9 @@ impl<'a> Panel<'a> {
     fn held_at(&mut self, client: POINT) {
         let px = self.placement.as_ref().map_or(1.0, |placement| placement.px);
         self.app_point = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
-        // (The place the one under it shows at, the others made room: not its place as kept.)
-        if let Some(Hit::App(under)) = self.hit_at(client) {
-            if let Some(slot) = crate::station::apps::shown().get(usize::from(under)).and_then(|app| self.thumbs.app_slot(&app.target)) {
-                self.app_over = Some(slot as u16);
-            }
+        // (The place it is over, which stands still as the others make room.)
+        if let Some(Hit::AppSlot(slot)) = self.hit_at(client) {
+            self.app_over = Some(slot);
         }
         self.next_frame = Instant::now();
     }
