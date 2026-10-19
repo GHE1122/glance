@@ -5,6 +5,8 @@
 /// An icon, by what it stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
+    /// The overlay's: a square with a pulse in it (Lucide's square-activity).
+    Activity,
     Cpu,
     Gpu,
     Memory,
@@ -96,6 +98,7 @@ impl Icon {
             Icon::ArrowDown => &["M12 5v14", "m19 12-7 7-7-7"],
             Icon::Folder => &["M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"],
             Icon::Search => &["M19 11a8 8 0 1 1-16 0a8 8 0 1 1 16 0z", "m21 21-4.34-4.34"],
+            Icon::Activity => &["M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z", "M17 12h-2l-2 5-2-10-2 5H7"],
             Icon::Ellipsis => &["M13 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0z", "M20 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0z", "M6 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0z"],
             Icon::List => &["M3 5h.01", "M3 12h.01", "M3 19h.01", "M8 5h13", "M8 12h13", "M8 19h13"],
             Icon::Image => &["M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z", "M7 9a2 2 0 1 0 4 0a2 2 0 1 0-4 0z", "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"],

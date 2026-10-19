@@ -12,7 +12,7 @@ const TEXT_KEPT: Duration = Duration::from_secs(2);
 /// How long a picture not drawn again is kept on the card (a track's cover: drawn each second while it plays).
 const PICTURE_KEPT: Duration = Duration::from_secs(10);
 
-use windows::core::{w, Interface, Result, BOOL, HSTRING, PCWSTR};
+use windows::core::{w, Interface, Result, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
@@ -87,7 +87,6 @@ pub struct Gfx {
     inter: (IDWriteFontCollection, HSTRING),
     /// The serif face, once it is had and first asked for (see `serif`).
     serif: std::cell::OnceCell<Option<(IDWriteFontCollection, HSTRING)>>,
-    icons: PCWSTR,
     /// Each font's format, and when it was last asked for.
     formats: RefCell<HashMap<FontKey, (IDWriteTextFormat3, Instant)>>,
     /// Laid-out text, kept while frames keep drawing it: most of a panel's
@@ -233,16 +232,10 @@ impl Gfx {
         let faces = (|| {
             let archivo = shipped_face(&write, &loader, ARCHIVO)?;
             let inter = shipped_face(&write, &loader, INTER)?;
-            let icons = unsafe {
-                let system = write.GetSystemFontCollection(false, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC)?;
-                let (mut index, mut fluent) = (0, BOOL(0));
-                system.FindFamilyName(w!("Segoe Fluent Icons"), &mut index, &mut fluent)?;
-                if fluent.as_bool() { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") }
-            };
-            Ok::<_, windows::core::Error>((archivo, inter, icons))
+            Ok::<_, windows::core::Error>((archivo, inter))
         })();
         // Failing here, the loader is not left registered with nothing to free it.
-        let (archivo, inter, icons) = faces.inspect_err(|_| unsafe {
+        let (archivo, inter) = faces.inspect_err(|_| unsafe {
             let _ = write.UnregisterFontFileLoader(&loader);
         })?;
         let round = unsafe {
@@ -270,7 +263,6 @@ impl Gfx {
             archivo,
             inter,
             serif: std::cell::OnceCell::new(),
-            icons,
             formats: RefCell::new(HashMap::new()),
             made: RefCell::new(HashMap::new()),
             spare: RefCell::new(Vec::new()),
@@ -308,7 +300,6 @@ impl Gfx {
             Family::Inter => (PCWSTR(self.inter.1.as_ptr()), Some(&self.inter.0)),
             Family::Segoe => (w!("Segoe UI Variable Text"), None),
             Family::SegoeDisplay => (w!("Segoe UI Variable Display"), None),
-            Family::Icons => (self.icons, None),
             Family::YaHei => (w!("Microsoft YaHei UI"), None),
             // (Asked for only once it is had: see `serif::family`.)
             Family::Serif => match self.serif.get_or_init(|| crate::serif::face().and_then(|face| face_of(&self.write, &self.loader, face).ok())) {

@@ -71,6 +71,17 @@ const SHADOW: f32 = 16.0;
 pub static SHOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const FONT: Font = Font::new(Family::Segoe, 14.0, 400.0);
 
+impl Look {
+    /// What its choices are written in: Windows' own face (Windows 11's look, the system's), or the skin's (glass's
+    /// Inter, chart paper's Archivo), its size.
+    fn font(self) -> Font {
+        match self.skin {
+            Some(skin @ (super::theme::Skin::Glass | super::theme::Skin::Paper)) => Font { size: FONT.size, weight: FONT.weight, ..super::theme::Theme::new(skin, self.dark).body },
+            _ => FONT,
+        }
+    }
+}
+
 /// What a menu made of a message for its window.
 pub enum Handled {
     /// None of its own: for the window, as any other message.
@@ -136,7 +147,7 @@ impl Menu {
             },
         };
         let scale = contact.scale;
-        let sheet = Sheet::new(&gfx, &items);
+        let sheet = Sheet::new(&gfx, &items, look);
         // At the pointer, turned back where it would leave its screen.
         let (w, h) = (((sheet.width + 2.0 * SHADOW) * scale) as i32, ((sheet.height + 2.0 * SHADOW) * scale) as i32);
         let margin = (SHADOW * scale) as i32;
@@ -309,9 +320,9 @@ pub struct Sheet {
 }
 
 impl Sheet {
-    pub fn new(gfx: &gfx::Gfx, items: &[Item]) -> Self {
+    pub fn new(gfx: &gfx::Gfx, items: &[Item], look: Look) -> Self {
         // As wide as its longest choice.
-        let widest = items.iter().map(|item| gfx.measure(item.label, FONT)).fold(0.0, f32::max);
+        let widest = items.iter().map(|item| gfx.measure(item.label, look.font())).fold(0.0, f32::max);
         let width = (TEXT_LEFT + widest + 48.0).max(MIN_WIDTH);
         let tops: Vec<f32> = items
             .iter()
@@ -351,8 +362,8 @@ impl Sheet {
             if let Some(icon) = item.icon {
                 frame.icon(icon, Point { x: INSET + 16.0, y: middle }, ICON, colours.icon);
             }
-            let (ink_top, ink_bottom) = frame.ink(item.label, FONT);
-            frame.text(item.label, FONT, colours.text, TEXT_LEFT, middle - (ink_top + ink_bottom) / 2.0, width - TEXT_LEFT - 36.0, Align::Start);
+            let (ink_top, ink_bottom) = frame.ink(item.label, look.font());
+            frame.text(item.label, look.font(), colours.text, TEXT_LEFT, middle - (ink_top + ink_bottom) / 2.0, width - TEXT_LEFT - 36.0, Align::Start);
             if item.checked {
                 frame.icon(Icon::Check, Point { x: width - INSET - 18.0, y: middle }, ICON, colours.text);
             }
@@ -457,14 +468,15 @@ mod tests {
             Item { label: "列表", icon: Some(Icon::List), checked: true, rule_before: false },
             Item { label: "清空中转站", icon: None, checked: false, rule_before: true },
         ];
-        let sheet = Sheet::new(&gfx, &items);
         let looks = [Look { skin: None, dark: false }, Look::of(Skin::Glass, false), Look::of(Skin::Paper, false), Look { skin: None, dark: true }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, true)];
-        let (cell_w, cell_h, px) = (sheet.width + 2.0 * SHADOW, sheet.height + 2.0 * SHADOW, 2.0f32);
+        let sheets: Vec<Sheet> = looks.iter().map(|look| Sheet::new(&gfx, &items, *look)).collect();
+        let widest = sheets.iter().map(|sheet| sheet.width).fold(0.0, f32::max);
+        let (cell_w, cell_h, px) = (widest + 2.0 * SHADOW, sheets[0].height + 2.0 * SHADOW, 2.0f32);
         let (w, h) = ((3.0 * cell_w * px) as u32, (2.0 * cell_h * px) as u32);
         let pixels = gfx.draw_offscreen((w, h), px, |frame| {
             frame.fill(Color::hex(0x8899AA, 1.0), 0.0, 0.0, 3.0 * cell_w, cell_h);
             frame.fill(Color::hex(0x223344, 1.0), 0.0, cell_h, 3.0 * cell_w, cell_h);
-            for (at, look) in looks.iter().enumerate() {
+            for (at, (look, sheet)) in looks.iter().zip(&sheets).enumerate() {
                 frame.origin((at % 3) as f32 * cell_w + SHADOW, (at / 3) as f32 * cell_h + SHADOW);
                 sheet.paint(frame, &items, *look, Some(1), false);
             }

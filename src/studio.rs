@@ -674,7 +674,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                 if let (Some(menu), Some((index, ..))) = (shot.menu.as_ref().filter(|menu| (menu.from..menu.to).contains(&t)), showing.first()) {
                     let filming = if *index == 0 { torn.as_ref().unwrap() } else { &placed_widgets[index - 1] };
                     let items = crate::widget::menu_items(lang, false, false, true, false);
-                    let sheet = crate::ui::menu::Sheet::new(gfx, &items);
+                    let sheet = crate::ui::menu::Sheet::new(gfx, &items, crate::ui::menu::Look::of(theme.skin, theme.dark));
                     let lit = menu.lit.iter().take_while(|(at, _)| *at <= t).last().map(|(_, choice)| *choice);
                     frame.place(Matrix3x2::translation(filming.at.0 + menu.at.0, filming.at.1 + menu.at.1));
                     sheet.paint(frame, &items, crate::ui::menu::Look::of(theme.skin, theme.dark), lit, false);

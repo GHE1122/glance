@@ -3,7 +3,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
+use super::canvas::{Align, Canvas, Color, Fill, Font, Point};
 use super::icons::Icon;
 use super::prefs::{Prefs, ProcessSort};
 use super::seen::Seen;
@@ -123,9 +123,6 @@ const MIN_RATE_SCALE: f64 = 10.0 * 1024.0;
 /// The frame time chart's least full scale, in milliseconds.
 const MIN_FRAME_SCALE: f64 = 10.0;
 
-/// The system icon font's open folder.
-const FOLDER: &str = "\u{E838}";
-
 /// The name `label` of a row that opens something (drawn at `left`, `top`),
 /// the pointer on it, marked as its skin marks what opens: chart paper
 /// underlines it in ink, as a link on paper is; Windows 11 sets it in the
@@ -141,11 +138,9 @@ fn opens_marked(frame: &dyn Canvas, theme: &Theme, label: &str, left: f32, top: 
         Skin::Paper => frame.fill(theme.text, left, top + ink_bottom + 1.5, wide, 1.0),
         Skin::Glass | Skin::Fluent => {}
     }
-    let icon = Font::new(Family::Icons, 11.0, 400.0);
-    let (icon_top, icon_bottom) = frame.ink(FOLDER, icon);
     let middle = top + (ink_top + ink_bottom) / 2.0;
     let ink = if theme.skin == Skin::Fluent { super::theme::accent(theme.dark) } else { theme.text2 };
-    frame.text(FOLDER, icon, ink, left + wide + 5.0, middle - (icon_top + icon_bottom) / 2.0, LABEL, Align::Start);
+    frame.icon(Icon::Folder, Point { x: left + wide + 5.0 + 6.0, y: middle }, 12.0, ink);
 }
 
 /// What a click or a wheel turn on the panel lands on.
@@ -643,9 +638,9 @@ const NOTE_LIFT: f32 = 3.0;
 fn notes_lane(full: bool, lang: Lang) -> Vec<Block> {
     let now = crate::station::now_ms();
     let notes: Vec<NoteCard> = crate::notes::shown().iter().enumerate().map(|(at, note)| note_card(at, note, lang, now, 6)).collect();
+    // (The number alone, as the station's count is.)
     let count = match notes.len() {
         0 => String::new(),
-        n if lang == Lang::Zh => format!("{n} 条"),
         n => n.to_string(),
     };
     let view = crate::notes::view();
@@ -1029,8 +1024,9 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 let when_w = frame.measure(&note.when, theme.small);
                 let x = left + if theme.skin == Skin::Fluent { 14.0 } else { 15.0 };
                 frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), width - 24.0 - when_w), bold(theme.body, 600.0), theme.text, x, title_y, width - 24.0 - when_w, Align::Start);
+                // (Short of when it was written, as the title is: under it, it ran on under the time.)
                 if let Some(first) = first {
-                    frame.text(&fitted(frame, first, theme.small, width - 24.0), theme.small, theme.text3, x, y + 4.0 + LINE, width - 24.0, Align::Start);
+                    frame.text(&fitted(frame, first, theme.small, width - 24.0 - when_w), theme.small, theme.text3, x, y + 4.0 + LINE, width - 24.0 - when_w, Align::Start);
                 }
                 frame.text(&note.when, theme.small, theme.text3, left, y + (NOTE_ROW - LINE) / 2.0, width, Align::End);
                 hits.extend(shown_in((left, y, width, NOTE_ROW, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, tall)));
@@ -1390,9 +1386,20 @@ const STATION_TALL: f32 = 284.0;
 /// A row of the station's list, and of what was copied lately; the side of the picture at its start.
 const LIST_ROW: f32 = 40.0;
 const LIST_PICTURE: f32 = 30.0;
-/// How many large cards go across (see `ShelfView::Large`), their plate as tall as so much of their width.
+/// How many large cards go across (see `ShelfView::Large`), their plate as tall as so much of their width at most (two
+/// rows of them whole in the room they are shown in: see `large_plate`).
 const LARGE_ACROSS: usize = 2;
 const LARGE_PLATE: f32 = 0.75;
+
+/// How tall a large card's plate is, `w` wide, shown in room `tall` high: as tall as `LARGE_PLATE` of its width, no
+/// taller than lets two rows of them, their words under them, show whole (the second's names were cut off under the
+/// room's foot, the files on no plate of their own seeming to float).
+fn large_plate(w: f32, tall: f32) -> f32 {
+    (w * LARGE_PLATE).min((tall - CARDS_LEAD - TILE_GAP) / 2.0 - CARD_WORDS).max(w * 0.4)
+}
+
+/// How far down their room cards lie (see `paint_tiles`).
+const CARDS_LEAD: f32 = 4.0;
 /// A tab's height, and the room round its name.
 const TAB_H: f32 = 24.0;
 const TAB_PAD: f32 = 8.0;
@@ -2812,7 +2819,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                         _ => {}
                     }
                     let ink = if chosen { theme.text } else { theme.text3 };
-                    frame.icon(icon, Point { x: x + cell / 2.0, y: button + MEDIA_ROW / 2.0 }, 14.0, ink);
+                    frame.icon(icon, Point { x: x + cell / 2.0, y: button + MEDIA_ROW / 2.0 }, 16.0, ink);
                     hits.push((x, button, cell, MEDIA_ROW, hit));
                 }
             }
@@ -3197,7 +3204,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
             ShelfView::Large => Icon::Image,
             ShelfView::List => Icon::List,
         };
-        frame.icon(icon, Point { x: vx + MEDIA_ROW / 2.0, y: row + MEDIA_ROW / 2.0 }, 15.0, color);
+        frame.icon(icon, Point { x: vx + MEDIA_ROW / 2.0, y: row + MEDIA_ROW / 2.0 }, 16.0, color);
         frame.icon(Icon::ChevronDown, Point { x: vx + MEDIA_ROW + 3.0, y: row + MEDIA_ROW / 2.0 + 0.5 }, 10.0, color);
         hits.push((vx, row, wide, MEDIA_ROW, Hit::StationView));
     }
@@ -3334,7 +3341,7 @@ fn ink_on(ground: Color) -> Color {
 
 /// Where each of the station's `count` things is laid out as `shows` says, `width` across: each one's room (from the
 /// list's top, unscrolled), and how tall they all are.
-fn shelf_places(shows: Shows, count: usize, width: f32) -> (Vec<Rect>, f32) {
+fn shelf_places(shows: Shows, count: usize, width: f32, tall: f32) -> (Vec<Rect>, f32) {
     let grid = |across: usize, w: f32, h: f32, gap: f32| {
         // (Spread over the width: the gaps share what is left over.)
         let gap_x = if across > 1 { (width - across as f32 * w) / (across - 1) as f32 } else { 0.0 };
@@ -3357,7 +3364,7 @@ fn shelf_places(shows: Shows, count: usize, width: f32) -> (Vec<Rect>, f32) {
         Shows::View(ShelfView::List) => grid(1, width, LIST_ROW, 0.0),
         Shows::View(ShelfView::Large) => {
             let w = (width - (LARGE_ACROSS - 1) as f32 * TILE_GAP) / LARGE_ACROSS as f32;
-            grid(LARGE_ACROSS, w, w * LARGE_PLATE + CARD_WORDS, TILE_GAP)
+            grid(LARGE_ACROSS, w, large_plate(w, tall) + CARD_WORDS, TILE_GAP)
         }
     }
 }
@@ -3405,19 +3412,25 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
         Face::Picture { path, more } => {
             // A picture fills its plate; a folder, or another file, is shown by Windows' own icon for it.
             let centre = Point { x: x + w / 2.0, y: y + h / 2.0 };
-            if shows_itself(path) {
+            // (What the count goes with: the picture, its plate's corner; an icon, its own corner.)
+            let corner = if shows_itself(path) {
                 plate();
                 match crate::station::thumbs::filling(path, pixels) {
                     Some(picture) => frame.picture(&picture, x, y, w, h, radius, 1.0),
                     None => frame.icon(Icon::Image, centre, small * 0.4, theme.text3),
                 }
+                (x + w - 5.0, y + h - 5.0)
             } else {
-                paint_shell_icon(frame, theme, path, centre, (small * 0.62).min(96.0), pixels);
-            }
-            // Files put on it together: how many more.
+                let side = (small * 0.62).min(96.0);
+                paint_shell_icon(frame, theme, path, centre, side, pixels);
+                (centre.x + side / 2.0 + 4.0, centre.y + side / 2.0)
+            };
+            // Files put on it together: how many more, on the icon's corner, in the sheet's ink (a mark of the lane's
+            // ink was the loudest thing on the panel).
             if *more > 0 && small >= 40.0 {
                 let badge = format!("+{more}");
-                paint_badge(frame, theme, &badge, ink.trace, x + w - badge_width(frame, theme, &badge) - 5.0, y + h - 5.0 - BADGE / 2.0);
+                let wide = badge_width(frame, theme, &badge);
+                paint_badge(frame, theme, &badge, theme.text2, (corner.0 - wide).min(x + w - wide), (corner.1 - BADGE / 2.0).min(y + h - BADGE / 2.0));
             }
         }
         Face::Text(text) => {
@@ -3426,7 +3439,7 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
                 frame.icon(Icon::Clipboard, Point { x: x + w / 2.0, y: y + h / 2.0 }, small / 2.0, theme.text3);
             } else {
                 // Its first lines, each cut short where it is longer than the tile is wide.
-                let font = Font { size: if small > 80.0 { 11.0 } else { 9.0 }, ..theme.small };
+                let font = Font { size: if small > 80.0 { 12.0 } else { 11.0 }, ..theme.small };
                 let line = font.size * 1.28;
                 let lines = ((h - 10.0) / line) as usize;
                 for (at, words) in text.lines().take(lines).enumerate() {
@@ -3562,10 +3575,10 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
 #[allow(clippy::too_many_arguments)]
 fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], shows: Shows, tall: f32, list: List, hit: &dyn Fn(&Tile, usize) -> Hit, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
-    let (places, whole) = shelf_places(shows, tiles.len(), width);
+    let (places, whole) = shelf_places(shows, tiles.len(), width, tall);
     // (Cards lie so far down their room as the plate under the pointer reaches past them: at the top unscrolled, its
     // top was cut off.)
-    let lead = if matches!(shows, Shows::View(ShelfView::Cards | ShelfView::Large)) { 4.0 } else { 0.0 };
+    let lead = if matches!(shows, Shows::View(ShelfView::Cards | ShelfView::Large)) { CARDS_LEAD } else { 0.0 };
     let whole = whole + lead;
     let most = (whole - tall).max(0.0);
     let scroll = scene.scrolls.at(list).clamp(0.0, most);
@@ -3580,15 +3593,15 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         let words = if lit { theme.text } else { theme.text2 };
         let shown = match shows {
             Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
-                let plate = place.w * if view == ShelfView::Large { LARGE_PLATE } else { PLATE };
+                let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
                 if lit {
                     frame.fill_rounded(theme.hover, x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0, plate_round(theme, face_round(theme, place.w.min(plate)), 4.0));
                 }
                 paint_face(frame, theme, ink, tile, x, y, place.w, plate, pixels_for(view));
+                // (Its name in the main ink, as the list's is; what it is and when under it, as the list's is.)
                 let shown = fitted(frame, &tile.label, theme.small, place.w);
-                frame.text(&shown, theme.small, words, x, y + plate + 5.0, place.w, Align::Start);
-                let tiny = Font { size: theme.small.size - 1.0, ..theme.small };
-                frame.text(&fitted(frame, &tile.about, tiny, place.w), tiny, theme.text3, x, y + plate + 5.0 + LINE, place.w, Align::Start);
+                frame.text(&shown, theme.small, theme.text, x, y + plate + 5.0, place.w, Align::Start);
+                frame.text(&fitted(frame, &tile.about, theme.small, place.w), theme.small, theme.text3, x, y + plate + 5.0 + LINE, place.w, Align::Start);
                 shown
             }
             Shows::Row => {
@@ -3662,33 +3675,33 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
             (choice, name, at, wide)
         })
         .collect();
-    // (Glass's chosen one on a pill of its glass, sliding to it, as the station's pages are: see `glass_choice`.)
-    if theme.skin == Skin::Glass {
+    // The one chosen marked as the station's page over them is, sliding to it (glass's on a pill of its glass, Windows
+    // 11's a bar of its accent under it, chart paper's underlined in ink: filled, they were a second way of choosing
+    // under the first).
+    {
         let boxes: Vec<(f32, f32)> = laid.iter().map(|one| (one.2, one.3)).collect();
         let at = |choice: Filter| laid.iter().position(|one| one.0 == choice);
         let slid = slid_at(scene.thumbs.slid(CHOICE_FILTER, Hit::Tab(Tab::Recent(filter))), |from| match from {
             Hit::Tab(Tab::Recent(from)) => at(from),
             _ => None,
         });
-        let hovered = laid.iter().position(|one| scene.hover == Some(Hit::Tab(Tab::Recent(one.0))));
-        glass_choice(frame, theme, (top, CHIP_H), &boxes, at(filter).unwrap_or(0), slid, hovered);
+        let chosen = at(filter).unwrap_or(0);
+        if theme.skin == Skin::Glass {
+            let hovered = laid.iter().position(|one| scene.hover == Some(Hit::Tab(Tab::Recent(one.0))));
+            glass_choice(frame, theme, (top, CHIP_H), &boxes, chosen, slid, hovered);
+        } else {
+            let under = if theme.skin == Skin::Paper { top + CHIP_H - 2.0 } else { top + CHIP_H - 3.0 };
+            choice_mark(frame, theme, &boxes, chosen, slid, under, 14.0, 4.0);
+        }
     }
     for (choice, name, x, wide) in laid {
         let chosen = choice == filter;
         let hit = Hit::Tab(Tab::Recent(choice));
-        let radius = theme.control_radius.min(CHIP_H / 2.0);
-        let (ground, words) = match (chosen, theme.skin) {
-            (true, Skin::Glass) => (None, theme.text),
-            (false, Skin::Glass) if scene.hover == Some(hit) => (None, theme.text),
-            (false, Skin::Glass) => (None, theme.text2),
-            (true, Skin::Paper) => (Some(theme.text), theme.paper),
-            (true, Skin::Fluent) => (Some(super::theme::accent(theme.dark)), ink_on(super::theme::accent(theme.dark))),
-            (false, _) if scene.hover == Some(hit) => (Some(theme.hover), theme.text),
-            (false, _) => (Some(theme.track), theme.text2),
-        };
-        if let Some(ground) = ground {
-            frame.fill_rounded(ground, x, top, wide, CHIP_H, radius);
+        let hovered = scene.hover == Some(hit);
+        if hovered && !chosen && theme.skin != Skin::Glass {
+            frame.fill_rounded(theme.hover, x, top, wide, CHIP_H, theme.control_radius.min(CHIP_H / 2.0));
         }
+        let words = if chosen || hovered { theme.text } else { theme.text2 };
         centred(frame, &name, theme.small, words, x, top + (CHIP_H - LINE) / 2.0, wide);
         hits.push((x, top, wide, CHIP_H, hit));
     }
@@ -4115,23 +4128,27 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
 /// up, pinned); the settings' marked by a dot where a newer Glance is out. Where it is pressed.
 fn panel_button(frame: &dyn Canvas, scene: &Scene, hit: Hit, left: f32, top: f32) -> HitBox {
     let theme = scene.theme;
-    let (glyph, lit) = match hit {
-        Hit::Game => ("", game_shown(scene.history.last().map(std::slice::from_ref).unwrap_or_default())),
-        Hit::Overlay => ("\u{E9D9}", scene.overlay),
-        Hit::Pin => (if scene.pinned { "\u{E840}" } else { "\u{E718}" }, scene.pinned),
-        _ => ("\u{E713}", false),
+    let (icon, on) = match hit {
+        Hit::Game => (Icon::Game, game_shown(scene.history.last().map(std::slice::from_ref).unwrap_or_default())),
+        Hit::Overlay => (Icon::Activity, scene.overlay),
+        Hit::Pin => (Icon::Pin, scene.pinned),
+        _ => (Icon::Settings, false),
     };
+    // Under the pointer, on a plate; on (pinned, the overlay up, the game shown), in the accent (chart paper's, its
+    // ink and a line under it): on a plate both ways, which was which could not be told under the pointer.
     let hovered = scene.hover == Some(hit);
-    if hovered || lit {
+    if hovered {
         frame.fill_rounded(theme.hover, left, top, BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
     }
-    let colour = if hovered || lit { theme.text } else { theme.text2 };
-    if hit == Hit::Game {
-        frame.icon(super::icons::Icon::Game, Point { x: left + BUTTON / 2.0, y: top + BUTTON / 2.0 }, 16.0, colour);
-    } else {
-        let icon = Font::new(Family::Icons, 16.0, 400.0);
-        let glyph_left = left + (BUTTON - frame.measure(glyph, icon)) / 2.0;
-        frame.text(glyph, icon, colour, glyph_left, top + 8.0, BUTTON, Align::Start);
+    let colour = match (on, theme.skin) {
+        (true, Skin::Paper) => theme.text,
+        (true, _) => super::theme::accent(theme.dark),
+        (false, _) if hovered => theme.text,
+        (false, _) => theme.text2,
+    };
+    frame.icon(icon, Point { x: left + BUTTON / 2.0, y: top + BUTTON / 2.0 }, 16.0, colour);
+    if on && theme.skin == Skin::Paper {
+        frame.fill(theme.text, left + BUTTON / 2.0 - 5.0, top + BUTTON - 3.0, 10.0, 1.5);
     }
     if hit == Hit::Settings && scene.newer {
         frame.fill_circle(super::theme::accent(theme.dark), Point { x: left + BUTTON - 7.0, y: top + 7.0 }, 3.0);
@@ -5015,7 +5032,7 @@ six".into()));
     #[test]
     fn lays_the_station_out_as_its_view_says() {
         let width = COLUMN_WIDTH - 32.0;
-        let (cards, tall) = shelf_places(Shows::View(ShelfView::Cards), 9, width);
+        let (cards, tall) = shelf_places(Shows::View(ShelfView::Cards), 9, width, STATION_TALL);
         let across = cards_across(width);
         assert_eq!(across, 3);
         let card = cards[0];
@@ -5024,14 +5041,17 @@ six".into()));
         assert_eq!((cards[across].x, cards[across].y), (0.0, card.h + TILE_GAP));
         assert!((cards[across - 1].x + card.w - width).abs() < 0.01);
         assert!((tall - (3.0 * card.h + 2.0 * TILE_GAP)).abs() < 0.01);
-        let (list, tall) = shelf_places(Shows::View(ShelfView::List), 3, width);
+        let (list, tall) = shelf_places(Shows::View(ShelfView::List), 3, width, STATION_TALL);
         assert_eq!((list[2].y, list[2].w, tall), (2.0 * LIST_ROW, width, 3.0 * LIST_ROW));
-        // Large cards: two across, filling it, each a plate three quarters as tall as wide and its words under it.
-        let (large, _) = shelf_places(Shows::View(ShelfView::Large), 4, width);
-        assert!((large[0].w * 2.0 + TILE_GAP - width).abs() < 0.01);
-        assert_eq!((large[2].x, large[3].x), (0.0, large[1].x));
-        assert!((large[0].h - (large[0].w * LARGE_PLATE + CARD_WORDS)).abs() < 0.01);
-        let (row, tall) = shelf_places(Shows::Row, 9, width);
+        // Large cards: two across, filling it, each a plate and its words under it, two rows of them whole in the room,
+        // on the station's page and on Recent files' (under its filters).
+        for room in [STATION_TALL, STATION_TALL - CHIP_H - 6.0] {
+            let (large, _) = shelf_places(Shows::View(ShelfView::Large), 4, width, room);
+            assert!((large[0].w * 2.0 + TILE_GAP - width).abs() < 0.01);
+            assert_eq!((large[2].x, large[3].x), (0.0, large[1].x));
+            assert!(CARDS_LEAD + large[3].y + large[3].h <= room + 0.01, "{room}: {:?}", large[3]);
+        }
+        let (row, tall) = shelf_places(Shows::Row, 9, width, STATION_TALL);
         assert_eq!((row.len(), tall), (tiles_across(width), TILE_H));
     }
 
