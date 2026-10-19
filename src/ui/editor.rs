@@ -64,6 +64,10 @@ pub struct Editor {
     kept: Rc<Kept>,
     /// What the keys last did (see `send`).
     typed: Cell<Typed>,
+    /// Whether the input method is composing (its words are its till they are written), and whether a composition
+    /// ended since this was last asked (see `take_composed`).
+    composing: Cell<bool>,
+    composed: Cell<bool>,
 }
 
 /// What the keys last did to the words: nothing yet (or the input method gave words), wrote, erased. Undo takes back one
@@ -127,7 +131,7 @@ impl Editor {
             let _ = services.OnTxUIActivate();
             let mut result = LRESULT(0);
             let _ = services.TxSendMessage(EM_SETEVENTMASK, WPARAM(0), LPARAM(ENM_CHANGE as isize), &mut result);
-            let editor = Editor { services: std::mem::ManuallyDrop::new(services), _host: host, kept, typed: Cell::new(Typed::Nothing) };
+            let editor = Editor { services: std::mem::ManuallyDrop::new(services), _host: host, kept, typed: Cell::new(Typed::Nothing), composing: Cell::new(false), composed: Cell::new(false) };
             // Its words all in its face, none put in another by the text services (as Chinese, in a face without it,
             // went into a taller one, its lines standing taller than the rest): what the face has not, drawn by
             // DirectWrite from the faces it falls back on, in the line as the face lays it.
@@ -177,7 +181,7 @@ impl Editor {
     pub fn send(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         use windows::Win32::UI::Input::Ime::GCS_RESULTSTR;
         use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_DELETE};
-        use windows::Win32::UI::WindowsAndMessaging::{WM_CHAR, WM_IME_COMPOSITION, WM_KEYDOWN};
+        use windows::Win32::UI::WindowsAndMessaging::{WM_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN};
         let now = match message {
             WM_KEYDOWN if wparam.0 == usize::from(VK_BACK.0) || wparam.0 == usize::from(VK_DELETE.0) => Some(Typed::Erased),
             WM_CHAR if wparam.0 >= 0x20 && wparam.0 != 0x7F => Some(Typed::Wrote),
@@ -194,7 +198,37 @@ impl Editor {
         if now == Some(Typed::Nothing) {
             self.answer(EM_STOPGROUPTYPING, WPARAM(0), LPARAM(0));
         }
+        match message {
+            WM_IME_STARTCOMPOSITION => self.composing.set(true),
+            WM_IME_ENDCOMPOSITION => {
+                self.composing.set(false);
+                self.composed.set(true);
+            }
+            _ => {}
+        }
         answer
+    }
+
+    /// Whether the input method is composing in it.
+    pub fn composing(&self) -> bool {
+        self.composing.get()
+    }
+
+    /// Whether a composition ended since this was last asked.
+    pub fn take_composed(&self) -> bool {
+        self.composed.replace(false)
+    }
+
+    /// The pointer's shape over it, the pointer at `point` (in the window), as the text services choose it (the I-beam
+    /// over words, the arrow over what is selected): asked of them as a host of windowless text services asks
+    /// (`OnTxSetCursor`). (Given `WM_SETCURSOR` as a message instead, they ended the input method's composition each
+    /// time it came, and with the pointer resting on the words it comes as the input method's windows come and go:
+    /// each syllable was written as it was typed, in Latin letters.)
+    pub fn set_cursor(&self, point: POINT) {
+        let mut rect = self.kept.rect.get();
+        unsafe {
+            let _ = self.services.OnTxSetCursor(windows::Win32::System::Com::DVASPECT_CONTENT, -1, std::ptr::null_mut(), std::ptr::null_mut(), HDC::default(), HDC::default(), &mut rect, point.x, point.y);
+        }
     }
 
     /// `message` handled by the text services: what they answer.

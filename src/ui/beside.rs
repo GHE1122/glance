@@ -100,6 +100,9 @@ static UP: AtomicBool = AtomicBool::new(false);
 /// screen's scale changed.
 const ASKED: u32 = WM_APP + 7;
 const GO_SOON: u32 = WM_APP + 8;
+/// The page's own part of what was written in a note's words' box (see `Beside::written`), done once the page is free:
+/// the box was given a message while the page was in the middle of another.
+const WRITTEN: u32 = WM_APP + 9;
 /// Its timers: the caret's blink, drawn again while pictures are being made, and a note kept a moment after it was
 /// last written in (the text services' own timers are numbered past these).
 const BLINK: usize = 1;
@@ -181,11 +184,10 @@ struct Writing {
     stamp: Option<crate::notes::store::Stamp>,
     colour: crate::notes::Colour,
     written_ms: u64,
-    editor: super::editor::Editor,
-    /// What its Markdown is dressed in (see `editor::Editor::dress`), and whether the input method is composing (its
-    /// words not dressed meanwhile).
+    /// Its words' box, held by `EDITOR` too (see `write`).
+    editor: Rc<super::editor::Editor>,
+    /// What its Markdown is dressed in (see `editor::Editor::dress`).
     palette: super::editor::Palette,
-    composing: bool,
     unkept: bool,
     said: Option<String>,
 }
@@ -232,6 +234,9 @@ enum Hit {
 
 thread_local! {
     static BESIDE: RefCell<Option<Beside>> = const { RefCell::new(None) };
+    /// A note's words' box while the page shows one: reached by its messages whatever the page is in the middle of
+    /// (see `write`).
+    static EDITOR: RefCell<Option<Rc<super::editor::Editor>>> = const { RefCell::new(None) };
 }
 
 fn with<R>(act: impl FnOnce(&mut Beside) -> R) -> Option<R> {
@@ -399,8 +404,10 @@ fn show(opening: Opening) {
                     editor.set_text(text);
                 }
                 let _ = editor.send(WM_SETFOCUS, WPARAM(0), LPARAM(0));
+                let editor = Rc::new(editor);
+                EDITOR.with(|held| *held.borrow_mut() = Some(editor.clone()));
                 let written_ms = read.as_ref().map_or_else(crate::station::now_ms, |(_, stamp)| stamp.written_ms);
-                let writing = Writing { folder: folder.path.clone(), name, stamp: read.map(|(_, stamp)| stamp), colour, written_ms, editor, palette, composing: false, unkept: false, said: None };
+                let writing = Writing { folder: folder.path.clone(), name, stamp: read.map(|(_, stamp)| stamp), colour, written_ms, editor, palette, unkept: false, said: None };
                 writing.dress();
                 with(|beside| beside.writing = Some(writing));
             }
@@ -436,7 +443,10 @@ thread_local! {
 /// The page up, gone (a note on it kept first: one that cannot be kept leaves it up, saying so). Asked while the page
 /// is in use (a message come in the middle of what it does), it goes as soon as it is free.
 fn gone() {
-    let Ok(mut held) = BESIDE.with(|cell| cell.try_borrow_mut().map(|mut beside| beside.take())) else {
+    // (Its words' box given a message meanwhile, and in the middle of it: the page goes once it has answered.)
+    let answering = EDITOR.with(|held| held.borrow().as_ref().is_some_and(|editor| Rc::strong_count(editor) > 2));
+    let held = if answering { Err(()) } else { BESIDE.with(|cell| cell.try_borrow_mut().map(|mut beside| beside.take()).map_err(drop)) };
+    let Ok(mut held) = held else {
         let post = POST.load(Ordering::Acquire);
         let _ = unsafe { PostMessageW(Some(HWND(post as *mut _)), GO_SOON, WPARAM(0), LPARAM(0)) };
         return;
@@ -453,6 +463,7 @@ fn gone() {
     }
     if let Some(mut beside) = held {
         // (The text services let go of before the window they write in.)
+        EDITOR.with(|held| held.borrow_mut().take());
         beside.writing = None;
         unsafe {
             let _ = windows::Win32::System::Ole::RevokeDragDrop(beside.hwnd);
@@ -464,6 +475,68 @@ fn gone() {
     UP.store(false, Ordering::Release);
 }
 
+/// A message for a note's words' box, given it where it is one of its: what it answers (none: the page's own). Given it
+/// whatever the page is in the middle of: an input method answers inside the message that asked it (the box placing
+/// its windows as it is drawn, say), and a composition the box ends (a press on its words) comes back inside that
+/// press. (Given only while the page was free, those went past the box: a composition it ended never ended in it, its
+/// words left in it as they were shown, the syllables' marks with them.) The page's own part is done then too, or as
+/// soon as the page is free.
+fn write(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+    let editor = EDITOR.with(|held| held.borrow().clone())?;
+    let point = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
+    let pointer = || {
+        let mut at = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut at);
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut at);
+        }
+        at
+    };
+    let its = match message {
+        // (Esc leaves the page; the rest of the keys and the input method's are the box's.)
+        WM_KEYDOWN => wparam.0 != usize::from(VK_ESCAPE.0),
+        WM_KEYUP | WM_CHAR | WM_SYSCHAR | WM_UNICHAR | WM_SETFOCUS | WM_KILLFOCUS => true,
+        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_NOTIFY | WM_IME_SETCONTEXT | WM_IME_CHAR | WM_IME_REQUEST | WM_IME_COMPOSITIONFULL | WM_IME_SELECT => true,
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN => editor.holds(point),
+        // (A press begun in it is followed till let go, wherever the pointer goes.)
+        WM_LBUTTONUP | WM_MOUSEMOVE => editor.holds(point) || unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == hwnd,
+        WM_SETCURSOR => (lparam.0 & 0xFFFF) as u32 == HTCLIENT && editor.holds(pointer()),
+        WM_MOUSEWHEEL => true,
+        WM_TIMER => !matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW),
+        _ => false,
+    };
+    if !its {
+        return None;
+    }
+    // A to-do's box pressed: ticked, or no longer (as if typed: undo takes it back).
+    let ticked = (message == WM_LBUTTONDOWN).then(|| {
+        let at = editor.at(point);
+        let text = editor.text();
+        crate::notes::markdown::tasks(&text).into_iter().find(|(range, _)| range.start <= at && at < range.end)
+    });
+    let answered = match (ticked.flatten(), message) {
+        (Some((range, done)), _) => {
+            editor.replace(range.start, range.end, if done { "[ ]" } else { "[x]" });
+            Some(LRESULT(0))
+        }
+        // (Its shape asked of the text services as their host asks it: see `Editor::set_cursor`.)
+        (None, WM_SETCURSOR) => {
+            editor.set_cursor(pointer());
+            Some(LRESULT(1))
+        }
+        (None, _) => editor.send(message, wparam, lparam),
+    };
+    drop(editor);
+    if with(Beside::written).is_none() {
+        let _ = unsafe { PostMessageW(Some(hwnd), WRITTEN, WPARAM(0), LPARAM(0)) };
+    }
+    // (The input method's, unanswered by the box, are the system's as well.)
+    match (answered, message) {
+        (None, WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_NOTIFY | WM_IME_SETCONTEXT | WM_IME_CHAR | WM_IME_REQUEST) => None,
+        (answered, _) => Some(answered.unwrap_or(LRESULT(0))),
+    }
+}
+
 /// Whether `window` is one of this thread's (the page's, its menu's).
 fn ours(window: HWND) -> bool {
     !window.is_invalid() && unsafe { GetWindowThreadProcessId(window, None) } == unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }
@@ -472,10 +545,13 @@ fn ours(window: HWND) -> bool {
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let point = || ((lparam.0 & 0xFFFF) as i16 as f32, ((lparam.0 >> 16) & 0xFFFF) as i16 as f32);
     // A note's words' box: the keys, the input method's, what the pointer does over it, its own timers.
-    if let Some(answered) = with(|beside| beside.write(message, wparam, lparam)).flatten() {
+    if let Some(answered) = write(hwnd, message, wparam, lparam) {
         return answered;
     }
     match message {
+        WRITTEN => {
+            with(Beside::written);
+        }
         WM_PAINT => {
             with(Beside::draw);
             let _ = unsafe { ValidateRect(Some(hwnd), None) };
@@ -603,57 +679,14 @@ impl Beside {
         let _ = unsafe { InvalidateRect(Some(self.hwnd), None, false) };
     }
 
-    /// A message for a note's words' box, given it where it is one of its: what it answers (none: the page's own).
-    fn write(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
-        let writing = self.writing.as_mut()?;
-        let point = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
-        let its = match message {
-            // (Esc leaves the page; the rest of the keys and the input method's are the box's.)
-            WM_KEYDOWN => wparam.0 != usize::from(VK_ESCAPE.0),
-            WM_KEYUP | WM_CHAR | WM_SYSCHAR | WM_UNICHAR | WM_SETFOCUS | WM_KILLFOCUS => true,
-            WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_NOTIFY | WM_IME_SETCONTEXT | WM_IME_CHAR | WM_IME_REQUEST | WM_IME_COMPOSITIONFULL | WM_IME_SELECT => true,
-            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN => writing.editor.holds(point),
-            // (A press begun in it is followed till let go, wherever the pointer goes.)
-            WM_LBUTTONUP | WM_MOUSEMOVE => writing.editor.holds(point) || unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == self.hwnd,
-            WM_SETCURSOR => {
-                let mut at = POINT::default();
-                unsafe {
-                    let _ = GetCursorPos(&mut at);
-                    let _ = windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut at);
-                }
-                writing.editor.holds(at)
-            }
-            WM_MOUSEWHEEL => true,
-            WM_TIMER => !matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW),
-            _ => false,
-        };
-        if !its {
-            return None;
-        }
-        // A to-do's box pressed: ticked, or no longer (as if typed: undo takes it back).
-        let ticked = (message == WM_LBUTTONDOWN).then(|| {
-            let at = writing.editor.at(point);
-            let text = writing.editor.text();
-            crate::notes::markdown::tasks(&text).into_iter().find(|(range, _)| range.start <= at && at < range.end)
-        });
-        let answered = match ticked.flatten() {
-            Some((range, done)) => {
-                writing.editor.replace(range.start, range.end, if done { "[ ]" } else { "[x]" });
-                Some(LRESULT(0))
-            }
-            None => writing.editor.send(message, wparam, lparam),
-        };
-        // (Dressed as it is written, not while the input method composes: its words are its till they are written.)
-        match message {
-            WM_IME_STARTCOMPOSITION => writing.composing = true,
-            WM_IME_ENDCOMPOSITION => {
-                writing.composing = false;
-                writing.dress();
-            }
-            _ => {}
-        }
+    /// The page's own part of what was written in a note's words' box: its words dressed as their Markdown reads (not
+    /// while the input method composes: its words are its till they are written), kept a moment after the last change,
+    /// the caret shown.
+    fn written(&mut self) {
+        let Some(writing) = self.writing.as_mut() else { return };
+        let composed = writing.editor.take_composed();
         let changed = writing.editor.take_changed();
-        if changed && !writing.composing {
+        if composed || (changed && !writing.editor.composing()) {
             writing.dress();
         }
         if changed {
@@ -665,11 +698,6 @@ impl Beside {
         }
         self.caret_on = true;
         self.redraw();
-        // (The input method's, unanswered by the box, are the system's as well.)
-        match (answered, message) {
-            (None, WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_NOTIFY | WM_IME_SETCONTEXT | WM_IME_CHAR | WM_IME_REQUEST | WM_SETCURSOR) => None,
-            (answered, _) => Some(answered.unwrap_or(LRESULT(0))),
-        }
     }
 
     /// The note written kept in its file, where what is written is not kept yet (see `notes::Folder::write`): a new
@@ -745,7 +773,7 @@ impl Beside {
     /// kept (or is being composed): read again, what was chosen kept as far as the words go. (With something waiting,
     /// it is kept apart as it is kept: see `keep`. Deleted outside: left as it is, kept apart likewise.)
     fn read_outside(&mut self) {
-        let Some(writing) = self.writing.as_mut().filter(|writing| !writing.unkept && !writing.composing) else { return };
+        let Some(writing) = self.writing.as_mut().filter(|writing| !writing.unkept && !writing.editor.composing()) else { return };
         let Some(name) = writing.name.clone() else { return };
         let Some((text, stamp)) = crate::notes::folder_at(writing.folder.clone()).read(&name) else { return };
         if writing.stamp.is_some_and(|was| was.same(&stamp)) {
