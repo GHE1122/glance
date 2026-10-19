@@ -2985,9 +2985,15 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
 fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), tab: Tab, count: usize, copies: bool, recent: bool, view: ShelfView, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let lang = scene.lang;
-    let row = top + (HEAD - TAB_H) / 2.0;
     let font = theme.title;
     let small = theme.small;
+    // The names on the head's line as the other lanes' titles are; their plates and the buttons about the middle of
+    // the names' ink (not of their line box: a plate round it stood higher than the words in it), the chosen one's
+    // mark so far under it (under the line box's foot, it met the words).
+    let name_top = top + (HEAD - font.size) / 2.0 - 1.0;
+    let (ink_top, ink_bottom) = frame.ink(lang.pick("中转站最近复制最近文件", "StationCopiedRecent"), font);
+    let middle = name_top + (ink_top + ink_bottom) / 2.0;
+    let row = middle - TAB_H / 2.0;
     // (Paper underlines the one chosen under its name, as its rules are drawn: no room round it.)
     let pad = if theme.skin == Skin::Paper { 0.0 } else { TAB_PAD };
     let mut x = left - pad;
@@ -3027,12 +3033,11 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         }
         if chosen {
             match theme.skin {
-                Skin::Fluent => frame.fill_rounded(super::theme::accent(theme.dark), x + wide / 2.0 - 8.0, row + TAB_H - 3.0, 16.0, 3.0, 1.5),
-                Skin::Paper => frame.fill(theme.text, x, row + TAB_H - 2.0, wide, 2.0),
+                Skin::Fluent => frame.fill_rounded(super::theme::accent(theme.dark), x + wide / 2.0 - 8.0, name_top + ink_bottom + 4.0, 16.0, 3.0, 1.5),
+                Skin::Paper => frame.fill(theme.text, x, name_top + ink_bottom + 4.0, wide, 2.0),
                 Skin::Glass => {}
             }
         }
-        let name_top = top + (HEAD - font.size) / 2.0 - 1.0;
         frame.text(&name, font, if chosen || hovered { theme.text } else { theme.text3 }, x + pad, name_top, name_w + 1.0, Align::Start);
         if aside_w > 0.0 {
             frame.text(&aside, small, theme.text3, x + pad + name_w + 5.0, name_top + 2.0, aside_w + 1.0, Align::Start);
@@ -3042,6 +3047,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     }
     // At the end, the rest's menu; before it, while what is on it shows, how it shows (its view's mark, and a chevron).
     let more = left + width - MEDIA_ROW;
+    let row = middle - MEDIA_ROW / 2.0;
     pressed(frame, scene, hits, Hit::StationMore, Icon::Ellipsis, more, row, false);
     {
         let wide = MEDIA_ROW + 12.0;
