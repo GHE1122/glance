@@ -795,9 +795,9 @@ fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Col
 pub(crate) fn note_page(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (width, height): (f32, f32)) {
     match theme.skin {
         Skin::Glass => {
-            // (Of its tint about half the card's: over a page's breadth the card's own reads as a sheet of paint, the
-            // desktop frosted under it no longer seen through.)
-            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark) * 0.55), 0.0, 0.0, width, height, theme.radius);
+            // (A little lighter than its card: over a page's breadth the card's own reads as a sheet of paint, the
+            // desktop frosted under it no longer seen through; at half of it, it read as another colour.)
+            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark) * 0.8), 0.0, 0.0, width, height, theme.radius);
             frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, if theme.dark { 0.22 } else { 0.65 })), 0.0, 0.0, width, height, theme.radius, 1.5);
         }
         Skin::Fluent => {
@@ -2676,9 +2676,9 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 frame.text(device, theme.small, theme.text3, left + title_width + 8.0, row + 1.0, width, Align::Start);
                 let button = y + (HEAD - MEDIA_ROW) / 2.0;
                 pressed(frame, scene, hits, Hit::NewNote, Icon::Add, left + width - MEDIA_ROW, button, false);
-                // Its views side by side, the one shown marked as the skin marks the station's chosen tab: glass's the
-                // segments of a capsule of their own (see `glass_segments`), Windows 11's a bar of its accent under it,
-                // chart paper's underlined in ink.
+                // Its views side by side, the one shown marked as the skin marks the station's chosen tab: glass's on a
+                // pill of its glass (see `glass_choice`), Windows 11's a bar of its accent under it, chart paper's
+                // underlined in ink.
                 let shown = crate::notes::view();
                 let views = [(crate::settings::NotesView::Deck, Icon::Layers), (crate::settings::NotesView::Cards, Icon::LayoutGrid), (crate::settings::NotesView::List, Icon::List)];
                 let cell = MEDIA_ROW + 2.0;
@@ -2693,7 +2693,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                         _ => None,
                     });
                     let hovered = views.iter().position(|(view, _)| scene.hover == Some(Hit::NotesShow(*view)));
-                    glass_segments(frame, theme, (x0, button - 2.0, wide, MEDIA_ROW + 4.0), (button, MEDIA_ROW), &boxes, at(shown).unwrap_or(0), slid, hovered);
+                    glass_choice(frame, theme, (button, MEDIA_ROW), &boxes, at(shown).unwrap_or(0), slid, hovered);
                 }
                 for (at, (view, icon)) in views.into_iter().enumerate() {
                     let x = x0 + 2.0 + at as f32 * cell;
@@ -3003,11 +3003,10 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     let (ink_top, ink_bottom) = frame.ink(lang.pick("中转站最近复制最近文件", "StationCopiedRecent"), font);
     let middle = name_top + (ink_top + ink_bottom) / 2.0;
     let row = middle - TAB_H / 2.0;
-    // (Paper underlines the one chosen under its name, as its rules are drawn: no room round it. Glass's tabs are the
-    // segments of a capsule of their own, from the head's start.)
+    // (Paper underlines the one chosen under its name, as its rules are drawn: no room round it.)
     let glass = theme.skin == Skin::Glass;
     let pad = if theme.skin == Skin::Paper { 0.0 } else { TAB_PAD };
-    let start = if glass { left + SEG_INSET } else { left - pad };
+    let start = left - pad;
     let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), if count > 0 { count.to_string() } else { String::new() })];
     if copies {
         pages.push((Tab::Copies, lang.pick("最近复制", "Copied"), String::new()));
@@ -3019,12 +3018,8 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     }
     // (In the room the buttons at the end leave, whichever page shows: names that do not fit there shortened, each
     // to a like share of it. A tab's room never reaches a button's.)
-    let gap = match theme.skin {
-        Skin::Paper => 16.0,
-        Skin::Glass => 0.0,
-        Skin::Fluent => 2.0,
-    };
-    let room = left + width - (MEDIA_ROW + 2.0 + MEDIA_ROW + 12.0 + 6.0) - start - if glass { SEG_INSET } else { 0.0 };
+    let gap = if theme.skin == Skin::Paper { 16.0 } else { 2.0 };
+    let room = left + width - (MEDIA_ROW + 2.0 + MEDIA_ROW + 12.0 + 6.0) - start;
     let measured: Vec<(f32, f32)> = pages.iter().map(|(_, name, aside)| (frame.measure(name, font), if aside.is_empty() { 0.0 } else { frame.measure(aside, small) })).collect();
     let whole: f32 = measured.iter().map(|(name_w, aside_w)| 2.0 * pad + name_w + if *aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).sum::<f32>() + gap * (pages.len() - 1) as f32;
     let share = (room - gap * (pages.len() - 1) as f32) / pages.len() as f32;
@@ -3057,8 +3052,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
             _ => None,
         });
         let hovered = laid.iter().position(|tab| scene.hover == Some(Hit::Tab(tab.0)));
-        let end = laid.last().map_or(start, |tab| tab.5 + tab.6);
-        glass_segments(frame, theme, (left, row - SEG_INSET, end + SEG_INSET - left, TAB_H + 2.0 * SEG_INSET), (row, TAB_H), &boxes, chosen, slid, hovered);
+        glass_choice(frame, theme, (row, TAB_H), &boxes, chosen, slid, hovered);
     }
     for (page, name, name_w, aside, aside_w, x, wide) in laid {
         let chosen = page == tab;
@@ -3073,7 +3067,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
                 Skin::Glass => {}
             }
         }
-        // (Glass's names as macOS's segments': the others a shade lighter, none faint.)
+        // (Glass's others a shade lighter than the chosen one's, none faint.)
         let words = match (chosen || hovered, glass) {
             (true, _) => theme.text,
             (false, true) => theme.text2,
@@ -3108,42 +3102,24 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     }
 }
 
-/// How far in from glass's segments' capsule its pills are (DIPs; see `glass_segments`).
-pub(crate) const SEG_INSET: f32 = 3.0;
-
-/// Glass's choice of one of several, as macOS 26 draws it: a capsule of glass raised off the sheet, `track` (x, y,
-/// width, height); the chosen one (`chosen` of `boxes`, each its left and width, all `pills` (top, height) down) on a
-/// grey pill in it, `slid` from the one chosen before so far (eased: see `thumb::Dots::choose`); the one under the
-/// pointer, `hovered`, lit; hairlines between the others. What each says is drawn over it after.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn glass_segments(frame: &dyn Canvas, theme: &Theme, track: (f32, f32, f32, f32), pills: (f32, f32), boxes: &[(f32, f32)], chosen: usize, slid: Option<(usize, f32)>, hovered: Option<usize>) {
-    let (tx, ty, tw, th) = track;
+/// Glass's choice of one of several, in the panel's own look: the chosen one (`chosen` of `boxes`, each its left and
+/// width, all `pills` (top, height) down) on a pill of the sheet's glass, as the lanes lie on it (whiter than what is
+/// round it, a rim lit along its top, fainter round its foot), `slid` from the one chosen before so far (eased: see
+/// `thumb::Dots::choose`); the one under the pointer, `hovered`, lit faintly. What each says is drawn over it after.
+pub(crate) fn glass_choice(frame: &dyn Canvas, theme: &Theme, pills: (f32, f32), boxes: &[(f32, f32)], chosen: usize, slid: Option<(usize, f32)>, hovered: Option<usize>) {
     let (py, ph) = pills;
     let dark = theme.dark;
-    let round = th / 2.0;
-    // (Glass on glass: little of a fill of its own, what is under it showing through, as macOS's controls take the
-    // colour of what they are over; a rim catching the light along its top, fainter round its foot; a shadow barely
-    // there. Filled white, it stood off the sheet as a button.)
-    frame.shadow(Color::hex(0, if dark { 0.18 } else { 0.05 }), tx, ty, tw, th, round, 5.0, 1.0);
-    frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.06) } else { Color::hex(0xFFFFFF, 0.24) }, tx, ty, tw, th, round);
-    let (lit, foot) = if dark { (Color::hex(0xFFFFFF, 0.26), Color::hex(0xFFFFFF, 0.06)) } else { (Color::hex(0xFFFFFF, 0.85), Color::hex(0xFFFFFF, 0.3)) };
-    frame.stroke_rounded(Fill::Down { top: ty, from: lit, bottom: ty + th, to: foot }, tx, ty, tw, th, round, 1.0);
     if let Some(&(x, w)) = hovered.filter(|at| *at != chosen).and_then(|at| boxes.get(at)) {
-        frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.06) } else { Color::hex(0, 0.04) }, x, py, w, ph, ph / 2.0);
+        frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.06) } else { Color::hex(0xFFFFFF, 0.24) }, x, py, w, ph, ph / 2.0);
     }
     let (to_x, to_w) = boxes[chosen];
     let (x, w) = match slid.and_then(|(from, done)| Some((*boxes.get(from)?, done))) {
         Some(((from_x, from_w), done)) => (from_x + (to_x - from_x) * done, from_w + (to_w - from_w) * done),
         None => (to_x, to_w),
     };
-    frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.12) } else { Color::hex(0, 0.07) }, x, py, w, ph, ph / 2.0);
-    // (Between two not chosen: the chosen one stands on its pill, a line by it is none.)
-    let hair = if dark { Color::hex(0xFFFFFF, 0.12) } else { Color::hex(0, 0.11) };
-    for (at, &(x, _)) in boxes.iter().enumerate().skip(1) {
-        if at != chosen && at - 1 != chosen {
-            frame.fill(hair, x - 0.5, py + ph * 0.25, 1.0, ph * 0.5);
-        }
-    }
+    frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.12) } else { Color::hex(0xFFFFFF, 0.58) }, x, py, w, ph, ph / 2.0);
+    let (lit, foot) = if dark { (Color::hex(0xFFFFFF, 0.3), Color::hex(0xFFFFFF, 0.08)) } else { (Color::hex(0xFFFFFF, 0.95), Color::hex(0xFFFFFF, 0.4)) };
+    frame.stroke_rounded(Fill::Down { top: py, from: lit, bottom: py + ph, to: foot }, x, py, w, ph, ph / 2.0, 1.0);
 }
 
 /// A count's mark: a pill `BADGE` tall, as wide as its figures and the room either side of them (see `badge_width`).

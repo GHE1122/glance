@@ -253,7 +253,7 @@ struct Beside {
     /// Shown on the screen yet: not before it is first drawn whole (on glass and Windows 11, with the desktop behind it,
     /// see `ready`), else it came up as it was drawn, and a moment after changed (the desktop come in behind).
     shown: bool,
-    /// The kind listed's mark, sliding to it as another is chosen (glass's: see `view::glass_segments`).
+    /// The kind listed's mark, sliding to it as another is chosen (glass's: see `view::glass_choice`).
     marks: super::thumb::Dots<Kinds>,
 }
 
@@ -1736,20 +1736,18 @@ impl Beside {
         frame.unclip();
         hits.extend(placed);
         // The kinds, side by side as the station's pages are, the one listed marked as the skin marks the station's
-        // chosen page: glass's the segments of a capsule of their own, Windows 11's a bar of its accent under it,
-        // chart paper's underlined in ink; the others lit under the pointer.
+        // chosen page: glass's on a pill of its glass (see `view::glass_choice`), Windows 11's a bar of its accent under
+        // it, chart paper's underlined in ink; the others lit under the pointer.
         let kinds = [(Kinds::Programs, Icon::LayoutGrid, lang.pick("程序", "Programs")), (Kinds::Files, Icon::File, lang.pick("文件", "Files")), (Kinds::Folders, Icon::Folder, lang.pick("文件夹", "Folders"))];
-        // (Glass's: the segments of a capsule of their own, as macOS's, see `view::glass_segments`.)
         let glass = theme.skin == Skin::Glass;
-        let inset = if glass { super::view::SEG_INSET } else { 0.0 };
-        let cell_w = (inner - 2.0 * inset) / kinds.len() as f32;
-        let cell_at = |at: usize| (PAD + inset + at as f32 * cell_w, KINDS_TOP + 3.0, cell_w, KINDS_H - 6.0);
+        let cell_w = inner / kinds.len() as f32;
+        let cell_at = |at: usize| (PAD + at as f32 * cell_w, KINDS_TOP + 3.0, cell_w, KINDS_H - 6.0);
         if glass {
             let boxes: Vec<(f32, f32)> = (0..kinds.len()).map(|at| (cell_at(at).0, cell_w)).collect();
             let at = |kind: Kinds| kinds.iter().position(|(one, _, _)| *one == kind);
             let slid = self.marks.slid(self.kind).and_then(|(from, done)| Some((at(from)?, done)));
             let hovered = (0..kinds.len()).find(|at| lit(cell_at(*at)));
-            super::view::glass_segments(frame, &theme, (PAD, KINDS_TOP, inner, KINDS_H), (KINDS_TOP + inset, KINDS_H - 2.0 * inset), &boxes, at(self.kind).unwrap_or(0), slid, hovered);
+            super::view::glass_choice(frame, &theme, (KINDS_TOP + 3.0, KINDS_H - 6.0), &boxes, at(self.kind).unwrap_or(0), slid, hovered);
         }
         for (at, (kind, icon, name)) in kinds.into_iter().enumerate() {
             let cell = cell_at(at);
