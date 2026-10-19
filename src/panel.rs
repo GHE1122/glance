@@ -436,13 +436,20 @@ impl Controller {
 
     /// The note `name` stuck on the desktop with its corner at `at` (asked from any thread: done on the panel's).
     pub fn stick_note(&self, name: String, at: POINT) {
-        STUCK.lock().unwrap().push((name, Some(at)));
+        STUCK.lock().unwrap().push((name, OnDesk::Stick(at)));
         self.post(STICK_NOTES);
     }
 
     /// The note `name`'s card on the desktop taken away, where it is stuck (it was deleted).
     pub fn unstick_note(&self, name: String) {
-        STUCK.lock().unwrap().push((name, None));
+        STUCK.lock().unwrap().push((name, OnDesk::Unstick));
+        self.post(STICK_NOTES);
+    }
+
+    /// The note `name`'s card on the desktop moved by (`dx`, `dy`) physical px, as it is written in over it (see
+    /// `ui::beside`), and where `done`, kept where it is.
+    pub fn move_note(&self, name: String, dx: i32, dy: i32, done: bool) {
+        STUCK.lock().unwrap().push((name, OnDesk::Move(dx, dy, done)));
         self.post(STICK_NOTES);
     }
 
@@ -798,10 +805,11 @@ impl Controller {
                 crate::widget::CAPTURED if widgets.owns(msg.hwnd) => widgets.captured(msg.hwnd),
                 OPEN_SETTINGS => settings_window::open(),
                 STICK_NOTES => {
-                    for (name, at) in std::mem::take(&mut *STUCK.lock().unwrap()) {
-                        match at {
-                            Some(at) => widgets.stick_note(&name, at),
-                            None => widgets.unstick_note(&name),
+                    for (name, asked) in std::mem::take(&mut *STUCK.lock().unwrap()) {
+                        match asked {
+                            OnDesk::Stick(at) => widgets.stick_note(&name, at),
+                            OnDesk::Unstick => widgets.unstick_note(&name),
+                            OnDesk::Move(dx, dy, done) => widgets.move_note(&name, dx, dy, done),
                         }
                     }
                 }
@@ -1200,7 +1208,15 @@ impl Controller {
 }
 
 /// Notes asked to be stuck on the desktop, and where (see `Controller::stick_note`), or taken off it (none).
-static STUCK: std::sync::Mutex<Vec<(String, Option<POINT>)>> = std::sync::Mutex::new(Vec::new());
+static STUCK: std::sync::Mutex<Vec<(String, OnDesk)>> = std::sync::Mutex::new(Vec::new());
+
+/// What is asked of a note on the desktop: stuck there with its corner at a point, taken away, or moved by so much
+/// (and kept where it is, once it is let go).
+enum OnDesk {
+    Stick(POINT),
+    Unstick,
+    Move(i32, i32, bool),
+}
 
 /// The overlay kept under `menu`, while one is up (see `Overlay::under_menu`).
 fn keep_menu_above(menu: &Option<(crate::ui::menu::Menu, MenuFor)>, overlay: &mut Option<Overlay>) {

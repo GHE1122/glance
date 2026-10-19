@@ -67,10 +67,14 @@ pub enum Side {
     Left,
     Right,
     Below,
+    /// Over it, from its corner (a note stuck on the desktop, written in where it is): as large as it, at least.
+    Over,
 }
 
 /// How wide it is (DIPs); its head, its search box, a row, a letter's heading, its foot; the room round its parts.
 const WIDTH: f32 = 360.0;
+/// The least it is, over what it opens from (DIPs): room to write a note in.
+const OVER_LEAST: (f32, f32) = (300.0, 280.0);
 const HEAD: f32 = 52.0;
 const SEARCH: f32 = 34.0;
 const ROW: f32 = 40.0;
@@ -163,6 +167,9 @@ struct Beside {
     writing: Option<Writing>,
     /// How it was opened (made again so as its screen's scale changes).
     opening: Option<Opening>,
+    /// Over a note stuck on the desktop, moved by its head: where its corner last was (the note moved along by as
+    /// much as it moves since).
+    moved_from: Option<POINT>,
 }
 
 /// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
@@ -315,11 +322,17 @@ fn show(opening: Opening) {
         let scale = dpi.max(96) as f32 / 96.0;
         let (wide, gap) = ((WIDTH * scale).round() as i32, (GAP * scale).round() as i32);
         let least = (480.0 * scale) as i32;
+        // (Over a note stuck on the desktop: as wide and tall as its card, and no less than a page to write in.)
+        let wide = if opening.side == Side::Over { (opening.by.right - opening.by.left).max((OVER_LEAST.0 * scale) as i32).min(room.right - room.left) } else { wide };
         // Beside it on its side away from the edge, else on the other, else over it; under the top edge's panel, as
         // tall as the room under it is.
         let left_of = opening.by.left - gap - wide;
         let right_of = opening.by.right + gap;
         let (x, y, tall) = match opening.side {
+            Side::Over => {
+                let tall = (opening.by.bottom - opening.by.top).max((OVER_LEAST.1 * scale) as i32).min(room.bottom - room.top);
+                (opening.by.left, opening.by.top, tall)
+            }
             Side::Below => {
                 let tall = (room.bottom - opening.by.bottom - gap - gap).max(least).min(room.bottom - room.top);
                 ((opening.by.left + opening.by.right - wide) / 2, opening.by.bottom + gap, tall)
@@ -359,6 +372,7 @@ fn show(opening: Opening) {
             waiting: false,
             writing: None,
             opening: Some(opening.clone()),
+            moved_from: None,
         };
         let page = beside.page.clone();
         let theme = beside.theme.clone();
@@ -514,6 +528,26 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         // Another program's window come in front: the page goes (the panel takes no focus, and leaves it up; its own
         // menu leaves it up too).
+        // Over a note stuck on the desktop: taken by its head (where nothing of it is pressed) and moved, the note
+        // with it, as a window is by its title.
+        WM_NCHITTEST => {
+            let at = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
+            if with(|beside| beside.takes_by_head(at)).unwrap_or(false) {
+                return LRESULT(HTCAPTION as isize);
+            }
+            return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+        }
+        // (Its head pressed twice: nothing, as a window that cannot be made larger.)
+        WM_NCLBUTTONDBLCLK => {}
+        WM_ENTERSIZEMOVE => {
+            with(|beside| beside.moved_from = Some(beside.corner()));
+        }
+        WM_MOVE => {
+            with(|beside| beside.carry_note(false));
+        }
+        WM_EXITSIZEMOVE => {
+            with(|beside| beside.carry_note(true));
+        }
         WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
             if !ours(HWND(lparam.0 as *mut _)) {
                 // (Gone once the page is free: this may come in the middle of what it does.)
@@ -704,6 +738,35 @@ impl Beside {
         writing.stamp = Some(stamp);
         writing.written_ms = stamp.written_ms;
         writing.dress();
+    }
+
+    /// Whether a press at `at` (on the screen) takes it by its head, to be moved: over a note stuck on the desktop,
+    /// in its head's row, on nothing of it pressed there.
+    fn takes_by_head(&self, at: POINT) -> bool {
+        if !self.opening.as_ref().is_some_and(|opening| opening.side == Side::Over) || self.writing.is_none() {
+            return false;
+        }
+        let mut client = at;
+        let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut client) };
+        let (x, y) = (client.x as f32 / self.scale, client.y as f32 / self.scale);
+        y >= 0.0 && y < HEAD && !self.hits.iter().any(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h)
+    }
+
+    /// Where its corner is on the screen.
+    fn corner(&self) -> POINT {
+        let mut place = RECT::default();
+        let _ = unsafe { GetWindowRect(self.hwnd, &mut place) };
+        POINT { x: place.left, y: place.top }
+    }
+
+    /// Moved by its head over a note stuck on the desktop: the note moved along by as much (and, `done`, kept where it
+    /// comes to).
+    fn carry_note(&mut self, done: bool) {
+        let Some(from) = self.moved_from else { return };
+        let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return };
+        let to = self.corner();
+        crate::app().controller.move_note(name, to.x - from.x, to.y - from.y, done);
+        self.moved_from = if done { None } else { Some(to) };
     }
 
     /// `choice` made in the note's menu: done; whether the page is to go.
@@ -1237,6 +1300,7 @@ otepad.exe"),
                             waiting: false,
                             writing: None,
                             opening: None,
+                            moved_from: None,
                         };
                         beside.search.put(&search.encode_utf16().collect::<Vec<_>>());
                         let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, h))).unwrap();

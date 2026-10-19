@@ -1265,6 +1265,19 @@ impl Widgets {
         self.save();
     }
 
+    /// The widget the note `name` is stuck on the desktop as (alone, or merged with another) moved by (`dx`, `dy`)
+    /// physical px, as what it is written in over it is moved; where `done`, kept where it is.
+    pub fn move_note(&mut self, name: &str, dx: i32, dy: i32, done: bool) {
+        let only = format!("{}{name}", view::STUCK_NOTE);
+        let Some(widget) = self.list.iter_mut().find(|widget| widget.content.holding(&only).is_some()) else { return };
+        if (dx, dy) != (0, 0) {
+            widget.moved_by(dx, dy);
+        }
+        if done {
+            self.save();
+        }
+    }
+
     /// The widget the note `name` is stuck on the desktop as (alone, or merged with another), raised in front; whether
     /// there is one.
     pub fn raise_note(&mut self, name: &str) -> bool {
@@ -2035,12 +2048,36 @@ impl Widget {
 
     /// `page` opened beside it, on the side of its screen with more room, drawn as it is.
     fn open_beside(&self, page: crate::ui::beside::Page) {
+        self.open_page(page, false);
+    }
+
+    /// `page` opened beside it, on the side of its screen with more room, or `over` it (a note stuck on the desktop,
+    /// written in where it is), drawn as it is.
+    fn open_page(&self, page: crate::ui::beside::Page, over: bool) {
         use crate::ui::beside::{Opening, Side};
         let by = self.rect();
         let screen = self.contact.monitor;
-        let side = if (by.left + by.right) / 2 > (screen.left + screen.right) / 2 { Side::Left } else { Side::Right };
+        let side = match over {
+            true => Side::Over,
+            false if (by.left + by.right) / 2 > (screen.left + screen.right) / 2 => Side::Left,
+            false => Side::Right,
+        };
         let (skin, dark) = self.drawn_look;
         crate::ui::beside::open(Opening { page, by, side, skin, dark, folder: None });
+    }
+
+    /// Moved by (`dx`, `dy`) physical px by something other than the hand on it (a note written in over it, moved):
+    /// no longer stuck to an edge, on the screen it comes to.
+    fn moved_by(&mut self, dx: i32, dy: i32) {
+        self.at = POINT { x: self.at.x + dx, y: self.at.y + dy };
+        self.stuck = None;
+        self.along = None;
+        self.keeps_to = (false, false);
+        let rect = self.rect();
+        if let Some(contact) = monitor_at(POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 }) {
+            self.moved_to(contact);
+        }
+        self.next_frame = Instant::now();
     }
 
     fn new(contact: Contact, at: POINT, content: Content) -> Option<Self> {
@@ -2638,8 +2675,11 @@ impl Widget {
                                         view::Hit::Note(at) => crate::notes::shown().get(usize::from(at)).map(|note| Page::Note(Some(note.name.clone()))),
                                         _ => None,
                                     };
+                                    // (A note stuck on the desktop, its own card pressed: written in where it is,
+                                    // over it, not beside it.)
+                                    let over = matches!(hit, view::Hit::Note(_)) && self.content.readings_mut().is_some_and(|readings| readings.only.as_deref().is_some_and(|only| only.starts_with(view::STUCK_NOTE)));
                                     if let Some(page) = page {
-                                        self.open_beside(page);
+                                        self.open_page(page, over);
                                     }
                                 }
                                 Some(view::Hit::Line(index)) => {
