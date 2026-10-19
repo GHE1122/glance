@@ -604,7 +604,12 @@ fn notes_lane(full: bool, lang: Lang) -> Vec<Block> {
 fn note_card(at: usize, note: &crate::notes::Note, lang: Lang, now: u64, lines: usize) -> NoteCard {
     NoteCard {
         at: at as u16,
-        title: if note.title().is_empty() { lang.pick("无标题", "Untitled").into() } else { note.title().to_string() },
+        // (A conflict's copy said to be one: its words, and so its title, are those of the note it was kept apart from.)
+        title: format!(
+            "{}{}",
+            if note.title().is_empty() { lang.pick("无标题", "Untitled") } else { note.title() },
+            if crate::notes::is_apart(&note.name) { lang.pick("（冲突副本）", " (conflicted copy)") } else { "" }
+        ),
         lines: note.text.lines().map(str::trim).filter(|line| !line.is_empty()).skip(1).take(lines).map(markdown_plain).collect(),
         when: text::since(note.stamp.written_ms, now, lang),
         colour: note.colour,

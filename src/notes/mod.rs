@@ -39,7 +39,18 @@ pub fn folder() -> Folder {
 
 /// The notes' folder at `path`, a conflict's copy called as the language shown says.
 pub fn folder_at(path: PathBuf) -> Folder {
-    Folder { path, apart: crate::update::language().pick("（冲突副本）", " (conflicted copy)") }
+    Folder { path, apart: crate::update::language().pick(APART[0], APART[1]) }
+}
+
+/// What a conflict's copy of a note is called after its name, in each language (see `store::Written::Apart`).
+const APART: [&str; 2] = ["（冲突副本）", " (conflicted copy)"];
+
+/// Whether the note `name` is a conflict's copy (named so in either language, numbered or not).
+pub fn is_apart(name: &str) -> bool {
+    let stem = std::path::Path::new(name).file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+    // (A second copy of the same note is numbered after its name: "（冲突副本） 2".)
+    let stem = stem.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
+    APART.iter().any(|apart| stem.ends_with(apart.trim_start()))
 }
 
 /// `Documents\Glance 便签` (`Glance Notes` in English).
@@ -109,5 +120,22 @@ fn follow() {
             std::thread::sleep(Duration::from_millis(50));
         }
         looked = std::time::Instant::now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A conflict's copy known by its name, in either language, a second one numbered; a note merely about conflicts
+    /// not.
+    #[test]
+    fn knows_a_conflicts_copy() {
+        assert!(is_apart("周会（冲突副本）.md"));
+        assert!(is_apart("周会（冲突副本） 2.md"));
+        assert!(is_apart("Meeting notes (conflicted copy).md"));
+        assert!(is_apart("Meeting notes (conflicted copy) 3.md"));
+        assert!(!is_apart("Meeting notes.md"));
+        assert!(!is_apart("conflicted copy rules.md"));
     }
 }

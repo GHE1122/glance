@@ -581,6 +581,7 @@ impl Controller {
                 // A capture of the desktop behind the panel come back, up or
                 // not (see `collect_behind`).
                 panel.collect_behind(now);
+                panel.menu_up = menu.is_some();
                 if panel.is_shown() {
                     panel.tick(now);
                     if panel.is_shown() {
@@ -1623,6 +1624,8 @@ struct Panel<'a> {
     /// The presses the sensors' process had told when the panel last looked (one told since is a press, however
     /// short, as the panel is open).
     presses_seen: u64,
+    /// Whether a menu of its own is up (see `stays`).
+    menu_up: bool,
     /// A drag of the pinned panel under way.
     drag: Option<PanelDrag>,
     /// The largest size the panel still grows to on its screen (see
@@ -1732,6 +1735,7 @@ impl<'a> Panel<'a> {
             tear_music: None,
             torn: false,
             presses_seen: 0,
+            menu_up: false,
             drag: None,
             largest: SIZES.1,
             sizing: None,
@@ -2329,8 +2333,10 @@ impl<'a> Panel<'a> {
     /// from the edge (it lives there until it is closed by hand, or moved
     /// back to the edge).
     fn stays(&self) -> bool {
-        // (With the page beside it up: the two are one place, left by the page's own going.)
-        self.pinned || self.floating() || crate::ui::beside::is_up()
+        // (With the page beside it up: the two are one place, left by the page's own going. With a menu of its own up,
+        // as large as it may be past its edge: a press on the menu is on the panel's behalf, and one away from both
+        // closes the menu first.)
+        self.pinned || self.floating() || crate::ui::beside::is_up() || self.menu_up
     }
 
     /// `page` opened beside it on its inner side (under it at the top edge): quick launch's choosing, a note.

@@ -138,6 +138,7 @@ impl Editor {
     }
 
     /// The top of the line the character at `at` is on (in the window).
+    #[cfg(test)]
     fn top_of(&self, at: i32) -> i32 {
         let mut point = windows::Win32::Foundation::POINTL::default();
         // (EM_POSFROMCHAR, which the bindings leave out.)

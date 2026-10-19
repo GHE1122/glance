@@ -12,7 +12,8 @@
 //! `node_modules`, …) are left out, and so are a repository's working tree (a checkout writes hundreds of files at
 //! once, its tools' to follow) and a program's folder wherever it was put (one holding a program or a library: what is
 //! written there, its logs and pictures, are the program's), as are hidden, system and temporary files and those being written (a download in progress);
-//! outside Downloads and the desktop, only documents, pictures, videos, music and archives. A file moved or
+//! outside Downloads and the desktop, only documents, pictures, videos, music and archives. Glance's own notes are
+//! left out too. A file moved or
 //! renamed is not one come (its creation is old); one renamed as a download finishes is.
 //!
 //! A file listed is followed: renamed, it is listed under its new name; moved with its folder (which the journal tells
@@ -485,7 +486,9 @@ fn follow() {
         }
         // (The folders the user asked not to list are left out as it is shown, not dropped from it: listed again,
         // their files come back.)
-        let out = |path: &Path| left_out(path, &[]) || tools.hold(path);
+        // (Glance's own notes too: written in Glance, they are no file come to the user's folders.)
+        let own = [crate::notes::folder().path];
+        let out = |path: &Path| left_out(path, &own) || tools.hold(path);
         let now = super::now_ms();
         let mut changed = kept.age(now);
         let mut folder_renamed = false;
