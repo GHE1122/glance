@@ -2231,7 +2231,7 @@ impl<'a> Panel<'a> {
         }
         self.end_drag();
         // (What it said under what the pointer was on goes with it: a drive's row, the line that switches players.)
-        if self.hover.take().is_some_and(|hit| says(hit, self.lang).is_some()) {
+        if self.hover.take().is_some_and(|hit| says(hit, self.lang, &self.hits).is_some()) {
             crate::ui::tip::hide();
         }
         self.recapture = false;
@@ -2301,7 +2301,7 @@ impl<'a> Panel<'a> {
         if !on_panel {
             if let Some(was) = self.hover.take() {
                 // (What it said under it goes with it: a drive's row, the line that switches players.)
-                if says(was, self.lang).is_some() {
+                if says(was, self.lang, &self.hits).is_some() {
                     crate::ui::tip::hide();
                 }
                 self.next_frame = now;
@@ -3495,7 +3495,7 @@ impl<'a> Panel<'a> {
         let hover = self.hit_at(client).filter(|hit| hit.list().is_none());
         if hover != self.hover {
             // What a press does, said under what says so (a drive's row, the line that switches players).
-            match (hover.and_then(|hit| Some((hit, says(hit, self.lang)?))), self.placement.as_ref()) {
+            match (hover.and_then(|hit| Some((hit, says(hit, self.lang, &self.hits)?))), self.placement.as_ref()) {
                 (Some((hit, said)), Some(placement)) => {
                     if let Some(&(x, y, w, h, _)) = self.hits.iter().find(|one| one.4 == hit) {
                         let on_screen = |dx: f32, dy: f32| ((placement.window.left as f32 + (self.corner.0 + dx) * placement.px).round() as i32, (placement.window.top as f32 + (self.corner.1 + dy) * placement.px).round() as i32);
@@ -3503,7 +3503,7 @@ impl<'a> Panel<'a> {
                         crate::ui::tip::show(&said, RECT { left, top, right, bottom }, crate::os::apps_dark());
                     }
                 }
-                _ if self.hover.is_some_and(|hit| says(hit, self.lang).is_some()) => crate::ui::tip::hide(),
+                _ if self.hover.is_some_and(|hit| says(hit, self.lang, &self.hits).is_some()) => crate::ui::tip::hide(),
                 _ => {}
             }
             self.hover = hover;
@@ -3864,8 +3864,12 @@ pub(crate) fn opens_drive(name: &str, lang: Lang) -> String {
     }
 }
 
-/// What a press on `hit` does, said under it, for what says so (a drive's row; the line that switches players).
-pub(crate) fn says(hit: Hit, lang: Lang) -> Option<String> {
+/// What is said under `hit` as the pointer comes over it (`hits` as last drawn): what a press on it does, for what
+/// says so (a drive's row; the line that switches players); a thing's whole name, where it shows shortened.
+pub(crate) fn says(hit: Hit, lang: Lang, hits: &[crate::ui::view::HitBox]) -> Option<String> {
+    if let Some(name) = crate::ui::view::named(hits, hit) {
+        return Some(name);
+    }
     match hit {
         Hit::Drive(letter) => Some(opens_drive(&format!("{letter}:"), lang)),
         Hit::Media(crate::playing::Key::Player, _) => {

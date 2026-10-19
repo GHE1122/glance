@@ -1509,7 +1509,7 @@ impl Widgets {
         if hit != widget.hit_hover {
             // What a press does, said under what says so (a drive's row, the line that switches players; its buttons'
             // own said over it).
-            match hit.and_then(|hit| Some((hit, crate::panel::says(hit, lang)?))) {
+            match hit.and_then(|hit| Some((hit, crate::panel::says(hit, lang, &widget.hits)?))) {
                 Some((hit, said)) if over.is_none() => {
                     if let Some((hx, hy, hw, hh)) = widget.hits.iter().find(|one| one.4 == hit).map(|one| (one.0, one.1, one.2, one.3)) {
                         let on_screen = |dx: f32, dy: f32| {
@@ -1520,7 +1520,7 @@ impl Widgets {
                         crate::ui::tip::show(&said, RECT { left, top, right, bottom }, crate::os::apps_dark());
                     }
                 }
-                _ if widget.hit_hover.is_some_and(|hit| crate::panel::says(hit, lang).is_some()) && over.is_none() => crate::ui::tip::hide(),
+                _ if widget.hit_hover.is_some_and(|hit| crate::panel::says(hit, lang, &widget.hits).is_some()) && over.is_none() => crate::ui::tip::hide(),
                 _ => {}
             }
             widget.hit_hover = hit;

@@ -200,13 +200,15 @@ pub enum Hit {
     StationMore,
     /// Where a station is: what is dragged there may be dropped on it (see `station::run::shows_at`).
     Station,
+    /// The thing whose box was put just before it, its name shown shortened there (see `named`).
+    Shortened,
 }
 
 impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea)
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened)
     }
 
     /// The track it is, where it is one dragged along.
@@ -516,6 +518,39 @@ impl Lately {
         };
         Lately { file: came.key, day: text::day_of(came.came_ms, now, lang), label, about: format!("{from} · {}", text::bytes(came.bytes as f64)), when: text::since(came.came_ms, now, lang), path: came.path.clone() }
     }
+}
+
+thread_local! {
+    /// The whole names of the things whose names were last shown shortened (by what a press on each finds).
+    static NAMES: std::cell::RefCell<Vec<(Hit, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `name` (the whole of it) shown as `shown` for what `hit` finds: where it was shortened and `hit`'s box was just put
+/// in `hits` (it shows), a mark after it that its name is shortened there, and its whole name kept (see `named`).
+fn name_shown(hits: &mut Vec<HitBox>, hit: Hit, name: &str, shown: &str) {
+    if shown == name {
+        return;
+    }
+    let Some(&(x, y, w, h, last)) = hits.last() else { return };
+    if last != hit {
+        return;
+    }
+    hits.push((x, y, w, h, Hit::Shortened));
+    NAMES.with(|names| {
+        let mut names = names.borrow_mut();
+        names.retain(|(kept, _)| *kept != hit);
+        names.push((hit, name.to_string()));
+    });
+}
+
+/// The whole name of what `hit` finds, where `hits` (as last drawn) show it shortened: said under it as the pointer
+/// comes over it.
+pub fn named(hits: &[HitBox], hit: Hit) -> Option<String> {
+    let shortened = hits.windows(2).any(|pair| pair[0].4 == hit && pair[1].4 == Hit::Shortened && (pair[0].0, pair[0].1, pair[0].2, pair[0].3) == (pair[1].0, pair[1].1, pair[1].2, pair[1].3));
+    if !shortened {
+        return None;
+    }
+    NAMES.with(|names| names.borrow().iter().find(|(kept, _)| *kept == hit).map(|(_, name)| name.clone()))
 }
 
 /// How the station's things are laid out: as `ShelfView` says, or (a small lane) in one row of pictures, named.
@@ -3279,16 +3314,18 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         let pressed = hit(tile, at);
         let lit = scene.hover == Some(pressed);
         let words = if lit { theme.text } else { theme.text2 };
-        match shows {
+        let shown = match shows {
             Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
                 if lit {
                     frame.fill_rounded(theme.hover, x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0, theme.control_radius.max(6.0));
                 }
                 let plate = place.w * if view == ShelfView::Large { LARGE_PLATE } else { PLATE };
                 paint_face(frame, theme, ink, tile, x, y, place.w, plate, pixels_for(view));
-                frame.text(&fitted(frame, &tile.label, theme.small, place.w), theme.small, words, x, y + plate + 5.0, place.w, Align::Start);
+                let shown = fitted(frame, &tile.label, theme.small, place.w);
+                frame.text(&shown, theme.small, words, x, y + plate + 5.0, place.w, Align::Start);
                 let tiny = Font { size: theme.small.size - 1.0, ..theme.small };
                 frame.text(&fitted(frame, &tile.about, tiny, place.w), tiny, theme.text3, x, y + plate + 5.0 + LINE, place.w, Align::Start);
+                shown
             }
             Shows::Row => {
                 if lit {
@@ -3296,7 +3333,9 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 }
                 let px = x + (TILE_W - TILE_PICTURE) / 2.0;
                 paint_face(frame, theme, ink, tile, px, y, TILE_PICTURE, TILE_PICTURE, TILE_PIXELS);
-                centred(frame, &fitted(frame, &tile.label, theme.small, TILE_W), theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
+                let shown = fitted(frame, &tile.label, theme.small, TILE_W);
+                centred(frame, &shown, theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
+                shown
             }
             Shows::View(ShelfView::List) => {
                 if lit {
@@ -3305,14 +3344,17 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 let py = y + (LIST_ROW - LIST_PICTURE) / 2.0;
                 paint_face(frame, theme, ink, tile, x, py, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
                 let room = width - LIST_PICTURE - 10.0 - if tile.pinned { 18.0 } else { 0.0 };
-                frame.text(&fitted(frame, &tile.label, theme.body, room), theme.body, theme.text, x + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
+                let shown = fitted(frame, &tile.label, theme.body, room);
+                frame.text(&shown, theme.body, theme.text, x + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
                 frame.text(&fitted(frame, &tile.about, theme.small, room), theme.small, theme.text3, x + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
                 if tile.pinned {
                     frame.icon(Icon::Pin, Point { x: x + width - 7.0, y: y + LIST_ROW / 2.0 }, 12.0, ink.trace);
                 }
+                shown
             }
-        }
+        };
         hits.extend(shown_in((x, y, place.w, place.h, pressed), (left - 4.0, top, width + 8.0, tall)));
+        name_shown(hits, pressed, &tile.label, &shown);
     }
     frame.unclip();
     // What the wheel scrolls (after its things: a press finds a thing before the list it is on).
@@ -3413,10 +3455,12 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         paint_face(frame, theme, ink, &face, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
         let when_w = frame.measure(&row.when, theme.small);
         let room = width - LIST_PICTURE - 10.0 - when_w - 8.0;
-        frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
+        let shown = fitted(frame, &row.label, theme.body, room);
+        frame.text(&shown, theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
         frame.text(&row.when, theme.small, theme.text3, left + width - when_w, y + (LIST_ROW - LINE) / 2.0, when_w + 1.0, Align::Start);
         hits.extend(shown_in((left, y, width, LIST_ROW, Hit::Recent(row.file)), (left - 4.0, list_top, width + 8.0, list_tall)));
+        name_shown(hits, Hit::Recent(row.file), &row.label, &shown);
     }
     frame.unclip();
     // (After its rows: a press finds a row before the list it is on.)
@@ -4400,6 +4444,30 @@ six".into()));
         fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
         fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
         fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+    }
+
+    /// A thing on the station whose name does not fit says its whole name as the pointer comes over it, in every view;
+    /// one whose name fits says nothing, and a press on either still finds it.
+    #[test]
+    fn a_shortened_name_is_said_whole() {
+        let theme = Theme::new(Skin::Fluent, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let long = "Bliss_v2.1.1_(Chocapic13_Shaders_edit).zip";
+        let tiles = vec![
+            Tile { id: 1, label: long.into(), about: String::new(), face: Face::Link, pinned: false },
+            Tile { id: 2, label: "a.md".into(), about: String::new(), face: Face::Link, pinned: false },
+        ];
+        for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large), Shows::Row] {
+            let mut hits = Vec::new();
+            paint_shelf(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &tiles, shows, STATION_TALL, None, false, &mut hits);
+            assert_eq!(named(&hits, Hit::Shelf(1)).as_deref(), Some(long), "{shows:?}");
+            assert_eq!(named(&hits, Hit::Shelf(2)), None, "{shows:?}");
+            let (x, y, w, h, _) = *hits.iter().find(|hit| hit.4 == Hit::Shelf(1)).unwrap();
+            assert_eq!(hits.iter().find(|(hx, hy, hw, hh, _)| x + w / 2.0 >= *hx && x + w / 2.0 < hx + hw && y + h / 2.0 >= *hy && y + h / 2.0 < hy + hh).map(|hit| hit.4), Some(Hit::Shelf(1)), "{shows:?}");
+        }
     }
 
     /// On a station, a list of what was copied, Recent files, long enough to scroll: a press on a thing finds the
