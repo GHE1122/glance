@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HGDIOBJ};
-use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_RESIZETOFIT};
+use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT};
 
 /// A picture: its pixels (BGRA, premultiplied, top row first) and how many across and down.
 #[derive(Clone, Debug)]
@@ -32,11 +32,13 @@ struct Key {
 }
 
 /// How a picture is made: as Explorer shows the file (its thumbnail, else its icon), its shape kept in the square;
-/// filling the square (a picture's middle, as much as the square holds: for a box it is to fill).
+/// filling the square (a picture's middle, as much as the square holds: for a box it is to fill); its icon alone, as
+/// Explorer shows a file of its kind (not what it holds).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Made {
     Fit,
     Fill,
+    Icon,
 }
 
 /// The most pictures kept (the oldest asked for go first).
@@ -136,6 +138,12 @@ pub fn filling(path: &Path, side: u32) -> Option<Picture> {
     asked(path, side, Made::Fill)
 }
 
+/// The icon of the file or folder at `path`, `side` physical px square: Windows' own for it (its program's for a
+/// file of a kind one opens, the folder's), as Explorer shows it.
+pub fn icon(path: &Path, side: u32) -> Option<Picture> {
+    asked(path, side, Made::Icon)
+}
+
 fn asked(path: &Path, side: u32, made: Made) -> Option<Picture> {
     // (Pictured as it was last written: a file written again pictured again. Not yet looked at, none yet. A name
     // that is not a path, a Store app's, is pictured as it is.)
@@ -173,9 +181,9 @@ fn make(asks: Receiver<Key>) {
             key.hash(&mut hasher);
             hasher.finish()
         };
-        let made = picture(&key.path, key.side).map(|thumb| match key.made {
+        let made = picture(&key.path, key.side, key.made == Made::Icon).map(|thumb| match key.made {
             Made::Fill => squared(&middle(&thumb), key.side, number),
-            Made::Fit => squared(&thumb, key.side, number),
+            Made::Fit | Made::Icon => squared(&thumb, key.side, number),
         });
         {
             let mut kept = KEPT.lock().unwrap();
@@ -304,8 +312,9 @@ fn middle(thumb: &Thumb) -> Thumb {
     Thumb { pixels, size: (side, side) }
 }
 
-/// The picture of the file at `path`, as large as fits `side` square (its shape kept), as Explorer shows it.
-fn picture(path: &Path, side: u32) -> Option<Thumb> {
+/// The picture of the file at `path`, as large as fits `side` square (its shape kept), as Explorer shows it (`icon`:
+/// its icon alone).
+fn picture(path: &Path, side: u32, icon: bool) -> Option<Thumb> {
     unsafe {
         // (A program the Start menu names by its file's path, "shell:AppsFolder\D:\App\a.exe", which the shell
         // does not read by that name: by the file itself.)
@@ -317,7 +326,8 @@ fn picture(path: &Path, side: u32) -> Option<Thumb> {
         };
         let factory: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
         let side = side.max(16) as i32;
-        let bitmap = factory.GetImage(SIZE { cx: side, cy: side }, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK).ok()?;
+        let how = if icon { SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK } else { SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK };
+        let bitmap = factory.GetImage(SIZE { cx: side, cy: side }, how).ok()?;
         let thumb = pixels_of(bitmap);
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
         thumb
@@ -398,9 +408,9 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let picture = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/website/apple-touch-icon.png")), 96).expect("a picture's");
+        let picture = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/website/apple-touch-icon.png")), 96, false).expect("a picture's");
         assert!(picture.size.0 <= 96 && picture.size.1 <= 96 && picture.size.0.max(picture.size.1) >= 48, "{:?}", picture.size);
-        let icon = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")), 48).expect("an icon");
+        let icon = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")), 48, false).expect("an icon");
         assert!(icon.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
         println!("picture {:?}, icon {:?}", picture.size, icon.size);
     }

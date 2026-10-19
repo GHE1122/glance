@@ -904,12 +904,11 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
         _ => path.extension().is_none(),
     };
     if on_disk && (folder || !crate::station::apps::pictured(path)) {
-        let round = side / 5.0;
-        frame.fill_rounded(theme.track, x, y, side, side, round);
-        if theme.skin != Skin::Glass {
-            frame.stroke_rounded(Fill::Solid(theme.rule), x, y, side, side, round, 1.0);
+        let centre = Point { x: x + side / 2.0, y: y + side / 2.0 };
+        match crate::station::thumbs::icon(path, TILE_PIXELS).filter(|_| !gone) {
+            Some(icon) => frame.picture(&icon, x, y, side, side, 0.0, 1.0),
+            None => paint_file_mark(frame, theme, folder, path, centre, side * 0.8, side >= 26.0, gone),
         }
-        paint_file_mark(frame, theme, folder, path, Point { x: x + side / 2.0, y: y + side / 2.0 }, side * 0.62, side >= 26.0, gone);
         return;
     }
     match crate::station::thumbs::of(path, TILE_PIXELS).filter(|_| !web) {
@@ -1207,11 +1206,11 @@ impl Hash for Block {
             Block::Notes { notes, view, tall } => (notes, view, tall.to_bits()).hash(state),
             Block::Apps { apps, rows, named } => {
                 (apps, rows, named).hash(state);
-                apps.iter().for_each(|(_, target)| crate::station::thumbs::of(std::path::Path::new(target), TILE_PIXELS).map(|picture| picture.key).hash(state));
+                apps.iter().for_each(|(_, target)| face_key(std::path::Path::new(target), TILE_PIXELS).hash(state));
             }
             Block::Recent { rows, filter, tall } => {
                 (rows, filter, tall.to_bits()).hash(state);
-                rows.iter().for_each(|row| crate::station::thumbs::of(&row.path, TILE_PIXELS).map(|picture| picture.key).hash(state));
+                rows.iter().for_each(|row| face_key(&row.path, TILE_PIXELS).hash(state));
             }
             Block::Shelf { tiles, shows, tall, said, over } => {
                 (tiles, shows, tall.to_bits(), said, over).hash(state);
@@ -1228,7 +1227,7 @@ impl Hash for Block {
 /// Each of `tiles`' pictures as it is now (`side` px), for a drawing to tell one made since.
 fn pictures_made<H: Hasher>(tiles: &[Tile], side: u32, state: &mut H) {
     tiles.iter().for_each(|tile| if let Face::Picture { path, .. } = &tile.face {
-        crate::station::thumbs::of(path, side).map(|picture| picture.key).hash(state);
+        face_key(path, side).hash(state);
     });
 }
 
@@ -2933,23 +2932,26 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
         Skin::Fluent => 4.0,
         Skin::Paper => 3.0,
     };
-    frame.fill_rounded(theme.track, x, y, w, h, radius);
-    if theme.skin != Skin::Glass {
-        frame.stroke_rounded(Fill::Solid(theme.rule), x, y, w, h, radius, 1.0);
-    }
+    // (A plate under what fills it: a picture, words, a link's mark. A file or folder stands on the card itself, by
+    // its icon: on a plate of its own, an icon looked like a picture of the screen.)
+    let plate = || {
+        frame.fill_rounded(theme.track, x, y, w, h, radius);
+        if theme.skin != Skin::Glass {
+            frame.stroke_rounded(Fill::Solid(theme.rule), x, y, w, h, radius, 1.0);
+        }
+    };
     match &tile.face {
         Face::Picture { path, more } => {
-            // A picture fills its plate; a folder, or another file, is drawn as the panel's icons are (a line, not the
-            // shell's picture of it), a file's kind named on a tag of its colour.
+            // A picture fills its plate; a folder, or another file, is shown by Windows' own icon for it.
             let centre = Point { x: x + w / 2.0, y: y + h / 2.0 };
             if shows_itself(path) {
+                plate();
                 match crate::station::thumbs::filling(path, pixels) {
                     Some(picture) => frame.picture(&picture, x, y, w, h, radius, 1.0),
                     None => frame.icon(Icon::Image, centre, small * 0.4, theme.text3),
                 }
             } else {
-                let folder = crate::station::thumbs::looked(path) == Some(crate::station::thumbs::Looked::Folder);
-                paint_file_mark(frame, theme, folder, path, centre, (small * 0.5).min(44.0), small >= 40.0, false);
+                paint_shell_icon(frame, theme, path, centre, (small * 0.62).min(96.0), pixels);
             }
             // Files put on it together: how many more.
             if *more > 0 && small >= 40.0 {
@@ -2958,6 +2960,7 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
             }
         }
         Face::Text(text) => {
+            plate();
             if small < 40.0 {
                 frame.icon(Icon::Clipboard, Point { x: x + w / 2.0, y: y + h / 2.0 }, small / 2.0, theme.text3);
             } else {
@@ -2973,6 +2976,7 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
             }
         }
         Face::Link => {
+            plate();
             frame.icon(Icon::Link, Point { x: x + w / 2.0, y: y + h / 2.0 }, (small * 0.42).min(28.0), ink.trace);
         }
     }
@@ -2982,6 +2986,32 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
         frame.fill_circle(ink.trace, corner, 8.0);
         frame.icon(Icon::Pin, corner, 10.0, ink_on(ink.trace));
     }
+}
+
+/// The file or folder at `path` by Windows' own icon for it, `side` wide round `centre` (asked for at `pixels`); till
+/// it is had, or where there is none (gone), its mark (see `paint_file_mark`), faint where it is gone.
+fn paint_shell_icon(frame: &dyn Canvas, theme: &Theme, path: &std::path::Path, centre: Point, side: f32, pixels: u32) {
+    match crate::station::thumbs::icon(path, pixels) {
+        Some(icon) => frame.picture(&icon, centre.x - side / 2.0, centre.y - side / 2.0, side, side, 0.0, 1.0),
+        None => {
+            let looked = crate::station::thumbs::looked(path);
+            let folder = looked.map_or(path.extension().is_none(), |looked| looked == crate::station::thumbs::Looked::Folder);
+            paint_file_mark(frame, theme, folder, path, centre, side * 0.8, side >= 40.0, looked == Some(crate::station::thumbs::Looked::Gone));
+        }
+    }
+}
+
+/// What tells a thing's face as it is drawn now (see `paint_face`, `paint_app`): the picture it is drawn with, made
+/// or not yet; for a drawing to tell one made since.
+fn face_key(path: &std::path::Path, side: u32) -> Option<u64> {
+    let picture = if shows_itself(path) {
+        crate::station::thumbs::filling(path, side)
+    } else if path.is_absolute() && !crate::station::apps::pictured(path) {
+        crate::station::thumbs::icon(path, side)
+    } else {
+        crate::station::thumbs::of(path, side)
+    };
+    picture.map(|picture| picture.key)
 }
 
 /// A folder's or a file's mark, as the panel's icons are drawn (a line, not the shell's picture of it), `side` wide
