@@ -851,9 +851,20 @@ impl Controller {
                     }
                 }
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == PASTE_HOTKEY as usize => crate::station::run::ask(crate::station::run::Ask::Paste),
+                // Esc: a thing kept at hand dragged put back where it was (and nothing more); else the panels that go,
+                // gone.
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize => {
-                    for panel in panels.iter_mut().filter(|panel| panel.is_open() && !panel.stays()) {
-                        panel.begin_close(now);
+                    if panels.iter().any(Panel::dragging_app) {
+                        for panel in panels.iter_mut().filter(|panel| panel.dragging_app()) {
+                            panel.app_press = None;
+                            panel.app_over = None;
+                            panel.next_frame = now;
+                        }
+                        let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                    } else {
+                        for panel in panels.iter_mut().filter(|panel| panel.is_open() && !panel.stays()) {
+                            panel.begin_close(now);
+                        }
                     }
                 }
                 // Placed, zoomed and backed for screens that are no longer
@@ -935,21 +946,21 @@ impl Controller {
                 // A thing kept at hand pressed and moved: put elsewhere among them as it is let go, over another.
                 WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].app_press.is_some()) => {
                     let panel = &mut panels[owner.unwrap()];
-                    if let (Some((at, from, false)), Some(now)) = (panel.app_press, cursor_position()) {
-                        if crate::station::run::drag_begins(from, now) {
-                            panel.app_press = Some((at, from, true));
+                    if let (Some((_, from, moved @ false)), Some(now)) = (panel.app_press.as_mut(), cursor_position()) {
+                        if crate::station::run::drag_begins(*from, now) {
+                            *moved = true;
                         }
                     }
                     // Moved: where the pointer has it, and the place it would go (the one it is over; between them,
                     // the last).
-                    if panel.app_press.is_some_and(|(_, _, moved)| moved) {
+                    if panel.app_press.as_ref().is_some_and(|(_, _, moved)| *moved) {
                         panel.held_at(lparam_point(msg.lParam));
                     }
                     panel.hover_at(lparam_point(msg.lParam));
                 }
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if owner.is_some_and(|at| panels[at].app_press.is_some()) => {
                     let panel = &mut panels[owner.unwrap()];
-                    let (from, _, moved) = panel.app_press.take().unwrap();
+                    let (moving, _, moved) = panel.app_press.take().unwrap();
                     let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
                     if moved {
                         panel.held_at(lparam_point(msg.lParam));
@@ -957,23 +968,23 @@ impl Controller {
                     let over = panel.hit_at(lparam_point(msg.lParam));
                     // (Where it would go as it was let go: the place the others made room at, not only another's.)
                     let went = panel.app_over.take().filter(|_| moved);
-                    match (msg.message == WM_LBUTTONUP, moved, went) {
-                        (true, true, Some(to)) if to != from => {
-                            // (Each by what opens it, as shown: what is kept may change before this is done.)
-                            let shown = crate::station::apps::shown();
-                            let (from, to) = (usize::from(from), usize::from(to));
-                            if let Some(moving) = shown.get(from).map(|app| app.target.clone()) {
-                                // (Dropped on a later one: after it; on an earlier one: before it.)
-                                let before = shown.get(if to > from { to + 1 } else { to }).map(|app| app.target.clone());
-                                panel.app_dropped = Some((moving.clone(), to, Instant::now()));
-                                crate::station::apps::change(move |apps| crate::station::apps::put_before(apps, &moving, before.as_deref()));
-                            }
+                    // (By what opens it: where it is now, if it is kept still.)
+                    let shown = crate::station::apps::shown();
+                    let from = shown.iter().position(|app| app.target == moving);
+                    match (msg.message == WM_LBUTTONUP, moved, went, from) {
+                        (true, true, Some(to), Some(from)) if usize::from(to) != from => {
+                            let to = usize::from(to).min(shown.len() - 1);
+                            // (Dropped on a later one: after it; on an earlier one: before it.)
+                            let before = shown.get(if to > from { to + 1 } else { to }).map(|app| app.target.clone());
+                            panel.app_dropped = Some((moving.clone(), to, Instant::now()));
+                            crate::station::apps::change(move |apps| crate::station::apps::put_before(apps, &moving, before.as_deref()));
                         }
-                        (true, false, _) if over == Some(Hit::App(from)) => {
-                            crate::station::pressed(Hit::App(from));
+                        (true, false, _, Some(from)) if over == Some(Hit::App(from as u16)) => {
+                            crate::station::pressed(Hit::App(from as u16));
                         }
                         _ => {}
                     }
+                    panel.next_frame = now;
                 }
                 // (The pointer taken from it as a thing on its station was pressed: nothing pressed.)
                 crate::ui::window::CAPTURE_LOST if owner.is_some_and(|at| panels[at].shelf_press.is_some()) => panels[owner.unwrap()].shelf_press = None,
@@ -1267,7 +1278,7 @@ impl Controller {
                 _ => {}
             }
 
-            let wanted = panels.iter().any(|panel| panel.is_open() && !panel.stays());
+            let wanted = panels.iter().any(|panel| (panel.is_open() && !panel.stays()) || panel.dragging_app());
             if wanted != escape {
                 escape = wanted;
                 unsafe {
@@ -1819,7 +1830,11 @@ struct Panel<'a> {
     shelf_press: Option<(Hit, POINT)>,
     /// A thing kept at hand pressed (its place), where the pointer was, and whether it has been moved far enough to
     /// be put elsewhere among them: let go on another, it goes there; else it is opened as it is let go.
-    app_press: Option<(u16, POINT, bool)>,
+    /// (By what opens it, as shown as it was pressed: what is kept may change meanwhile, and its place with it.)
+    app_press: Option<(String, POINT, bool)>,
+    /// Where the pointer last was over it (physical px in its window): what is under it found again as what is drawn
+    /// moves under a pointer that stays.
+    pointer: Option<POINT>,
     /// One held so and moved: the place among them it would go to (the one the pointer was last over), and where
     /// the pointer has it (DIPs from the panel's corner).
     app_over: Option<u16>,
@@ -1927,6 +1942,7 @@ impl<'a> Panel<'a> {
             music_settle: None,
             shelf_press: None,
             app_press: None,
+            pointer: None,
             app_over: None,
             app_point: (0.0, 0.0),
             app_dropped: None,
@@ -2675,7 +2691,8 @@ impl<'a> Panel<'a> {
         }
         // On a thing kept at hand: moved among them, or opened (see `app_press`).
         if let (Some(Hit::App(at)), Some(from)) = (self.hit_at(client), cursor_position()) {
-            self.app_press = Some((at, from, false));
+            let Some(target) = crate::station::apps::shown().get(usize::from(at)).map(|app| app.target.clone()) else { return };
+            self.app_press = Some((target, from, false));
             self.app_over = None;
             unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd) };
             return;
@@ -3244,15 +3261,16 @@ impl<'a> Panel<'a> {
         let held = self.sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
         let thumbs_moving = self.thumbs.step(now, self.hover.filter(|hit| hit.eases()), held);
         // (What is chosen of several, its mark sliding to it as it changes: the station's page, the notes' view.)
-        let thumbs_moving = self.thumbs.choose(now, &[(0, Hit::Tab(self.tab)), (1, Hit::NotesShow(crate::notes::view()))]) | thumbs_moving;
+        let thumbs_moving = self.thumbs.choose(now, &view::choices(self.tab)) | thumbs_moving;
         // What is kept at hand: the one held where it would go, the others making room; one let go, kept where it went
         // till the order comes so.
         let order: Vec<String> = crate::station::apps::shown().iter().map(|app| app.target.clone()).collect();
         if self.app_dropped.as_ref().is_some_and(|(target, to, at)| order.get(*to) == Some(target) || at.elapsed() > Duration::from_secs(1)) {
             self.app_dropped = None;
         }
-        let hold = match (self.app_press, &self.app_dropped) {
-            (Some((from, _, true)), _) => Some((usize::from(from), usize::from(self.app_over.unwrap_or(from)), Some(self.app_point))),
+        let held = self.app_press.as_ref().filter(|(_, _, moved)| *moved).and_then(|(target, ..)| order.iter().position(|one| one == target));
+        let hold = match (held, &self.app_dropped) {
+            (Some(from), _) => Some((from, self.app_over.map_or(from, usize::from), Some(self.app_point))),
             (_, Some((target, to, _))) => order.iter().position(|one| one == target).map(|from| (from, *to, None)),
             _ => None,
         };
@@ -3365,6 +3383,7 @@ impl<'a> Panel<'a> {
         }
         if let Some(hits) = hits {
             self.hits = hits;
+            self.hover_again();
         }
         // (In the window: where it is painted in it, and where in that.)
         self.corner = (x + offset.0 as f32 / px, y + offset.1 as f32 / px);
@@ -3528,13 +3547,31 @@ impl<'a> Panel<'a> {
         self.hits.iter().filter(move |(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
     }
 
+    /// Whether a thing kept at hand is being dragged among the others on it.
+    fn dragging_app(&self) -> bool {
+        self.app_press.as_ref().is_some_and(|(_, _, moved)| *moved)
+    }
+
+    /// What is under the pointer found again where it stays as what is drawn moves under it (a list scrolled, things
+    /// moving to new places): lit as it is.
+    fn hover_again(&mut self) {
+        let Some(at) = self.pointer else { return };
+        let hover = self.hit_at(at).filter(|hit| hit.list().is_none());
+        if hover != self.hover {
+            self.hover = hover;
+            self.next_frame = Instant::now();
+        }
+    }
+
     /// A thing kept at hand held and moved, the pointer at `client` (physical px in the window): where it has it, and
     /// the place it would go (the one it is over, where it is over one), drawn so as soon as can be.
     fn held_at(&mut self, client: POINT) {
         let px = self.placement.as_ref().map_or(1.0, |placement| placement.px);
         self.app_point = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
-        // (The place it is over, which stands still as the others make room.)
-        if let Some(Hit::AppSlot(slot)) = self.hit_at(client) {
+        // (The place it is over, which stands still as the others make room: whatever else is drawn there, the "+"
+        // after them among it.)
+        let slot = self.hits_at(client).find_map(|hit| if let Hit::AppSlot(slot) = hit { Some(slot) } else { None });
+        if let Some(slot) = slot {
             self.app_over = Some(slot);
         }
         self.next_frame = Instant::now();
@@ -3548,6 +3585,7 @@ impl<'a> Panel<'a> {
 
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
+        self.pointer = Some(client);
         // Off the panel (its window holds its screen): clicks there are let through at once, not as the pointer is
         // next followed (see `track`), which a quick click comes before.
         if self.drag.is_none() && self.sliding.is_none() && !self.on_panel(client) {

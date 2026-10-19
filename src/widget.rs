@@ -2884,10 +2884,16 @@ impl Widget {
         let held = sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
         moving |= self.thumbs.step(now, self.hit_hover.filter(|hit| hit.eases()), held);
         // (What is chosen of several, its mark sliding to it as it changes: the station's page, the notes' view.)
-        moving |= self.thumbs.choose(now, &[(0, view::Hit::Tab(self.content.tab())), (1, view::Hit::NotesShow(crate::notes::view()))]);
-        // (What is kept at hand going to its places as its order changes.)
-        let order: Vec<String> = crate::station::apps::shown().iter().map(|app| app.target.clone()).collect();
-        moving |= self.thumbs.apps(now, &order, None);
+        // (What it shows of them alone: what is chosen, its mark sliding as it changes; what is kept at hand, going to its
+        // places as its order changes. A widget showing none of them asks no frames for them.)
+        let shows = |kind: fn(&view::Hit) -> bool| self.hits.iter().any(|hit| kind(&hit.4));
+        if shows(|hit| matches!(hit, view::Hit::Tab(_) | view::Hit::NotesShow(_))) {
+            moving |= self.thumbs.choose(now, &view::choices(self.content.tab()));
+        }
+        if shows(|hit| matches!(hit, view::Hit::App(_) | view::Hit::AppsArea)) {
+            let order: Vec<String> = crate::station::apps::shown().iter().map(|app| app.target.clone()).collect();
+            moving |= self.thumbs.apps(now, &order, None);
+        }
         let thumbs = self.thumbs.clone();
         // Its process list turned on toward where the wheel turned it, as the panel's is.
         let readings: Vec<&mut Readings> = match &mut self.content {

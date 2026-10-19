@@ -1749,7 +1749,7 @@ impl Beside {
         let cell_at = |at: usize| (PAD + at as f32 * cell_w, KINDS_TOP + 3.0, cell_w, KINDS_H - 6.0);
         {
             let at = |kind: Kinds| kinds.iter().position(|(one, _, _)| *one == kind);
-            let slid = self.marks.slid(self.kind).and_then(|(from, done)| Some((at(from)?, done)));
+            let slid = super::view::slid_at(self.marks.slid(0, self.kind), at);
             let chosen = at(self.kind).unwrap_or(0);
             if glass {
                 let boxes: Vec<(f32, f32)> = (0..kinds.len()).map(|at| (cell_at(at).0, cell_w)).collect();

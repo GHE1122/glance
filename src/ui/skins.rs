@@ -574,9 +574,11 @@ fn glass(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
         unsafe { frame.dc.FillRoundedRectangle(&rounded(*piece, *radius), frame.brush(tint)) };
         // Light caught just inside the edge: strongest from above.
         let white = |a| Color::hex(0xFFFFFF, a);
-        inset_shadow(frame, *piece, *radius, 1.0, 2.0, white(0.7))?;
-        inset_shadow(frame, *piece, *radius, -1.0, 2.0, white(0.25))?;
-        inset_shadow(frame, *piece, *radius, 0.0, 18.0, white(0.12))?;
+        // (Lit along the top, a little light back along the foot: the owner's "适中", of three looked at; the first,
+        // bright all round, read as a tube of metal.)
+        inset_shadow(frame, *piece, *radius, 1.0, 2.0, white(0.5))?;
+        inset_shadow(frame, *piece, *radius, -1.0, 2.0, white(0.12))?;
+        inset_shadow(frame, *piece, *radius, 0.0, 18.0, white(0.07))?;
         rim(frame, *piece, *radius)?;
     }
     Ok(())
@@ -665,9 +667,12 @@ fn made_displacement_map(frame: &Frame, piece: Rect, radius: f32, dpi: (f32, f32
 
 /// The light along a piece's edge: a 1.5 DIP ring, brightest where light
 /// would strike the top-left, again faintly at the bottom-right.
+/// How wide glass's rim is (DIPs).
+const RIM_WIDTH: f32 = 1.25;
+
 fn rim(frame: &Frame, piece: Rect, radius: f32) -> Result<()> {
     let white = |position, a| D2D1_GRADIENT_STOP { position, color: Color::hex(0xFFFFFF, a).d2d() };
-    let stops = [white(0.0, 0.95), white(0.22, 0.25), white(0.5, 0.06), white(0.78, 0.2), white(1.0, 0.7)];
+    let stops = [white(0.0, 0.75), white(0.22, 0.2), white(0.5, 0.05), white(0.78, 0.08), white(1.0, 0.22)];
     // CSS's 135deg: toward the bottom-right, over a line long enough for the
     // gradient to reach the corners.
     let length = (piece.w + piece.h) * std::f32::consts::FRAC_1_SQRT_2;
@@ -681,7 +686,7 @@ fn rim(frame: &Frame, piece: Rect, radius: f32) -> Result<()> {
         };
         let brush = frame.dc.CreateLinearGradientBrush(&line, None, &collection)?;
         let outer = geometry(frame, piece, radius)?;
-        let inner = geometry(frame, grow(piece, -1.5), radius - 1.5)?;
+        let inner = geometry(frame, grow(piece, -RIM_WIDTH), radius - RIM_WIDTH)?;
         let ring = frame.gfx.factory.CreateGeometryGroup(D2D1_FILL_MODE_ALTERNATE, &[Some(outer), Some(inner)])?;
         frame.dc.FillGeometry(&ring, &brush, None);
     }

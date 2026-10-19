@@ -56,9 +56,17 @@ struct Apps {
 pub type Held = (usize, usize, Option<(f32, f32)>);
 
 /// Where a thing kept at hand is drawn: in its place among them (`Slot`, the places between one and the next as far
-/// along as it is from the one to the other), or where the pointer has it.
+/// along as it is from the one to the other), or on its way from where it was let go (`From`: the pointer there, in
+/// the host's DIPs) to its place `to`, `done` of the way.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AppPlace {
+    Slot(f32),
+    From { x: f32, y: f32, to: usize, done: f32 },
+}
+
+/// Where a move starts: a place among them (as far along as it was), or the pointer where one was let go.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Start {
     Slot(f32),
     Point(f32, f32),
 }
@@ -67,7 +75,7 @@ pub enum AppPlace {
 #[derive(Clone)]
 struct Move {
     target: String,
-    from: AppPlace,
+    from: Start,
     to: usize,
     start: Instant,
     done: f32,
@@ -81,18 +89,19 @@ impl Move {
     fn place(&self) -> AppPlace {
         let to = self.to as f32;
         match self.from {
-            AppPlace::Slot(from) => AppPlace::Slot(from + (to - from) * self.done),
-            // (From the pointer: on its way to its place, which the painter knows; told as how far, from where.)
-            point => if self.done >= 1.0 { AppPlace::Slot(to) } else { point },
+            Start::Slot(from) => AppPlace::Slot(from + (to - from) * self.done),
+            // (From the pointer: on its way to its place, which the painter knows where it is.)
+            Start::Point(x, y) => AppPlace::From { x, y, to: self.to, done: self.done },
         }
     }
 }
 
-/// A choice's mark (of the choice `of`: see `choose`): on `to`, come from `from` (none: it was first chosen so) since `start`, `done` of the way (eased).
+/// A choice's mark (of the choice `of`: see `choose`): on `to`, come from `from` (none: it was first chosen so; or from
+/// mid-way on its way from one to another, chosen again before it was there) since `start`, `done` of the way (eased).
 #[derive(Clone)]
 struct Slide<K> {
     of: usize,
-    from: Option<K>,
+    from: Option<Slid<K>>,
     to: K,
     start: Instant,
     done: f32,
@@ -101,6 +110,14 @@ struct Slide<K> {
 /// How long a choice's mark takes to slide from one to another, slowing as it comes (macOS's: it stops where it is
 /// to be, at the time it is to, with no spring past it).
 const SLIDE: f32 = 0.22;
+
+/// Where a choice's mark slides from: the one chosen before, or (`mid`) where it was on its way from that to another,
+/// so far.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Slid<K> {
+    pub from: K,
+    pub mid: Option<(K, f32)>,
+}
 
 impl<K: Copy + PartialEq> Dots<K> {
     pub const fn new() -> Self {
@@ -113,7 +130,14 @@ impl<K: Copy + PartialEq> Dots<K> {
     pub fn choose(&mut self, now: Instant, chosen: &[(usize, K)]) -> bool {
         for &(of, to) in chosen {
             match self.slides.iter_mut().find(|slide| slide.of == of) {
-                Some(slide) if slide.to != to => *slide = Slide { of, from: Some(slide.to), to, start: now, done: 0.0 },
+                // (On its way still: from where it is, mid-way from where it came from to where it was going.)
+                Some(slide) if slide.to != to => {
+                    let from = match slide.from.filter(|_| slide.done < 1.0) {
+                        Some(was) => Slid { from: was.from, mid: Some((slide.to, slide.done)) },
+                        None => Slid { from: slide.to, mid: None },
+                    };
+                    *slide = Slide { of, from: Some(from), to, start: now, done: 0.0 };
+                }
                 Some(_) => {}
                 None => self.slides.push(Slide { of, from: None, to, start: now, done: 1.0 }),
             }
@@ -141,8 +165,13 @@ impl<K: Copy + PartialEq> Dots<K> {
         let held_now = held.and_then(|(from, _, point)| Some((order.get(from)?.clone(), point?)));
         let held_target = held_now.as_ref().map(|(target, _)| target.clone());
         // (Before: where each was drawn, mid-way where it was on its way.)
-        let was: Vec<(String, AppPlace)> = self.apps.order.iter().enumerate().map(|(at, target)| {
-            let place = self.apps.moves.iter().find(|one| &one.target == target).map_or(AppPlace::Slot(at as f32), Move::place);
+        let was: Vec<(String, Option<f32>)> = self.apps.order.iter().enumerate().map(|(at, target)| {
+            let place = match self.apps.moves.iter().find(|one| &one.target == target).map(Move::place) {
+                Some(AppPlace::Slot(slot)) => Some(slot),
+                // (From the pointer still: kept on that way, its end moved; see below.)
+                Some(AppPlace::From { .. }) => None,
+                None => Some(at as f32),
+            };
             (target.clone(), place)
         }).collect();
         let let_go = self.apps.held.clone().filter(|_| held_now.is_none());
@@ -151,18 +180,34 @@ impl<K: Copy + PartialEq> Dots<K> {
                 self.apps.moves.retain(|one| &one.target != target);
                 continue;
             }
-            let heading = self.apps.moves.iter().find(|one| &one.target == target).map(|one| one.to);
-            let from = match &let_go {
-                Some((gone, point)) if gone == target => Some(AppPlace::Point(point.0, point.1)),
-                _ => was.iter().find(|(one, _)| one == target).map(|(_, place)| *place).filter(|place| *place != AppPlace::Slot(at as f32) && heading != Some(at)),
-            };
-            if let Some(from) = from {
+            if let Some((_, point)) = let_go.as_ref().filter(|(gone, _)| gone == target) {
                 self.apps.moves.retain(|one| &one.target != target);
-                self.apps.moves.push(Move { target: target.clone(), from, to: at, start: now, done: 0.0 });
+                self.apps.moves.push(Move { target: target.clone(), from: Start::Point(point.0, point.1), to: at, start: now, done: 0.0 });
+                continue;
+            }
+            let heading = self.apps.moves.iter().position(|one| &one.target == target);
+            if heading.is_some_and(|one| self.apps.moves[one].to == at) {
+                continue;
+            }
+            match was.iter().find(|(one, _)| one == target).map(|(_, place)| *place) {
+                // (Coming from the pointer: on the same way, to its new place.)
+                Some(None) => {
+                    if let Some(one) = heading {
+                        self.apps.moves[one].to = at;
+                    }
+                }
+                // Where it is: there already, no way to go (a way it was on given up); else a way from there.
+                Some(Some(slot)) if slot == at as f32 => self.apps.moves.retain(|one| &one.target != target),
+                Some(Some(slot)) => {
+                    self.apps.moves.retain(|one| &one.target != target);
+                    self.apps.moves.push(Move { target: target.clone(), from: Start::Slot(slot), to: at, start: now, done: 0.0 });
+                }
+                None => {}
             }
         }
         self.apps.order = shown;
-        let mut moving = held_now.is_some();
+        // (Held still, nothing moves: frames are asked for as the pointer moves it.)
+        let mut moving = false;
         self.apps.held = held_now;
         for one in &mut self.apps.moves {
             let t = (now.saturating_duration_since(one.start).as_secs_f32() / SHIFT).min(1.0);
@@ -174,19 +219,15 @@ impl<K: Copy + PartialEq> Dots<K> {
     }
 
     /// Where the thing kept at hand `target` (at `at` among them as kept) is drawn now: none, held (drawn where the
-    /// pointer has it: see `app_held`); else in its place, or on its way to it, from a place among them or from a
-    /// point (and how far it has come from there).
-    pub fn app_place(&self, target: &str, at: usize) -> Option<(AppPlace, f32)> {
+    /// pointer has it: see `app_held`); else in its place, or on its way to it.
+    pub fn app_place(&self, target: &str, at: usize) -> Option<AppPlace> {
         if self.apps.held.as_ref().is_some_and(|(held, _)| held == target) {
             return None;
         }
         Some(match self.apps.moves.iter().find(|one| one.target == target) {
-            Some(one) => match one.from {
-                AppPlace::Point(..) => (one.from, one.done),
-                _ => (one.place(), 1.0),
-            },
+            Some(one) => one.place(),
             // (In its place as they show: the one held where it would go, the others round it; not its place as kept.)
-            None => (AppPlace::Slot(self.apps.order.iter().position(|one| one == target).unwrap_or(at) as f32), 1.0),
+            None => AppPlace::Slot(self.apps.order.iter().position(|one| one == target).unwrap_or(at) as f32),
         })
     }
 
@@ -195,10 +236,10 @@ impl<K: Copy + PartialEq> Dots<K> {
         self.apps.held.as_ref().map(|(target, point)| (target.as_str(), *point))
     }
 
-    /// Where the mark of what is chosen as `to` is on its way from the one chosen before: that one, and how far it has
+    /// Where the mark of the choice `of`, `to` chosen, is on its way from where it was: from where, and how far it has
     /// come (eased); none once it is there.
-    pub fn slid(&self, to: K) -> Option<(K, f32)> {
-        self.slides.iter().find(|slide| slide.to == to && slide.done < 1.0).and_then(|slide| Some((slide.from?, slide.done)))
+    pub fn slid(&self, of: usize, to: K) -> Option<(Slid<K>, f32)> {
+        self.slides.iter().find(|slide| slide.of == of && slide.to == to && slide.done < 1.0).and_then(|slide| Some((slide.from?, slide.done)))
     }
 
     /// The size of `key`'s dot now, of its size at rest.
@@ -272,18 +313,18 @@ mod tests {
         let start = Instant::now();
         let mut marks: Dots<u8> = Dots::new();
         assert!(!marks.choose(start, &[(0, 1)]));
-        assert_eq!(marks.slid(1), None);
+        assert_eq!(marks.slid(0, 1), None);
         assert!(marks.choose(start, &[(0, 2)]));
         let at = |ms: u64| start + std::time::Duration::from_millis(ms);
         assert!(marks.choose(at(55), &[(0, 2)]));
-        let quarter = marks.slid(2).unwrap();
-        assert_eq!(quarter.0, 1);
+        let quarter = marks.slid(0, 2).unwrap();
+        assert_eq!(quarter.0, Slid { from: 1, mid: None });
         assert!(marks.choose(at(165), &[(0, 2)]));
-        let most = marks.slid(2).unwrap().1;
+        let most = marks.slid(0, 2).unwrap().1;
         // (Eased: more than a quarter of the way at a quarter of the time, the last quarter the least of it.)
         assert!(quarter.1 > 0.25 && most > 0.9 && most < 1.0, "{quarter:?} {most}");
         assert!(!marks.choose(at(230), &[(0, 2)]));
-        assert_eq!(marks.slid(2), None);
+        assert_eq!(marks.slid(0, 2), None);
     }
 
     /// One kept at hand dragged along the others: those between where it was and where it would go make room for it
@@ -297,25 +338,59 @@ mod tests {
         assert!(!motion.apps(start, &order, None));
         // "a" held over where "c" is: "b" and "c" go up a place, "a" drawn at the pointer.
         assert!(motion.apps(start, &order, Some((0, 2, Some((5.0, 50.0))))));
+        // (Held still once they are there, nothing more wanted.)
         assert_eq!(motion.app_place("a", 0), None);
         assert_eq!(motion.app_held(), Some(("a", (5.0, 50.0))));
         motion.apps(at(100), &order, Some((0, 2, Some((5.0, 50.0)))));
-        let Some((AppPlace::Slot(b), _)) = motion.app_place("b", 0) else { panic!() };
+        let Some(AppPlace::Slot(b)) = motion.app_place("b", 0) else { panic!() };
         assert!(b < 1.0 && b > 0.0, "{b}");
         motion.apps(at(400), &order, Some((0, 2, Some((5.0, 50.0)))));
         // (Asked by their places as kept: "b" and "c" are 1 and 2 there, and show at 0 and 1 once there.)
-        assert_eq!(motion.app_place("b", 1), Some((AppPlace::Slot(0.0), 1.0)));
-        assert_eq!(motion.app_place("c", 2), Some((AppPlace::Slot(1.0), 1.0)));
+        assert_eq!(motion.app_place("b", 1), Some(AppPlace::Slot(0.0)));
+        assert_eq!(motion.app_place("c", 2), Some(AppPlace::Slot(1.0)));
         // Let go there, the order not yet come: "a" from the pointer to the last place, "b" and "c" where they are.
         motion.apps(at(400), &order, Some((0, 2, None)));
-        assert_eq!(motion.app_place("a", 2), Some((AppPlace::Point(5.0, 50.0), 0.0)));
-        assert_eq!(motion.app_place("c", 1), Some((AppPlace::Slot(1.0), 1.0)));
+        assert_eq!(motion.app_place("a", 0), Some(AppPlace::From { x: 5.0, y: 50.0, to: 2, done: 0.0 }));
+        assert_eq!(motion.app_place("c", 2), Some(AppPlace::Slot(1.0)));
         // The order come so: nothing more moves once "a" is there.
         let kept: Vec<String> = ["b", "c", "a"].map(String::from).to_vec();
         assert!(motion.apps(at(500), &kept, None));
         assert!(!motion.apps(at(700), &kept, None));
-        assert_eq!(motion.app_place("a", 2), Some((AppPlace::Slot(2.0), 1.0)));
-        assert_eq!(motion.app_place("b", 0), Some((AppPlace::Slot(0.0), 1.0)));
+        assert_eq!(motion.app_place("a", 2), Some(AppPlace::Slot(2.0)));
+        assert_eq!(motion.app_place("b", 0), Some(AppPlace::Slot(0.0)));
+    }
+
+    /// One dragged over another's place and straight back: that one, just set on its way, goes back from where it is
+    /// (it went on to the place it was making, and jumped back once there); held there, nothing more is wanted.
+    #[test]
+    fn a_place_made_and_given_up_goes_back() {
+        let start = Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let order: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        let mut motion: Dots<u8> = Dots::new();
+        motion.apps(start, &order, None);
+        motion.apps(start, &order, Some((0, 1, Some((5.0, 50.0)))));
+        motion.apps(at(10), &order, Some((0, 0, Some((5.0, 10.0)))));
+        motion.apps(at(400), &order, Some((0, 0, Some((5.0, 10.0)))));
+        assert_eq!(motion.app_place("b", 1), Some(AppPlace::Slot(1.0)));
+        assert!(!motion.apps(at(500), &order, Some((0, 0, Some((5.0, 10.0))))));
+    }
+
+    /// Chosen again before its mark was there, the mark goes on from where it was, mid-way, not from where it was
+    /// going.
+    #[test]
+    fn a_choice_changed_mid_way_slides_from_where_it_is() {
+        let start = Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut marks: Dots<u8> = Dots::new();
+        marks.choose(start, &[(0, 1)]);
+        marks.choose(start, &[(0, 2)]);
+        marks.choose(at(55), &[(0, 2)]);
+        let mid = marks.slid(0, 2).unwrap().1;
+        marks.choose(at(55), &[(0, 3)]);
+        let (from, done) = marks.slid(0, 3).unwrap();
+        assert_eq!(from, Slid { from: 1, mid: Some((2, mid)) });
+        assert_eq!(done, 0.0);
     }
 
     /// The choices of an enum of no fields (quick launch's kinds), each value of another variant: one chosen after
@@ -332,7 +407,7 @@ mod tests {
         let mut marks: Dots<Kind> = Dots::new();
         marks.choose(start, &[(0, Kind::A)]);
         assert!(marks.choose(start, &[(0, Kind::B)]));
-        assert_eq!(marks.slid(Kind::B).map(|(from, _)| from), Some(Kind::A));
+        assert_eq!(marks.slid(0, Kind::B).map(|(from, _)| from.from), Some(Kind::A));
     }
 
     /// At rest the dot is small; under the pointer it grows over several frames, fast then slowing, not at once; held,

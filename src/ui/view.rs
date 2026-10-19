@@ -210,7 +210,7 @@ impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened)
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened | Hit::AppSlot(_))
     }
 
     /// The track it is, where it is one dragged along.
@@ -287,6 +287,16 @@ pub enum Tab {
     Shelf,
     Copies,
     Recent(crate::station::recent::Filter),
+}
+
+impl Tab {
+    /// Which page it is (Recent files' whatever it shows of them).
+    pub fn page(self) -> Tab {
+        match self {
+            Tab::Recent(_) => Tab::Recent(Default::default()),
+            page => page,
+        }
+    }
 }
 
 /// How far each list is scrolled (DIPs), and how far it is going (each frame a little nearer: see `ease`).
@@ -1187,10 +1197,13 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     let view = (left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
     frame.clip(view.0, view.1, view.2, view.3);
     let cell = |at: usize| (left + (at % across) as f32 * (cell_w + gap), top + (at / across) as f32 * (cell_h + APP_GAP) - scroll);
+    // (The one held: its picture's middle at the pointer, its cell round it.)
+    let picture_in = if named { (cell_w - APP_SIDE) / 2.0 } else { 0.0 };
+    let held_cell = |(px, py): (f32, f32)| (px - APP_SIDE / 2.0 - picture_in, py - APP_SIDE / 2.0);
     for at in 0..count {
         // Each in its place, or on its way to it; the one held drawn after all, where the pointer has it.
         let spot = match apps.get(at) {
-            Some((_, target)) => app_spot(scene, target, at, (cell_w, cell_h), &cell),
+            Some((_, target)) => app_spot(scene, target, at, &cell, &held_cell),
             None => Some(cell(at)),
         };
         let Some((x, y)) = spot else { continue };
@@ -1212,24 +1225,26 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         }
         placed.push((x, y, if named { cell_w } else { APP_SIDE }, cell_h, hit));
     }
-    if let Some((held, (px, py))) = scene.thumbs.app_held() {
-        // (The places it may go to, standing still: see `Hit::AppSlot`.)
+    if let Some((held, point)) = scene.thumbs.app_held() {
         placed.retain(|hit| !matches!(hit.4, Hit::App(_)));
-        for at in 0..apps.len() {
-            let (x, y) = cell(at);
-            placed.push((x, y, if named { cell_w } else { APP_SIDE }, cell_h, Hit::AppSlot(at as u16)));
-        }
         if let Some((name, target)) = apps.iter().find(|(_, target)| target == held) {
-            paint_held_app(frame, scene, name, target, px - APP_SIDE / 2.0, py - APP_SIDE / 2.0, APP_SIDE);
+            let (x, y) = held_cell(point);
+            paint_held_app(frame, scene, name, target, x + picture_in, y, APP_SIDE);
         }
     }
     frame.unclip();
     // (Its things first, as much of them as shows: a press finds a thing before the list, and the room round it.)
     hits.extend(placed.into_iter().filter_map(|hit| shown_in(hit, view)));
+    // The places one dragged among them may go to, standing still (see `Hit::AppSlot`), after all else.
+    let places: Vec<HitBox> = (0..apps.len()).map(|at| {
+        let (x, y) = cell(at);
+        (x, y, if named { cell_w } else { APP_SIDE }, cell_h, Hit::AppSlot(at as u16))
+    }).collect();
     if most > 0.0 {
         hits.push((left, top, width, tall, Hit::List(List::Apps, most.to_bits())));
     }
     hits.push((left - 4.0, top - SHELF_GAP - HEAD - HEAD_GAP, width + 8.0, tall + SHELF_GAP + HEAD + HEAD_GAP + 4.0, Hit::AppsArea));
+    hits.extend(places.into_iter().filter_map(|hit| shown_in(hit, view)));
     scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
 }
 
@@ -1243,17 +1258,17 @@ fn paint_held_app(frame: &dyn Canvas, scene: &Scene, name: &str, target: &str, x
 }
 
 /// Where the thing kept at hand `target` (at `at` among them) is drawn, its cell's corner (see `thumb::Dots::apps`):
-/// in its place (`cell` of a place), between two places as it goes from one to the other, or on its way from the
-/// pointer (its cell `size` round it); none while it is held.
-fn app_spot(scene: &Scene, target: &str, at: usize, size: (f32, f32), cell: &dyn Fn(usize) -> (f32, f32)) -> Option<(f32, f32)> {
+/// in its place (`cell` of a place), between two places as it goes from one to the other, or on its way from where
+/// it was let go (its cell there as it was drawn held: `held_cell` of the pointer) to its place; none while it is held.
+fn app_spot(scene: &Scene, target: &str, at: usize, cell: &dyn Fn(usize) -> (f32, f32), held_cell: &dyn Fn((f32, f32)) -> (f32, f32)) -> Option<(f32, f32)> {
     use super::thumb::AppPlace;
     let lerp = |a: (f32, f32), b: (f32, f32), t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
     Some(match scene.thumbs.app_place(target, at)? {
-        (AppPlace::Slot(slot), _) => {
+        AppPlace::Slot(slot) => {
             let low = slot.floor().max(0.0);
             lerp(cell(low as usize), cell(slot.ceil().max(0.0) as usize), slot - low)
         }
-        (AppPlace::Point(x, y), done) => lerp((x - size.0 / 2.0, y - size.1 / 2.0), cell(at), done),
+        AppPlace::From { x, y, to, done } => lerp(held_cell((x, y)), cell(to), done),
     })
 }
 
@@ -1285,10 +1300,12 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
         if across { (x - scroll, y) } else { (x, y - scroll) }
     };
     let inset = (RAIL_CELL - RAIL_SIDE) / 2.0;
+    // (The one held: along the rail as the pointer has it, in its middle across it.)
+    let held_cell = |(px, py): (f32, f32)| if across { (px - RAIL_CELL / 2.0, area.y + (area.h - RAIL_CELL) / 2.0) } else { (area.x + (area.w - RAIL_CELL) / 2.0, py - RAIL_CELL / 2.0) };
     for at in 0..=apps.len() {
         // Each in its place, or on its way to it; the one held drawn after all, where the pointer has it.
         let spot = match apps.get(at) {
-            Some((_, target)) => app_spot(scene, target, at, (RAIL_CELL, RAIL_CELL), &shown_cell),
+            Some((_, target)) => app_spot(scene, target, at, &shown_cell, &held_cell),
             None => Some(shown_cell(at)),
         };
         let Some((x, y)) = spot else { continue };
@@ -1308,21 +1325,23 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
     }
     // The one held, lifted where the pointer has it along the rail; the places it may go to, standing still, all of
     // the rail between them (before the first, past the last).
-    if scene.thumbs.app_held().is_some() && !apps.is_empty() {
+    if scene.thumbs.app_held().is_some() {
         placed.retain(|hit| !matches!(hit.4, Hit::App(_)));
-        for at in 0..apps.len() {
-            let (x, y) = shown_cell(at);
-            let (lead, tail) = (if at == 0 { 1000.0 } else { 0.0 }, if at + 1 == apps.len() { 1000.0 } else { 0.0 });
-            placed.push(if across { (x - lead, area.y, RAIL_CELL + lead + tail, area.h, Hit::AppSlot(at as u16)) } else { (area.x, y - lead, area.w, RAIL_CELL + lead + tail, Hit::AppSlot(at as u16)) });
-        }
     }
-    if let Some((held, (px, py))) = scene.thumbs.app_held() {
+    if let Some((held, point)) = scene.thumbs.app_held() {
         if let Some((name, target)) = apps.iter().find(|(_, target)| target == held) {
-            let (x, y) = if across { (px - RAIL_CELL / 2.0, area.y + (area.h - RAIL_CELL) / 2.0) } else { (area.x + (area.w - RAIL_CELL) / 2.0, py - RAIL_CELL / 2.0) };
+            let (x, y) = held_cell(point);
             paint_held_app(frame, scene, name, target, x + inset, y + inset, RAIL_SIDE);
         }
     }
     frame.unclip();
+    // The places one dragged among them may go to, standing still (see `Hit::AppSlot`), all of the rail between them
+    // (before the first, past the last, the "+" over it): after all else.
+    let places: Vec<HitBox> = (0..apps.len()).map(|at| {
+        let (x, y) = shown_cell(at);
+        let (lead, tail) = (if at == 0 { 1000.0 } else { 0.0 }, if at + 1 == apps.len() { 1000.0 } else { 0.0 });
+        if across { (x - lead, area.y, RAIL_CELL + lead + tail, area.h, Hit::AppSlot(at as u16)) } else { (area.x, y - lead, area.w, RAIL_CELL + lead + tail, Hit::AppSlot(at as u16)) }
+    }).collect();
     // (Only what shows of them is pressed.)
     hits.extend(placed.into_iter().filter_map(|hit| shown_in(hit, (view_x, view_y, view_w, view_h))));
     if most > 0.0 {
@@ -1330,6 +1349,7 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
     }
     // Where something dragged may be dropped to be kept at hand: all of the rail (after its things).
     hits.push((area.x, area.y, area.w, area.h, Hit::AppsArea));
+    hits.extend(places.into_iter().filter_map(|hit| shown_in(hit, (view_x, view_y, view_w, view_h))));
     // The foot: the pin (lit while pinned), the settings, as the bar has them and as far apart.
     for (at, hit) in [Hit::Pin, Hit::Settings].into_iter().enumerate() {
         let along = at as f32 * (BUTTON + BUTTON_GAP);
@@ -2760,8 +2780,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 {
                     let boxes: Vec<(f32, f32)> = (0..views.len()).map(|at| (x0 + 2.0 + at as f32 * cell, cell)).collect();
                     let at = |view: crate::settings::NotesView| views.iter().position(|(one, _)| *one == view);
-                    let slid = scene.thumbs.slid(Hit::NotesShow(shown)).and_then(|(from, done)| match from {
-                        Hit::NotesShow(from) => Some((at(from)?, done)),
+                    let slid = slid_at(scene.thumbs.slid(CHOICE_NOTES, Hit::NotesShow(shown)), |from| match from {
+                        Hit::NotesShow(from) => at(from),
                         _ => None,
                     });
                     if theme.skin == Skin::Glass {
@@ -3123,8 +3143,8 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         let boxes: Vec<(f32, f32)> = laid.iter().map(|tab| (tab.5, tab.6)).collect();
         let at = |page: Tab| laid.iter().position(|tab| tab.0 == page);
         let chosen = at(tab).unwrap_or(0);
-        let slid = scene.thumbs.slid(Hit::Tab(tab)).and_then(|(from, done)| match from {
-            Hit::Tab(from) => Some((at(from)?, done)),
+        let slid = slid_at(scene.thumbs.slid(CHOICE_PAGE, Hit::Tab(tab.page())), |from| match from {
+            Hit::Tab(from) => laid.iter().position(|one| one.0.page() == from),
             _ => None,
         });
         if glass {
@@ -3177,7 +3197,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
 /// width, all `pills` (top, height) down) on a pill of the sheet's glass, as the lanes lie on it (whiter than what is
 /// round it, a rim lit along its top, fainter round its foot), `slid` from the one chosen before so far (eased: see
 /// `thumb::Dots::choose`); the one under the pointer, `hovered`, lit faintly. What each says is drawn over it after.
-pub(crate) fn glass_choice(frame: &dyn Canvas, theme: &Theme, pills: (f32, f32), boxes: &[(f32, f32)], chosen: usize, slid: Option<(usize, f32)>, hovered: Option<usize>) {
+pub(crate) fn glass_choice(frame: &dyn Canvas, theme: &Theme, pills: (f32, f32), boxes: &[(f32, f32)], chosen: usize, slid: Option<SlidAt>, hovered: Option<usize>) {
     let (py, ph) = pills;
     let dark = theme.dark;
     if let Some(&(x, w)) = hovered.filter(|at| *at != chosen).and_then(|at| boxes.get(at)) {
@@ -3189,19 +3209,43 @@ pub(crate) fn glass_choice(frame: &dyn Canvas, theme: &Theme, pills: (f32, f32),
 
 /// Where the mark of what is chosen (`chosen` of `boxes`, each its left and width) is: on it, or on its way to it from
 /// the one chosen before (`slid`, so far: see `thumb::Dots::choose`).
-pub(crate) fn slid_box(boxes: &[(f32, f32)], chosen: usize, slid: Option<(usize, f32)>) -> (f32, f32) {
-    let (to_x, to_w) = boxes[chosen];
-    match slid.and_then(|(from, done)| Some((*boxes.get(from)?, done))) {
-        Some(((from_x, from_w), done)) => (from_x + (to_x - from_x) * done, from_w + (to_w - from_w) * done),
-        None => (to_x, to_w),
-    }
+pub(crate) fn slid_box(boxes: &[(f32, f32)], chosen: usize, slid: Option<SlidAt>) -> (f32, f32) {
+    let lerp = |a: (f32, f32), b: (f32, f32), t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+    let to = boxes[chosen];
+    let Some(slid) = slid else { return to };
+    let Some(&from) = boxes.get(slid.from) else { return to };
+    // (From mid-way, where it was chosen again on its way.)
+    let start = match slid.mid.and_then(|(mid, t)| Some((*boxes.get(mid)?, t))) {
+        Some((mid, t)) => lerp(from, mid, t),
+        None => from,
+    };
+    lerp(start, to, slid.done)
+}
+
+/// A choice's mark on its way (see `thumb::Dots::slid`), by the places of what it slides from among the boxes it is
+/// drawn over: from which, mid-way to which and how far, and how far it has come since.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct SlidAt {
+    pub from: usize,
+    pub mid: Option<(usize, f32)>,
+    pub done: f32,
+}
+
+/// `slid` by the places of what it slides from (`at`: where each is among the boxes; none, where one no longer is).
+pub(crate) fn slid_at<K: Copy>(slid: Option<(super::thumb::Slid<K>, f32)>, at: impl Fn(K) -> Option<usize>) -> Option<SlidAt> {
+    let (slid, done) = slid?;
+    let mid = match slid.mid {
+        Some((mid, t)) => Some((at(mid)?, t)),
+        None => None,
+    };
+    Some(SlidAt { from: at(slid.from)?, mid, done })
 }
 
 /// The mark under what is chosen, as Windows 11 (a short bar of its accent under its middle, `bar` long) and chart
 /// paper (a line of ink under all of it) draw it, `y` down, on its way to it from the one before as it slides (see
 /// `slid_box`). Glass marks it otherwise (see `glass_choice`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn choice_mark(frame: &dyn Canvas, theme: &Theme, boxes: &[(f32, f32)], chosen: usize, slid: Option<(usize, f32)>, y: f32, bar: f32, inset: f32) {
+pub(crate) fn choice_mark(frame: &dyn Canvas, theme: &Theme, boxes: &[(f32, f32)], chosen: usize, slid: Option<SlidAt>, y: f32, bar: f32, inset: f32) {
     let (x, w) = slid_box(boxes, chosen, slid);
     match theme.skin {
         Skin::Fluent => frame.fill_rounded(super::theme::accent(theme.dark), x + w / 2.0 - bar / 2.0, y, bar, 3.0, 1.5),
@@ -3231,6 +3275,22 @@ pub(crate) fn glass_pill(frame: &dyn Canvas, theme: &Theme, (x, py, w, ph): (f32
     }
     let (top, foot) = if dark { (Color::hex(0xFFFFFF, 0.3), Color::hex(0xFFFFFF, 0.08)) } else { (Color::hex(0xFFFFFF, 0.95), Color::hex(0xFFFFFF, 0.4)) };
     frame.stroke_rounded(Fill::Down { top: py + 0.5, from: top, bottom: py + ph, to: foot }, x + 0.5, py + 0.5, w - 1.0, ph - 1.0, radius - 0.5, 1.0);
+}
+
+/// The choices whose marks slide (see `thumb::Dots::choose`): the station's pages, the notes' views, the recent files'
+/// filters.
+pub const CHOICE_PAGE: usize = 0;
+pub const CHOICE_NOTES: usize = 1;
+pub const CHOICE_FILTER: usize = 2;
+
+/// What is chosen of the station's pages, of the notes' views and of the recent files' filters (that one while its
+/// page shows), for their marks to slide (see `thumb::Dots::choose`).
+pub fn choices(tab: Tab) -> Vec<(usize, Hit)> {
+    let mut chosen = vec![(CHOICE_PAGE, Hit::Tab(tab.page())), (CHOICE_NOTES, Hit::NotesShow(crate::notes::view()))];
+    if matches!(tab, Tab::Recent(_)) {
+        chosen.push((CHOICE_FILTER, Hit::Tab(tab)));
+    }
+    chosen
 }
 
 /// A count's mark: a pill `BADGE` tall, as wide as its figures and the room either side of them (see `badge_width`).
@@ -3596,8 +3656,8 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
     if theme.skin == Skin::Glass {
         let boxes: Vec<(f32, f32)> = laid.iter().map(|one| (one.2, one.3)).collect();
         let at = |choice: Filter| laid.iter().position(|one| one.0 == choice);
-        let slid = scene.thumbs.slid(Hit::Tab(Tab::Recent(filter))).and_then(|(from, done)| match from {
-            Hit::Tab(Tab::Recent(from)) => Some((at(from)?, done)),
+        let slid = slid_at(scene.thumbs.slid(CHOICE_FILTER, Hit::Tab(Tab::Recent(filter))), |from| match from {
+            Hit::Tab(Tab::Recent(from)) => at(from),
             _ => None,
         });
         let hovered = laid.iter().position(|one| scene.hover == Some(Hit::Tab(Tab::Recent(one.0))));
@@ -4764,8 +4824,8 @@ six".into()));
         within(&hits, top, APP_ROWS as f32 * APP_CELL_H + (APP_ROWS - 1) as f32 * APP_GAP, "apps");
     }
 
-    /// The panel's rail with one held: a point at each of its places finds that place first (what the panel takes it
-    /// to go to), whatever else lies there.
+    /// The panel's rail: a point at each of its places finds that place (what the panel takes one held to go to),
+    /// whatever else lies there, held or not (the places are there before the first frame drawn with one held).
     #[test]
     #[cfg(feature = "studio")]
     fn a_rail_s_places_are_found_while_one_is_dragged() {
@@ -4787,8 +4847,9 @@ six".into()));
         for at in 0..5u16 {
             let Some(&(x, y, w, h, _)) = hits.iter().find(|hit| hit.4 == Hit::AppSlot(at)) else { panic!("no place {at}: {hits:?}") };
             let (px, py) = (x + w / 2.0, y + h.min(RAIL_CELL) / 2.0 + if at == 0 { h - RAIL_CELL } else { 0.0 });
-            let first = hits.iter().find(|(hx, hy, hw, hh, _)| px >= *hx && px < hx + hw && py >= *hy && py < hy + hh).map(|hit| hit.4);
-            assert_eq!(first, Some(Hit::AppSlot(at)), "at {at}");
+            // (As the panel finds it: the first place among all that lies there, whatever else is drawn there.)
+            let place = hits.iter().filter(|(hx, hy, hw, hh, _)| px >= *hx && px < hx + hw && py >= *hy && py < hy + hh).find_map(|hit| if let Hit::AppSlot(slot) = hit.4 { Some(slot) } else { None });
+            assert_eq!(place, Some(at), "at {at}");
         }
     }
 
