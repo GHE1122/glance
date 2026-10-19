@@ -635,82 +635,43 @@ fn markdown_plain(line: &str) -> String {
     line.replace("**", "").replace('`', "").replace("__", "")
 }
 
-/// A note's colour as its card wears it: the colour's mark, and its card's ground in `theme` (as the mockup has them):
-/// on glass a wash of the colour's light shade; on Windows 11 its sheet a little of the colour; on chart paper a sheet
-/// of its own paper, the colour only in its mark.
-pub(crate) fn note_colours(theme: &Theme, colour: crate::notes::Colour) -> (Color, Color) {
+/// A note's colour: its dot on the panel and on its page (the same in every skin: its card is the skin's own).
+pub(crate) fn note_colour(colour: crate::notes::Colour) -> Color {
     use crate::notes::Colour;
-    let mark = match colour {
+    match colour {
         Colour::Blue => Color::hex(0x5B8DEF, 1.0),
         Colour::Yellow => Color::hex(0xE8B64A, 1.0),
         Colour::Green => Color::hex(0x4FBF82, 1.0),
         Colour::Pink => Color::hex(0xEF7AA5, 1.0),
         Colour::Purple => Color::hex(0x9B7BF0, 1.0),
         Colour::Grey => Color::hex(0x8E949C, 1.0),
-    };
-    let ground = match theme.skin {
-        Skin::Glass => match (colour, theme.dark) {
-            (Colour::Blue, false) => Color::hex(0x78AAFF, 0.30),
-            (Colour::Yellow, false) => Color::hex(0xFFD25A, 0.38),
-            (Colour::Green, false) => Color::hex(0x6ED296, 0.32),
-            (Colour::Pink, false) => Color::hex(0xFF8CB4, 0.30),
-            (Colour::Purple, false) => Color::hex(0xAA8CFF, 0.30),
-            (Colour::Grey, false) => Color::hex(0xA0A6B0, 0.20),
-            (Colour::Blue, true) => Color::hex(0x6EA0FF, 0.26),
-            (Colour::Yellow, true) => Color::hex(0xFFC850, 0.24),
-            (Colour::Green, true) => Color::hex(0x64C88C, 0.24),
-            (Colour::Pink, true) => Color::hex(0xFF82AA, 0.24),
-            (Colour::Purple, true) => Color::hex(0xA082FF, 0.26),
-            (Colour::Grey, true) => Color::hex(0x969CA6, 0.26),
-        },
-        // (The sheet's colour, so much of the note's in it.)
-        Skin::Fluent => {
-            let sheet = if theme.dark { Color::hex(0x282A2E, 1.0) } else { Color::hex(0xFAFBFC, 1.0) };
-            let k = 0.16;
-            Color { r: sheet.r + (mark.r - sheet.r) * k, g: sheet.g + (mark.g - sheet.g) * k, b: sheet.b + (mark.b - sheet.b) * k, a: 0.94 }
-        }
-        Skin::Paper => {
-            if theme.dark { Color::hex(0x1B2D28, 1.0) } else { Color::hex(0xF7F9F5, 1.0) }
-        }
-    };
-    (mark, ground)
-}
-
-/// A note's card (or the top of one, `strip`: what the deck shows of it over the next) at (`x`, `y`), `w` × `h`, as
-/// its skin draws it: glass a wash with light along its top; Windows 11 its sheet with a band of its colour along
-/// its top; chart paper its paper, ruled round, a band of its colour down its left. Its corners rounded by `radius`.
-#[allow(clippy::too_many_arguments)]
-fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, x: f32, y: f32, w: f32, h: f32, radius: f32) {
-    let (mark, ground) = note_colours(theme, colour);
-    match theme.skin {
-        Skin::Glass => {
-            frame.fill_rounded(ground, x, y, w, h, radius);
-            frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, if theme.dark { 0.10 } else { 0.35 })), x, y, w, h, radius, 1.0);
-        }
-        Skin::Fluent => {
-            frame.fill_rounded(ground, x, y, w, h, radius);
-            frame.stroke_rounded(Fill::Solid(theme.rule), x, y, w, h, radius, 1.0);
-            frame.clip(x, y, w, 4.0);
-            frame.fill_rounded(mark, x, y, w, h.min(2.0 * radius + 4.0), radius);
-            frame.unclip();
-        }
-        Skin::Paper => {
-            frame.fill_rounded(ground, x, y, w, h, radius);
-            frame.stroke_rounded(Fill::Solid(theme.rule), x, y, w, h, radius, 1.0);
-            frame.clip(x, y, 5.0, h);
-            frame.fill_rounded(mark, x, y, 2.0 * radius + 5.0, h, radius);
-            frame.unclip();
-        }
     }
 }
 
-/// How round a note's card's corners are in `theme`: glass's round, Windows 11's a little, chart paper's a little
-/// more (the owner's: the mockup's square ones too stark).
+/// A note's card at (`x`, `y`), `w` × `h`, as its skin draws what lies on its sheet (the station's things' plates):
+/// the skin's track, ruled round on Windows 11 and chart paper; no colour of its own (the note's colour is its dot,
+/// see `note_dot`: a card washed in it stood out from all else on the panel). Its corners rounded by `radius`.
+fn note_card_ground(frame: &dyn Canvas, theme: &Theme, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+    frame.fill_rounded(theme.track, x, y, w, h, radius);
+    if theme.skin != Skin::Glass {
+        frame.stroke_rounded(Fill::Solid(theme.rule), x, y, w, h, radius, 1.0);
+    }
+}
+
+/// A note's colour as it is shown on the panel: a dot of it, its middle at (`x` + its radius, `middle`); the room it
+/// takes before its title.
+fn note_dot(frame: &dyn Canvas, colour: crate::notes::Colour, x: f32, middle: f32) -> f32 {
+    frame.fill_circle(note_colour(colour), Point { x: x + 3.5, y: middle }, 3.5);
+    15.0
+}
+
+/// How round a note's card's corners are in `theme`: as its skin rounds what lies on its sheet (glass's the most,
+/// chart paper's a little: the owner's, its square ones too stark).
 fn note_radius(theme: &Theme, small: bool) -> f32 {
     match theme.skin {
-        Skin::Glass => if small { 12.0 } else { 16.0 },
-        Skin::Fluent => 6.0,
-        Skin::Paper => 8.0,
+        Skin::Glass => if small { 12.0 } else { 14.0 },
+        Skin::Fluent => 4.0,
+        Skin::Paper => 6.0,
     }
 }
 
@@ -729,23 +690,14 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
     }
     let lit = |at: usize| notes.get(at).is_some_and(|note| scene.hover == Some(Hit::Note(note.at)));
     let bold = |font: Font, weight: f32| Font { weight, ..font };
-    // (On glass a dot of its colour by its title: the others mark it along an edge.)
-    let dot = |frame: &dyn Canvas, note: &NoteCard, x: f32, y: f32| {
-        if theme.skin == Skin::Glass {
-            frame.fill_circle(note_colours(theme, note.colour).0, Point { x: x + 4.0, y }, 4.0);
-            16.0
-        } else {
-            0.0
-        }
-    };
-    // (Words start clear of a band down the left on chart paper.)
-    let inset = if theme.skin == Skin::Paper { 16.0 } else { 14.0 };
+    let dot = |frame: &dyn Canvas, note: &NoteCard, x: f32, y: f32| note_dot(frame, note.colour, x, y);
+    let inset = 14.0;
     frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
     match view {
         NotesView::Deck => {
-            // The others' titles as the tops of cards stacked over the last written, each lying over the one before
-            // it (a strip of each shows), as many as leave it a card's room, the rest scrolled to; the last written
-            // whole at the foot.
+            // The others' titles, a row each over the last written, ruled apart as the skin rules (the same lines as
+            // between its lanes), as many as leave it a card's room, the rest scrolled to; the last written whole at
+            // the foot, on a card.
             let others = notes.len() - 1;
             let room = (others as f32 * NOTE_STRIP).min((tall - NOTE_CARD).max(0.0));
             let (most, scroll) = notes_scroll(scene, others as f32 * NOTE_STRIP, room);
@@ -756,12 +708,11 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 if y + NOTE_STRIP < top || y > top + room {
                     continue;
                 }
-                // (As tall as reaches under the next: its foot hidden there, as a card's in a stack.)
-                note_card_ground(frame, theme, note.colour, left, y, width, NOTE_STRIP + radius + 4.0, radius);
                 if lit(at) {
-                    frame.fill_rounded(theme.hover, left, y, width, NOTE_STRIP, radius.min(NOTE_STRIP / 2.0));
+                    frame.fill_rounded(theme.hover, left, y + 1.0, width, NOTE_STRIP - 2.0, theme.control_radius.max(6.0).min(NOTE_STRIP / 2.0));
                 }
-                let line = y + (NOTE_STRIP - LINE) / 2.0 + if theme.skin == Skin::Fluent { 2.0 } else { 0.0 };
+                frame.fill(theme.rule, left + inset, y + NOTE_STRIP - 1.0, width - 2.0 * inset, 1.0);
+                let line = y + (NOTE_STRIP - LINE) / 2.0;
                 let x = left + inset + dot(frame, note, left + inset, line + LINE / 2.0);
                 let when_w = frame.measure(&note.when, theme.small);
                 frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), width - (x - left) - when_w - 24.0), bold(theme.body, 600.0), theme.text, x, line, width - (x - left) - when_w - 24.0, Align::Start);
@@ -775,15 +726,17 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
             }
             let y = top + room;
             let front = &notes[0];
-            let card = tall - (y - top);
-            note_card_ground(frame, theme, front.colour, left, y, width, card, radius);
+            let card_top = y + if others > 0 { 6.0 } else { 0.0 };
+            let card = tall - (card_top - top);
+            let y = card_top;
+            note_card_ground(frame, theme, left, y, width, card, radius);
             if lit(0) {
-                frame.stroke_rounded(Fill::Solid(note_colours(theme, front.colour).0.alpha(0.8)), left, y, width, card, radius, 1.5);
+                frame.fill_rounded(theme.hover, left, y, width, card, radius);
             }
             let x = left + inset;
-            let head = y + 12.0 + if theme.skin == Skin::Fluent { 2.0 } else { 0.0 };
-            frame.icon(Icon::File, Point { x: x + 6.0, y: head + LINE / 2.0 }, 12.0, theme.text3);
-            frame.text(&front.when, theme.small, theme.text2, x + 18.0, head + 1.0, width - (x - left) - 30.0, Align::Start);
+            let head = y + 12.0;
+            let dot_w = dot(frame, front, x, head + LINE / 2.0);
+            frame.text(&front.when, theme.small, theme.text3, x + dot_w, head + 1.0, width - (x - left) - dot_w - 14.0, Align::Start);
             let title = Font { size: theme.title.size + 1.0, weight: 700.0, ..theme.title };
             frame.text(&fitted(frame, &front.title, title, width - (x - left) - 14.0), title, theme.text, x, head + LINE + 6.0, width - (x - left) - 14.0, Align::Start);
             for (at, line) in front.lines.iter().enumerate() {
@@ -807,12 +760,12 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 if y + NOTE_CARD < top || y > top + tall {
                     continue;
                 }
-                note_card_ground(frame, theme, note.colour, x, y, card_w, NOTE_CARD, radius);
+                note_card_ground(frame, theme, x, y, card_w, NOTE_CARD, radius);
                 if lit(at) {
-                    frame.stroke_rounded(Fill::Solid(note_colours(theme, note.colour).0.alpha(0.8)), x, y, card_w, NOTE_CARD, radius, 1.5);
+                    frame.fill_rounded(theme.hover, x, y, card_w, NOTE_CARD, radius);
                 }
-                let inner = if theme.skin == Skin::Paper { 14.0 } else { 11.0 };
-                let head = y + 10.0 + if theme.skin == Skin::Fluent { 2.0 } else { 0.0 };
+                let inner = 11.0;
+                let head = y + 10.0;
                 let tx = x + inner + dot(frame, note, x + inner, head + LINE / 2.0);
                 let room = card_w - (tx - x) - 10.0;
                 frame.text(&fitted(frame, &note.title, bold(theme.body, 700.0), room), bold(theme.body, 700.0), theme.text, tx, head, room, Align::Start);
@@ -827,7 +780,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
             }
         }
         NotesView::List => {
-            // A row each: a band of its colour, its title over its first line, when it was written.
+            // A row each: a dot of its colour, its title over its first line, when it was written; ruled apart.
             let (most, scroll) = notes_scroll(scene, notes.len() as f32 * NOTE_ROW, tall);
             for (at, note) in notes.iter().enumerate() {
                 let y = top + at as f32 * NOTE_ROW - scroll;
@@ -837,10 +790,12 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 if lit(at) {
                     frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, NOTE_ROW - 2.0, theme.control_radius.max(6.0));
                 }
-                let (mark, _) = note_colours(theme, note.colour);
-                frame.fill_rounded(mark, left, y + 7.0, 4.0, NOTE_ROW - 14.0, 2.0);
+                note_dot(frame, note.colour, left, y + 4.0 + LINE / 2.0);
+                if at + 1 < notes.len() {
+                    frame.fill(theme.rule, left + 15.0, y + NOTE_ROW - 1.0, width - 15.0, 1.0);
+                }
                 let when_w = frame.measure(&note.when, theme.small);
-                let x = left + 14.0;
+                let x = left + 15.0;
                 frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), width - 24.0 - when_w), bold(theme.body, 600.0), theme.text, x, y + 4.0, width - 24.0 - when_w, Align::Start);
                 frame.text(&fitted(frame, note.lines.first().map_or("", String::as_str), theme.small, width - 24.0), theme.small, theme.text3, x, y + 4.0 + LINE, width - 24.0, Align::Start);
                 frame.text(&note.when, theme.small, theme.text3, left, y + (NOTE_ROW - LINE) / 2.0, width, Align::End);
@@ -2485,23 +2440,28 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 frame.text(device, theme.small, theme.text3, left + title_width + 8.0, row + 1.0, width, Align::Start);
                 let button = y + (HEAD - MEDIA_ROW) / 2.0;
                 pressed(frame, scene, hits, Hit::NewNote, Icon::Add, left + width - MEDIA_ROW, button, false);
-                // Its views, side by side on a ground of their own, the one shown lit (as the mockup has them).
+                // Its views side by side, the one shown marked as the skin marks the station's chosen tab: glass's on
+                // a face of its own (the views on a ground of their own), Windows 11's a bar of its accent under it,
+                // chart paper's underlined in ink.
                 let shown = crate::notes::view();
                 let views = [(crate::settings::NotesView::Deck, Icon::Layers), (crate::settings::NotesView::Cards, Icon::LayoutGrid), (crate::settings::NotesView::List, Icon::List)];
                 let cell = MEDIA_ROW + 2.0;
                 let wide = views.len() as f32 * cell + 4.0;
                 let x0 = left + width - MEDIA_ROW - 8.0 - wide;
                 let round = theme.control_radius.min(MEDIA_ROW / 2.0 + 2.0);
-                frame.fill_rounded(theme.track, x0, button - 2.0, wide, MEDIA_ROW + 4.0, round);
+                if theme.skin == Skin::Glass {
+                    frame.fill_rounded(theme.track, x0, button - 2.0, wide, MEDIA_ROW + 4.0, (MEDIA_ROW + 4.0) / 2.0);
+                }
                 for (at, (view, icon)) in views.into_iter().enumerate() {
                     let x = x0 + 2.0 + at as f32 * cell;
                     let hit = Hit::NotesShow(view);
                     let chosen = view == shown;
-                    if chosen {
-                        let face = if theme.skin == Skin::Paper { theme.text.alpha(0.12) } else { Color::hex(0xFFFFFF, if theme.dark { 0.16 } else { 0.9 }) };
-                        frame.fill_rounded(face, x, button, cell, MEDIA_ROW, (round - 2.0).max(2.0));
-                    } else if scene.hover == Some(hit) {
-                        frame.fill_rounded(theme.hover, x, button, cell, MEDIA_ROW, (round - 2.0).max(2.0));
+                    match theme.skin {
+                        Skin::Glass if chosen => frame.fill_rounded(Color::hex(0xFFFFFF, if theme.dark { 0.16 } else { 0.9 }), x, button, cell, MEDIA_ROW, MEDIA_ROW / 2.0),
+                        Skin::Fluent if chosen => frame.fill_rounded(super::theme::accent(theme.dark), x + cell / 2.0 - 7.0, button + MEDIA_ROW + 1.0, 14.0, 3.0, 1.5),
+                        Skin::Paper if chosen => frame.fill(theme.text, x + 4.0, button + MEDIA_ROW + 1.0, cell - 8.0, 2.0),
+                        _ if scene.hover == Some(hit) => frame.fill_rounded(theme.hover, x, button, cell, MEDIA_ROW, if theme.skin == Skin::Glass { MEDIA_ROW / 2.0 } else { round }),
+                        _ => {}
                     }
                     let ink = if chosen { theme.text } else { theme.text3 };
                     frame.icon(icon, Point { x: x + cell / 2.0, y: button + MEDIA_ROW / 2.0 }, 14.0, ink);
@@ -3742,6 +3702,83 @@ otepad.exe", "Notepad"),
                 }
             }
             // (The pictures made meanwhile, on the station's own thread: drawn again with them.)
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    }
+
+    /// The workbench (the time, the station, the notes, quick launch as its rail) beside the readings' panel (the
+    /// processor, memory), each on its skin's ground over a wallpaper, as the panels are drawn: for each skin and its
+    /// light and dark (`cargo test --features studio --lib -- --ignored workbench_looks` writes
+    /// `target/looks/<skin>-<light|dark>.png`).
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn workbench_looks() {
+        use super::*;
+        use crate::notes::{Colour, Note};
+        use crate::station::shelf::{Item, What};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        crate::station::thumbs::start(|| {});
+        let now = crate::station::now_ms();
+        let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
+        let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0 };
+        crate::station::run::pretend(vec![
+            item(1, What::Files { paths: vec![file("website/apple-touch-icon.png")], kept: Vec::new() }, 400),
+            item(2, What::Text { text: "会议改到周四下午三点\n地点：二楼小会议室".into() }, 180),
+            item(3, What::Files { paths: vec![file("docs")], kept: Vec::new() }, 60),
+            item(4, What::Files { paths: vec![file("Cargo.toml")], kept: Vec::new() }, 20),
+        ], ShelfView::Cards);
+        let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into() };
+        crate::station::apps::pretend(vec![
+            app(r"C:\Windows\explorer.exe", "Explorer"),
+            app(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "Calculator"),
+            app(r"C:\Windows\System32\cmd.exe", "Command"),
+        ]);
+        let note = |name: &str, text: &str, colour: Colour, ago_min: u64| Note { name: name.into(), text: text.into(), colour, stamp: crate::notes::store::Stamp { bytes: 0, written_ms: now - ago_min * 60_000, digest: 0 } };
+        crate::notes::pretend(vec![
+            note("a.md", "# 本周要做的事\n- [x] 发布 0.3.13\n- [ ] 中转站三种视图\n周五前合并", Colour::Blue, 3),
+            note("b.md", "显卡价格记录\n5070 Ti 京东 6299", Colour::Yellow, 60 * 20),
+            note("c.md", "周末开车听的歌\n- 敢爱敢做", Colour::Green, 60 * 50),
+        ]);
+        let (width, height, px) = (900u32, 760u32, 1.5f32);
+        let desktop = crate::ui::wallpaper::picture(r"C:\Windows\Web\Wallpaper\Windows\img19.jpg", (width as f32 * px) as u32, (height as f32 * px) as u32).expect("wallpaper");
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{}/target/looks", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        for pass in 0..2 {
+            for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+                for dark in [false, true] {
+                    let theme = Theme::new(skin, dark);
+                    let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+                    let history: &'static [Sample] = Box::leak(Box::new([sample(Some(4200.0), None, None)]));
+                    let seen = Seen::of(history);
+                    let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+                    let made = |ids: &[&str]| -> Vec<Lane> { ids.iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect() };
+                    let bench = made(&["time", "station", "notes", "apps"]);
+                    let readings = made(&["cpu", "memory"]);
+                    let heights = |lanes: &[Lane]| -> Vec<f32> { lanes.iter().map(|lane| lane.height(&theme)).collect() };
+                    let bench_layout = Layout::with_columns(heights(&bench)[..3].to_vec(), 1, &theme).with_rail(3, RailSide::Start);
+                    let readings_layout = Layout::with_columns(heights(&readings), 1, &theme);
+                    let pixels = gfx.draw_offscreen(((width as f32 * px) as u32, (height as f32 * px) as u32), px, |frame| {
+                        if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
+                            unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+                        }
+                        let behind = desktop.bitmap(&frame.dc, px).ok();
+                        for (lanes, layout, at) in [(&bench, &bench_layout, (30.0f32, 30.0f32)), (&readings, &readings_layout, (40.0 + bench_layout.width() + 30.0, 30.0))] {
+                            let backdrop = behind.as_ref().map(|bitmap| (bitmap, windows_numerics::Vector2 { X: at.0, Y: at.1 }, desktop.digest, px));
+                            let picture = crate::ui::render::Picture { scene: &scene, lanes, layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: None, backdrop, frost: 0.4, rough: false };
+                            let mut layers = crate::ui::render::PanelLayers::default();
+                            let _ = layers.draw(frame, &picture, windows_numerics::Matrix3x2::translation(at.0, at.1), px);
+                        }
+                    }).expect("drawn");
+                    if pass == 1 {
+                        let name = format!("{}-{}.png", match skin { Skin::Glass => "glass", Skin::Fluent => "fluent", Skin::Paper => "paper" }, if dark { "dark" } else { "light" });
+                        crate::studio::save_png(&out.join(name), (width as f32 * px) as u32, (height as f32 * px) as u32, &pixels).unwrap();
+                    }
+                }
+            }
             std::thread::sleep(std::time::Duration::from_millis(1500));
         }
     }

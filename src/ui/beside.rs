@@ -1516,9 +1516,8 @@ impl Beside {
             self.hits = hits;
             return;
         };
-        let (mark, _) = super::view::note_colours(&theme, writing.colour);
-        // Its colour over all of it, faintly; its mark by when it was written.
-        frame.fill(mark.alpha(if theme.dark { 0.10 } else { 0.08 }), 0.0, 0.0, width, height);
+        // Its colour's dot by when it was written (the page the skin's own, as the note's card on the panel is).
+        let mark = super::view::note_colour(writing.colour);
         frame.fill_circle(mark, Point { x: PAD + 5.0, y: 26.0 }, 5.0);
         let when = super::text::since(writing.written_ms, crate::station::now_ms(), lang);
         let said = match (&writing.name, lang) {
