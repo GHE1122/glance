@@ -834,6 +834,15 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
             // the last written, which shows the last of them through it on glass.)
             let (side, under_room) = (12.0, room + foot + 12.0);
             let shows = |at: usize| strip_y(at) + NOTE_STRIP >= top && strip_y(at) <= top + room;
+            // On glass, each the narrower the farther back it lies (by so much a strip it is above the last written,
+            // so as it scrolls too), as a stack drawn away: its sides inside the corners of the one over it. Of the
+            // same width, a card under showed sharp in the corners of the one over it and blurred under it, broken
+            // off at its edge.
+            let recede = if theme.skin == Skin::Glass { radius * 2.0 / 3.0 } else { 0.0 };
+            let across = |at: usize| {
+                let back = recede * ((top + room - strip_y(at)) / NOTE_STRIP).max(0.0);
+                (left + back, width - 2.0 * back)
+            };
             let strip = |frame: &dyn Canvas, at: usize, plain: bool| {
                 let note = &notes[at];
                 let y = strip_y(at);
@@ -841,22 +850,29 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 let under = |frame: &dyn Canvas| {
                     frame.clip(left - side, top - 2.0, width + 2.0 * side, under_room);
                     for below in (1..at).filter(|below| shows(*below)) {
-                        note_card_ground(frame, theme, notes[below].colour, (left, strip_y(below), width, NOTE_STRIP + foot), radius, false, true, None);
+                        let (x, w) = across(below);
+                        note_card_ground(frame, theme, notes[below].colour, (x, strip_y(below), w, NOTE_STRIP + foot), radius, false, true, None);
                     }
                     frame.unclip();
                 };
-                note_card_ground(frame, theme, note.colour, (left, y, width, NOTE_STRIP + foot), radius, !plain && lit(at), plain, (at > 1).then_some(&under as Under));
+                let (x, w) = across(at);
+                note_card_ground(frame, theme, note.colour, (x, y, w, NOTE_STRIP + foot), radius, !plain && lit(at), plain, (at > 1).then_some(&under as Under));
                 let (title_ink, _, faint) = note_inks(theme, note.colour);
                 let line = y + (NOTE_STRIP - LINE) / 2.0 + banded;
                 let when_w = frame.measure(&note.when, theme.small);
-                let room_w = width - inset - when_w - 24.0;
-                frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), room_w), bold(theme.body, 600.0), title_ink, left + inset, line, room_w, Align::Start);
-                frame.text(&note.when, theme.small, faint, left, line + 1.0, width - 14.0, Align::End);
+                let room_w = w - inset - when_w - 24.0;
+                frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), room_w), bold(theme.body, 600.0), title_ink, x + inset, line, room_w, Align::Start);
+                frame.text(&note.when, theme.small, faint, x, line + 1.0, w - 14.0, Align::End);
             };
             frame.clip(left - side, top - 2.0, width + 2.0 * side, under_room);
             for at in (1..notes.len()).filter(|at| shows(*at)) {
+                // (Up to the card lying on it: under that, it is seen only through it, frosted on glass, not sharp.)
+                let covered = if at + 1 < notes.len() { strip_y(at + 1) } else { top + room };
+                frame.clip(left - side, top - 2.0, width + 2.0 * side, covered - (top - 2.0));
                 strip(frame, at, false);
-                hits.extend(shown_in((left, strip_y(at), width, NOTE_STRIP, Hit::Note(notes[at].at)), (left - 4.0, top, width + 8.0, room)));
+                frame.unclip();
+                let (x, w) = across(at);
+                hits.extend(shown_in((x, strip_y(at), w, NOTE_STRIP, Hit::Note(notes[at].at)), (left - 4.0, top, width + 8.0, room)));
             }
             frame.unclip();
             // (After its strips: a press finds a strip before the list they are on.)
