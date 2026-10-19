@@ -2885,6 +2885,9 @@ impl Widget {
         moving |= self.thumbs.step(now, self.hit_hover.filter(|hit| hit.eases()), held);
         // (What is chosen of several, its mark sliding to it as it changes: the station's page, the notes' view.)
         moving |= self.thumbs.choose(now, &[(0, view::Hit::Tab(self.content.tab())), (1, view::Hit::NotesShow(crate::notes::view()))]);
+        // (What is kept at hand going to its places as its order changes.)
+        let order: Vec<String> = crate::station::apps::shown().iter().map(|app| app.target.clone()).collect();
+        moving |= self.thumbs.apps(now, &order, None);
         let thumbs = self.thumbs.clone();
         // Its process list turned on toward where the wheel turned it, as the panel's is.
         let readings: Vec<&mut Readings> = match &mut self.content {

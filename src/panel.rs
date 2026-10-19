@@ -940,26 +940,37 @@ impl Controller {
                             panel.app_press = Some((at, from, true));
                         }
                     }
+                    // Moved: where the pointer has it, and the place it would go (the one it is over; between them,
+                    // the last).
+                    if panel.app_press.is_some_and(|(_, _, moved)| moved) {
+                        panel.held_at(lparam_point(msg.lParam));
+                    }
                     panel.hover_at(lparam_point(msg.lParam));
                 }
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if owner.is_some_and(|at| panels[at].app_press.is_some()) => {
                     let panel = &mut panels[owner.unwrap()];
                     let (from, _, moved) = panel.app_press.take().unwrap();
                     let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                    if moved {
+                        panel.held_at(lparam_point(msg.lParam));
+                    }
                     let over = panel.hit_at(lparam_point(msg.lParam));
-                    match (msg.message == WM_LBUTTONUP, moved, over) {
-                        (true, true, Some(Hit::App(to))) if to != from => {
+                    // (Where it would go as it was let go: the place the others made room at, not only another's.)
+                    let went = panel.app_over.take().filter(|_| moved);
+                    match (msg.message == WM_LBUTTONUP, moved, went) {
+                        (true, true, Some(to)) if to != from => {
                             // (Each by what opens it, as shown: what is kept may change before this is done.)
                             let shown = crate::station::apps::shown();
                             let (from, to) = (usize::from(from), usize::from(to));
                             if let Some(moving) = shown.get(from).map(|app| app.target.clone()) {
                                 // (Dropped on a later one: after it; on an earlier one: before it.)
                                 let before = shown.get(if to > from { to + 1 } else { to }).map(|app| app.target.clone());
+                                panel.app_dropped = Some((moving.clone(), to, Instant::now()));
                                 crate::station::apps::change(move |apps| crate::station::apps::put_before(apps, &moving, before.as_deref()));
                             }
                         }
-                        (true, false, Some(Hit::App(at))) if at == from => {
-                            crate::station::pressed(Hit::App(at));
+                        (true, false, _) if over == Some(Hit::App(from)) => {
+                            crate::station::pressed(Hit::App(from));
                         }
                         _ => {}
                     }
@@ -1809,6 +1820,13 @@ struct Panel<'a> {
     /// A thing kept at hand pressed (its place), where the pointer was, and whether it has been moved far enough to
     /// be put elsewhere among them: let go on another, it goes there; else it is opened as it is let go.
     app_press: Option<(u16, POINT, bool)>,
+    /// One held so and moved: the place among them it would go to (the one the pointer was last over), and where
+    /// the pointer has it (DIPs from the panel's corner).
+    app_over: Option<u16>,
+    app_point: (f32, f32),
+    /// One let go among them: what opens it and its place, kept so (see `thumb::Dots::apps`) till what is kept comes
+    /// to that order, or a while after.
+    app_dropped: Option<(String, usize, Instant)>,
     /// The sound's track is being slid along.
     sliding: Option<crate::playing::Slider>,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
@@ -1909,6 +1927,9 @@ impl<'a> Panel<'a> {
             music_settle: None,
             shelf_press: None,
             app_press: None,
+            app_over: None,
+            app_point: (0.0, 0.0),
+            app_dropped: None,
             sliding: None,
             thumbs: crate::ui::thumb::Dots::new(),
             recapture: false,
@@ -2655,6 +2676,7 @@ impl<'a> Panel<'a> {
         // On a thing kept at hand: moved among them, or opened (see `app_press`).
         if let (Some(Hit::App(at)), Some(from)) = (self.hit_at(client), cursor_position()) {
             self.app_press = Some((at, from, false));
+            self.app_over = None;
             unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd) };
             return;
         }
@@ -3223,6 +3245,18 @@ impl<'a> Panel<'a> {
         let thumbs_moving = self.thumbs.step(now, self.hover.filter(|hit| hit.eases()), held);
         // (What is chosen of several, its mark sliding to it as it changes: the station's page, the notes' view.)
         let thumbs_moving = self.thumbs.choose(now, &[(0, Hit::Tab(self.tab)), (1, Hit::NotesShow(crate::notes::view()))]) | thumbs_moving;
+        // What is kept at hand: the one held where it would go, the others making room; one let go, kept where it went
+        // till the order comes so.
+        let order: Vec<String> = crate::station::apps::shown().iter().map(|app| app.target.clone()).collect();
+        if self.app_dropped.as_ref().is_some_and(|(target, to, at)| order.get(*to) == Some(target) || at.elapsed() > Duration::from_secs(1)) {
+            self.app_dropped = None;
+        }
+        let hold = match (self.app_press, &self.app_dropped) {
+            (Some((from, _, true)), _) => Some((usize::from(from), usize::from(self.app_over.unwrap_or(from)), Some(self.app_point))),
+            (_, Some((target, to, _))) => order.iter().position(|one| one == target).map(|from| (from, *to, None)),
+            _ => None,
+        };
+        let thumbs_moving = self.thumbs.apps(now, &order, hold) | thumbs_moving;
         let scene = Scene { thumbs: &self.thumbs, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
@@ -3492,6 +3526,20 @@ impl<'a> Panel<'a> {
         let px = self.placement.as_ref().map_or(1.0, |placement| placement.px);
         let (x, y) = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
         self.hits.iter().filter(move |(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
+    }
+
+    /// A thing kept at hand held and moved, the pointer at `client` (physical px in the window): where it has it, and
+    /// the place it would go (the one it is over, where it is over one), drawn so as soon as can be.
+    fn held_at(&mut self, client: POINT) {
+        let px = self.placement.as_ref().map_or(1.0, |placement| placement.px);
+        self.app_point = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
+        // (The place the one under it shows at, the others made room: not its place as kept.)
+        if let Some(Hit::App(under)) = self.hit_at(client) {
+            if let Some(slot) = crate::station::apps::shown().get(usize::from(under)).and_then(|app| self.thumbs.app_slot(&app.target)) {
+                self.app_over = Some(slot as u16);
+            }
+        }
+        self.next_frame = Instant::now();
     }
 
     /// The list a point in the window's client area (physical px) is on, and how far it scrolls (under what is on

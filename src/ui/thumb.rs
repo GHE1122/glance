@@ -37,6 +37,55 @@ pub struct Dots<K> {
     now: Vec<(K, f32)>,
     at: Option<Instant>,
     slides: Vec<Slide<K>>,
+    /// What is kept at hand, as it moves among itself: see `apps`.
+    apps: Apps,
+}
+
+/// What is kept at hand moving among itself (one dragged along the others, or their order changed): the order they
+/// show in (the one dragged where it would go), each one on its way from where it was (`Move`), and the one held, by
+/// what opens it, and where the pointer has it (in the host's own DIPs).
+#[derive(Clone, Default)]
+struct Apps {
+    order: Vec<String>,
+    moves: Vec<Move>,
+    held: Option<(String, (f32, f32))>,
+}
+
+/// One kept at hand held (see `Dots::apps`): its place as kept, the place it would go to, and where the pointer has it
+/// (none: let go there).
+pub type Held = (usize, usize, Option<(f32, f32)>);
+
+/// Where a thing kept at hand is drawn: in its place among them (`Slot`, the places between one and the next as far
+/// along as it is from the one to the other), or where the pointer has it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AppPlace {
+    Slot(f32),
+    Point(f32, f32),
+}
+
+/// One thing kept at hand on its way: from where it was to its place, since `start`, `done` of the way (eased).
+#[derive(Clone)]
+struct Move {
+    target: String,
+    from: AppPlace,
+    to: usize,
+    start: Instant,
+    done: f32,
+}
+
+/// How long a thing kept at hand takes to its new place.
+const SHIFT: f32 = 0.2;
+
+impl Move {
+    /// Where it is now.
+    fn place(&self) -> AppPlace {
+        let to = self.to as f32;
+        match self.from {
+            AppPlace::Slot(from) => AppPlace::Slot(from + (to - from) * self.done),
+            // (From the pointer: on its way to its place, which the painter knows; told as how far, from where.)
+            point => if self.done >= 1.0 { AppPlace::Slot(to) } else { point },
+        }
+    }
 }
 
 /// A choice's mark (of the choice `of`: see `choose`): on `to`, come from `from` (none: it was first chosen so) since `start`, `done` of the way (eased).
@@ -55,7 +104,7 @@ const SLIDE: f32 = 0.22;
 
 impl<K: Copy + PartialEq> Dots<K> {
     pub const fn new() -> Self {
-        Dots { now: Vec::new(), at: None, slides: Vec::new() }
+        Dots { now: Vec::new(), at: None, slides: Vec::new(), apps: Apps { order: Vec::new(), moves: Vec::new(), held: None } }
     }
 
     /// What is chosen now of each choice (`chosen`: each choice's number, and what of it is chosen): each that changed
@@ -76,6 +125,79 @@ impl<K: Copy + PartialEq> Dots<K> {
             moving |= slide.done < 1.0;
         }
         moving
+    }
+
+    /// What is kept at hand now (`order`: each by what opens it), one held and dragged (`held`: its place in `order`, the
+    /// place it would go to among them, and where the pointer has it; no point: let go there, kept so till the order
+    /// comes to it): each whose place among them changes goes there from where it is, the one let go from the
+    /// pointer. Whether any is still on its way, or held (more frames wanted).
+    pub fn apps(&mut self, now: Instant, order: &[String], held: Option<Held>) -> bool {
+        // Where they show: as kept, or the one held where it would go.
+        let mut shown: Vec<String> = order.to_vec();
+        if let Some((from, to, _)) = held.filter(|(from, to, _)| *from < order.len() && *to < order.len()) {
+            let moving = shown.remove(from);
+            shown.insert(to, moving);
+        }
+        let held_now = held.and_then(|(from, _, point)| Some((order.get(from)?.clone(), point?)));
+        let held_target = held_now.as_ref().map(|(target, _)| target.clone());
+        // (Before: where each was drawn, mid-way where it was on its way.)
+        let was: Vec<(String, AppPlace)> = self.apps.order.iter().enumerate().map(|(at, target)| {
+            let place = self.apps.moves.iter().find(|one| &one.target == target).map_or(AppPlace::Slot(at as f32), Move::place);
+            (target.clone(), place)
+        }).collect();
+        let let_go = self.apps.held.clone().filter(|_| held_now.is_none());
+        for (at, target) in shown.iter().enumerate() {
+            if Some(target) == held_target.as_ref() {
+                self.apps.moves.retain(|one| &one.target != target);
+                continue;
+            }
+            let heading = self.apps.moves.iter().find(|one| &one.target == target).map(|one| one.to);
+            let from = match &let_go {
+                Some((gone, point)) if gone == target => Some(AppPlace::Point(point.0, point.1)),
+                _ => was.iter().find(|(one, _)| one == target).map(|(_, place)| *place).filter(|place| *place != AppPlace::Slot(at as f32) && heading != Some(at)),
+            };
+            if let Some(from) = from {
+                self.apps.moves.retain(|one| &one.target != target);
+                self.apps.moves.push(Move { target: target.clone(), from, to: at, start: now, done: 0.0 });
+            }
+        }
+        self.apps.order = shown;
+        let mut moving = held_now.is_some();
+        self.apps.held = held_now;
+        for one in &mut self.apps.moves {
+            let t = (now.saturating_duration_since(one.start).as_secs_f32() / SHIFT).min(1.0);
+            one.done = 1.0 - (1.0 - t).powi(3);
+            moving |= one.done < 1.0;
+        }
+        self.apps.moves.retain(|one| one.done < 1.0);
+        moving
+    }
+
+    /// Where the thing kept at hand `target` (shown at `at` among them) is drawn now: none, held (drawn where the
+    /// pointer has it: see `app_held`); else in its place, or on its way to it, from a place among them or from a
+    /// point (and how far it has come from there).
+    pub fn app_place(&self, target: &str, at: usize) -> Option<(AppPlace, f32)> {
+        if self.apps.held.as_ref().is_some_and(|(held, _)| held == target) {
+            return None;
+        }
+        Some(match self.apps.moves.iter().find(|one| one.target == target) {
+            Some(one) => match one.from {
+                AppPlace::Point(..) => (one.from, one.done),
+                _ => (one.place(), 1.0),
+            },
+            None => (AppPlace::Slot(at as f32), 1.0),
+        })
+    }
+
+    /// The place `target` shows at among what is kept at hand (the one held where it would go): what one dragged over
+    /// it goes to.
+    pub fn app_slot(&self, target: &str) -> Option<usize> {
+        self.apps.order.iter().position(|one| one == target)
+    }
+
+    /// The thing kept at hand held, by what opens it, and where the pointer has it.
+    pub fn app_held(&self) -> Option<(&str, (f32, f32))> {
+        self.apps.held.as_ref().map(|(target, point)| (target.as_str(), *point))
     }
 
     /// Where the mark of what is chosen as `to` is on its way from the one chosen before: that one, and how far it has
@@ -127,6 +249,14 @@ impl<K: std::hash::Hash> std::hash::Hash for Dots<K> {
             slide.to.hash(state);
             slide.done.to_bits().hash(state);
         }
+        for one in &self.apps.moves {
+            one.target.hash(state);
+            one.done.to_bits().hash(state);
+        }
+        if let Some((held, (x, y))) = &self.apps.held {
+            (held, x.to_bits(), y.to_bits()).hash(state);
+            self.apps.order.hash(state);
+        }
     }
 }
 
@@ -159,6 +289,36 @@ mod tests {
         assert!(quarter.1 > 0.25 && most > 0.9 && most < 1.0, "{quarter:?} {most}");
         assert!(!marks.choose(at(230), &[(0, 2)]));
         assert_eq!(marks.slid(2), None);
+    }
+
+    /// One kept at hand dragged along the others: those between where it was and where it would go make room for it
+    /// (each on its way, then there); let go there, it goes from the pointer to its place, and the others stay.
+    #[test]
+    fn things_kept_at_hand_make_room_for_one_dragged() {
+        let start = Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let order: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        let mut motion: Dots<u8> = Dots::new();
+        assert!(!motion.apps(start, &order, None));
+        // "a" held over where "c" is: "b" and "c" go up a place, "a" drawn at the pointer.
+        assert!(motion.apps(start, &order, Some((0, 2, Some((5.0, 50.0))))));
+        assert_eq!(motion.app_place("a", 0), None);
+        assert_eq!(motion.app_held(), Some(("a", (5.0, 50.0))));
+        motion.apps(at(100), &order, Some((0, 2, Some((5.0, 50.0)))));
+        let Some((AppPlace::Slot(b), _)) = motion.app_place("b", 0) else { panic!() };
+        assert!(b < 1.0 && b > 0.0, "{b}");
+        motion.apps(at(400), &order, Some((0, 2, Some((5.0, 50.0)))));
+        assert_eq!(motion.app_place("b", 0), Some((AppPlace::Slot(0.0), 1.0)));
+        // Let go there, the order not yet come: "a" from the pointer to the last place, "b" and "c" where they are.
+        motion.apps(at(400), &order, Some((0, 2, None)));
+        assert_eq!(motion.app_place("a", 2), Some((AppPlace::Point(5.0, 50.0), 0.0)));
+        assert_eq!(motion.app_place("c", 1), Some((AppPlace::Slot(1.0), 1.0)));
+        // The order come so: nothing more moves once "a" is there.
+        let kept: Vec<String> = ["b", "c", "a"].map(String::from).to_vec();
+        assert!(motion.apps(at(500), &kept, None));
+        assert!(!motion.apps(at(700), &kept, None));
+        assert_eq!(motion.app_place("a", 2), Some((AppPlace::Slot(2.0), 1.0)));
+        assert_eq!(motion.app_place("b", 0), Some((AppPlace::Slot(0.0), 1.0)));
     }
 
     /// The choices of an enum of no fields (quick launch's kinds), each value of another variant: one chosen after

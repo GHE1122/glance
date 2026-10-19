@@ -1183,9 +1183,14 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     let scroll = scene.scrolls.at(List::Apps).clamp(0.0, most);
     let view = (left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
     frame.clip(view.0, view.1, view.2, view.3);
+    let cell = |at: usize| (left + (at % across) as f32 * (cell_w + gap), top + (at / across) as f32 * (cell_h + APP_GAP) - scroll);
     for at in 0..count {
-        let x = left + (at % across) as f32 * (cell_w + gap);
-        let y = top + (at / across) as f32 * (cell_h + APP_GAP) - scroll;
+        // Each in its place, or on its way to it; the one held drawn after all, where the pointer has it.
+        let spot = match apps.get(at) {
+            Some((_, target)) => app_spot(scene, target, at, (cell_w, cell_h), &cell),
+            None => Some(cell(at)),
+        };
+        let Some((x, y)) = spot else { continue };
         if y + cell_h < top || y > top + tall {
             continue;
         }
@@ -1204,6 +1209,11 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         }
         placed.push((x, y, if named { cell_w } else { APP_SIDE }, cell_h, hit));
     }
+    if let Some((held, (px, py))) = scene.thumbs.app_held() {
+        if let Some((name, target)) = apps.iter().find(|(_, target)| target == held) {
+            paint_held_app(frame, scene, name, target, px - APP_SIDE / 2.0, py - APP_SIDE / 2.0, APP_SIDE);
+        }
+    }
     frame.unclip();
     // (Its things first, as much of them as shows: a press finds a thing before the list, and the room round it.)
     hits.extend(placed.into_iter().filter_map(|hit| shown_in(hit, view)));
@@ -1212,6 +1222,30 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     }
     hits.push((left - 4.0, top - SHELF_GAP - HEAD - HEAD_GAP, width + 8.0, tall + SHELF_GAP + HEAD + HEAD_GAP + 4.0, Hit::AppsArea));
     scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
+}
+
+/// A thing kept at hand held and dragged, its picture `side` square at (`x`, `y`): lifted off the others, a little
+/// larger, on its shadow.
+fn paint_held_app(frame: &dyn Canvas, scene: &Scene, name: &str, target: &str, x: f32, y: f32, side: f32) {
+    let grown = side * 1.12;
+    let (x, y) = (x - (grown - side) / 2.0, y - (grown - side) / 2.0);
+    frame.shadow(Color::hex(0, if scene.theme.dark { 0.45 } else { 0.22 }), x, y, grown, grown, grown * 0.22, 8.0, 4.0);
+    paint_app(frame, scene.theme, name, target, x, y, grown);
+}
+
+/// Where the thing kept at hand `target` (at `at` among them) is drawn, its cell's corner (see `thumb::Dots::apps`):
+/// in its place (`cell` of a place), between two places as it goes from one to the other, or on its way from the
+/// pointer (its cell `size` round it); none while it is held.
+fn app_spot(scene: &Scene, target: &str, at: usize, size: (f32, f32), cell: &dyn Fn(usize) -> (f32, f32)) -> Option<(f32, f32)> {
+    use super::thumb::AppPlace;
+    let lerp = |a: (f32, f32), b: (f32, f32), t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+    Some(match scene.thumbs.app_place(target, at)? {
+        (AppPlace::Slot(slot), _) => {
+            let low = slot.floor().max(0.0);
+            lerp(cell(low as usize), cell(slot.ceil().max(0.0) as usize), slot - low)
+        }
+        (AppPlace::Point(x, y), done) => lerp((x - size.0 / 2.0, y - size.1 / 2.0), cell(at), done),
+    })
 }
 
 /// Quick launch's lane as a rail along the panel's edge (`area`, at `side`): what is kept at hand, a picture each,
@@ -1236,13 +1270,22 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
     let (view_x, view_y, view_w, view_h) = if across { (start, area.y, length, area.h) } else { (area.x, start, area.w, length) };
     frame.clip(view_x, view_y, view_w, view_h);
     let mut placed = Vec::new();
-    for at in 0..=apps.len() {
+    // (Scrolled along: where each place shows.)
+    let shown_cell = |at: usize| {
         let (x, y) = cell(at);
-        let (x, y) = if across { (x - scroll, y) } else { (x, y - scroll) };
+        if across { (x - scroll, y) } else { (x, y - scroll) }
+    };
+    let inset = (RAIL_CELL - RAIL_SIDE) / 2.0;
+    for at in 0..=apps.len() {
+        // Each in its place, or on its way to it; the one held drawn after all, where the pointer has it.
+        let spot = match apps.get(at) {
+            Some((_, target)) => app_spot(scene, target, at, (RAIL_CELL, RAIL_CELL), &shown_cell),
+            None => Some(shown_cell(at)),
+        };
+        let Some((x, y)) = spot else { continue };
         if if across { x + RAIL_CELL < view_x || x > view_x + view_w } else { y + RAIL_CELL < view_y || y > view_y + view_h } {
             continue;
         }
-        let inset = (RAIL_CELL - RAIL_SIDE) / 2.0;
         let Some((name, target)) = apps.get(at) else {
             paint_adder(frame, scene, x + inset, y + inset, RAIL_SIDE, &mut placed);
             continue;
@@ -1253,6 +1296,13 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
         }
         paint_app(frame, theme, name, target, x + inset, y + inset, RAIL_SIDE);
         placed.push((x, y, RAIL_CELL, RAIL_CELL, hit));
+    }
+    // The one held, lifted where the pointer has it along the rail.
+    if let Some((held, (px, py))) = scene.thumbs.app_held() {
+        if let Some((name, target)) = apps.iter().find(|(_, target)| target == held) {
+            let (x, y) = if across { (px - RAIL_CELL / 2.0, area.y + (area.h - RAIL_CELL) / 2.0) } else { (area.x + (area.w - RAIL_CELL) / 2.0, py - RAIL_CELL / 2.0) };
+            paint_held_app(frame, scene, name, target, x + inset, y + inset, RAIL_SIDE);
+        }
     }
     frame.unclip();
     // (Only what shows of them is pressed.)
