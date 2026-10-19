@@ -833,7 +833,9 @@ fn note_dot(frame: &dyn Canvas, colour: crate::notes::Colour, x: f32, middle: f3
 /// a little more (the owner's: its square ones too stark).
 fn note_radius(theme: &Theme, small: bool) -> f32 {
     match theme.skin {
-        Skin::Glass => if small { 14.0 } else { 18.0 },
+        // (Concentric with the lane's corners near them, as the lane's padding leaves them, a little rounder for the
+        // deck's large card; see `plate_round`.)
+        Skin::Glass => if small { 10.0 } else { 12.0 },
         Skin::Fluent => 6.0,
         Skin::Paper => 6.0,
     }
@@ -1015,7 +1017,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                     continue;
                 }
                 if lit(at) {
-                    frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, NOTE_ROW - 2.0, theme.control_radius.max(6.0));
+                    frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, NOTE_ROW - 2.0, plate_round(theme, GLASS_ROW_ROUND - 4.0, 4.0));
                 }
                 // (Its title over its first line; with none, in the row's middle, as when it was written is.)
                 let first = note.lines.first();
@@ -1212,7 +1214,7 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         };
         let hit = Hit::App(at as u16);
         if scene.hover == Some(hit) {
-            frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, (if named { cell_w } else { APP_SIDE }) + 4.0, cell_h + 4.0, theme.control_radius.max(6.0));
+            frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, (if named { cell_w } else { APP_SIDE }) + 4.0, cell_h + 4.0, plate_round(theme, GLASS_ROW_ROUND, 2.0));
         }
         paint_app(frame, theme, name, target, px, y, APP_SIDE);
         if named {
@@ -3209,6 +3211,29 @@ fn shelf_places(shows: Shows, count: usize, width: f32) -> (Vec<Rect>, f32) {
     }
 }
 
+/// How round a plate is that lies round something `inner` round, `gap` from it all round: concentric with it (the same
+/// centres: its radius the inner's and the gap), as a lane's corners are with the sheet's. A plate rounder than that
+/// (glass's used to be a capsule round a row of two lines, round a picture of a smaller radius) showed its corners off
+/// what it held. On glass alone: Windows 11's and chart paper's plates keep their own small, square-ish corners.
+fn plate_round(theme: &Theme, inner: f32, gap: f32) -> f32 {
+    if theme.skin == Skin::Glass { inner + gap } else { theme.control_radius.max(6.0) }
+}
+
+/// How round glass's things on the sheet are where they hold no picture of their own (a row of words): as round as a
+/// picture on a tile is, so the two sit alike in a lane (see `face_round`).
+const GLASS_ROW_ROUND: f32 = 8.0;
+
+/// How round a tile's face's plate is, its smaller side `small`: glass's as round as its lanes' corners allow within
+/// them (the sheet's radius less the lane's padding, rounded up so as not to read as square; see `plate_round`),
+/// smaller for a small face; Windows 11's and chart paper's square-cornered.
+fn face_round(theme: &Theme, small: f32) -> f32 {
+    match theme.skin {
+        Skin::Glass => (small / 5.0).clamp(4.0, 10.0),
+        Skin::Fluent => 4.0,
+        Skin::Paper => 3.0,
+    }
+}
+
 /// A tile's face (see `Face`) in the box `w` × `h` at (`x`, `y`), on a plate as its skin draws one (glass's round,
 /// Windows 11's and chart paper's square-cornered and ruled round): a picture filling it (`pixels`: the side it is
 /// asked for), another file's or a folder's icon in its middle, a text's first lines, or a web address's mark; how
@@ -3216,11 +3241,7 @@ fn shelf_places(shows: Shows, count: usize, width: f32) -> (Vec<Rect>, f32) {
 #[allow(clippy::too_many_arguments)]
 fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &Tile, x: f32, y: f32, w: f32, h: f32, pixels: u32) {
     let small = w.min(h);
-    let radius = match theme.skin {
-        Skin::Glass => (small / 5.0).clamp(4.0, 14.0),
-        Skin::Fluent => 4.0,
-        Skin::Paper => 3.0,
-    };
+    let radius = face_round(theme, small);
     // (A plate under what fills it: a picture, words, a link's mark. A file or folder stands on the card itself, by
     // its icon: on a plate of its own, an icon looked like a picture of the screen.)
     let plate = || {
@@ -3404,10 +3425,10 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         let words = if lit { theme.text } else { theme.text2 };
         let shown = match shows {
             Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
-                if lit {
-                    frame.fill_rounded(theme.hover, x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0, theme.control_radius.max(6.0));
-                }
                 let plate = place.w * if view == ShelfView::Large { LARGE_PLATE } else { PLATE };
+                if lit {
+                    frame.fill_rounded(theme.hover, x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0, plate_round(theme, face_round(theme, place.w.min(plate)), 4.0));
+                }
                 paint_face(frame, theme, ink, tile, x, y, place.w, plate, pixels_for(view));
                 let shown = fitted(frame, &tile.label, theme.small, place.w);
                 frame.text(&shown, theme.small, words, x, y + plate + 5.0, place.w, Align::Start);
@@ -3427,7 +3448,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
             }
             Shows::View(ShelfView::List) => {
                 if lit {
-                    frame.fill_rounded(theme.hover, x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0, theme.control_radius.max(6.0));
+                    frame.fill_rounded(theme.hover, x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0));
                 }
                 let py = y + (LIST_ROW - LIST_PICTURE) / 2.0;
                 paint_face(frame, theme, ink, tile, x, py, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
@@ -3560,7 +3581,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         }
         let lit = scene.hover == Some(Hit::Recent(row.file));
         if lit {
-            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, theme.control_radius.max(6.0));
+            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0));
         }
         let face = Tile { id: 0, label: String::new(), about: String::new(), face: Face::Picture { path: row.path.clone(), more: 0 }, pinned: false };
         paint_face(frame, theme, ink, &face, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
@@ -3661,7 +3682,7 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         }
         let lit = scene.hover == Some(Hit::Copied(row.id));
         if lit {
-            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, theme.control_radius.max(6.0));
+            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0));
         }
         paint_face(frame, theme, ink, row, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
         let room = width - LIST_PICTURE - 10.0;
