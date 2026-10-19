@@ -1598,7 +1598,7 @@ impl Beside {
             if row.on_disk {
                 super::view::paint_app(frame, &theme, &row.name, &row.target, PAD, ry + (tall - face) / 2.0, face);
             } else {
-                match crate::station::thumbs::icon(std::path::Path::new(&row.target), 64) {
+                match crate::station::thumbs::icon(std::path::Path::new(&row.target), super::view::APP_PIXELS) {
                     Some(picture) => frame.picture(&picture, PAD, ry + (tall - face) / 2.0, face, face, 5.0, 1.0),
                     None => {
                         waiting = true;

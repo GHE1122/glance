@@ -905,14 +905,14 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
     };
     if on_disk && (folder || !crate::station::apps::pictured(path)) {
         let centre = Point { x: x + side / 2.0, y: y + side / 2.0 };
-        match crate::station::thumbs::icon(path, TILE_PIXELS).filter(|_| !gone) {
+        match crate::station::thumbs::icon(path, APP_PIXELS).filter(|_| !gone) {
             Some(icon) => frame.picture(&icon, x, y, side, side, 0.0, 1.0),
             None => paint_file_mark(frame, theme, folder, path, centre, side * 0.8, side >= 26.0, gone),
         }
         return;
     }
     // (A program by its icon alone: its thumbnail is, for some, its icon on a white square.)
-    match crate::station::thumbs::icon(path, TILE_PIXELS).filter(|_| !web) {
+    match crate::station::thumbs::icon(path, APP_PIXELS).filter(|_| !web) {
         Some(picture) => frame.picture(&picture, x, y, side, side, side / 5.0, if gone { 0.4 } else { 1.0 }),
         None => {
             frame.fill_rounded(theme.track, x, y, side, side, side / 5.0);
@@ -930,9 +930,9 @@ fn paint_adder(frame: &dyn Canvas, scene: &Scene, x: f32, y: f32, side: f32, hit
     let lit = scene.hover == Some(Hit::AddApp);
     let centre = Point { x: x + side / 2.0, y: y + side / 2.0 };
     let edge = if lit { theme.text2 } else { theme.text3 };
-    // Its ring dashed, as its skin rounds one: glass's round, Windows 11's and chart paper's square-cornered.
+    // Its ring dashed, its corners rounded as its skin rounds a small square (glass's the most).
     let (ring, round) = (side * 0.92, match theme.skin {
-        Skin::Glass => side * 0.46,
+        Skin::Glass => side * 0.26,
         Skin::Fluent => 4.0,
         Skin::Paper => 6.0,
     });
@@ -1093,6 +1093,9 @@ const TAB_PAD: f32 = 8.0;
 /// The side of a picture as it is asked for (physical px: as large as it is drawn up to 225%): a tile's, and a large
 /// card's.
 const TILE_PIXELS: u32 = 128;
+/// The side a thing kept at hand's icon is asked for (physical px): the largest every program has (Windows' extra
+/// large icon). Asked larger, a program with only small icons is given one small in the middle of a white box.
+pub(crate) const APP_PIXELS: u32 = 48;
 const LARGE_PIXELS: u32 = 256;
 
 /// A card's plate as tall as so much of its width, and the room under it for its name and what it is.
@@ -1219,7 +1222,7 @@ impl Hash for Block {
             Block::Notes { notes, view, tall } => (notes, view, tall.to_bits()).hash(state),
             Block::Apps { apps, rows, named } => {
                 (apps, rows, named).hash(state);
-                apps.iter().for_each(|(_, target)| face_key(std::path::Path::new(target), TILE_PIXELS).hash(state));
+                apps.iter().for_each(|(_, target)| face_key(std::path::Path::new(target), APP_PIXELS).hash(state));
             }
             Block::Recent { rows, filter, view, tall } => {
                 (rows, filter, view, tall.to_bits()).hash(state);
