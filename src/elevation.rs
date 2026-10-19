@@ -345,6 +345,15 @@ impl Held {
         (length > 0 && length < buffer.len()).then(|| PathBuf::from(String::from_utf16_lossy(&buffer[..length])))
     }
 
+    /// What the file system knows it by: its volume's serial number, and its number on that volume.
+    fn id(&self) -> Option<(u32, u64)> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe { GetFileInformationByHandle(HANDLE(self.0.as_raw_handle()), &mut information) }.ok()?;
+        Some((information.dwVolumeSerialNumber, (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow)))
+    }
+
     fn is_folder(&self) -> bool {
         use std::os::windows::fs::MetadataExt;
         self.0.metadata().is_ok_and(|meta| meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0)
@@ -464,12 +473,17 @@ fn create_held(folder: &Path, parent: &Held, attributes: Option<&SECURITY_ATTRIB
     unsafe { CreateDirectoryW(&HSTRING::from(folder.as_os_str()), attributes.map(|a| a as *const _)) }
         .map_err(|_| InstallFolder::Occupied)?;
     let made = pin(folder).ok_or(InstallFolder::Indirect)?;
-    if made.lies_in(parent) {
-        Ok(made)
-    } else {
+    if !made.lies_in(parent) {
         made.delete();
-        Err(InstallFolder::Indirect)
+        return Err(InstallFolder::Indirect);
     }
+    // Held from here as a folder that was there already is (`hold`), without the right to delete it: held able to
+    // delete it, every name put in it by a rename was refused on Windows 10 (the rename opens the folder to add the
+    // name, sharing no deletion: ERROR_SHARING_VIOLATION, see `held_where_it_says`), and a first install, which
+    // makes the folder, failed there at its first rename. The same folder, by its id, still in `parent`.
+    let id = made.id();
+    drop(made);
+    hold(folder).filter(|held| id.is_some() && held.id() == id && held.lies_in(parent)).ok_or(InstallFolder::Indirect)
 }
 
 /// `create_held` with the security descriptor `sddl`, set in the one step
