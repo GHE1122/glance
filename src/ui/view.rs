@@ -1327,7 +1327,7 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
         };
         let hit = Hit::App(at as u16);
         if lit_on(hit) {
-            frame.fill_rounded(theme.hover, x + 2.0, y + 2.0, RAIL_CELL - 4.0, RAIL_CELL - 4.0, theme.control_radius.max(8.0));
+            app_plate(frame, theme, (x + 2.0, y + 2.0, RAIL_CELL - 4.0), (RAIL_CELL - 4.0 - RAIL_SIDE) / 2.0);
         }
         paint_app(frame, theme, name, target, x + inset, y + inset, RAIL_SIDE);
         placed.push((x, y, RAIL_CELL, RAIL_CELL, hit));
@@ -3290,6 +3290,10 @@ pub(crate) fn glass_pill(frame: &dyn Canvas, theme: &Theme, (x, py, w, ph): (f32
         (false, true) => Color::hex(0xFFFFFF, 0.85),
     };
     frame.fill_rounded(fill, x, py, w, ph, radius);
+    // (Under the pointer, also as everything else on glass is: white on a white sheet, whiter only was not seen.)
+    if lit {
+        frame.fill_rounded(theme.hover, x, py, w, ph, radius);
+    }
     if !dark {
         frame.stroke_rounded(Fill::Solid(Color::hex(0, 0.07)), x, py, w, ph, radius, 1.0);
     }
@@ -3378,6 +3382,12 @@ fn shelf_places(shows: Shows, count: usize, width: f32, tall: f32) -> (Vec<Rect>
 /// what it held. On glass alone: Windows 11's and chart paper's plates keep their own small, square-ish corners.
 fn plate_round(theme: &Theme, inner: f32, gap: f32) -> f32 {
     if theme.skin == Skin::Glass { inner + gap } else { theme.control_radius.max(6.0) }
+}
+
+/// The plate under a thing kept at hand under the pointer (or held), its box (x, y, side), its picture `gap` in from
+/// its edges: as the rail and quick launch's adding page both draw it, its corners concentric with its picture's.
+pub(crate) fn app_plate(frame: &dyn Canvas, theme: &Theme, (x, y, side): (f32, f32, f32), gap: f32) {
+    frame.fill_rounded(theme.hover, x, y, side, side, plate_round(theme, GLASS_ROW_ROUND, gap));
 }
 
 /// How round glass's things on the sheet are where they hold no picture of their own (a row of words): as round as a
@@ -4852,6 +4862,28 @@ six".into()));
         let mut hits = Vec::new();
         paint_apps(&Nothing, &scene, (0.0, top, width), &apps, APP_ROWS, true, false, &mut hits);
         within(&hits, top, APP_ROWS as f32 * APP_CELL_H + (APP_ROWS - 1) as f32 * APP_GAP, "apps");
+    }
+
+    /// The station's head's menu button, on each page, found first by a press on it (a menu opens), in every skin.
+    #[test]
+    fn the_station_s_menu_button_is_found_first() {
+        for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+            for tab in [Tab::Shelf, Tab::Copies, Tab::Recent(Default::default())] {
+                let theme = Theme::new(skin, false);
+                let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+                let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+                let seen = Seen::of(history);
+                let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+                let lanes: Vec<Lane> = ["station"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
+                let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
+                let layout = Layout::with_columns(heights, 1, &theme);
+                let hits = paint(&Nothing, &scene, &lanes, &layout, Pass::Content);
+                let Some(&(x, y, w, h, _)) = hits.iter().find(|hit| hit.4 == Hit::StationView) else { panic!("{skin:?} {tab:?}: no button") };
+                let (px, py) = (x + w / 2.0, y + h / 2.0);
+                let first = hits.iter().find(|(hx, hy, hw, hh, _)| px >= *hx && px < hx + hw && py >= *hy && py < hy + hh).map(|hit| hit.4);
+                assert_eq!(first, Some(Hit::StationView), "{skin:?} {tab:?}");
+            }
+        }
     }
 
     /// The panel's rail: a point at each of its places finds that place (what the panel takes one held to go to),

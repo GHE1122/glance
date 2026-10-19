@@ -516,7 +516,9 @@ fn words_box(room: i32, wide: i32, tall: i32, scale: f32) -> RECT {
 
 /// The page `opening` asks for, up beside what it opens from.
 fn show(opening: Opening) {
-    gone();
+    // (The page up before it gone, not told: the windows that give way to a page would else come over for a moment
+    // between the two.)
+    let_go(false);
     // (The page before still up, its note not kept or the page in use: it stays, the new one not made.)
     if BESIDE.with(|cell| cell.try_borrow().map_or(true, |beside| beside.is_some())) {
         return;
@@ -649,6 +651,11 @@ thread_local! {
 /// The page up, gone (a note on it kept first: one that cannot be kept leaves it up, saying so). Asked while the page
 /// is in use (a message come in the middle of what it does), it goes as soon as it is free.
 fn gone() {
+    let_go(true);
+}
+
+/// The page up gone (see `gone`), what gives way to it told so (`told`), or not (another comes at once).
+fn let_go(told: bool) {
     // (Its words' box given a message meanwhile, and in the middle of it: the page goes once it has answered.)
     let answering = EDITOR.with(|held| held.borrow().as_ref().is_some_and(|editor| Rc::strong_count(editor) > 2));
     let held = if answering { Err(()) } else { BESIDE.with(|cell| cell.try_borrow_mut().map(|mut beside| beside.take()).map_err(drop)) };
@@ -683,7 +690,9 @@ fn gone() {
             held.1 = None;
             held.2 = None;
         });
-        crate::app().controller.page_front(None);
+        if told {
+            crate::app().controller.page_front(None);
+        }
     }
     PAGE.store(0, Ordering::Release);
     UP.store(false, Ordering::Release);
@@ -977,6 +986,8 @@ impl Beside {
             let _ = SetForegroundWindow(self.hwnd);
             let _ = SetFocus(Some(self.hwnd));
         }
+        // (Told again as it comes in front: the panels come over it again, the front having taken it over them.)
+        crate::app().controller.page_front(Some(self.hwnd));
     }
 
     /// The point (`x`, `y`) physical px in its window, on its page (DIPs from the page's corner, past its shadow's room).
@@ -1742,7 +1753,7 @@ impl Beside {
             let cell = (x, STRIP_TOP, STRIP_CELL, STRIP_CELL);
             let over = lit(cell) && held.is_none();
             if over || held.as_ref().is_some_and(|(moving, ..)| *moving == app.target) {
-                frame.fill_rounded(theme.hover, cell.0, cell.1, cell.2, cell.3, round(STRIP_CELL).min(12.0));
+                super::view::app_plate(frame, &theme, (cell.0, cell.1, cell.2), 6.0);
             }
             super::view::paint_app(frame, &theme, &app.name, &app.target, x + 6.0, STRIP_TOP + 6.0, STRIP_CELL - 12.0);
             // Its cross, over the one under the pointer.

@@ -611,12 +611,16 @@ impl Controller {
                 if menu.as_ref().is_some_and(|(open, _)| open.left() || (panels.iter().any(Panel::is_shown) && !open.over_the_panel())) {
                     self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                 }
-                // The panels under what is in front of them: a menu up, the settings, the page beside. (Placed again
-                // above all as they are drawn, a panel came over the page it opened, its shadow over it, the two at one
-                // level by turns; another panel came over a menu opened on the one beside it.)
-                let give_way = menu.as_ref().map(|(open, _)| open.hwnd()).or(in_front.0).or(in_front.1);
-                for panel in panels.iter_mut().filter(|panel| panel.window.gives_way_to() != give_way) {
-                    panel.window.yield_to(give_way);
+                // The panels under what is in front of them: a menu up; the settings, but for one pressed since they came
+                // in front (in use). Not under the page beside: over it, always (its window's room for its shadow lay
+                // over the panel's edge, taking presses meant for the panel's buttons there; placed again above all as
+                // they are drawn, a panel came over it and went under it by turns).
+                let menu_up = menu.as_ref().map(|(open, _)| open.hwnd());
+                for panel in panels.iter_mut() {
+                    let give_way = menu_up.or(in_front.0.filter(|_| !panel.forward));
+                    if panel.window.gives_way_to() != give_way {
+                        panel.window.yield_to(give_way);
+                    }
                 }
                 let mut wait: Option<Duration> = None;
                 for (at, panel) in panels.iter_mut().enumerate() {
@@ -913,10 +917,20 @@ impl Controller {
                     if msg.lParam.0 == 0 {
                         in_front.0 = front;
                         for panel in panels.iter_mut() {
+                            // (Come in front again: given way to again, as it was pressed before.)
+                            if front.is_some() {
+                                panel.forward = false;
+                            }
                             panel.settings_front(front);
                         }
                     } else {
                         in_front.1 = front;
+                        // (A page come up: the panels over it, as they stay.)
+                        if front.is_some() {
+                            for panel in panels.iter().filter(|panel| panel.is_shown()) {
+                                panel.window.stand_again();
+                            }
+                        }
                     }
                     widgets.settings_front(in_front.1.or(in_front.0));
                 }
@@ -941,7 +955,13 @@ impl Controller {
                     draw_overlay(&mut overlay, &panels);
                 }
                 // The pinned panel dragged by its bar.
-                WM_LBUTTONDOWN if owner.is_some() => panels[owner.unwrap()].press(lparam_point(msg.lParam)),
+                // (Pressed with the settings in front, it comes over them: in use, it was under them till a page it opened
+                // took the front.)
+                WM_LBUTTONDOWN if owner.is_some() => {
+                    let panel = &mut panels[owner.unwrap()];
+                    panel.forward = true;
+                    panel.press(lparam_point(msg.lParam));
+                }
                 WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].shelf_press.is_some()) => panels[owner.unwrap()].shelf_moved(),
                 // A thing kept at hand pressed and moved: put elsewhere among them as it is let go, over another.
                 WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].app_press.is_some()) => {
@@ -1835,6 +1855,8 @@ struct Panel<'a> {
     /// Where the pointer last was over it (physical px in its window): what is under it found again as what is drawn
     /// moves under a pointer that stays.
     pointer: Option<POINT>,
+    /// Pressed since the settings last came in front: over them, in use (see the frame loop).
+    forward: bool,
     /// One held so and moved: the place among them it would go to (the one the pointer was last over), and where
     /// the pointer has it (DIPs from the panel's corner).
     app_over: Option<u16>,
@@ -1943,6 +1965,7 @@ impl<'a> Panel<'a> {
             shelf_press: None,
             app_press: None,
             pointer: None,
+            forward: false,
             app_over: None,
             app_point: (0.0, 0.0),
             app_dropped: None,
