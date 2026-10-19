@@ -42,6 +42,7 @@ pub enum Ask {
     Settings,
     /// Something dragged is over a station now, or no longer.
     Over(bool),
+    AppsOver(bool),
     /// What `id` holds dragged off it (pressed on it and moved: see `drag_begins`), pressed on a window of the
     /// thread numbered so.
     DragOut(u64, u32),
@@ -81,8 +82,9 @@ pub struct Shown {
     pub recent_view: crate::settings::ShelfView,
     /// What was last given could not be taken: no room but what is pinned holds.
     pub full: bool,
-    /// Something is dragged over a station, to be dropped.
+    /// Something is dragged over a station, to be dropped; over what is kept at hand, to be kept there.
     pub over: bool,
+    pub apps_over: bool,
 }
 
 /// Its window's message: asked something (see `ask`).
@@ -131,6 +133,8 @@ pub enum Lands {
 /// told it by message): a drag over a strip along `edge` opens the station there, as a push into the edge does.
 pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Lands) {
     if lands == Lands::Apps {
+        // Over it: what is kept at hand says it takes what is let go (see `Shown::apps_over`); gone, no more.
+        ask(Ask::AppsOver(matches!(dragged, Dragged::Over(_))));
         // Files, folders and shortcuts dropped, and web addresses, kept at hand after what is there. (Told apart on a
         // thread of their own: a path on a drive slow to answer would else hold the station's thread, and the
         // clipboard with it.)
@@ -207,7 +211,7 @@ pub fn shown() -> Arc<Shown> {
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(all(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
-    *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, full: false, over: false }));
+    *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, full: false, over: false, apps_over: false }));
 }
 
 /// `given` opened as Explorer opens it: each file (a folder in Explorer), or a web address in the browser.
@@ -319,6 +323,7 @@ struct Station {
     tries: u32,
     /// Something dragged over a station, to be dropped (see `drop`).
     over: bool,
+    apps_over: bool,
     /// Where drops are caught while something is dragged (see `catch`).
     catchers: super::catch::Catchers,
     /// What is to be dragged off it, asked, and the thread it was pressed on (dragged once it is done answering: see
@@ -345,7 +350,7 @@ fn run(asks: Receiver<Ask>) {
         let settings = crate::app().settings.lock().unwrap().station;
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
         keep.expire(super::now_ms());
-        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, catchers: Default::default(), dragging: None }));
+        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, catchers: Default::default(), dragging: None }));
         WINDOW.store(window.0 as isize, Ordering::Release);
         let _ = SetTimer(Some(window), EXPIRE, EXPIRE_EVERY_MS, None);
         let _ = SetTimer(Some(window), WATCH, WATCH_EVERY_MS, None);
@@ -479,6 +484,7 @@ impl Station {
                 }
                 Ask::Settings => self.follow_settings(),
                 Ask::Over(over) => self.over = over,
+                Ask::AppsOver(over) => self.apps_over = over,
                 Ask::DragOut(id, thread) => self.dragging = Some((Leaving::Item(id), thread)),
                 Ask::DragFiles(paths, thread) => self.dragging = Some((Leaving::Files(paths), thread)),
                 Ask::Files(paths, act) => match act {
@@ -587,7 +593,7 @@ impl Station {
     /// What it shows now, for the other threads, who are told.
     fn show(&self) {
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, full: self.keep.full, over: self.over };
+        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, full: self.keep.full, over: self.over, apps_over: self.apps_over };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();
