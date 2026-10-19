@@ -2676,8 +2676,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 frame.text(device, theme.small, theme.text3, left + title_width + 8.0, row + 1.0, width, Align::Start);
                 let button = y + (HEAD - MEDIA_ROW) / 2.0;
                 pressed(frame, scene, hits, Hit::NewNote, Icon::Add, left + width - MEDIA_ROW, button, false);
-                // Its views side by side, the one shown marked as the skin marks the station's chosen tab: glass's on
-                // a face of its own (the views on a ground of their own), Windows 11's a bar of its accent under it,
+                // Its views side by side, the one shown marked as the skin marks the station's chosen tab: glass's the
+                // segments of a capsule of their own (see `glass_segments`), Windows 11's a bar of its accent under it,
                 // chart paper's underlined in ink.
                 let shown = crate::notes::view();
                 let views = [(crate::settings::NotesView::Deck, Icon::Layers), (crate::settings::NotesView::Cards, Icon::LayoutGrid), (crate::settings::NotesView::List, Icon::List)];
@@ -2686,14 +2686,21 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let x0 = left + width - MEDIA_ROW - 8.0 - wide;
                 let round = theme.control_radius.min(MEDIA_ROW / 2.0 + 2.0);
                 if theme.skin == Skin::Glass {
-                    frame.fill_rounded(theme.track, x0, button - 2.0, wide, MEDIA_ROW + 4.0, (MEDIA_ROW + 4.0) / 2.0);
+                    let boxes: Vec<(f32, f32)> = (0..views.len()).map(|at| (x0 + 2.0 + at as f32 * cell, cell)).collect();
+                    let at = |view: crate::settings::NotesView| views.iter().position(|(one, _)| *one == view);
+                    let slid = scene.thumbs.slid(Hit::NotesShow(shown)).and_then(|(from, done)| match from {
+                        Hit::NotesShow(from) => Some((at(from)?, done)),
+                        _ => None,
+                    });
+                    let hovered = views.iter().position(|(view, _)| scene.hover == Some(Hit::NotesShow(*view)));
+                    glass_segments(frame, theme, (x0, button - 2.0, wide, MEDIA_ROW + 4.0), (button, MEDIA_ROW), &boxes, at(shown).unwrap_or(0), slid, hovered);
                 }
                 for (at, (view, icon)) in views.into_iter().enumerate() {
                     let x = x0 + 2.0 + at as f32 * cell;
                     let hit = Hit::NotesShow(view);
                     let chosen = view == shown;
                     match theme.skin {
-                        Skin::Glass if chosen => frame.fill_rounded(Color::hex(0xFFFFFF, if theme.dark { 0.16 } else { 0.9 }), x, button, cell, MEDIA_ROW, MEDIA_ROW / 2.0),
+                        Skin::Glass => {}
                         Skin::Fluent if chosen => frame.fill_rounded(super::theme::accent(theme.dark), x + cell / 2.0 - 7.0, button + MEDIA_ROW + 1.0, 14.0, 3.0, 1.5),
                         Skin::Paper if chosen => frame.fill(theme.text, x + 4.0, button + MEDIA_ROW + 1.0, cell - 8.0, 2.0),
                         _ if scene.hover == Some(hit) => frame.fill_rounded(theme.hover, x, button, cell, MEDIA_ROW, if theme.skin == Skin::Glass { MEDIA_ROW / 2.0 } else { round }),
@@ -2996,9 +3003,11 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     let (ink_top, ink_bottom) = frame.ink(lang.pick("中转站最近复制最近文件", "StationCopiedRecent"), font);
     let middle = name_top + (ink_top + ink_bottom) / 2.0;
     let row = middle - TAB_H / 2.0;
-    // (Paper underlines the one chosen under its name, as its rules are drawn: no room round it.)
+    // (Paper underlines the one chosen under its name, as its rules are drawn: no room round it. Glass's tabs are the
+    // segments of a capsule of their own, from the head's start.)
+    let glass = theme.skin == Skin::Glass;
     let pad = if theme.skin == Skin::Paper { 0.0 } else { TAB_PAD };
-    let mut x = left - pad;
+    let start = if glass { left + SEG_INSET } else { left - pad };
     let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), if count > 0 { count.to_string() } else { String::new() })];
     if copies {
         pages.push((Tab::Copies, lang.pick("最近复制", "Copied"), String::new()));
@@ -3010,28 +3019,52 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     }
     // (In the room the buttons at the end leave, whichever page shows: names that do not fit there shortened, each
     // to a like share of it. A tab's room never reaches a button's.)
-    let gap = if theme.skin == Skin::Paper { 16.0 } else { 2.0 };
-    let room = width + pad - (MEDIA_ROW + 2.0 + MEDIA_ROW + 12.0 + 6.0);
+    let gap = match theme.skin {
+        Skin::Paper => 16.0,
+        Skin::Glass => 0.0,
+        Skin::Fluent => 2.0,
+    };
+    let room = left + width - (MEDIA_ROW + 2.0 + MEDIA_ROW + 12.0 + 6.0) - start - if glass { SEG_INSET } else { 0.0 };
     let measured: Vec<(f32, f32)> = pages.iter().map(|(_, name, aside)| (frame.measure(name, font), if aside.is_empty() { 0.0 } else { frame.measure(aside, small) })).collect();
     let whole: f32 = measured.iter().map(|(name_w, aside_w)| 2.0 * pad + name_w + if *aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).sum::<f32>() + gap * (pages.len() - 1) as f32;
     let share = (room - gap * (pages.len() - 1) as f32) / pages.len() as f32;
-    for ((page, name, aside), (name_w, aside_w)) in pages.into_iter().zip(measured) {
-        let (name, name_w) = if whole > room {
-            let fit = (share - 2.0 * pad - if aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).min(name_w).max(0.0);
-            let name = fitted(frame, name, font, fit);
-            let name_w = frame.measure(&name, font);
-            (name, name_w)
-        } else {
-            (name.into(), name_w)
-        };
-        let wide = pad + name_w + if aside_w > 0.0 { 5.0 + aside_w } else { 0.0 } + pad;
+    // Each laid out: its name (shortened to its share where they do not all fit), its count, where it is.
+    let mut x = start;
+    let laid: Vec<(Tab, String, f32, String, f32, f32, f32)> = pages
+        .into_iter()
+        .zip(measured)
+        .map(|((page, name, aside), (name_w, aside_w))| {
+            let (name, name_w) = if whole > room {
+                let fit = (share - 2.0 * pad - if aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).min(name_w).max(0.0);
+                let name = fitted(frame, name, font, fit).into_owned();
+                let name_w = frame.measure(&name, font);
+                (name, name_w)
+            } else {
+                (name.to_string(), name_w)
+            };
+            let wide = pad + name_w + if aside_w > 0.0 { 5.0 + aside_w } else { 0.0 } + pad;
+            let at = x;
+            x += wide + gap;
+            (page, name, name_w, aside, aside_w, at, wide)
+        })
+        .collect();
+    if glass {
+        let boxes: Vec<(f32, f32)> = laid.iter().map(|tab| (tab.5, tab.6)).collect();
+        let at = |page: Tab| laid.iter().position(|tab| tab.0 == page);
+        let chosen = at(tab).unwrap_or(0);
+        let slid = scene.thumbs.slid(Hit::Tab(tab)).and_then(|(from, done)| match from {
+            Hit::Tab(from) => Some((at(from)?, done)),
+            _ => None,
+        });
+        let hovered = laid.iter().position(|tab| scene.hover == Some(Hit::Tab(tab.0)));
+        let end = laid.last().map_or(start, |tab| tab.5 + tab.6);
+        glass_segments(frame, theme, (left, row - SEG_INSET, end + SEG_INSET - left, TAB_H + 2.0 * SEG_INSET), (row, TAB_H), &boxes, chosen, slid, hovered);
+    }
+    for (page, name, name_w, aside, aside_w, x, wide) in laid {
         let chosen = page == tab;
         let hovered = scene.hover == Some(Hit::Tab(page));
-        match theme.skin {
-            // (Glass's chosen tab on a face of its own, as the notes' chosen view is.)
-            Skin::Glass if chosen => frame.fill_rounded(Color::hex(0xFFFFFF, if theme.dark { 0.16 } else { 0.9 }), x, row, wide, TAB_H, TAB_H / 2.0),
-            Skin::Glass | Skin::Fluent if hovered => frame.fill_rounded(theme.hover.alpha(0.6), x, row, wide, TAB_H, theme.control_radius.min(TAB_H / 2.0)),
-            _ => {}
+        if theme.skin == Skin::Fluent && hovered {
+            frame.fill_rounded(theme.hover.alpha(0.6), x, row, wide, TAB_H, theme.control_radius.min(TAB_H / 2.0));
         }
         if chosen {
             match theme.skin {
@@ -3040,12 +3073,17 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
                 Skin::Glass => {}
             }
         }
-        frame.text(&name, font, if chosen || hovered { theme.text } else { theme.text3 }, x + pad, name_top, name_w + 1.0, Align::Start);
+        // (Glass's names as macOS's segments': the others a shade lighter, none faint.)
+        let words = match (chosen || hovered, glass) {
+            (true, _) => theme.text,
+            (false, true) => theme.text2,
+            (false, false) => theme.text3,
+        };
+        frame.text(&name, font, words, x + pad, name_top, name_w + 1.0, Align::Start);
         if aside_w > 0.0 {
             frame.text(&aside, small, theme.text3, x + pad + name_w + 5.0, name_top + 2.0, aside_w + 1.0, Align::Start);
         }
         hits.push((x, row, wide, TAB_H, Hit::Tab(page)));
-        x += wide + gap;
     }
     // At the end, the rest's menu; before it, while what is on it shows, how it shows (its view's mark, and a chevron).
     let more = left + width - MEDIA_ROW;
@@ -3067,6 +3105,41 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         frame.icon(icon, Point { x: vx + MEDIA_ROW / 2.0, y: row + MEDIA_ROW / 2.0 }, 15.0, color);
         frame.icon(Icon::ChevronDown, Point { x: vx + MEDIA_ROW + 3.0, y: row + MEDIA_ROW / 2.0 + 0.5 }, 10.0, color);
         hits.push((vx, row, wide, MEDIA_ROW, Hit::StationView));
+    }
+}
+
+/// How far in from glass's segments' capsule its pills are (DIPs; see `glass_segments`).
+pub(crate) const SEG_INSET: f32 = 3.0;
+
+/// Glass's choice of one of several, as macOS 26 draws it: a capsule of glass raised off the sheet, `track` (x, y,
+/// width, height); the chosen one (`chosen` of `boxes`, each its left and width, all `pills` (top, height) down) on a
+/// grey pill in it, `slid` from the one chosen before so far (eased: see `thumb::Dots::choose`); the one under the
+/// pointer, `hovered`, lit; hairlines between the others. What each says is drawn over it after.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn glass_segments(frame: &dyn Canvas, theme: &Theme, track: (f32, f32, f32, f32), pills: (f32, f32), boxes: &[(f32, f32)], chosen: usize, slid: Option<(usize, f32)>, hovered: Option<usize>) {
+    let (tx, ty, tw, th) = track;
+    let (py, ph) = pills;
+    let dark = theme.dark;
+    let round = th / 2.0;
+    frame.shadow(Color::hex(0, if dark { 0.25 } else { 0.07 }), tx, ty, tw, th, round, 7.0, 2.0);
+    frame.shadow(Color::hex(0, if dark { 0.25 } else { 0.06 }), tx, ty, tw, th, round, 1.0, 1.0);
+    frame.fill_rounded(if dark { Color::hex(0x3A3A3E, 0.62) } else { Color::hex(0xFFFFFF, 0.78) }, tx, ty, tw, th, round);
+    frame.stroke_rounded(Fill::Solid(if dark { Color::hex(0xFFFFFF, 0.07) } else { Color::hex(0, 0.05) }), tx, ty, tw, th, round, 0.5);
+    if let Some(&(x, w)) = hovered.filter(|at| *at != chosen).and_then(|at| boxes.get(at)) {
+        frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.06) } else { Color::hex(0, 0.04) }, x, py, w, ph, ph / 2.0);
+    }
+    let (to_x, to_w) = boxes[chosen];
+    let (x, w) = match slid.and_then(|(from, done)| Some((*boxes.get(from)?, done))) {
+        Some(((from_x, from_w), done)) => (from_x + (to_x - from_x) * done, from_w + (to_w - from_w) * done),
+        None => (to_x, to_w),
+    };
+    frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.15) } else { Color::hex(0, 0.085) }, x, py, w, ph, ph / 2.0);
+    // (Between two not chosen: the chosen one stands on its pill, a line by it is none.)
+    let hair = if dark { Color::hex(0xFFFFFF, 0.12) } else { Color::hex(0, 0.11) };
+    for (at, &(x, _)) in boxes.iter().enumerate().skip(1) {
+        if at != chosen && at - 1 != chosen {
+            frame.fill(hair, x - 0.5, py + ph * 0.25, 1.0, ph * 0.5);
+        }
     }
 }
 

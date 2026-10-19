@@ -30,16 +30,56 @@ pub fn draw(frame: &dyn Canvas, centre: Point, face: f32, dot: f32, colour: Colo
 }
 
 /// The dots of a host's sliders, each known by `K`, easing toward their size (of their size at rest): at rest, under
-/// the pointer, or held. Only those not at rest are kept.
+/// the pointer, or held. Only those not at rest are kept. And what is chosen of several, each known by the `K` of the
+/// one chosen (one of a kind: see `choose`), its mark sliding to it from the one chosen before.
 #[derive(Clone)]
 pub struct Dots<K> {
     now: Vec<(K, f32)>,
     at: Option<Instant>,
+    slides: Vec<Slide<K>>,
 }
+
+/// A choice's mark: on `to`, come from `from` (none: it was first chosen so) since `start`, `done` of the way (eased).
+#[derive(Clone)]
+struct Slide<K> {
+    from: Option<K>,
+    to: K,
+    start: Instant,
+    done: f32,
+}
+
+/// How long a choice's mark takes to slide from one to another, slowing as it comes (macOS's: it stops where it is
+/// to be, at the time it is to, with no spring past it).
+const SLIDE: f32 = 0.22;
 
 impl<K: Copy + PartialEq> Dots<K> {
     pub const fn new() -> Self {
-        Dots { now: Vec::new(), at: None }
+        Dots { now: Vec::new(), at: None, slides: Vec::new() }
+    }
+
+    /// `chosen` now, one of each kind (`K`s of a kind: of one enum's variant): each that changed since its mark slides
+    /// from the one before, the others' come on. Whether any is still on its way (more frames wanted).
+    pub fn choose(&mut self, now: Instant, chosen: &[K]) -> bool {
+        for &to in chosen {
+            match self.slides.iter_mut().find(|slide| std::mem::discriminant(&slide.to) == std::mem::discriminant(&to)) {
+                Some(slide) if slide.to != to => *slide = Slide { from: Some(slide.to), to, start: now, done: 0.0 },
+                Some(_) => {}
+                None => self.slides.push(Slide { from: None, to, start: now, done: 1.0 }),
+            }
+        }
+        let mut moving = false;
+        for slide in &mut self.slides {
+            let t = (now.saturating_duration_since(slide.start).as_secs_f32() / SLIDE).min(1.0);
+            slide.done = if slide.from.is_none() { 1.0 } else { 1.0 - (1.0 - t).powi(3) };
+            moving |= slide.done < 1.0;
+        }
+        moving
+    }
+
+    /// Where the mark of what is chosen as `to` is on its way from the one chosen before: that one, and how far it has
+    /// come (eased); none once it is there.
+    pub fn slid(&self, to: K) -> Option<(K, f32)> {
+        self.slides.iter().find(|slide| slide.to == to && slide.done < 1.0).and_then(|slide| Some((slide.from?, slide.done)))
     }
 
     /// The size of `key`'s dot now, of its size at rest.
@@ -81,6 +121,10 @@ impl<K: std::hash::Hash> std::hash::Hash for Dots<K> {
             key.hash(state);
             dot.to_bits().hash(state);
         }
+        for slide in self.slides.iter().filter(|slide| slide.done < 1.0) {
+            slide.to.hash(state);
+            slide.done.to_bits().hash(state);
+        }
     }
 }
 
@@ -93,6 +137,27 @@ impl<K: Copy + PartialEq> Default for Dots<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What is first chosen is marked where it is; another chosen, its mark slides there from the one before, slowing as
+    /// it comes, and is there at the slide's end (no further, and nothing more wanted after).
+    #[test]
+    fn a_choice_slides_to_the_one_chosen() {
+        let start = Instant::now();
+        let mut marks: Dots<u8> = Dots::new();
+        assert!(!marks.choose(start, &[1]));
+        assert_eq!(marks.slid(1), None);
+        assert!(marks.choose(start, &[2]));
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        assert!(marks.choose(at(55), &[2]));
+        let quarter = marks.slid(2).unwrap();
+        assert_eq!(quarter.0, 1);
+        assert!(marks.choose(at(165), &[2]));
+        let most = marks.slid(2).unwrap().1;
+        // (Eased: more than a quarter of the way at a quarter of the time, the last quarter the least of it.)
+        assert!(quarter.1 > 0.25 && most > 0.9 && most < 1.0, "{quarter:?} {most}");
+        assert!(!marks.choose(at(230), &[2]));
+        assert_eq!(marks.slid(2), None);
+    }
 
     /// At rest the dot is small; under the pointer it grows over several frames, fast then slowing, not at once; held,
     /// it shrinks, a little smaller than at rest; let go and left, it is back at rest and forgotten, and nothing more

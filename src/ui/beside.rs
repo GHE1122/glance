@@ -134,6 +134,8 @@ const FOLLOW_MS: u32 = 1000;
 /// Its timer for showing it, drawn without the desktop behind it, where that does not come (it cannot be taken), and
 /// how long it waits for it.
 const SHOW: usize = 5;
+/// Its timer for drawing again while a mark slides (each frame's time).
+const SLIDING: usize = 6;
 const SHOW_WITHIN_MS: u32 = 400;
 /// How long after the last key a note is kept.
 const KEEP_AFTER_MS: u32 = 600;
@@ -251,6 +253,8 @@ struct Beside {
     /// Shown on the screen yet: not before it is first drawn whole (on glass and Windows 11, with the desktop behind it,
     /// see `ready`), else it came up as it was drawn, and a moment after changed (the desktop come in behind).
     shown: bool,
+    /// The kind listed's mark, sliding to it as another is chosen (glass's: see `view::glass_segments`).
+    marks: super::thumb::Dots<Kinds>,
 }
 
 /// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
@@ -538,6 +542,7 @@ fn show(opening: Opening) {
             opening: Some(opening.clone()),
             moved_from: None,
             shown: false,
+            marks: super::thumb::Dots::new(),
         };
         let page = beside.page.clone();
         let theme = beside.theme.clone();
@@ -690,7 +695,7 @@ fn write(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
         WM_LBUTTONUP | WM_MOUSEMOVE => editor.holds(point) || unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == hwnd,
         WM_SETCURSOR => (lparam.0 & 0xFFFF) as u32 == HTCLIENT && editor.holds(pointer()),
         WM_MOUSEWHEEL => true,
-        WM_TIMER => !matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW | SHOW),
+        WM_TIMER => !matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW | SHOW | SLIDING),
         _ => false,
     };
     if !its {
@@ -1083,7 +1088,7 @@ impl Beside {
         let mut client = at;
         let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut client) };
         let (x, y) = self.on_page(client.x as f32, client.y as f32);
-        y >= 0.0 && y < HEAD && !self.hits.iter().any(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h)
+        (0.0..HEAD).contains(&y) && !self.hits.iter().any(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h)
     }
 
     /// Where its corner is on the screen.
@@ -1400,6 +1405,15 @@ impl Beside {
         let inset = self.inset;
         let area = (size.0 as f32 / self.scale - 2.0 * inset, size.1 as f32 / self.scale - 2.0 * inset);
         self.look_behind();
+        // (A mark sliding: drawn again a frame on, till it is where it is to be.)
+        let sliding = self.marks.choose(std::time::Instant::now(), &[self.kind]);
+        unsafe {
+            if sliding {
+                let _ = SetTimer(Some(self.hwnd), SLIDING, 15, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), SLIDING);
+            }
+        }
         let drawn = surface.draw(&gfx, size, self.scale, |frame| {
             let mut was = windows_numerics::Matrix3x2::default();
             unsafe {
@@ -1722,20 +1736,30 @@ impl Beside {
         frame.unclip();
         hits.extend(placed);
         // The kinds, side by side as the station's pages are, the one listed marked as the skin marks the station's
-        // chosen page: glass's on a face of its own, Windows 11's a bar of its accent under it, chart paper's
-        // underlined in ink; the others lit under the pointer.
+        // chosen page: glass's the segments of a capsule of their own, Windows 11's a bar of its accent under it,
+        // chart paper's underlined in ink; the others lit under the pointer.
         let kinds = [(Kinds::Programs, Icon::LayoutGrid, lang.pick("程序", "Programs")), (Kinds::Files, Icon::File, lang.pick("文件", "Files")), (Kinds::Folders, Icon::Folder, lang.pick("文件夹", "Folders"))];
-        let cell_w = inner / kinds.len() as f32;
+        // (Glass's: the segments of a capsule of their own, as macOS's, see `view::glass_segments`.)
+        let glass = theme.skin == Skin::Glass;
+        let inset = if glass { super::view::SEG_INSET } else { 0.0 };
+        let cell_w = (inner - 2.0 * inset) / kinds.len() as f32;
+        let cell_at = |at: usize| (PAD + inset + at as f32 * cell_w, KINDS_TOP + 3.0, cell_w, KINDS_H - 6.0);
+        if glass {
+            let boxes: Vec<(f32, f32)> = (0..kinds.len()).map(|at| (cell_at(at).0, cell_w)).collect();
+            let at = |kind: Kinds| kinds.iter().position(|(one, _, _)| *one == kind);
+            let slid = self.marks.slid(self.kind).and_then(|(from, done)| Some((at(from)?, done)));
+            let hovered = (0..kinds.len()).find(|at| lit(cell_at(*at)));
+            super::view::glass_segments(frame, &theme, (PAD, KINDS_TOP, inner, KINDS_H), (KINDS_TOP + inset, KINDS_H - 2.0 * inset), &boxes, at(self.kind).unwrap_or(0), slid, hovered);
+        }
         for (at, (kind, icon, name)) in kinds.into_iter().enumerate() {
-            let cell = (PAD + at as f32 * cell_w, KINDS_TOP + 3.0, cell_w, KINDS_H - 6.0);
+            let cell = cell_at(at);
             let chosen = kind == self.kind;
             let hovered = lit(cell);
             let name_w = frame.measure(name, theme.body);
             let content = 15.0 + 6.0 + name_w;
             let start = cell.0 + (cell.2 - content) / 2.0;
             match theme.skin {
-                Skin::Glass if chosen => frame.fill_rounded(Color::hex(0xFFFFFF, if theme.dark { 0.16 } else { 0.9 }), cell.0, cell.1, cell.2, cell.3, cell.3 / 2.0),
-                Skin::Glass | Skin::Fluent if hovered && !chosen => frame.fill_rounded(theme.hover, cell.0, cell.1, cell.2, cell.3, round(cell.3)),
+                Skin::Fluent if hovered && !chosen => frame.fill_rounded(theme.hover, cell.0, cell.1, cell.2, cell.3, round(cell.3)),
                 _ => {}
             }
             if chosen {
@@ -1745,7 +1769,11 @@ impl Beside {
                     Skin::Glass => {}
                 }
             }
-            let ink = if chosen || hovered { theme.text } else { theme.text3 };
+            let ink = match (chosen || hovered, glass) {
+                (true, _) => theme.text,
+                (false, true) => theme.text2,
+                (false, false) => theme.text3,
+            };
             frame.icon(icon, Point { x: start + 7.5, y: cell.1 + cell.3 / 2.0 }, 15.0, ink);
             frame.text(name, theme.body, ink, start + 21.0, cell.1 + (cell.3 - theme.body.size * 1.35) / 2.0, name_w + 2.0, Align::Start);
             hits.push((cell.0, cell.1, cell.2, cell.3, Hit::Kind(kind)));
@@ -2050,6 +2078,7 @@ otepad.exe"),
                             opening: None,
                             moved_from: None,
             shown: false,
+            marks: super::super::thumb::Dots::new(),
                         };
                         beside.search.put(&search.encode_utf16().collect::<Vec<_>>());
                         let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, h))).unwrap();

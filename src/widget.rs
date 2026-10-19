@@ -2878,6 +2878,8 @@ impl Widget {
         };
         let held = sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
         moving |= self.thumbs.step(now, self.hit_hover.filter(|hit| hit.eases()), held);
+        // (What is chosen of several, its mark sliding to it as it changes: the station's page, the notes' view.)
+        moving |= self.thumbs.choose(now, &[view::Hit::Tab(self.content.tab()), view::Hit::NotesShow(crate::notes::view())]);
         let thumbs = self.thumbs.clone();
         // Its process list turned on toward where the wheel turned it, as the panel's is.
         let readings: Vec<&mut Readings> = match &mut self.content {
