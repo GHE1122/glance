@@ -706,10 +706,16 @@ fn note_glass(colour: crate::notes::Colour) -> (Color, Color) {
     (Color::hex(tint, 1.0), Color::hex(ink, 1.0))
 }
 
-/// How strong a glass note's tint is over what it frosts, in the light and in the dark (where white is written on
-/// it: a little less of it, the dark under it showing deeper).
-fn glass_tint(dark: bool) -> f32 {
-    if dark { 0.5 } else { 0.58 }
+/// How strong a glass note's tint is over what it frosts. (In the dark as in the light, over a pane of light of its own:
+/// see `note_light`; over the dark sheet alone, its colours went deep and muddy.)
+fn glass_tint(_dark: bool) -> f32 {
+    0.58
+}
+
+/// What a glass note's tint lies over in the dark, that it have the colours it has in the light: a pane of white as
+/// much as the light sheet shows under it.
+fn note_light(dark: bool) -> Option<Color> {
+    dark.then(|| Color::hex(0xFFFFFF, 0.55))
 }
 
 /// How blurred what lies under a glass note shows through it (DIPs).
@@ -719,7 +725,6 @@ const NOTE_FROST: f32 = 7.0;
 /// the tint's ink (white in the dark); else the skin's own.
 fn note_inks(theme: &Theme, colour: crate::notes::Colour) -> (Color, Color, Color) {
     match theme.skin {
-        Skin::Glass if theme.dark => (Color::hex(0xFFFFFF, 1.0), Color::hex(0xFFFFFF, 0.84), Color::hex(0xFFFFFF, 0.66)),
         Skin::Glass => {
             let ink = note_glass(colour).1;
             (ink, ink.alpha(0.84), ink.alpha(0.7))
@@ -753,7 +758,11 @@ fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Col
         Skin::Glass => {
             let (tint, _) = note_glass(colour);
             let tint = tint.alpha(glass_tint(theme.dark));
+            let light = note_light(theme.dark);
             if plain {
+                if let Some(light) = light {
+                    frame.fill_rounded(light, x, y, w, h, radius);
+                }
                 frame.fill_rounded(tint, x, y, w, h, radius);
                 return;
             }
@@ -762,6 +771,9 @@ fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Col
             frame.shadow(Color::hex(0, 0.045 * shade), x, y, w, h, radius, 3.0, 2.0);
             if let Some(below) = below {
                 frame.frosted(x, y, w, h, radius, NOTE_FROST, below);
+            }
+            if let Some(light) = light {
+                frame.fill_rounded(light, x, y, w, h, radius);
             }
             frame.fill_rounded(tint, x, y, w, h, radius);
             let rim = match (theme.dark, lit) {
@@ -795,9 +807,12 @@ fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Col
 pub(crate) fn note_page(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (width, height): (f32, f32)) {
     match theme.skin {
         Skin::Glass => {
-            // (A little lighter than its card: over a page's breadth the card's own reads as a sheet of paint, the
-            // desktop frosted under it no longer seen through; at half of it, it read as another colour.)
-            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark) * 0.8), 0.0, 0.0, width, height, theme.radius);
+            // (Lighter than its card: over a page's breadth the card's own reads as a sheet of paint, the desktop frosted
+            // under it no longer seen through; at half of it, it read as another colour.)
+            if let Some(light) = note_light(theme.dark) {
+                frame.fill_rounded(light.alpha(0.4), 0.0, 0.0, width, height, theme.radius);
+            }
+            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark) * 0.65), 0.0, 0.0, width, height, theme.radius);
             frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, if theme.dark { 0.22 } else { 0.65 })), 0.0, 0.0, width, height, theme.radius, 1.5);
         }
         Skin::Fluent => {
@@ -1002,18 +1017,23 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 if lit(at) {
                     frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, NOTE_ROW - 2.0, theme.control_radius.max(6.0));
                 }
+                // (Its title over its first line; with none, in the row's middle, as when it was written is.)
+                let first = note.lines.first();
+                let title_y = if first.is_some() { y + 4.0 } else { y + (NOTE_ROW - LINE) / 2.0 };
                 if theme.skin == Skin::Fluent {
                     frame.fill_rounded(note_colour(note.colour), left, y + 7.0, 4.0, NOTE_ROW - 14.0, 2.0);
                 } else {
-                    note_dot(frame, note.colour, left, y + 4.0 + LINE / 2.0);
+                    note_dot(frame, note.colour, left, title_y + LINE / 2.0);
                 }
                 if dotted && at + 1 < notes.len() {
                     frame.fill(theme.rule, left + 15.0, y + NOTE_ROW - 1.0, width - 15.0, 1.0);
                 }
                 let when_w = frame.measure(&note.when, theme.small);
                 let x = left + if theme.skin == Skin::Fluent { 14.0 } else { 15.0 };
-                frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), width - 24.0 - when_w), bold(theme.body, 600.0), theme.text, x, y + 4.0, width - 24.0 - when_w, Align::Start);
-                frame.text(&fitted(frame, note.lines.first().map_or("", String::as_str), theme.small, width - 24.0), theme.small, theme.text3, x, y + 4.0 + LINE, width - 24.0, Align::Start);
+                frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), width - 24.0 - when_w), bold(theme.body, 600.0), theme.text, x, title_y, width - 24.0 - when_w, Align::Start);
+                if let Some(first) = first {
+                    frame.text(&fitted(frame, first, theme.small, width - 24.0), theme.small, theme.text3, x, y + 4.0 + LINE, width - 24.0, Align::Start);
+                }
                 frame.text(&note.when, theme.small, theme.text3, left, y + (NOTE_ROW - LINE) / 2.0, width, Align::End);
                 hits.extend(shown_in((left, y, width, NOTE_ROW, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, tall)));
             }
@@ -3117,9 +3137,17 @@ pub(crate) fn glass_choice(frame: &dyn Canvas, theme: &Theme, pills: (f32, f32),
         Some(((from_x, from_w), done)) => (from_x + (to_x - from_x) * done, from_w + (to_w - from_w) * done),
         None => (to_x, to_w),
     };
-    frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.12) } else { Color::hex(0xFFFFFF, 0.58) }, x, py, w, ph, ph / 2.0);
+    // (On a light sheet, white on white: its shadow and a faint dark edge under its lit one tell it from what is round
+    // it, as the lanes' tell them from the sheet.)
+    if !dark {
+        frame.shadow(Color::hex(0, 0.08), x, py, w, ph, ph / 2.0, 3.0, 1.0);
+    }
+    frame.fill_rounded(if dark { Color::hex(0xFFFFFF, 0.12) } else { Color::hex(0xFFFFFF, 0.62) }, x, py, w, ph, ph / 2.0);
+    if !dark {
+        frame.stroke_rounded(Fill::Solid(Color::hex(0, 0.07)), x, py, w, ph, ph / 2.0, 1.0);
+    }
     let (lit, foot) = if dark { (Color::hex(0xFFFFFF, 0.3), Color::hex(0xFFFFFF, 0.08)) } else { (Color::hex(0xFFFFFF, 0.95), Color::hex(0xFFFFFF, 0.4)) };
-    frame.stroke_rounded(Fill::Down { top: py, from: lit, bottom: py + ph, to: foot }, x, py, w, ph, ph / 2.0, 1.0);
+    frame.stroke_rounded(Fill::Down { top: py + 0.5, from: lit, bottom: py + ph, to: foot }, x + 0.5, py + 0.5, w - 1.0, ph - 1.0, ph / 2.0 - 0.5, 1.0);
 }
 
 /// A count's mark: a pill `BADGE` tall, as wide as its figures and the room either side of them (see `badge_width`).
@@ -3447,23 +3475,46 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
     let share = (width - gaps) / names.len() as f32;
     let shortened = words + 2.0 * pad * names.len() as f32 + gaps > width;
     let mut x = left;
-    for (choice, name) in Filter::ALL.into_iter().zip(names) {
-        let name = if shortened { fitted(frame, name, theme.small, share - 2.0 * pad) } else { name.into() };
-        let wide = frame.measure(&name, theme.small) + 2.0 * pad;
+    let laid: Vec<(Filter, String, f32, f32)> = Filter::ALL
+        .into_iter()
+        .zip(names)
+        .map(|(choice, name)| {
+            let name = if shortened { fitted(frame, name, theme.small, share - 2.0 * pad).into_owned() } else { name.to_string() };
+            let wide = frame.measure(&name, theme.small) + 2.0 * pad;
+            let at = x;
+            x += wide + 4.0;
+            (choice, name, at, wide)
+        })
+        .collect();
+    // (Glass's chosen one on a pill of its glass, sliding to it, as the station's pages are: see `glass_choice`.)
+    if theme.skin == Skin::Glass {
+        let boxes: Vec<(f32, f32)> = laid.iter().map(|one| (one.2, one.3)).collect();
+        let at = |choice: Filter| laid.iter().position(|one| one.0 == choice);
+        let slid = scene.thumbs.slid(Hit::Tab(Tab::Recent(filter))).and_then(|(from, done)| match from {
+            Hit::Tab(Tab::Recent(from)) => Some((at(from)?, done)),
+            _ => None,
+        });
+        let hovered = laid.iter().position(|one| scene.hover == Some(Hit::Tab(Tab::Recent(one.0))));
+        glass_choice(frame, theme, (top, CHIP_H), &boxes, at(filter).unwrap_or(0), slid, hovered);
+    }
+    for (choice, name, x, wide) in laid {
         let chosen = choice == filter;
         let hit = Hit::Tab(Tab::Recent(choice));
-        let radius = if theme.skin == Skin::Glass { CHIP_H / 2.0 } else { theme.control_radius.min(CHIP_H / 2.0) };
+        let radius = theme.control_radius.min(CHIP_H / 2.0);
         let (ground, words) = match (chosen, theme.skin) {
-            (true, Skin::Paper) => (theme.text, theme.paper),
-            (true, Skin::Fluent) => (super::theme::accent(theme.dark), ink_on(super::theme::accent(theme.dark))),
-            (true, Skin::Glass) => (ink.trace, ink_on(ink.trace)),
-            (false, _) if scene.hover == Some(hit) => (theme.hover, theme.text),
-            (false, _) => (theme.track, theme.text2),
+            (true, Skin::Glass) => (None, theme.text),
+            (false, Skin::Glass) if scene.hover == Some(hit) => (None, theme.text),
+            (false, Skin::Glass) => (None, theme.text2),
+            (true, Skin::Paper) => (Some(theme.text), theme.paper),
+            (true, Skin::Fluent) => (Some(super::theme::accent(theme.dark)), ink_on(super::theme::accent(theme.dark))),
+            (false, _) if scene.hover == Some(hit) => (Some(theme.hover), theme.text),
+            (false, _) => (Some(theme.track), theme.text2),
         };
-        frame.fill_rounded(ground, x, top, wide, CHIP_H, radius);
+        if let Some(ground) = ground {
+            frame.fill_rounded(ground, x, top, wide, CHIP_H, radius);
+        }
         centred(frame, &name, theme.small, words, x, top + (CHIP_H - LINE) / 2.0, wide);
         hits.push((x, top, wide, CHIP_H, hit));
-        x += wide + 4.0;
     }
     let list_top = top + CHIP_H + 6.0;
     let list_tall = tall - CHIP_H - 6.0;
