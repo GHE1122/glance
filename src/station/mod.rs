@@ -24,14 +24,14 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
     /// The thing on it last pressed, and when.
     static LAST: std::sync::Mutex<Option<(u64, std::time::Instant)>> = std::sync::Mutex::new(None);
     match hit {
-        Hit::Shelf(id) => {
+        // A thing on it, or copied lately: put on the clipboard (pressed again within a double click's time, opened).
+        Hit::Shelf(id) | Hit::Copied(id) => {
             let double = std::time::Duration::from_millis(u64::from(unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }));
             let mut last = LAST.lock().unwrap();
             let again = last.is_some_and(|(was, at)| was == id && at.elapsed() <= double);
             *last = (!again).then(|| (id, std::time::Instant::now()));
             run::ask(if again { run::Ask::Open(id) } else { run::Ask::Copy(id) });
         }
-        Hit::Copied(id) => run::ask(run::Ask::Copy(id)),
         // The notes shown another way (their head's views).
         Hit::NotesShow(view) => {
             std::thread::spawn(move || crate::app().change(|settings| settings.notes_view = view));
@@ -80,8 +80,7 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
     let item = shown.items.iter().find(|item| item.id == id)?;
     let lang = crate::update::language();
     let (opens, in_explorer) = match &item.what {
-        What::Text { .. } => (false, false),
-        What::Link { .. } => (true, false),
+        What::Text { .. } | What::Link { .. } => (true, false),
         What::Files { .. } | What::Picture { .. } | What::Saved { .. } => (true, true),
     };
     let mut rows: Vec<(Choice, &'static str, Icon, bool)> = vec![(Choice::Copy, lang.pick("复制", "Copy"), Icon::Clipboard, false)];

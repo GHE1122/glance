@@ -218,8 +218,28 @@ fn open(given: &Content) {
     match given {
         Content::Files(paths) => paths.iter().for_each(|path| shell(path.as_os_str())),
         Content::Text(text) if text.starts_with("https://") || text.starts_with("http://") => shell(std::ffi::OsStr::new(text)),
-        _ => {}
+        // Words: as a text file of their own (named by their first line, as they are dragged off), in what opens one.
+        Content::Text(text) => {
+            if let Some(file) = text_file(text) {
+                shell(file.as_os_str());
+            }
+        }
+        Content::Png(_) | Content::Saved { .. } => {}
     }
+}
+
+/// `text` written as a text file to be opened (UTF-8, marked so; named by its first line, see `drag::text_name`), in a
+/// folder of Windows' temporary ones that is its own (one for each text: two of the same first line are two files).
+fn text_file(text: &str) -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut digest = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut digest);
+    let folder = std::env::temp_dir().join("Glance").join("opened").join(format!("{:016x}", digest.finish()));
+    std::fs::create_dir_all(&folder).ok()?;
+    let file = folder.join(super::drag::text_name(text));
+    let contents: Vec<u8> = [0xEF, 0xBB, 0xBF].into_iter().chain(text.bytes()).collect();
+    std::fs::write(&file, contents).ok()?;
+    Some(file)
 }
 
 /// `act` done with the shell (opening, showing in Explorer) on a thread of its own, a single-threaded apartment as the
@@ -448,12 +468,12 @@ impl Station {
                     }
                 }
                 Ask::Open(id) => {
-                    if let Some(given) = self.keep.shelf.get(id).and_then(|item| self.keep.content_of(item)) {
+                    if let Some(given) = self.opened(id) {
                         by_the_shell(move || open(&given));
                     }
                 }
                 Ask::Show(id) => {
-                    if let Some(Content::Files(paths)) = self.keep.shelf.get(id).and_then(|item| self.keep.content_of(item)) {
+                    if let Some(Content::Files(paths)) = self.opened(id) {
                         by_the_shell(move || show_in_explorer(&paths));
                     }
                 }
@@ -491,16 +511,22 @@ impl Station {
         self.show();
     }
 
+    /// `id` as it is opened, shown in Explorer or dragged off: a picture of its own as its file (what Explorer and the
+    /// chat programs take where it is dropped, and what a viewer opens; copied, it is the picture), the rest as it is
+    /// copied.
+    fn opened(&self, id: u64) -> Option<Content> {
+        let item = self.keep.shelf.get(id)?;
+        match &item.what {
+            super::shelf::What::Picture { file } => Some(Content::Files(vec![self.keep.folder.path(file)])),
+            _ => self.keep.content_of(item),
+        }
+    }
+
     /// What a drag off it of `id` gives (see `drag_off`): its number, what it gives, whether it stays on this PC, and
     /// the files of its own it holds meanwhile.
     fn drag_given(&mut self, id: u64) -> Option<(u64, Content, bool, Vec<String>)> {
         let item = self.keep.shelf.get(id)?.clone();
-        // A picture of its own dragged as its file (what Explorer and the chat programs take where it is dropped);
-        // copied, it is the picture.
-        let content = match &item.what {
-            super::shelf::What::Picture { file } => Content::Files(vec![self.keep.folder.path(file)]),
-            _ => self.keep.content_of(&item)?,
-        };
+        let content = self.opened(id)?;
         let held: Vec<String> = item.what.own_files().into_iter().map(str::to_string).collect();
         for name in &held {
             self.keep.folder.hold(name);
@@ -566,5 +592,22 @@ impl Station {
         if let Some(told) = TOLD.get() {
             told();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Words copied lately, opened: a text file of them, named by their first line, that holds them whole (marked
+    /// UTF-8, as Notepad reads Chinese right); the same words twice, the same file.
+    #[test]
+    fn words_open_as_a_text_file() {
+        let text = "先看一下安装脚本的用法\nRan 1 shell command";
+        let file = super::text_file(text).expect("written");
+        assert_eq!(file.file_name().unwrap().to_string_lossy(), "先看一下安装脚本的用法.txt");
+        let held = std::fs::read(&file).unwrap();
+        assert_eq!(&held[..3], &[0xEF, 0xBB, 0xBF]);
+        assert_eq!(std::str::from_utf8(&held[3..]).unwrap(), text);
+        assert_eq!(super::text_file(text).unwrap(), file);
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 }

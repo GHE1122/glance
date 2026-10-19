@@ -54,6 +54,27 @@ thread_local! {
 const UNDER: f32 = 8.0;
 const TALL: f32 = 28.0;
 const PAD: f32 = 10.0;
+/// How wide its words go before they are put on more lines, and how tall they go at most, the rest left off (DIPs).
+const WIDEST: f32 = 360.0;
+const TALLEST: f32 = 150.0;
+
+/// As much of `text` as `TALLEST` holds on lines `WIDEST` across (its padding off), and "…" where some is left off:
+/// the most of its characters that fit (found by halving).
+fn held(gfx: &Gfx, text: &str, font: Font) -> String {
+    let across = WIDEST - 2.0 * PAD;
+    let room = TALLEST - (TALL - font.size * 1.3);
+    if gfx.wrapped_height(text, font, across) <= room {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let cut = |count: usize| chars[..count].iter().collect::<String>().trim_end().to_string() + "…";
+    let (mut fits, mut over) = (0, chars.len());
+    while over - fits > 1 {
+        let middle = (fits + over) / 2;
+        if gfx.wrapped_height(&cut(middle), font, across) <= room { fits = middle } else { over = middle }
+    }
+    cut(fits)
+}
 
 /// Says `text` under `about` (what it speaks of, where that is on the
 /// screen), its middle under its middle, on its screen, till `hide`: always
@@ -84,14 +105,18 @@ pub fn show(text: &str, about: RECT, dark: bool) {
         }
         let (scale, screen) = (dpi as f32 / 96.0, info.rcMonitor);
         let font = Font::new(Family::Segoe, 12.0, 400.0);
-        let (wide, tall) = (gfx.measure(text, font) + 2.0 * PAD, TALL);
+        // On one line where it fits; else on as many as it takes `WIDEST` across, as many as `TALLEST` holds, what is
+        // past them left off.
+        let one_line = gfx.measure(text, font) <= WIDEST - 2.0 * PAD;
+        let said = if one_line { text.to_string() } else { held(&gfx, text, font) };
+        let (wide, tall) = if one_line { (gfx.measure(text, font) + 2.0 * PAD, TALL) } else { (WIDEST, gfx.wrapped_height(&said, font, WIDEST - 2.0 * PAD) + 2.0 * (TALL - font.size * 1.3) / 2.0) };
         let (width, height) = ((wide * scale).ceil() as i32, (tall * scale).ceil() as i32);
         // Under it, its middle on its middle; all of it on the screen; over it where there is no room under.
         let left = (at.x - width / 2).min(screen.right - width).max(screen.left);
         let under = about.bottom + (UNDER * scale) as i32;
         let top = if under + height > screen.bottom { about.top - (UNDER * scale) as i32 - height } else { under };
         let rect = RECT { left, top, right: left + width, bottom: top + height };
-        if tip.said.0 == text && tip.said.1 == rect {
+        if tip.said.0 == said && tip.said.1 == rect {
             return;
         }
         let surface = match tip.surface.take() {
@@ -104,8 +129,12 @@ pub fn show(text: &str, about: RECT, dark: bool) {
         let drawn = surface.draw(&gfx, (width as u32, height as u32), scale, |frame| {
             frame.fill_rounded(plate, 0.0, 0.0, wide, tall, 6.0);
             frame.stroke_rounded(Fill::Solid(rim), 0.0, 0.0, wide, tall, 6.0, 1.0);
-            let (ink_top, ink_bottom) = frame.ink(text, font);
-            frame.text(text, font, ink, PAD, tall / 2.0 - (ink_top + ink_bottom) / 2.0, wide - 2.0 * PAD + 2.0, Align::Start);
+            if one_line {
+                let (ink_top, ink_bottom) = frame.ink(&said, font);
+                frame.text(&said, font, ink, PAD, tall / 2.0 - (ink_top + ink_bottom) / 2.0, wide - 2.0 * PAD + 2.0, Align::Start);
+            } else {
+                frame.text_wrapped(&said, font, ink, PAD, (TALL - font.size * 1.3) / 2.0, wide - 2.0 * PAD);
+            }
         });
         tip.surface = Some(surface);
         if drawn.is_err() {
@@ -114,7 +143,7 @@ pub fn show(text: &str, about: RECT, dark: bool) {
         }
         tip.window.place(rect);
         tip.window.show();
-        tip.said = (text.to_string(), rect);
+        tip.said = (said, rect);
     });
 }
 
@@ -142,6 +171,20 @@ pub fn hide() {
 #[cfg(test)]
 mod tests {
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsWindowVisible};
+
+    /// Words too many for a tip: as many as fit its tallest on its widest lines, "…" after them; a name that fits on
+    /// its lines whole, whole.
+    #[test]
+    fn a_long_tip_is_cut_to_its_room() {
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let font = super::Font::new(super::Family::Segoe, 12.0, 400.0);
+        let long = "先看一下安装脚本的用法，再备份设置： Ran 1 shell command 用正式版配置编译 0.4，同时备份设置： ".repeat(12);
+        let held = super::held(&gfx, &long, font);
+        assert!(held.ends_with('…') && held.chars().count() < long.chars().count());
+        assert!(gfx.wrapped_height(&held, font, super::WIDEST - 2.0 * super::PAD) <= super::TALLEST - (super::TALL - font.size * 1.3));
+        let name = "Bliss_v2.1.1_(Chocapic13_Shaders_edit_with_a_long_tail_of_words).zip";
+        assert_eq!(super::held(&gfx, name, font), name);
+    }
 
     /// On a desktop: the tip comes where it is asked for, and goes.
     #[test]
