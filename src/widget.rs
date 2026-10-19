@@ -102,6 +102,11 @@ const CORNER: f32 = 20.0;
 /// The edges a press at (`x`, `y`) on a widget `w` × `h` sizes: left,
 /// right, top, bottom.
 fn edges_at(x: f32, y: f32, w: f32, h: f32) -> (bool, bool, bool, bool) {
+    // (Past the band round its edge, over its shadow (which its window holds too): none, as a press there takes
+    // nothing, nor the pointer's shape says one would.)
+    if x < -EDGE || y < -EDGE || x > w + EDGE || y > h + EDGE {
+        return (false, false, false, false);
+    }
     let (left, right, top, bottom) = (x < EDGE, x > w - EDGE, y < EDGE, y > h - EDGE);
     let (side, end) = (left || right, top || bottom);
     (left || end && x < CORNER, right || end && x > w - CORNER, top || side && y < CORNER, bottom || side && y > h - CORNER)
@@ -3603,5 +3608,9 @@ mod tests {
         assert_eq!(edges_at(w - 2.0, 100.0, w, h), (false, true, false, false));
         assert_eq!(edges_at(150.0, h - 2.0, w, h), (false, false, false, true));
         assert_eq!(edges_at(15.0, 15.0, w, h), (false, false, false, false));
+        // Over its shadow, past the band round its edge: none.
+        assert_eq!(edges_at(-EDGE - 1.0, 100.0, w, h), (false, false, false, false));
+        assert_eq!(edges_at(w + EDGE + 1.0, h + EDGE + 1.0, w, h), (false, false, false, false));
+        assert_eq!(edges_at(-EDGE + 1.0, 100.0, w, h), (true, false, false, false));
     }
 }
