@@ -1689,6 +1689,11 @@ impl Widgets {
         widget.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
     }
 
+    /// How a menu opened on the widget at `hwnd` looks: in its skin, light or dark as it is drawn.
+    pub fn look_of(&self, hwnd: HWND) -> crate::ui::menu::Look {
+        self.list.iter().find(|w| w.window.hwnd == hwnd).map_or_else(crate::ui::menu::Look::system, |w| crate::ui::menu::Look::of(w.drawn_look.0, w.drawn_look.1))
+    }
+
     /// The menu of the widget at `hwnd` (a right click on it), up (see `chose`).
     pub fn menu(&mut self, hwnd: HWND, lang: Lang, over_the_panel: bool) -> Option<crate::ui::menu::Menu> {
         self.list.iter().find(|w| w.window.hwnd == hwnd)?.menu(lang, over_the_panel)
@@ -3508,9 +3513,9 @@ impl Widget {
         frost
     }
 
-    /// Its menu, up (as the apps are, light or dark).
+    /// Its menu, up (in its skin, light or dark as it is drawn).
     fn menu(&self, lang: Lang, over_the_panel: bool) -> Option<crate::ui::menu::Menu> {
-        crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop, self.shows_full()), crate::os::apps_dark(), over_the_panel)
+        crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop, self.shows_full()), crate::ui::menu::Look::of(self.drawn_look.0, self.drawn_look.1), over_the_panel)
     }
 
     /// Whether it shows what plays, alone or merged with others (and so offers it over the whole screen). (Not by its

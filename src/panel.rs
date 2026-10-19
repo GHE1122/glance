@@ -611,6 +611,13 @@ impl Controller {
                 if menu.as_ref().is_some_and(|(open, _)| open.left() || (panels.iter().any(Panel::is_shown) && !open.over_the_panel())) {
                     self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                 }
+                // The panels under what is in front of them: a menu up, the settings, the page beside. (Placed again
+                // above all as they are drawn, a panel came over the page it opened, its shadow over it, the two at one
+                // level by turns; another panel came over a menu opened on the one beside it.)
+                let give_way = menu.as_ref().map(|(open, _)| open.hwnd()).or(in_front.0).or(in_front.1);
+                for panel in panels.iter_mut().filter(|panel| panel.window.gives_way_to() != give_way) {
+                    panel.window.yield_to(give_way);
+                }
                 let mut wait: Option<Duration> = None;
                 for (at, panel) in panels.iter_mut().enumerate() {
                     // A capture of the desktop behind the panel come back, up or
@@ -1026,7 +1033,7 @@ impl Controller {
                     // A button of its station's head: its menu.
                     if let Some((hit, tab)) = widgets.take_menu_asked() {
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
-                        menu = cursor_position().and_then(|at| crate::station::head_menu(hit, tab, at, panels.iter().any(Panel::is_shown))).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
+                        menu = cursor_position().and_then(|at| crate::station::head_menu(hit, tab, at, panels.iter().any(Panel::is_shown), widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
                         keep_menu_above(&menu, &mut overlay);
                     }
                 }
@@ -1040,9 +1047,9 @@ impl Controller {
                     // On a thing on the station, its menu; else the widget's.
                     let panel_shown = panels.iter().any(Panel::is_shown);
                     menu = match widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
-                        Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel_shown)).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
-                        Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel_shown)).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
-                        Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel_shown)).map(|(open, choices, app)| (open, MenuFor::App(app, choices))),
+                        Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
+                        Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
+                        Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices, app)| (open, MenuFor::App(app, choices))),
                         _ => widgets.menu(msg.hwnd, panels[0].lang, panel_shown).map(|open| (open, MenuFor::Widget(msg.hwnd))),
                     };
                     keep_menu_above(&menu, &mut overlay);
@@ -1050,6 +1057,7 @@ impl Controller {
                 // On a thing on the station in the panel, its menu.
                 WM_RBUTTONUP if owner.is_some() => {
                     let hit = panels[owner.unwrap()].hit_at(lparam_point(msg.lParam));
+                    let look = panels[owner.unwrap()].menu_look();
                     if matches!(hit, Some(Hit::Shelf(_) | Hit::App(_) | Hit::Recent(_))) {
                         // (Before `end_menu`, which forgets whose the menu up was.)
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
@@ -1057,15 +1065,15 @@ impl Controller {
                     }
                     match hit {
                         Some(Hit::Shelf(id)) => {
-                            menu = cursor_position().and_then(|at| crate::station::menu(id, at, true)).map(|(open, choices)| (open, MenuFor::Station(id, choices, None)));
+                            menu = cursor_position().and_then(|at| crate::station::menu(id, at, true, look)).map(|(open, choices)| (open, MenuFor::Station(id, choices, None)));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         Some(Hit::App(at)) => {
-                            menu = cursor_position().and_then(|point| crate::station::app_menu(at, point, true)).map(|(open, choices, app)| (open, MenuFor::App(app, choices)));
+                            menu = cursor_position().and_then(|point| crate::station::app_menu(at, point, true, look)).map(|(open, choices, app)| (open, MenuFor::App(app, choices)));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         Some(Hit::Recent(file)) => {
-                            menu = cursor_position().and_then(|at| crate::station::recent_menu(file, at, true)).map(|(open, choices)| (open, MenuFor::Recent(file, choices)));
+                            menu = cursor_position().and_then(|at| crate::station::recent_menu(file, at, true, look)).map(|(open, choices)| (open, MenuFor::Recent(file, choices)));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         _ => {}
@@ -1145,7 +1153,7 @@ impl Controller {
                     let hit = panels[at].hit_at(lparam_point(msg.lParam)).unwrap();
                     panels[at].click(lparam_point(msg.lParam));
                     self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
-                    menu = cursor_position().and_then(|point| crate::station::head_menu(hit, panels[at].tab, point, true)).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
+                    menu = cursor_position().and_then(|point| crate::station::head_menu(hit, panels[at].tab, point, true, panels[at].menu_look())).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
                     menu_of = Some(at);
                     keep_menu_above(&menu, &mut overlay);
                 }
@@ -2505,6 +2513,11 @@ impl<'a> Panel<'a> {
             self.recapture = true;
             self.next_frame = Instant::now();
         }
+    }
+
+    /// How a menu opened on it looks: in its skin, light or dark as it is drawn.
+    fn menu_look(&self) -> crate::ui::menu::Look {
+        crate::ui::menu::Look::of(self.theme.skin, self.theme.dark)
     }
 
     /// Whether it is moved away from the edge.

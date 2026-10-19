@@ -72,7 +72,7 @@ pub enum Choice {
 
 /// The menu of the thing `id` on the station (a right click on it), at `at` on the screen (`over_the_panel`: as
 /// `Menu::open_at` says): up, with what its rows do.
-pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<Choice>)> {
+pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<Choice>)> {
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
     use shelf::What;
@@ -94,7 +94,7 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
     rows.push((Choice::Pin, if item.pinned { lang.pick("取消固定", "Unpin") } else { lang.pick("固定", "Pin") }, Icon::Pin, false));
     rows.push((Choice::Remove, lang.pick("移除", "Remove"), Icon::Close, true));
     let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
-    let menu = Menu::open_at(items, crate::os::apps_dark(), at, false, over_the_panel)?;
+    let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
 }
 
@@ -141,7 +141,7 @@ pub enum RecentChoice {
 
 /// The menu of the file come lately numbered `file` (a right click on it), at `at` on the screen: up, with what its
 /// rows do.
-pub fn recent_menu(file: recent::Key, at: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<RecentChoice>)> {
+pub fn recent_menu(file: recent::Key, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<RecentChoice>)> {
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
     recent::path_of(file)?;
@@ -154,7 +154,7 @@ pub fn recent_menu(file: recent::Key, at: windows::Win32::Foundation::POINT, ove
         (RecentChoice::Hide, lang.pick("不再列出这个文件夹", "List this folder no more"), Icon::Close, true),
     ];
     let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
-    let menu = Menu::open_at(items, crate::os::apps_dark(), at, false, over_the_panel)?;
+    let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
 }
 
@@ -184,7 +184,7 @@ pub enum AppChoice {
 
 /// The menu of the thing kept at hand at `at` among them (a right click on it), at `point` on the screen: up, with
 /// what its rows do (where it is is shown only for what is on the disk).
-pub fn app_menu(at: u16, point: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<AppChoice>, apps::App)> {
+pub fn app_menu(at: u16, point: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<AppChoice>, apps::App)> {
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
     let app = apps::shown().get(usize::from(at))?.clone();
@@ -195,7 +195,7 @@ pub fn app_menu(at: u16, point: windows::Win32::Foundation::POINT, over_the_pane
     }
     rows.push((AppChoice::Remove, lang.pick("从快捷 App 移除", "Take off quick launch"), Icon::Close, true));
     let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
-    let menu = Menu::open_at(items, crate::os::apps_dark(), point, false, over_the_panel)?;
+    let menu = Menu::open_at(items, look, point, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect(), app))
 }
 
@@ -227,7 +227,7 @@ pub enum HeadChoice {
 
 /// The menu a press on the station's head opens (`hit`: the button of how what is on it shows, or of the rest, the
 /// page `tab` shown), at `at` on the screen (`over_the_panel`: as `Menu::open_at` says): up, with what its rows do.
-pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windows::Win32::Foundation::POINT, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, Vec<HeadChoice>)> {
+pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<HeadChoice>)> {
     use crate::settings::ShelfView;
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
@@ -264,7 +264,7 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
         _ => return None,
     };
     let items = rows.iter().map(|(_, label, icon, checked, rule_before)| Item { label, icon: Some(*icon), checked: *checked, rule_before: *rule_before }).collect();
-    let menu = Menu::open_at(items, crate::os::apps_dark(), at, false, over_the_panel)?;
+    let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
 }
 

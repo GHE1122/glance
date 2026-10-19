@@ -272,6 +272,11 @@ impl Window {
         self.came_to_top();
     }
 
+    /// The window it gives way to, if it does (see `yield_to`).
+    pub fn gives_way_to(&self) -> Option<HWND> {
+        self.under.get()
+    }
+
     /// Whether it is giving way to another window (see `yield_to`).
     pub fn yielding(&self) -> bool {
         self.under.get().is_some()

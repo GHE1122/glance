@@ -512,6 +512,9 @@ fn show(opening: Opening) {
         let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP, w!("GlanceBeside"), &HSTRING::from("Glance"), WS_POPUP, x - room_px, y - room_px, wide + 2 * room_px, tall + 2 * room_px, None, None, None, None) else { return };
         let square = DWMWCP_DONOTROUND;
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &square as *const _ as *const _, size_of_val(&square) as u32);
+        // (Shown as it is drawn, at once: Windows' fade as it came up showed it all but clear a moment first.)
+        let off = windows::core::BOOL(1);
+        let _ = DwmSetWindowAttribute(hwnd, windows::Win32::Graphics::Dwm::DWMWA_TRANSITIONS_FORCEDISABLED, &off as *const _ as *const _, size_of_val(&off) as u32);
         let beside = Beside {
             hwnd,
             gfx,
@@ -1056,7 +1059,7 @@ impl Beside {
             rows.push((NoteChoice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Icon::Close, false, false));
         }
         let items = rows.iter().map(|(_, label, icon, checked, rule_before)| Item { label, icon: Some(*icon), checked: *checked, rule_before: *rule_before }).collect();
-        if let Some(menu) = Menu::open_at(items, self.theme.dark, at, false, false) {
+        if let Some(menu) = Menu::open_at(items, super::menu::Look::of(self.theme.skin, self.theme.dark), at, false, false) {
             MENU.with(|held| *held.borrow_mut() = Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect())));
         }
     }

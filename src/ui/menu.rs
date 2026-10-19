@@ -1,7 +1,7 @@
-//! A menu as Windows 11 draws its own (File Explorer's): a rounded sheet
-//! with a soft shadow, a row for each choice with its icon, a light
-//! highlight under the pointer, a tick for a choice that is on, thin rules
-//! between groups. Shown at the pointer, it is up until a choice is made or
+//! A menu as Windows 11 draws its own (File Explorer's), or in the skin of
+//! what it is opened on (see `Look`): a rounded sheet with a soft shadow, a
+//! row for each choice with its icon, a light highlight under the pointer, a
+//! tick for a choice that is on, thin rules between groups. Shown at the pointer, it is up until a choice is made or
 //! it is left (a click elsewhere, Esc, Alt, another window to the front),
 //! as a system menu is.
 
@@ -19,6 +19,26 @@ use super::gfx::{self, Surface};
 use super::icons::Icon;
 use super::window::{Window, CAPTURE_LOST};
 
+/// How a menu looks: in the skin of what it is opened on (`skin`: the panel's, a widget's, the page beside), or as
+/// Windows' own (none: the tray's, the overlay's, which are Windows' things); light or `dark`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Look {
+    pub skin: Option<super::theme::Skin>,
+    pub dark: bool,
+}
+
+impl Look {
+    /// As Windows' own menus, light or dark as the apps are.
+    pub fn system() -> Look {
+        Look { skin: None, dark: crate::os::apps_dark() }
+    }
+
+    /// In `skin`, light or `dark`.
+    pub fn of(skin: super::theme::Skin, dark: bool) -> Look {
+        Look { skin: Some(skin), dark }
+    }
+}
+
 /// One choice: what it says, its icon, whether it is on (ticked), and
 /// whether a rule sets it off from the choices before it.
 pub struct Item<'a> {
@@ -33,7 +53,6 @@ const ROW: f32 = 32.0;
 const RULE: f32 = 9.0;
 const INSET: f32 = 4.0;
 const RADIUS: f32 = 8.0;
-const HIGHLIGHT_RADIUS: f32 = 4.0;
 const ICON: f32 = 16.0;
 const TEXT_LEFT: f32 = 44.0;
 const MIN_WIDTH: f32 = 200.0;
@@ -65,7 +84,7 @@ pub struct Menu {
     surface: Surface,
     items: Vec<Item<'static>>,
     sheet: Sheet,
-    dark: bool,
+    look: Look,
     scale: f32,
     /// Its window's size (physical px) and where it is.
     size: (i32, i32),
@@ -81,15 +100,15 @@ pub struct Menu {
 
 impl Menu {
     /// Shows `items` at the pointer, light or `dark`.
-    pub fn open(items: Vec<Item<'static>>, dark: bool, with_the_panel: bool) -> Option<Menu> {
+    pub fn open(items: Vec<Item<'static>>, look: Look, with_the_panel: bool) -> Option<Menu> {
         let mut cursor = POINT::default();
         unsafe { GetCursorPos(&mut cursor) }.ok()?;
-        Menu::open_at(items, dark, cursor, false, with_the_panel)
+        Menu::open_at(items, look, cursor, false, with_the_panel)
     }
 
     /// Shows `items` with a corner at `at` (physical px), its bottom there for `above` (as a menu from the taskbar
     /// opens), light or `dark`. None where it could not be shown, or was not let to the front.
-    pub fn open_at(items: Vec<Item<'static>>, dark: bool, at: POINT, above: bool, with_the_panel: bool) -> Option<Menu> {
+    pub fn open_at(items: Vec<Item<'static>>, look: Look, at: POINT, above: bool, with_the_panel: bool) -> Option<Menu> {
         let contact = crate::mouse::monitor_at(at)?;
         let gfx = gfx::current().ok()?;
         let showing = super::life::Showing::of(&gfx);
@@ -116,7 +135,7 @@ impl Menu {
         let left = left.clamp(work.left - margin, (work.right - w + margin).max(work.left - margin));
         let top = top.clamp(work.top - margin, (work.bottom - h + margin).max(work.top - margin));
         let rect = RECT { left, top, right: left + w, bottom: top + h };
-        let mut menu = Menu { gfx, window, surface, items, sheet, dark, scale, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, _showing: showing };
+        let mut menu = Menu { gfx, window, surface, items, sheet, look, scale, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, _showing: showing };
         if !menu.draw() {
             menu.window.destroy();
             return None;
@@ -227,10 +246,10 @@ impl Menu {
     }
 
     fn draw(&mut self) -> bool {
-        let (sheet, items, dark, lit) = (&self.sheet, &self.items, self.dark, self.lit);
+        let (sheet, items, look, lit) = (&self.sheet, &self.items, self.look, self.lit);
         let drawn = self.surface.draw(&self.gfx, (self.size.0 as u32, self.size.1 as u32), self.scale, |frame| {
             frame.origin(SHADOW, SHADOW);
-            sheet.paint(frame, items, dark, lit);
+            sheet.paint(frame, items, look, lit);
         });
         if drawn.is_err() {
             gfx::lost();
@@ -280,19 +299,24 @@ impl Sheet {
     }
 
     /// Draws it, its corner at the frame's origin (its shadow beyond),
-    /// light or `dark`, the choice `lit` highlighted.
-    pub fn paint(&self, frame: &gfx::Frame, items: &[Item], dark: bool, lit: Option<usize>) {
+    /// as `look` has it, the choice `lit` highlighted.
+    pub fn paint(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>) {
         let (width, height) = (self.width, self.height);
-        let colours = Colours::new(dark);
-        frame.shadow(colours.shadow, 0.0, 0.0, width, height, RADIUS, 12.0, 6.0);
-        frame.fill_rounded(colours.sheet, 0.0, 0.0, width, height, RADIUS);
-        frame.stroke_rounded(Fill::Solid(colours.stroke), 0.0, 0.0, width, height, RADIUS, 1.0);
+        let colours = Colours::new(look);
+        let (radius, highlight_radius) = (colours.radius, colours.radius - INSET);
+        frame.shadow(colours.shadow, 0.0, 0.0, width, height, radius, 12.0, 6.0);
+        frame.fill_rounded(colours.sheet, 0.0, 0.0, width, height, radius);
+        frame.stroke_rounded(Fill::Solid(colours.stroke), 0.0, 0.0, width, height, radius, 1.0);
+        if let Some(rim) = colours.rim {
+            // (Glass's: lit along its top, as its lanes are.)
+            frame.stroke_rounded(Fill::Down { top: 0.0, from: rim, bottom: height, to: rim.alpha(rim.a * 0.3) }, 1.0, 1.0, width - 2.0, height - 2.0, radius - 1.0, 1.0);
+        }
         for (i, (item, top)) in items.iter().zip(&self.tops).enumerate() {
             if item.rule_before {
                 frame.fill(colours.rule, 0.0, top - RULE / 2.0 - 0.5, width, 1.0);
             }
             if lit == Some(i) {
-                frame.fill_rounded(colours.highlight, INSET, *top, width - 2.0 * INSET, ROW, HIGHLIGHT_RADIUS);
+                frame.fill_rounded(colours.highlight, INSET, *top, width - 2.0 * INSET, ROW, highlight_radius);
             }
             let middle = top + ROW / 2.0;
             if let Some(icon) = item.icon {
@@ -307,39 +331,110 @@ impl Sheet {
     }
 }
 
-/// What a menu is drawn in, light or dark, as Windows 11's are.
+/// What a menu is drawn in: Windows 11's (light or dark), or its skin's, as the panel's lanes are (glass's a near opaque
+/// pane of its glass, lit along its top, round as its lanes; chart paper's its paper ruled in ink, square-ish); its
+/// corners' radius (its rows' highlight concentric within them).
 struct Colours {
     sheet: Color,
     stroke: Color,
+    rim: Option<Color>,
     shadow: Color,
     text: Color,
     icon: Color,
     highlight: Color,
     rule: Color,
+    radius: f32,
 }
 
 impl Colours {
-    fn new(dark: bool) -> Self {
-        if dark {
-            Colours {
+    fn new(look: Look) -> Self {
+        use super::theme::Skin;
+        let dark = look.dark;
+        let theme = look.skin.map(|skin| super::theme::Theme::new(skin, dark));
+        match (look.skin, theme) {
+            (Some(Skin::Glass), Some(theme)) => Colours {
+                sheet: if dark { Color::hex(0x2A2D35, 0.94) } else { Color::hex(0xF7F8FA, 0.94) },
+                stroke: if dark { Color::hex(0x000000, 0.35) } else { Color::hex(0x000000, 0.08) },
+                rim: Some(Color::hex(0xFFFFFF, if dark { 0.16 } else { 0.9 })),
+                shadow: Color::hex(0x000000, if dark { 0.4 } else { 0.16 }),
+                text: theme.text,
+                icon: theme.text2,
+                highlight: if dark { Color::hex(0xFFFFFF, 0.08) } else { Color::hex(0x000000, 0.05) },
+                rule: theme.rule,
+                radius: 14.0,
+            },
+            (Some(Skin::Paper), Some(theme)) => Colours {
+                sheet: Color { a: 1.0, ..theme.paper },
+                stroke: theme.stroke,
+                rim: None,
+                shadow: Color::hex(0x000000, if dark { 0.3 } else { 0.1 }),
+                text: theme.text,
+                icon: theme.text2,
+                highlight: theme.hover,
+                rule: theme.rule,
+                radius: 8.0,
+            },
+            _ if dark => Colours {
                 sheet: Color::hex(0x2C2C2C, 0.98),
                 stroke: Color::hex(0x000000, 0.2),
+                rim: None,
                 shadow: Color::hex(0x000000, 0.35),
                 text: Color::hex(0xFFFFFF, 1.0),
                 icon: Color::hex(0xFFFFFF, 0.86),
                 highlight: Color::hex(0xFFFFFF, 0.06),
                 rule: Color::hex(0xFFFFFF, 0.08),
-            }
-        } else {
-            Colours {
+                radius: RADIUS,
+            },
+            _ => Colours {
                 sheet: Color::hex(0xF9F9F9, 0.98),
                 stroke: Color::hex(0x000000, 0.08),
+                rim: None,
                 shadow: Color::hex(0x000000, 0.16),
                 text: Color::hex(0x000000, 0.9),
                 icon: Color::hex(0x000000, 0.72),
                 highlight: Color::hex(0x000000, 0.04),
                 rule: Color::hex(0x000000, 0.08),
-            }
+                radius: RADIUS,
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A menu in each look, light and dark, a row lit (`cargo test --features studio --lib -- --ignored menu_looks`
+    /// writes `target/looks/menus.png`).
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    #[cfg(feature = "studio")]
+    fn menu_looks() {
+        use super::super::theme::Skin;
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let gfx = gfx::Gfx::new().expect("graphics");
+        let items = vec![
+            Item { label: "小卡片", icon: Some(Icon::LayoutGrid), checked: false, rule_before: false },
+            Item { label: "大卡片", icon: Some(Icon::Image), checked: false, rule_before: false },
+            Item { label: "列表", icon: Some(Icon::List), checked: true, rule_before: false },
+            Item { label: "清空中转站", icon: None, checked: false, rule_before: true },
+        ];
+        let sheet = Sheet::new(&gfx, &items);
+        let looks = [Look { skin: None, dark: false }, Look::of(Skin::Glass, false), Look::of(Skin::Paper, false), Look { skin: None, dark: true }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, true)];
+        let (cell_w, cell_h, px) = (sheet.width + 2.0 * SHADOW, sheet.height + 2.0 * SHADOW, 2.0f32);
+        let (w, h) = ((3.0 * cell_w * px) as u32, (2.0 * cell_h * px) as u32);
+        let pixels = gfx.draw_offscreen((w, h), px, |frame| {
+            frame.fill(Color::hex(0x8899AA, 1.0), 0.0, 0.0, 3.0 * cell_w, cell_h);
+            frame.fill(Color::hex(0x223344, 1.0), 0.0, cell_h, 3.0 * cell_w, cell_h);
+            for (at, look) in looks.iter().enumerate() {
+                frame.origin((at % 3) as f32 * cell_w + SHADOW, (at / 3) as f32 * cell_h + SHADOW);
+                sheet.paint(frame, &items, *look, Some(1));
+            }
+        }).expect("drawn");
+        let out = std::path::PathBuf::from(format!("{}/target/looks", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        crate::studio::save_png(&out.join("menus.png"), w, h, &pixels).unwrap();
     }
 }

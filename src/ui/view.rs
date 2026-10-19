@@ -3412,11 +3412,15 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
 fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], shows: Shows, tall: f32, list: List, hit: &dyn Fn(&Tile, usize) -> Hit, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let (places, whole) = shelf_places(shows, tiles.len(), width);
+    // (Cards lie so far down their room as the plate under the pointer reaches past them: at the top unscrolled, its
+    // top was cut off.)
+    let lead = if matches!(shows, Shows::View(ShelfView::Cards | ShelfView::Large)) { 4.0 } else { 0.0 };
+    let whole = whole + lead;
     let most = (whole - tall).max(0.0);
     let scroll = scene.scrolls.at(list).clamp(0.0, most);
     frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
     for (at, (tile, place)) in tiles.iter().zip(&places).enumerate() {
-        let (x, y) = (left + place.x, top + place.y - scroll);
+        let (x, y) = (left + place.x, top + lead + place.y - scroll);
         if y + place.h < top || y > top + tall {
             continue;
         }

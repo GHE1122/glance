@@ -677,7 +677,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                     let sheet = crate::ui::menu::Sheet::new(gfx, &items);
                     let lit = menu.lit.iter().take_while(|(at, _)| *at <= t).last().map(|(_, choice)| *choice);
                     frame.place(Matrix3x2::translation(filming.at.0 + menu.at.0, filming.at.1 + menu.at.1));
-                    sheet.paint(frame, &items, theme.dark, lit);
+                    sheet.paint(frame, &items, crate::ui::menu::Look::of(theme.skin, theme.dark), lit);
                     frame.origin(0.0, 0.0);
                 }
             })

@@ -817,7 +817,7 @@ impl Overlay {
             Item { label: if zh { "关闭悬浮窗" } else { "Close the overlay" }, icon: Some(Icon::Close), checked: false, rule_before: false },
             Item { label: if zh { "设置…" } else { "Settings…" }, icon: Some(Icon::Settings), checked: false, rule_before: true },
         ];
-        Menu::open(items, crate::os::apps_dark(), over_the_panel)
+        Menu::open(items, crate::ui::menu::Look::system(), over_the_panel)
     }
 
     /// The choice at `row` of its menu made (see `menu`).
