@@ -176,7 +176,7 @@ pub fn site_of(text: &str) -> Option<String> {
 
 /// One change a journal's record tells: the file's number and its folder's, why (its reasons, as `USN_REASON_*`), its
 /// attributes, and when (ms since 1970).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Change {
     pub file: u128,
     pub folder: u128,
@@ -242,44 +242,38 @@ mod reasons {
     pub const TEMPORARY: u32 = 0x100;
 }
 
-/// A file looked for by its number: where it is (its path, when it was made, how large it is), gone, or not to be told
-/// now (its drive away, it not the user's to open, or locked).
+/// A file looked for by its number: where it is (its path, when it was made, how large it is), gone, not the user's
+/// to open (never listed), or not to be told now (its drive away, it locked: asked again later).
 #[derive(Clone, PartialEq, Debug)]
 pub enum Looked {
     At(PathBuf, u64, u64),
     Gone,
+    Theirs,
     Unknown,
 }
 
-/// Whether a file is at a path: there, not, or not to be told now (its drive away, or not ready).
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum There {
-    Yes,
-    No,
-    Unknown,
-}
-
-fn there(path: &Path) -> There {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => There::Yes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => There::No,
-        Err(_) => There::Unknown,
-    }
-}
+/// How many times a file come that could not be opened is tried again (a turn apart: see `EVERY`), and the most such
+/// files waiting at once.
+const LATER_TRIES: u8 = 30;
+const LATER_MOST: usize = 1000;
 
 /// The list, as kept between runs: where each drive's journal was read up to (by its letter, the journal's number,
-/// and the place in it), and the files come.
+/// and the place in it), the files come, and the files come that could not be opened as they were read, to be tried
+/// again (their journal's records read past: kept with where it was read up to, so a restart does not lose them).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Kept {
     read: Vec<(char, u64, i64)>,
     files: Vec<Came>,
+    #[serde(default)]
+    later: Vec<(char, Change, u8)>,
 }
 
 impl Kept {
     /// `change` on drive `drive` seen: a file taken off the list where it is gone; one come, or come under another
     /// name, opened by its number (`open`) and listed if it is one listed (made within the days kept before `now`, as
-    /// `kind_of` says, and not `out`); whether the list changed. (A change older than the days kept is of a file made
-    /// before them: never opened.)
+    /// `kind_of` says, and not `out`); one listed, written again, followed (how large it is now); whether the list
+    /// changed. (A change older than the days kept, of a file not listed, is of a file made before them: never opened.)
+    /// One that could not be opened now is kept to be tried again (see `retry`).
     fn take(&mut self, drive: char, change: Change, now: u64, places: &Places, out: &dyn Fn(&Path) -> bool, open: impl Fn(u128) -> Looked, site: impl Fn(&Path) -> Option<String>) -> bool {
         use reasons::*;
         let key = Key { drive, file: change.file };
@@ -289,13 +283,24 @@ impl Kept {
         if change.reason & DELETED != 0 {
             let before = self.files.len();
             self.files.retain(|came| came.key != key);
+            self.later.retain(|(letter, later, _)| (*letter, later.file) != (drive, change.file));
             return self.files.len() != before;
         }
-        if change.reason & (CREATED | RENAMED_TO) == 0 || change.attributes & (HIDDEN | SYSTEM | FOLDER | TEMPORARY) != 0 || now.saturating_sub(change.at_ms) > KEEP_MS {
+        let had = self.files.iter().position(|came| came.key == key);
+        let come = change.reason & (CREATED | RENAMED_TO) != 0 && now.saturating_sub(change.at_ms) <= KEEP_MS;
+        if !(come || had.is_some()) || change.attributes & (HIDDEN | SYSTEM | FOLDER | TEMPORARY) != 0 {
             return false;
         }
-        let Looked::At(path, made_ms, bytes) = open(change.file) else { return false };
-        let had = self.files.iter().position(|came| came.key == key);
+        let (path, made_ms, bytes) = match open(change.file) {
+            Looked::At(path, made_ms, bytes) => (path, made_ms, bytes),
+            Looked::Unknown => {
+                if self.later.len() < LATER_MOST && !self.later.iter().any(|(letter, later, _)| (*letter, later.file) == (drive, change.file)) {
+                    self.later.push((drive, change, 0));
+                }
+                return false;
+            }
+            Looked::Gone | Looked::Theirs => return false,
+        };
         let listed = (now.saturating_sub(made_ms) <= KEEP_MS && !out(&path)).then(|| kind_of(&path, places)).flatten();
         match (listed, had) {
             (Some((kind, downloaded)), Some(at)) => {
@@ -328,24 +333,46 @@ impl Kept {
         self.files.len() != before
     }
 
-    /// Each file listed looked for where it was (`there`): one no longer there looked for by its number (`look`) and
-    /// followed where it went (moved with its folder), or taken off where it is gone; one now `out` taken off; one that
-    /// cannot be looked for now kept as it is. Whether the list changed.
-    fn recheck(&mut self, there: impl Fn(&Path) -> There, look: impl Fn(Key) -> Looked, out: &dyn Fn(&Path) -> bool) -> bool {
+    /// The files come that could not be opened as they were read, tried again (`open`: on their drives), each up to
+    /// `LATER_TRIES` times; whether the list changed.
+    fn retry(&mut self, now: u64, places: &Places, out: &dyn Fn(&Path) -> bool, open: impl Fn(char, u128) -> Looked, site: impl Fn(&Path) -> Option<String>) -> bool {
+        let mut changed = false;
+        for (drive, change, tries) in std::mem::take(&mut self.later) {
+            let waiting = self.later.len();
+            changed |= self.take(drive, change, now, places, out, |file| open(drive, file), &site);
+            // (Still not to be told: tried once more, or let go of.)
+            if self.later.len() > waiting {
+                if tries + 1 >= LATER_TRIES {
+                    self.later.pop();
+                } else if let Some(last) = self.later.last_mut() {
+                    last.2 = tries + 1;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Each file listed looked for by its number (`look`): followed where it is now (moved with its folder: the journal
+    /// tells of the folder alone), and what it is told again there (`kind_of`: moved out of Downloads, or into the
+    /// screenshots' folder); taken off where it is gone, or where it is now `out` or no kind listed there; one that
+    /// cannot be looked for now (its drive away, it locked) kept as it is. Whether the list changed. (By its number,
+    /// not its path: another file put where it was is not it.)
+    fn recheck(&mut self, places: &Places, look: impl Fn(Key) -> Looked, out: &dyn Fn(&Path) -> bool) -> bool {
         let mut changed = false;
         self.files.retain_mut(|came| {
-            let keep = match there(&came.path) {
-                There::Yes => !out(&came.path),
-                There::Unknown => true,
-                There::No => match look(came.key) {
-                    Looked::At(path, ..) if !out(&path) => {
-                        came.path = path;
-                        changed = true;
+            let keep = match look(came.key) {
+                Looked::At(path, _, bytes) => match (!out(&path)).then(|| kind_of(&path, places)).flatten() {
+                    Some((kind, downloaded)) => {
+                        if (&came.path, came.kind, came.downloaded, came.bytes) != (&path, kind, downloaded, bytes) {
+                            (came.path, came.kind, came.downloaded, came.bytes) = (path, kind, downloaded, bytes);
+                            changed = true;
+                        }
                         true
                     }
-                    Looked::At(..) | Looked::Gone => false,
-                    Looked::Unknown => true,
+                    None => false,
                 },
+                Looked::Gone => false,
+                Looked::Theirs | Looked::Unknown => true,
             };
             changed |= !keep;
             keep
@@ -510,21 +537,27 @@ fn follow() {
                     if change.reason & reasons::RENAMED_TO != 0 && change.reason & reasons::CLOSED != 0 {
                         folder_renamed = true;
                         skipped.borrow_mut().retain(|(drive, _)| *drive != letter);
+                        tools.forget();
                     }
                     continue;
                 }
                 if change.reason & reasons::DELETED == 0 && skipped.borrow().contains(&(letter, change.folder)) {
                     continue;
                 }
-                // (A file found left out: its folder's skipped from now on, all left out being so by its folders.)
+                // (A file found left out: its folder (where the record says it was) skipped from now on, all left out
+                // being so by its folders, once that folder is known to be left out itself: the file may have moved
+                // since out of the folder the record names, from one listed into one left out.)
                 let out_here = |path: &Path| {
                     let left = out(path);
-                    if left {
-                        let mut skipped = skipped.borrow_mut();
-                        if skipped.len() > 50_000 {
-                            skipped.clear();
+                    if left && !skipped.borrow().contains(&(letter, change.folder)) {
+                        let folder_left = matches!(drive.look(change.folder), Looked::At(folder, ..) if out(&folder.join("_")));
+                        if folder_left {
+                            let mut skipped = skipped.borrow_mut();
+                            if skipped.len() > 50_000 {
+                                skipped.clear();
+                            }
+                            skipped.insert((letter, change.folder));
                         }
-                        skipped.insert((letter, change.folder));
                     }
                     left
                 };
@@ -536,10 +569,16 @@ fn follow() {
                 read_owed = true;
             }
         }
-        // Each file listed looked for where it was now and then, and as a folder was renamed.
+        // The files come that could not be opened, tried again; each file listed looked for now and then, and as a
+        // folder was renamed.
+        let open = |drive: char, file: u128| drives.iter().find(|one| one.letter == drive).map_or(Looked::Unknown, |one| one.look(file));
+        if !kept.later.is_empty() {
+            changed |= kept.retry(now, &places, &out, open, |path| std::fs::read_to_string(format!("{}:Zone.Identifier", path.display())).ok().and_then(|text| site_of(&text)));
+            // (What waits kept with where the journals were read up to, now and then.)
+            read_owed = true;
+        }
         if folder_renamed || rechecked.is_none_or(|rechecked| rechecked.elapsed() > RECHECK_EVERY) {
-            let look = |key: Key| drives.iter().find(|drive| drive.letter == key.drive).map_or(Looked::Unknown, |drive| drive.look(key.file));
-            changed |= kept.recheck(there, look, &out);
+            changed |= kept.recheck(&places, |key| open(key.drive, key.file), &out);
             rechecked = Some(Instant::now());
         }
         if changed || !was_on || hidden != shown_hidden {
@@ -591,7 +630,7 @@ mod os {
     use super::{Looked, JOURNAL_PAGE};
     use std::path::PathBuf;
     use windows::core::HSTRING;
-    use windows::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, GENERIC_READ, HANDLE};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, GENERIC_READ, HANDLE};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, GetDriveTypeW, GetFileInformationByHandle, GetFinalPathNameByHandleW, GetLogicalDrives, GetVolumeInformationW, OpenFileById,
         BY_HANDLE_FILE_INFORMATION, ExtendedFileIdType, FileIdType, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_128, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0,
@@ -705,7 +744,7 @@ mod os {
         }
 
         /// The file numbered `file` on it, opened as the user: where it is (its path, when it was made, in ms since
-        /// 1970, and how large it is), gone, or not to be told (theirs not to open, or locked).
+        /// 1970, and how large it is), gone, not theirs to open, or not to be told now (locked, its drive not ready).
         pub fn look(&self, file: u128) -> Looked {
             let described = FILE_ID_DESCRIPTOR {
                 dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
@@ -717,6 +756,7 @@ mod os {
                     Ok(handle) => handle,
                     // (A number no file has: the file deleted, its number's sequence moved on.)
                     Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() || error.code() == ERROR_FILE_NOT_FOUND.to_hresult() => return Looked::Gone,
+                    Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => return Looked::Theirs,
                     Err(_) => return Looked::Unknown,
                 };
                 let mut name = [0u16; 1024];
@@ -884,25 +924,84 @@ mod tests {
         assert_eq!(together, vec![change(1, 0x8000_0102, 3), change(2, 0x8000_0100, 2)]);
     }
 
-    /// Each file listed looked for: one there kept; one moved with its folder followed by its number; one gone taken
-    /// off; one whose drive is away, or not ready, kept; one now in a tool's folder taken off.
+    /// Each file listed looked for by its number: one where it was kept; one moved with its folder followed (another
+    /// file put where it was not taken for it); one gone taken off; one whose drive is away, or locked, kept; one now
+    /// in a tool's folder taken off; one moved out of Downloads told again where it is (a program left there: no kind
+    /// listed outside Downloads and the desktop, taken off; a picture: no longer downloaded); one written again, as
+    /// large as it is now.
     #[test]
     fn looks_for_each_file_again() {
-        let came = |drive: char, file: u128, path: &str| Came { key: Key { drive, file }, path: PathBuf::from(path), came_ms: 1, bytes: 1, kind: Kind::Document, downloaded: false, site: None };
-        let mut kept = Kept { read: Vec::new(), files: vec![came('D', 1, r"D:\a\one.pdf"), came('D', 2, r"D:\b\two.pdf"), came('D', 3, r"D:\c\three.pdf"), came('E', 4, r"E:\four.pdf"), came('D', 5, r"D:\d\five.pdf"), came('D', 6, r"D:\repo\six.pdf")] };
-        let there = |path: &Path| match path.to_str().unwrap() {
-            r"D:\a\one.pdf" | r"D:\repo\six.pdf" => There::Yes,
-            r"D:\d\five.pdf" => There::Unknown,
-            _ => There::No,
+        let came = |drive: char, file: u128, path: &str, kind: Kind, downloaded: bool| Came { key: Key { drive, file }, path: PathBuf::from(path), came_ms: 1, bytes: 1, kind, downloaded, site: None };
+        let mut kept = Kept {
+            files: vec![
+                came('D', 1, r"D:\a\one.pdf", Kind::Document, false),
+                came('D', 2, r"D:\b\two.pdf", Kind::Document, false),
+                came('D', 3, r"D:\c\three.pdf", Kind::Document, false),
+                came('E', 4, r"E:\four.pdf", Kind::Document, false),
+                came('D', 5, r"D:\d\five.pdf", Kind::Document, false),
+                came('D', 6, r"D:\repo\six.pdf", Kind::Document, false),
+                came('C', 7, r"C:\Users\a\Downloads\tool.exe", Kind::Program, true),
+                came('C', 8, r"C:\Users\a\Downloads\sea.png", Kind::Picture, true),
+            ],
+            ..Kept::default()
         };
         let look = |key: Key| match (key.drive, key.file) {
+            ('D', 1) => Looked::At(PathBuf::from(r"D:\a\one.pdf"), 1, 900),
             ('D', 2) => Looked::At(PathBuf::from(r"D:\b renamed\two.pdf"), 1, 1),
             ('D', 3) => Looked::Gone,
+            ('D', 5) => Looked::Unknown,
+            ('D', 6) => Looked::At(PathBuf::from(r"D:\repo\six.pdf"), 1, 1),
+            ('C', 7) => Looked::At(PathBuf::from(r"D:\Tools\tool.exe"), 1, 1),
+            ('C', 8) => Looked::At(PathBuf::from(r"D:\Photos\sea.png"), 1, 1),
             _ => Looked::Unknown,
         };
-        assert!(kept.recheck(there, look, &|path: &Path| path.starts_with(r"D:\repo")));
-        assert_eq!(kept.files.iter().map(|came| came.path.to_str().unwrap()).collect::<Vec<_>>(), [r"D:\a\one.pdf", r"D:\b renamed\two.pdf", r"E:\four.pdf", r"D:\d\five.pdf"]);
-        assert!(!kept.recheck(|_| There::Yes, |_| Looked::Unknown, &|_| false));
+        assert!(kept.recheck(&places(), look, &|path: &Path| path.starts_with(r"D:\repo")));
+        assert_eq!(kept.files.iter().map(|came| came.path.to_str().unwrap()).collect::<Vec<_>>(), [r"D:\a\one.pdf", r"D:\b renamed\two.pdf", r"E:\four.pdf", r"D:\d\five.pdf", r"D:\Photos\sea.png"]);
+        assert_eq!(kept.files[0].bytes, 900);
+        assert!(!kept.files[4].downloaded);
+        assert!(!kept.recheck(&places(), |_| Looked::Unknown, &|_| false));
+    }
+
+    /// A file come that could not be opened as it was read (locked, its drive not ready): tried again till it can be,
+    /// and listed; one never to be opened let go of after its tries; one not the user's to open never tried again.
+    #[test]
+    fn tries_again_a_file_it_could_not_open() {
+        let now = 1_760_800_000_000;
+        let places = places();
+        let change = |file: u128| Change { file, folder: 9, reason: 0x8000_0100, attributes: 0x20, at_ms: now };
+        let out = |path: &Path| left_out(path, &[]);
+        let mut kept = Kept::default();
+        assert!(!kept.take('D', change(1), now, &places, &out, |_| Looked::Unknown, |_| None));
+        assert!(!kept.take('D', change(2), now, &places, &out, |_| Looked::Unknown, |_| None));
+        assert!(!kept.take('D', change(3), now, &places, &out, |_| Looked::Theirs, |_| None));
+        assert_eq!(kept.later.len(), 2);
+        // Kept with where the journal was read up to.
+        let kept_again: Kept = serde_json::from_slice(&serde_json::to_vec(&kept).unwrap()).unwrap();
+        assert_eq!(kept_again.later.len(), 2);
+        let open = |_: char, file: u128| if file == 1 { Looked::At(PathBuf::from(r"D:\Documents\one.pdf"), now - 10, 5) } else { Looked::Unknown };
+        assert!(kept.retry(now, &places, &out, open, |_| None));
+        assert_eq!(kept.files.iter().map(|came| came.key.file).collect::<Vec<_>>(), [1]);
+        assert_eq!(kept.later.iter().map(|(_, change, tries)| (change.file, *tries)).collect::<Vec<_>>(), [(2, 1)]);
+        for _ in 1..LATER_TRIES {
+            kept.retry(now, &places, &out, open, |_| None);
+        }
+        assert!(kept.later.is_empty());
+    }
+
+    /// A file listed, written again (no longer made or renamed): as large as it is now.
+    #[test]
+    fn follows_a_listed_file_as_it_is_written() {
+        let now = 1_760_800_000_000;
+        let places = places();
+        let out = |path: &Path| left_out(path, &[]);
+        let mut kept = Kept::default();
+        let open = |bytes: u64| move |_: u128| Looked::At(PathBuf::from(r"D:\Documents\a.txt"), now - 100, bytes);
+        assert!(kept.take('D', Change { file: 1, folder: 9, reason: 0x8000_0100, attributes: 0x20, at_ms: now }, now, &places, &out, open(5), |_| None));
+        // Written again (data extended, closed).
+        assert!(kept.take('D', Change { file: 1, folder: 9, reason: 0x8000_0002, attributes: 0x20, at_ms: now }, now, &places, &out, open(500), |_| None));
+        assert_eq!(kept.files[0].bytes, 500);
+        // Another file, not listed, written: not opened.
+        assert!(!kept.take('D', Change { file: 2, folder: 9, reason: 0x8000_0002, attributes: 0x20, at_ms: now }, now, &places, &out, |_| panic!("opened"), |_| None));
     }
 
     /// A file in a repository's working tree or a program's folder, however deep: a tool's; beside them, or in
