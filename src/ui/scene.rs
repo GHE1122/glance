@@ -442,6 +442,19 @@ unsafe extern "system" fn each(window: HWND, found: LPARAM) -> BOOL {
     true.into()
 }
 
+/// How opaque `window` is drawn as a whole (0 to 255): a layered window as its opacity is set.
+fn opacity_of(window: HWND) -> u8 {
+    use windows::Win32::UI::WindowsAndMessaging::{GetLayeredWindowAttributes, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, WS_EX_LAYERED};
+    let layered = unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } as u32 & WS_EX_LAYERED.0 != 0;
+    let (mut alpha, mut flags) = (255u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS(0));
+    // (One drawn whole by its program, its opacity its pixels', tells none: whole.)
+    if layered && unsafe { GetLayeredWindowAttributes(window, None, Some(&mut alpha), Some(&mut flags)) }.is_ok() && flags.contains(LWA_ALPHA) {
+        alpha
+    } else {
+        255
+    }
+}
+
 fn cloaked(window: HWND) -> bool {
     let mut cloaked = 0u32;
     unsafe { DwmGetWindowAttribute(window, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4) }.is_ok() && cloaked != 0
@@ -539,7 +552,7 @@ impl Scene {
             .skip_while(|window| *window != over)
             .skip(1)
             .filter(|window| !left_out.contains(&(window.0 as isize)))
-            .filter(|window| unsafe { IsWindowVisible(*window).as_bool() && !IsIconic(*window).as_bool() } && !cloaked(*window))
+            .filter(|window| unsafe { IsWindowVisible(*window).as_bool() && !IsIconic(*window).as_bool() } && !cloaked(*window) && opacity_of(*window) > 0)
             .filter_map(|window| {
                 let mut rect = RECT::default();
                 unsafe { GetWindowRect(window, &mut rect) }.ok()?;
@@ -632,13 +645,14 @@ impl Scene {
 
     /// The thumbnail `index` shown where its window is, `rect`, within the area.
     fn place(&mut self, index: usize, rect: RECT) {
-        let (_, thumbnail, at) = &mut self.shown[index];
+        let (window, thumbnail, at) = &mut self.shown[index];
         let (x, y) = (self.area.left, self.area.top);
         let properties = DWM_THUMBNAIL_PROPERTIES {
             dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY,
             rcDestination: RECT { left: rect.left - x, top: rect.top - y, right: rect.right - x, bottom: rect.bottom - y },
             fVisible: true.into(),
-            opacity: 255,
+            // (A thumbnail is drawn whole, whatever the window's opacity: at it, as the window is.)
+            opacity: opacity_of(*window),
             fSourceClientAreaOnly: false.into(),
             ..Default::default()
         };
@@ -736,6 +750,33 @@ impl Drop for Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window is put in a scene as opaque as it is drawn: a layered one at its opacity (one at none, as an overlay
+    /// kept up and showing nothing is, as none at all), any other whole.
+    #[test]
+    fn a_window_is_as_opaque_as_it_is_drawn() {
+        use windows::Win32::UI::WindowsAndMessaging::{SetLayeredWindowAttributes, LWA_ALPHA, WS_EX_LAYERED};
+        let made = |layered: Option<u8>| unsafe {
+            unsafe extern "system" fn answer(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+                unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            }
+            let class = WNDCLASSW { lpfnWndProc: Some(answer), lpszClassName: w!("GlanceOpacityTest"), ..Default::default() };
+            RegisterClassW(&class);
+            let ex = if layered.is_some() { WS_EX_LAYERED } else { WINDOW_EX_STYLE(0) };
+            let window = CreateWindowExW(ex, class.lpszClassName, w!(""), WS_POPUP, -32000, -32000, 10, 10, None, None, None, None).expect("a window");
+            if let Some(alpha) = layered {
+                SetLayeredWindowAttributes(window, windows::Win32::Foundation::COLORREF(0), alpha, LWA_ALPHA).expect("its opacity set");
+            }
+            window
+        };
+        for (layered, opacity) in [(None, 255), (Some(0), 0), (Some(128), 128), (Some(255), 255)] {
+            let window = made(layered);
+            assert_eq!(opacity_of(window), opacity, "{layered:?}");
+            unsafe {
+                let _ = DestroyWindow(window);
+            }
+        }
+    }
 
     /// A scene's window is taken by the capture, and is in no task switcher (Alt+Tab, the task view), which lists a
     /// window shown that is not a tool window and is owned by none or by one that is not a tool window (measured on
