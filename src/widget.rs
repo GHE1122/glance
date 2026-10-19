@@ -2877,7 +2877,7 @@ impl Widget {
             _ => None,
         };
         let held = sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
-        moving |= self.thumbs.step(now, self.hit_hover.filter(|hit| hit.slider().is_some()), held);
+        moving |= self.thumbs.step(now, self.hit_hover.filter(|hit| hit.eases()), held);
         let thumbs = self.thumbs.clone();
         // Its process list turned on toward where the wheel turned it, as the panel's is.
         let readings: Vec<&mut Readings> = match &mut self.content {

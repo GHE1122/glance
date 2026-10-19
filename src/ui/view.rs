@@ -218,6 +218,12 @@ impl Hit {
         }
     }
 
+    /// Whether it eases as the pointer comes over it and leaves (see `Scene::thumbs`): a slider's thumb, a note's strip
+    /// in the deck (lifted from it).
+    pub fn eases(self) -> bool {
+        self.slider().is_some() || matches!(self, Hit::Note(_))
+    }
+
     /// Where what is dropped on it goes, where something dragged may be dropped on it.
     pub fn lands(self) -> Option<crate::station::run::Lands> {
         match self {
@@ -449,10 +455,10 @@ enum Block {
     Table { headings: Vec<(String, Option<ProcessSort>)>, sort: Option<ProcessSort>, rows: Vec<[String; 5]>, visible: usize, scrolls: bool, widths: [f32; 4] },
     /// Room this tall left empty, for what is drawn there apart (see `Scene::music_apart`).
     Room(f32),
-    /// The station's head: its pages as tabs (`tab` the one shown; how many things are on it; how many were copied
-    /// since its copies were last shown, where they are a page of it), and its buttons (how what is on it shows, while
-    /// that is shown; the rest).
-    Tabs { tab: Tab, count: usize, copies: Option<usize>, recent: bool, view: ShelfView },
+    /// The station's head: its pages as tabs (`tab` the one shown; how many things are on it; whether what was copied
+    /// lately is a page of it, and the files come lately), and its buttons (how what is on it shows, while that is
+    /// shown; the rest).
+    Tabs { tab: Tab, count: usize, copies: bool, recent: bool, view: ShelfView },
     /// What is on the station, the newest first, as `shows` lays it out in room `tall` high, scrolled through past
     /// it; `said`, what it says instead of them (nothing on it), or over them (no room left); `over`, something
     /// dragged over it, to be dropped.
@@ -581,6 +587,8 @@ const NOTE_SMALL: f32 = 64.0;
 const NOTE_STRIP: f32 = 30.0;
 const NOTE_ROW: f32 = 40.0;
 const NOTE_CARD: f32 = 104.0;
+/// How far a note's strip in the deck is lifted under the pointer (DIPs).
+const NOTE_LIFT: f32 = 3.0;
 
 /// The notes' lane: whole (`full`), its name and how many there are, the menu of how they show and a new note, over
 /// them as they show; else the last written alone.
@@ -746,6 +754,23 @@ fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Col
     }
 }
 
+/// A note's page (`width` × `height`, on the skin's sheet) of its colour as its card on the panel is: glass's a pane of
+/// its coloured glass (the desktop frosted under it by the sheet), its soft white rim round it; Windows 11's its sheet
+/// a little of the colour, ruled round; chart paper's its paper.
+pub(crate) fn note_page(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (width, height): (f32, f32)) {
+    match theme.skin {
+        Skin::Glass => {
+            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark)), 0.0, 0.0, width, height, theme.radius);
+            frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, if theme.dark { 0.22 } else { 0.65 })), 0.0, 0.0, width, height, theme.radius, 1.5);
+        }
+        Skin::Fluent => {
+            frame.fill_rounded(fluent_note_ground(theme, colour), 0.0, 0.0, width, height, theme.radius);
+            frame.stroke_rounded(Fill::Solid(theme.rule), 0.0, 0.0, width, height, theme.radius, 1.0);
+        }
+        Skin::Paper => {}
+    }
+}
+
 /// A note's colour as a dot, its middle at (`x` + its radius, `middle`); the room it takes before its title.
 fn note_dot(frame: &dyn Canvas, colour: crate::notes::Colour, x: f32, middle: f32) -> f32 {
     frame.fill_circle(note_colour(colour), Point { x: x + 3.5, y: middle }, 3.5);
@@ -829,7 +854,10 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
             let radius = note_radius(theme, false);
             // (As tall as reaches under the next: its foot hidden there, as a card's in a stack.)
             let foot = radius + 6.0;
-            let strip_y = |at: usize| top + (at - 1) as f32 * NOTE_STRIP - scroll;
+            // (Under the pointer, a strip lifted a little from the deck, easing up and back: as far up as its thumb's ease
+            // has come, of the way.)
+            let lift = |at: usize| NOTE_LIFT * ((scene.thumbs.of(Hit::Note(notes[at].at)) - 1.0) / (super::thumb::OVER - 1.0)).clamp(0.0, 1.0);
+            let strip_y = |at: usize| top + (at - 1) as f32 * NOTE_STRIP - scroll - lift(at);
             // (The strips cut off where they scroll out at the top only: their feet, and their shadows, reach on under
             // the last written, which shows the last of them through it on glass.)
             let (side, under_room) = (12.0, room + foot + 12.0);
@@ -866,13 +894,19 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
             };
             frame.clip(left - side, top - 2.0, width + 2.0 * side, under_room);
             for at in (1..notes.len()).filter(|at| shows(*at)) {
-                // (Up to the card lying on it: under that, it is seen only through it, frosted on glass, not sharp.)
+                // On glass, up to the pane lying on it: under that it is seen only through it, frosted, not sharp. (The
+                // others' cards hide what they lie on, and in their corners it shows, as a stack's does.)
                 let covered = if at + 1 < notes.len() { strip_y(at + 1) } else { top + room };
-                frame.clip(left - side, top - 2.0, width + 2.0 * side, covered - (top - 2.0));
+                if theme.skin == Skin::Glass {
+                    frame.clip(left - side, top - 2.0, width + 2.0 * side, covered - (top - 2.0));
+                }
                 strip(frame, at, false);
-                frame.unclip();
+                if theme.skin == Skin::Glass {
+                    frame.unclip();
+                }
+                // (Where it lies at rest: lifted, it does not move from under the pointer.)
                 let (x, w) = across(at);
-                hits.extend(shown_in((x, strip_y(at), w, NOTE_STRIP, Hit::Note(notes[at].at)), (left - 4.0, top, width + 8.0, room)));
+                hits.extend(shown_in((x, strip_y(at) + lift(at), w, NOTE_STRIP, Hit::Note(notes[at].at)), (left - 4.0, top, width + 8.0, room)));
             }
             frame.unclip();
             // (After its strips: a press finds a strip before the list they are on.)
@@ -1250,15 +1284,10 @@ fn tiles_across(width: f32) -> usize {
     (((width + TILE_GAP) / (TILE_W + TILE_GAP)) as usize).max(1)
 }
 
-/// The newest copied thing the station's copies were shown with (none yet: the newest there is, as they are first
-/// laid out): how many were copied since is said on their tab.
-static COPIES_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
-
 /// The station's lane: whole (`full`), its head's pages (what is on it, and with Recently copied on, what was copied
 /// lately, and with Recent files on, the files come lately) over the page `tab` (as far as there is one); else what is on it in a row
 /// under its name.
 fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
-    use std::sync::atomic::Ordering;
     let shown = crate::station::run::shown();
     let folder = crate::station::folder::Folder::own();
     let now = crate::station::now_ms();
@@ -1276,14 +1305,6 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     }
     let copies = shown.history;
     let tab = if !copies && tab == Tab::Copies { Tab::Shelf } else { tab };
-    let newest = shown.items.iter().filter(|item| item.copied).map(|item| item.id).max().unwrap_or(0);
-    // (Their first showing takes all there are for seen.)
-    let _ = COPIES_SEEN.compare_exchange(u64::MAX, newest, Ordering::Relaxed, Ordering::Relaxed);
-    if tab == Tab::Copies {
-        COPIES_SEEN.fetch_max(newest, Ordering::Relaxed);
-    }
-    let seen = COPIES_SEEN.load(Ordering::Relaxed);
-    let fresh = shown.items.iter().filter(|item| item.copied && item.id > seen).count();
     let recent = crate::station::recent::on();
     let tab = if !recent && matches!(tab, Tab::Recent(_)) { Tab::Shelf } else { tab };
     let view = match tab {
@@ -1291,7 +1312,7 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
         Tab::Copies => shown.copies_view,
         Tab::Recent(_) => shown.recent_view,
     };
-    let mut blocks = vec![Block::Tabs { tab, count: tiles.len(), copies: copies.then_some(fresh), recent, view }];
+    let mut blocks = vec![Block::Tabs { tab, count: tiles.len(), copies, recent, view }];
     blocks.push(match tab {
         Tab::Shelf => Block::Shelf { tiles, shows: Shows::View(view), tall: STATION_TALL, said, over: shown.over },
         Tab::Copies => Block::Copies { rows: shown.items.iter().rev().filter(|item| item.copied).map(|item| Tile::of(item, &folder, lang, now)).collect(), view, tall: STATION_TALL },
@@ -2900,7 +2921,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 }
             }
             (Block::Tabs { tab, count, copies, recent, view }, Pass::Content) => {
-                paint_tabs(frame, scene, ink, (left, y, width), *tab, *count, *copies, *recent, *view, hits);
+                paint_tabs(frame, scene, (left, y, width), *tab, *count, *copies, *recent, *view, hits);
             }
             (Block::Notes { notes, view, tall }, Pass::Content) => {
                 paint_notes(frame, scene, (left, y + SHELF_GAP, width), notes, *view, *tall + spare, hits);
@@ -2926,7 +2947,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
 /// The station's head (see `Block::Tabs`) on the head row at `top`, from `left`, `width` across: its pages' tabs,
 /// the one shown marked as its skin marks what is chosen, and its buttons at the end.
 #[allow(clippy::too_many_arguments)]
-fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tab: Tab, count: usize, copies: Option<usize>, recent: bool, view: ShelfView, hits: &mut Vec<HitBox>) {
+fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), tab: Tab, count: usize, copies: bool, recent: bool, view: ShelfView, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let lang = scene.lang;
     let row = top + (HEAD - TAB_H) / 2.0;
@@ -2935,26 +2956,23 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
     // (Paper underlines the one chosen under its name, as its rules are drawn: no room round it.)
     let pad = if theme.skin == Skin::Paper { 0.0 } else { TAB_PAD };
     let mut x = left - pad;
-    let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), if count > 0 { count.to_string() } else { String::new() }, false)];
-    if let Some(fresh) = copies {
-        pages.push((Tab::Copies, lang.pick("最近复制", "Copied"), if fresh > 0 && tab != Tab::Copies { fresh.to_string() } else { String::new() }, true));
+    let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), if count > 0 { count.to_string() } else { String::new() })];
+    if copies {
+        pages.push((Tab::Copies, lang.pick("最近复制", "Copied"), String::new()));
     }
     if recent {
         // (Chosen again, with the filter it had.)
         let filter = if let Tab::Recent(filter) = tab { filter } else { Default::default() };
-        pages.push((Tab::Recent(filter), lang.pick("最近文件", "Recent"), String::new(), false));
+        pages.push((Tab::Recent(filter), lang.pick("最近文件", "Recent"), String::new()));
     }
     // (In the room the buttons at the end leave, whichever page shows: names that do not fit there shortened, each
     // to a like share of it. A tab's room never reaches a button's.)
     let gap = if theme.skin == Skin::Paper { 16.0 } else { 2.0 };
     let room = width + pad - (MEDIA_ROW + 2.0 + MEDIA_ROW + 12.0 + 6.0);
-    let measured: Vec<(f32, f32)> = pages.iter().map(|(_, name, aside, badge)| {
-        let aside_w = if aside.is_empty() { 0.0 } else if *badge { badge_width(frame, theme, aside) } else { frame.measure(aside, small) };
-        (frame.measure(name, font), aside_w)
-    }).collect();
+    let measured: Vec<(f32, f32)> = pages.iter().map(|(_, name, aside)| (frame.measure(name, font), if aside.is_empty() { 0.0 } else { frame.measure(aside, small) })).collect();
     let whole: f32 = measured.iter().map(|(name_w, aside_w)| 2.0 * pad + name_w + if *aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).sum::<f32>() + gap * (pages.len() - 1) as f32;
     let share = (room - gap * (pages.len() - 1) as f32) / pages.len() as f32;
-    for ((page, name, aside, badge), (name_w, aside_w)) in pages.into_iter().zip(measured) {
+    for ((page, name, aside), (name_w, aside_w)) in pages.into_iter().zip(measured) {
         let (name, name_w) = if whole > room {
             let fit = (share - 2.0 * pad - if aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).min(name_w).max(0.0);
             let name = fitted(frame, name, font, fit);
@@ -2982,13 +3000,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
         let name_top = top + (HEAD - font.size) / 2.0 - 1.0;
         frame.text(&name, font, if chosen || hovered { theme.text } else { theme.text3 }, x + pad, name_top, name_w + 1.0, Align::Start);
         if aside_w > 0.0 {
-            let ax = x + pad + name_w + 5.0;
-            if badge {
-                // What was copied since its page was last shown: how many, on a mark of the lane's ink.
-                paint_badge(frame, theme, &aside, ink.trace, ax, top + HEAD / 2.0);
-            } else {
-                frame.text(&aside, small, theme.text3, ax, name_top + 2.0, aside_w + 1.0, Align::Start);
-            }
+            frame.text(&aside, small, theme.text3, x + pad + name_w + 5.0, name_top + 2.0, aside_w + 1.0, Align::Start);
         }
         hits.push((x, row, wide, TAB_H, Hit::Tab(page)));
         x += wide + gap;
@@ -4542,7 +4554,7 @@ six".into()));
             let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
             let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
             let mut hits = Vec::new();
-            paint_tabs(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, width), Tab::Shelf, 128, Some(57), true, ShelfView::Cards, &mut hits);
+            paint_tabs(&Nothing, &scene, (0.0, 0.0, width), Tab::Shelf, 128, true, true, ShelfView::Cards, &mut hits);
             let buttons: Vec<HitBox> = hits.iter().filter(|hit| matches!(hit.4, Hit::StationView | Hit::StationMore)).copied().collect();
             assert_eq!(buttons.len(), 2, "{skin:?}");
             for tab in hits.iter().filter(|hit| matches!(hit.4, Hit::Tab(_))) {

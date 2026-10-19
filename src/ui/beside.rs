@@ -23,9 +23,8 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND};
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, MonitorFromRect, ValidateRect, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
-use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -208,7 +207,6 @@ struct Beside {
     lang: super::text::Lang,
     page: Page,
     /// Drawn in the skin as the panel is (see the top), in room `inset` (DIPs) round it for its shadow; how frosted.
-    skinned: bool,
     inset: f32,
     frost: f32,
     /// What a press began on (a press acts only let go on the same), and Windows' chooser asked for by one (opened
@@ -467,21 +465,14 @@ fn show(opening: Opening) {
         };
         let x = x.clamp(room.left, room.right - wide);
         let y = y.clamp(room.top, room.bottom - tall);
-        // Skinned (not a note's page): its window larger by its shadow's room each way, its corners and shadow drawn
-        // as the panel's are; a note's page rounded and shadowed by Windows.
+        // In the skin, a note's page too (as its card on the panel is): its window larger by its shadow's room each
+        // way, its corners and shadow drawn as the panel's are.
         let theme = Theme::new(opening.skin, opening.dark);
-        let skinned = !matches!(opening.page, Page::Note(_));
-        let inset = if skinned { theme.margin } else { 0.0 };
+        let inset = theme.margin;
         let room_px = (inset * scale).round() as i32;
         let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP, w!("GlanceBeside"), &HSTRING::from("Glance"), WS_POPUP, x - room_px, y - room_px, wide + 2 * room_px, tall + 2 * room_px, None, None, None, None) else { return };
-        if skinned {
-            let square = DWMWCP_DONOTROUND;
-            let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &square as *const _ as *const _, size_of_val(&square) as u32);
-        } else {
-            let round = DWMWCP_ROUND;
-            let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const _, size_of_val(&round) as u32);
-            let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 });
-        }
+        let square = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &square as *const _ as *const _, size_of_val(&square) as u32);
         let beside = Beside {
             hwnd,
             gfx,
@@ -491,7 +482,6 @@ fn show(opening: Opening) {
             theme: Rc::new(theme),
             lang: crate::update::language(),
             page: opening.page.clone(),
-            skinned,
             inset,
             frost: 0.0,
             pressed: None,
@@ -526,7 +516,8 @@ fn show(opening: Opening) {
                 // (A new note takes the next colour round.)
                 None => crate::notes::Colour::ALL[shown.len() % crate::notes::Colour::ALL.len()],
             };
-            let rect = RECT { left: (PAD * scale) as i32, top: ((HEAD + 4.0) * scale) as i32, right: wide - (PAD * scale) as i32, bottom: tall - (FOOT * scale) as i32 };
+            // (In its window: past its shadow's room.)
+            let rect = RECT { left: room_px + (PAD * scale) as i32, top: room_px + ((HEAD + 4.0) * scale) as i32, right: room_px + wide - (PAD * scale) as i32, bottom: room_px + tall - (FOOT * scale) as i32 };
             let pixels = 15.0 * scale;
             let accent = match theme.skin {
                 Skin::Paper => theme.text,
@@ -1014,7 +1005,7 @@ impl Beside {
         }
         let mut client = at;
         let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut client) };
-        let (x, y) = (client.x as f32 / self.scale, client.y as f32 / self.scale);
+        let (x, y) = self.on_page(client.x as f32, client.y as f32);
         y >= 0.0 && y < HEAD && !self.hits.iter().any(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h)
     }
 
@@ -1053,10 +1044,7 @@ impl Beside {
             // Its card on the desktop where the page is, the page gone.
             NoteChoice::Stick => {
                 let Some(name) = writing.name.clone() else { return false };
-                let mut place = RECT::default();
-                unsafe {
-                    let _ = GetWindowRect(self.hwnd, &mut place);
-                }
+                let place = self.page_on_screen();
                 crate::app().controller.stick_note(name, POINT { x: place.left + (24.0 * self.scale) as i32, y: place.top + (24.0 * self.scale) as i32 });
                 true
             }
@@ -1364,7 +1352,7 @@ impl Beside {
     /// as it is moved, and again a while after (what is behind changes); how frosted it is drawn, as what is behind
     /// asks. Its scene is its thread's, kept from page to page (one made anew keeps some of the card's memory).
     fn look_behind(&mut self) {
-        if !self.skinned || self.theme.skin == Skin::Paper {
+        if self.theme.skin == Skin::Paper {
             return;
         }
         let page = self.page_on_screen();
@@ -1392,18 +1380,10 @@ impl Beside {
         });
     }
 
-    /// Its ground: on a skinned page, the skin's sheet as the panel's is (its shadow, the desktop behind as the skin
-    /// shows it, its tint and edge, its corners), as one piece; on a note's page, a flyout's ground, light or dark.
+    /// Its ground: the skin's sheet as the panel's is (its shadow, the desktop behind as the skin shows it, its tint
+    /// and edge, its corners), as one piece.
     fn paint_ground(&self, frame: &Frame, (width, height): (f32, f32)) {
         let theme = &self.theme;
-        if !self.skinned {
-            let ground = match theme.skin {
-                Skin::Paper => theme.paper,
-                _ if theme.dark => Color::hex(0x2C2C2C, 1.0),
-                _ => Color::hex(0xF9F9F9, 1.0),
-            };
-            return frame.fill(ground, 0.0, 0.0, width, height);
-        }
         let piece = [super::view::Rect { x: 0.0, y: 0.0, w: width, h: height }];
         BEHIND.with(|held| {
             let mut held = held.borrow_mut();
@@ -1533,12 +1513,9 @@ impl Beside {
             self.hits = hits;
             return;
         };
-        // Its colour over all of it, faintly, where its card on the panel is of it (glass's, Windows 11's; chart
-        // paper's card is the skin's own); its dot by when it was written.
+        // Of its colour as its card on the panel is (see `view::note_page`); its dot by when it was written.
+        super::view::note_page(frame, &theme, writing.colour, (width, height));
         let mark = super::view::note_colour(writing.colour);
-        if theme.skin != super::theme::Skin::Paper {
-            frame.fill(mark.alpha(if theme.dark { 0.10 } else { 0.08 }), 0.0, 0.0, width, height);
-        }
         frame.fill_circle(mark, Point { x: PAD + 5.0, y: 26.0 }, 5.0);
         let when = super::text::since(writing.written_ms, crate::station::now_ms(), lang);
         let said = match (&writing.name, lang) {
@@ -1557,11 +1534,19 @@ impl Beside {
             hits.push((place.0, place.1, place.2, place.3, hit));
         }
         // Its words, as the text services draw them, and the caret where they say it is.
+        // (Its box placed in its window, past the shadow's room: drawn from the window's corner, not the page's.)
         let editor = &writing.editor;
+        let mut was = windows_numerics::Matrix3x2::default();
+        unsafe {
+            frame.dc.GetTransform(&mut was);
+            frame.dc.SetTransform(&(windows_numerics::Matrix3x2::translation(-self.inset, -self.inset) * was));
+        }
         frame.in_pixels(|target| editor.draw(target));
+        unsafe { frame.dc.SetTransform(&was) };
         if let (Some((x, y, w, h)), true) = (editor.caret(), self.caret_on) {
+            let (x, y) = self.on_page(x as f32, y as f32);
             let scale = self.scale;
-            frame.fill(theme.text, x as f32 / scale, y as f32 / scale, (w as f32 / scale).max(1.2), h as f32 / scale);
+            frame.fill(theme.text, x, y, (w as f32 / scale).max(1.2), h as f32 / scale);
         }
         // Its foot: how many characters; kept as it is written, and where (or what was said of it).
         let bottom = height - FOOT;
@@ -1960,7 +1945,6 @@ otepad.exe"),
                             theme: Rc::new(Theme::new(skin, dark)),
                             lang: super::super::text::Lang::Zh,
                             page: Page::Picker,
-                            skinned: false,
                             inset: 0.0,
                             frost: 0.0,
                             pressed: None,
