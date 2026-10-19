@@ -1065,7 +1065,7 @@ impl Beside {
         if let Some(path) = picture.filter(|_| words.is_none()) {
             let side = inner.min(bottom - top);
             match crate::station::thumbs::of(&path, 512) {
-                Some(shown) => frame.picture(&shown, PAD + (inner - side) / 2.0, top, side, 8.0, 1.0),
+                Some(shown) => frame.picture(&shown, PAD + (inner - side) / 2.0, top, side, side, 8.0, 1.0),
                 None => {
                     waiting = true;
                     frame.fill_rounded(theme.track, PAD + (inner - side) / 2.0, top, side, side, 8.0);
@@ -1253,7 +1253,7 @@ impl Beside {
                 frame.fill_rounded(theme.hover, row.0, row.1 + 1.0, row.2, row.3 - 2.0, theme.control_radius.max(6.0));
             }
             match crate::station::thumbs::of(std::path::Path::new(&found.target), 64) {
-                Some(picture) => frame.picture(&picture, PAD, ry + (ROW - 26.0) / 2.0, 26.0, 5.0, 1.0),
+                Some(picture) => frame.picture(&picture, PAD, ry + (ROW - 26.0) / 2.0, 26.0, 26.0, 5.0, 1.0),
                 None => {
                     waiting = true;
                     frame.fill_rounded(theme.track, PAD, ry + (ROW - 26.0) / 2.0, 26.0, 26.0, 5.0);

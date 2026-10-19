@@ -192,9 +192,10 @@ pub trait Canvas {
     /// `icon` stroked in `color`, `size` DIPs square, centred on `centre`.
     fn icon(&self, icon: super::icons::Icon, centre: Point, size: f32, color: Color);
 
-    /// `picture` drawn into the square `size` wide from (`x`, `y`), its corners rounded by `radius`, `opacity` of it.
+    /// `picture` (square) drawn over the box `w` × `h` from (`x`, `y`), filling it (a box not square shows the
+    /// picture's middle, the rest cut off), its corners rounded by `radius`, `opacity` of it.
     #[allow(clippy::too_many_arguments)]
-    fn picture(&self, picture: &Picture, x: f32, y: f32, size: f32, radius: f32, opacity: f32);
+    fn picture(&self, picture: &Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32);
     /// Names what is drawn from here on (`""`: nothing), for a canvas that
     /// tells one drawing's parts from another's (see `morph`).
     fn key(&self, _key: &str) {}

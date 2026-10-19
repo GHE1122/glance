@@ -976,21 +976,24 @@ impl Canvas for Frame<'_> {
         }
     }
 
-    fn picture(&self, picture: &super::canvas::Picture, x: f32, y: f32, size: f32, radius: f32, opacity: f32) {
+    fn picture(&self, picture: &super::canvas::Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32) {
         let Some(bitmap) = self.gfx.picture_bitmap(&self.dc, picture) else { return };
         // (Its box on whole pixels, as a rectangle's: its edges sharp, all four.)
-        let (x, y, size, _) = self.on_pixels(x, y, size, size);
+        let (x, y, w, h) = self.on_pixels(x, y, w, h);
+        // (As large as covers the box, its middle on the box's.)
+        let size = w.max(h);
         let scale = size / picture.side.max(1) as f32;
+        let (from_x, from_y) = (x - (size - w) / 2.0, y - (size - h) / 2.0);
         unsafe {
             let properties = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_BRUSH_PROPERTIES1 {
                 extendModeX: windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP,
                 extendModeY: windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP,
                 interpolationMode: windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR,
             };
-            let placed = windows::Win32::Graphics::Direct2D::D2D1_BRUSH_PROPERTIES { opacity, transform: Matrix3x2::scale(scale, scale) * Matrix3x2::translation(x, y) };
+            let placed = windows::Win32::Graphics::Direct2D::D2D1_BRUSH_PROPERTIES { opacity, transform: Matrix3x2::scale(scale, scale) * Matrix3x2::translation(from_x, from_y) };
             let Ok(brush) = self.dc.CreateBitmapBrush(&bitmap, Some(&properties), Some(&placed)) else { return };
-            let radius = radius.max(0.0).min(size / 2.0);
-            self.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(x, y, size, size), radiusX: radius, radiusY: radius }, &brush);
+            let radius = radius.max(0.0).min(w.min(h) / 2.0);
+            self.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: radius, radiusY: radius }, &brush);
         }
     }
 

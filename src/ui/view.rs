@@ -823,7 +823,7 @@ fn apps_rows(count: usize, theme: &Theme) -> usize {
 fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &str, x: f32, y: f32, side: f32) {
     let web = target.starts_with("https://") || target.starts_with("http://");
     match crate::station::thumbs::of(std::path::Path::new(target), TILE_PIXELS).filter(|_| !web) {
-        Some(picture) => frame.picture(&picture, x, y, side, side / 5.0, 1.0),
+        Some(picture) => frame.picture(&picture, x, y, side, side, side / 5.0, 1.0),
         None => {
             frame.fill_rounded(theme.track, x, y, side, side, side / 5.0);
             let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
@@ -964,12 +964,11 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
     }
 }
 
-/// The station's tiles laid out as cards: each one's room across, its picture's side, its room down (the picture, its
-/// name and what it is under it), the gap between them; and as one row (a small lane), named only.
+/// The station's tiles as one row (a small lane): each one's room across, its picture's side, its room down (the
+/// picture and its name under it); the gap between tiles (and cards: see `cards_across`).
 const TILE_W: f32 = 72.0;
 const TILE_PICTURE: f32 = 56.0;
 const TILE_H: f32 = TILE_PICTURE + 4.0 + 16.0;
-const CARD_H: f32 = TILE_H + 14.0;
 const TILE_GAP: f32 = 8.0;
 /// The room between the station's head and what is under it.
 const SHELF_GAP: f32 = 6.0;
@@ -987,6 +986,15 @@ const TAB_PAD: f32 = 8.0;
 /// the pictures' view.
 const TILE_PIXELS: u32 = 128;
 const LARGE_PIXELS: u32 = 256;
+
+/// A card's plate as tall as so much of its width, and the room under it for its name and what it is.
+const PLATE: f32 = 0.74;
+const CARD_WORDS: f32 = 5.0 + 2.0 * LINE;
+
+/// How many cards go across `width`: three in a column (as many as fit in a wider one), each at least a tile wide.
+fn cards_across(width: f32) -> usize {
+    (((width + TILE_GAP) / (TILE_W + 24.0 + TILE_GAP)) as usize).clamp(1, 4)
+}
 
 /// How many tiles go across `width`.
 fn tiles_across(width: f32) -> usize {
@@ -2741,7 +2749,11 @@ fn shelf_places(shows: Shows, count: usize, width: f32) -> (Vec<Rect>, f32) {
         (places, lines as f32 * (h + gap) - if lines > 0 { gap } else { 0.0 })
     };
     match shows {
-        Shows::View(ShelfView::Cards) => grid(tiles_across(width), TILE_W, CARD_H, TILE_GAP),
+        Shows::View(ShelfView::Cards) => {
+            let across = cards_across(width);
+            let w = (width - (across - 1) as f32 * TILE_GAP) / across as f32;
+            grid(across, w, w * PLATE + CARD_WORDS, TILE_GAP)
+        }
         Shows::Row => {
             let (mut places, _) = grid(tiles_across(width), TILE_W, TILE_H, TILE_GAP);
             // (One row: as many as fit, the rest left out.)
@@ -2756,54 +2768,78 @@ fn shelf_places(shows: Shows, count: usize, width: f32) -> (Vec<Rect>, f32) {
     }
 }
 
-/// A tile's face (see `Face`) in the square `side` wide at (`x`, `y`): its picture (`pixels` as asked for), its first
-/// lines, or a web address's mark; how many more files are with it, and a pin where it is pinned.
+/// A tile's face (see `Face`) in the box `w` × `h` at (`x`, `y`), on a plate as its skin draws one (glass's round,
+/// Windows 11's and chart paper's square-cornered and ruled round): a picture filling it (`pixels`: the side it is
+/// asked for), another file's or a folder's icon in its middle, a text's first lines, or a web address's mark; how
+/// many more files are with it, and a pin where it is pinned.
 #[allow(clippy::too_many_arguments)]
-fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &Tile, x: f32, y: f32, side: f32, pixels: u32) {
-    let radius = (side / 9.0).clamp(4.0, 10.0);
+fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &Tile, x: f32, y: f32, w: f32, h: f32, pixels: u32) {
+    let small = w.min(h);
+    let radius = match theme.skin {
+        Skin::Glass => (small / 5.0).clamp(4.0, 14.0),
+        Skin::Fluent => 4.0,
+        Skin::Paper => 3.0,
+    };
+    frame.fill_rounded(theme.track, x, y, w, h, radius);
+    if theme.skin != Skin::Glass {
+        frame.stroke_rounded(Fill::Solid(theme.rule), x, y, w, h, radius, 1.0);
+    }
     match &tile.face {
         Face::Picture { path, more } => {
-            // (On a ground of its own: a file's icon, or a picture not square, sits on it as a tile.)
-            frame.fill_rounded(theme.track, x, y, side, side, radius);
-            match crate::station::thumbs::of(path, pixels) {
-                Some(picture) => frame.picture(&picture, x, y, side, radius, 1.0),
-                None => frame.icon(Icon::File, Point { x: x + side / 2.0, y: y + side / 2.0 }, side / 2.0, theme.text3),
+            // A picture fills its plate; another file, or a folder, shows its kind's icon, as large as reads (a file's
+            // own thumbnail, as Explorer draws one, on a plate of its own looked like a picture of the screen).
+            if shows_itself(path) {
+                match crate::station::thumbs::filling(path, pixels) {
+                    Some(picture) => frame.picture(&picture, x, y, w, h, radius, 1.0),
+                    None => frame.icon(Icon::Image, Point { x: x + w / 2.0, y: y + h / 2.0 }, small * 0.4, theme.text3),
+                }
+            } else {
+                let side = (small * 0.56).min(40.0);
+                match crate::station::thumbs::icon(path, (side * 3.0) as u32) {
+                    Some(picture) => frame.picture(&picture, x + (w - side) / 2.0, y + (h - side) / 2.0, side, side, 0.0, 1.0),
+                    None => frame.icon(Icon::File, Point { x: x + w / 2.0, y: y + h / 2.0 }, side * 0.7, theme.text3),
+                }
             }
             // Files put on it together: how many more.
-            if *more > 0 && side >= 40.0 {
+            if *more > 0 && small >= 40.0 {
                 let badge = format!("+{more}");
                 let wide = frame.measure(&badge, theme.small) + 10.0;
-                frame.fill_rounded(ink.trace, x + side - wide + 4.0, y + side - 14.0, wide, 18.0, 9.0);
-                centred(frame, &badge, theme.small, ink_on(ink.trace), x + side - wide + 4.0, y + side - 13.0, wide);
+                frame.fill_rounded(ink.trace, x + w - wide - 4.0, y + h - 22.0, wide, 18.0, 9.0);
+                centred(frame, &badge, theme.small, ink_on(ink.trace), x + w - wide - 4.0, y + h - 21.0, wide);
             }
         }
         Face::Text(text) => {
-            frame.fill_rounded(theme.track, x, y, side, side, radius);
-            if side < 40.0 {
-                frame.icon(Icon::Clipboard, Point { x: x + side / 2.0, y: y + side / 2.0 }, side / 2.0, theme.text3);
+            if small < 40.0 {
+                frame.icon(Icon::Clipboard, Point { x: x + w / 2.0, y: y + h / 2.0 }, small / 2.0, theme.text3);
             } else {
                 // Its first lines, each cut short where it is longer than the tile is wide.
-                let small = Font { size: if side > 80.0 { 11.0 } else { 9.0 }, ..theme.small };
-                let line = small.size * 1.28;
-                let lines = ((side - 10.0) / line) as usize;
+                let font = Font { size: if small > 80.0 { 11.0 } else { 9.0 }, ..theme.small };
+                let line = font.size * 1.28;
+                let lines = ((h - 10.0) / line) as usize;
                 for (at, words) in text.lines().take(lines).enumerate() {
                     // (The first short of a pin in the corner.)
-                    let room = side - 10.0 - if at == 0 && tile.pinned { 14.0 } else { 0.0 };
-                    frame.text(&fitted(frame, words.trim(), small, room), small, theme.text2, x + 5.0, y + 5.0 + at as f32 * line, room, Align::Start);
+                    let room = w - 10.0 - if at == 0 && tile.pinned { 14.0 } else { 0.0 };
+                    frame.text(&fitted(frame, words.trim(), font, room), font, theme.text2, x + 5.0, y + 5.0 + at as f32 * line, room, Align::Start);
                 }
             }
         }
         Face::Link => {
-            frame.fill_rounded(theme.track, x, y, side, side, radius);
-            frame.icon(Icon::Link, Point { x: x + side / 2.0, y: y + side / 2.0 }, (side * 0.42).min(28.0), ink.trace);
+            frame.icon(Icon::Link, Point { x: x + w / 2.0, y: y + h / 2.0 }, (small * 0.42).min(28.0), ink.trace);
         }
     }
     // Pinned: a pin in its corner.
-    if tile.pinned && side >= 40.0 {
-        let corner = Point { x: x + side - 9.0, y: y + 9.0 };
+    if tile.pinned && small >= 40.0 {
+        let corner = Point { x: x + w - 9.0, y: y + 9.0 };
         frame.fill_circle(ink.trace, corner, 8.0);
         frame.icon(Icon::Pin, corner, 10.0, ink_on(ink.trace));
     }
+}
+
+/// Whether the file at `path` is a picture, shown as itself (its thumbnail filling its plate); any other, or a folder,
+/// by its kind's icon.
+fn shows_itself(path: &std::path::Path) -> bool {
+    let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    ["png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif", "tif", "tiff", "avif", "jfif"].contains(&extension.as_str())
 }
 
 /// What is on the station (see `Block::Shelf`) from (`left`, `top`), `width` across, in room `tall` high and scrolled
@@ -2839,24 +2875,30 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         let lit = scene.hover == Some(Hit::Shelf(tile.id));
         let words = if lit { theme.text } else { theme.text2 };
         match shows {
-            Shows::View(ShelfView::Cards) | Shows::Row => {
+            Shows::View(ShelfView::Cards) => {
+                if lit {
+                    frame.fill_rounded(theme.hover, x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0, theme.control_radius.max(6.0));
+                }
+                let plate = place.w * PLATE;
+                paint_face(frame, theme, ink, tile, x, y, place.w, plate, TILE_PIXELS);
+                frame.text(&fitted(frame, &tile.label, theme.small, place.w), theme.small, words, x, y + plate + 5.0, place.w, Align::Start);
+                let tiny = Font { size: theme.small.size - 1.0, ..theme.small };
+                frame.text(&fitted(frame, &tile.about, tiny, place.w), tiny, theme.text3, x, y + plate + 5.0 + LINE, place.w, Align::Start);
+            }
+            Shows::Row => {
                 if lit {
                     frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, place.w + 4.0, place.h + 4.0, 8.0);
                 }
                 let px = x + (TILE_W - TILE_PICTURE) / 2.0;
-                paint_face(frame, theme, ink, tile, px, y, TILE_PICTURE, TILE_PIXELS);
+                paint_face(frame, theme, ink, tile, px, y, TILE_PICTURE, TILE_PICTURE, TILE_PIXELS);
                 centred(frame, &fitted(frame, &tile.label, theme.small, TILE_W), theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
-                if shows != Shows::Row {
-                    let tiny = Font { size: theme.small.size - 1.5, ..theme.small };
-                    centred(frame, &fitted(frame, &tile.about, tiny, TILE_W), tiny, theme.text3, x, y + TILE_H, TILE_W);
-                }
             }
             Shows::View(ShelfView::List) => {
                 if lit {
                     frame.fill_rounded(theme.hover, x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0, theme.control_radius.max(6.0));
                 }
                 let py = y + (LIST_ROW - LIST_PICTURE) / 2.0;
-                paint_face(frame, theme, ink, tile, x, py, LIST_PICTURE, TILE_PIXELS);
+                paint_face(frame, theme, ink, tile, x, py, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
                 let room = width - LIST_PICTURE - 10.0 - if tile.pinned { 18.0 } else { 0.0 };
                 frame.text(&fitted(frame, &tile.label, theme.body, room), theme.body, theme.text, x + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
                 frame.text(&fitted(frame, &tile.about, theme.small, room), theme.small, theme.text3, x + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
@@ -2865,7 +2907,7 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 }
             }
             Shows::View(ShelfView::Pictures) => {
-                paint_face(frame, theme, ink, tile, x, y, place.w, LARGE_PIXELS);
+                paint_face(frame, theme, ink, tile, x, y, place.w, place.h, LARGE_PIXELS);
                 // A picture's or a file's name over its foot; under the pointer, the whole lit.
                 if matches!(tile.face, Face::Picture { .. }) {
                     let band = LINE + 6.0;
@@ -2979,7 +3021,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
             frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, theme.control_radius.max(6.0));
         }
         let face = Tile { id: 0, label: String::new(), about: String::new(), face: Face::Picture { path: row.path.clone(), more: 0 }, pinned: false };
-        paint_face(frame, theme, ink, &face, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, TILE_PIXELS);
+        paint_face(frame, theme, ink, &face, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
         let when_w = frame.measure(&row.when, theme.small);
         let room = width - LIST_PICTURE - 10.0 - when_w - 8.0;
         frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
@@ -3072,7 +3114,7 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         if lit {
             frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, theme.control_radius.max(6.0));
         }
-        paint_face(frame, theme, ink, row, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, TILE_PIXELS);
+        paint_face(frame, theme, ink, row, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
         let room = width - LIST_PICTURE - 10.0;
         frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
@@ -3875,7 +3917,7 @@ six".into()));
         fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
         fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
-        fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
     }
 
     /// On a station, a list of what was copied, Recent files, long enough to scroll: a press on a thing finds the
@@ -4071,23 +4113,26 @@ six".into()));
         }
     }
 
-    /// The station's places as each view lays them out: cards across the column, spread over it; a list a row each;
-    /// three pictures across, square; a small lane's one row, as many as fit.
+    /// The station's places as each view lays them out: cards three across a column, filling it, each a plate as wide
+    /// and its words under it; a list a row each; three pictures across, square; a small lane's one row, as many as fit.
     #[test]
     fn lays_the_station_out_as_its_view_says() {
         let width = COLUMN_WIDTH - 32.0;
         let (cards, tall) = shelf_places(Shows::View(ShelfView::Cards), 9, width);
-        let across = tiles_across(width);
-        assert_eq!(across, 4);
-        assert_eq!((cards[across].x, cards[across].y), (0.0, CARD_H + TILE_GAP));
-        assert!((cards[across - 1].x + TILE_W - width).abs() < 0.01);
-        assert_eq!(tall, 3.0 * CARD_H + 2.0 * TILE_GAP);
+        let across = cards_across(width);
+        assert_eq!(across, 3);
+        let card = cards[0];
+        assert!((card.w * 3.0 + 2.0 * TILE_GAP - width).abs() < 0.01);
+        assert!((card.h - (card.w * PLATE + CARD_WORDS)).abs() < 0.01);
+        assert_eq!((cards[across].x, cards[across].y), (0.0, card.h + TILE_GAP));
+        assert!((cards[across - 1].x + card.w - width).abs() < 0.01);
+        assert!((tall - (3.0 * card.h + 2.0 * TILE_GAP)).abs() < 0.01);
         let (list, tall) = shelf_places(Shows::View(ShelfView::List), 3, width);
         assert_eq!((list[2].y, list[2].w, tall), (2.0 * LIST_ROW, width, 3.0 * LIST_ROW));
         let (pictures, _) = shelf_places(Shows::View(ShelfView::Pictures), 4, width);
         assert_eq!((pictures[3].x, pictures[3].w, pictures[3].h), (0.0, pictures[0].w, pictures[0].w));
         let (row, tall) = shelf_places(Shows::Row, 9, width);
-        assert_eq!((row.len(), tall), (across, TILE_H));
+        assert_eq!((row.len(), tall), (tiles_across(width), TILE_H));
     }
 
     #[test]

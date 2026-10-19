@@ -1166,6 +1166,10 @@ struct Dropping {
     armed: bool,
 }
 
+/// Whether a widget held over another is merged into it. Off for now (the owner's call, 2026-10-19): merged widgets'
+/// looks are to be designed first. Those merged before stay as they are.
+const MERGING: bool = false;
+
 /// How long a widget in hand is held over another before it is merged into it as it is let go; how far into the
 /// other's width from its right edge it goes beside it (else below); how many parts a widget merges at most.
 const DROP_HOLD: Duration = Duration::from_millis(600);
@@ -1851,7 +1855,7 @@ impl Widgets {
     /// one shown as where it would go (beside it near its right edge, else below it).
     fn look_for_a_drop(&mut self, now: Instant) {
         let held = self.list.iter().position(|w| matches!(w.drag, Some(Drag::Move { moved: true, .. })));
-        let found = held.zip(cursor_position()).and_then(|(guest, cursor)| {
+        let found = held.filter(|_| MERGING).zip(cursor_position()).and_then(|(guest, cursor)| {
             let target = self.list.iter().position(|w| {
                 let r = w.rect();
                 w.window.hwnd != self.list[guest].window.hwnd && w.shown_once && (r.left..r.right).contains(&cursor.x) && (r.top..r.bottom).contains(&cursor.y) && w.content.takes(&self.list[guest].content)

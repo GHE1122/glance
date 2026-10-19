@@ -1072,7 +1072,7 @@ impl Drawing<'_> {
                     match &cover {
                         Some(cover) => {
                             let picture = super::canvas::Picture { key: cover.key, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
-                            frame.picture(&picture, x, y, side, corner, 1.0);
+                            frame.picture(&picture, x, y, side, side, corner, 1.0);
                         }
                         // None (its player gives none, or it is being read): a plate with a note on it.
                         None => {
@@ -1781,7 +1781,7 @@ impl Drawing<'_> {
         frame.turned(cx, cy, angle, (1.0, 1.0), |frame| match &self.moment.cover {
             Some(cover) => {
                 let picture = super::canvas::Picture { key: cover.key, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
-                frame.picture(&picture, x, y, side, corner, 1.0);
+                frame.picture(&picture, x, y, side, side, corner, 1.0);
             }
             None => {
                 frame.fill_rounded(Color::hex(0x2A2A30, 1.0), x, y, side, side, corner);

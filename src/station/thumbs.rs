@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HGDIOBJ};
-use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_RESIZETOFIT};
+use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT};
 
 /// A picture: its pixels (BGRA, premultiplied, top row first) and how many across and down.
 #[derive(Clone, Debug)]
@@ -19,13 +19,23 @@ struct Thumb {
     size: (u32, u32),
 }
 
-/// What a picture is asked for: the file, when it was last written (a file written again is pictured again), and the
-/// side (physical px) it is to fill.
+/// What a picture is asked for: the file, when it was last written (a file written again is pictured again), the
+/// side (physical px) it is to fill, and how (see `Made`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Key {
     path: PathBuf,
     written: Option<std::time::SystemTime>,
     side: u32,
+    made: Made,
+}
+
+/// How a picture is made: as Explorer shows the file (its thumbnail, else its icon), its shape kept in the square;
+/// filling the square (a picture's middle, as much as the square holds: for a box it is to fill); its icon alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Made {
+    Fit,
+    Fill,
+    Icon,
 }
 
 /// The most pictures kept (the oldest asked for go first).
@@ -57,7 +67,21 @@ pub fn start(told: impl Fn() + Send + Sync + 'static) {
 /// The picture of the file at `path`, `side` physical px square (its own shape in its middle): as made; none yet
 /// (asked for, and told when it is), or none to be had.
 pub fn of(path: &Path, side: u32) -> Option<Picture> {
-    let key = Key { path: path.to_path_buf(), written: std::fs::metadata(path).and_then(|meta| meta.modified()).ok(), side };
+    asked(path, side, Made::Fit)
+}
+
+/// The picture of the picture at `path`, `side` physical px square, filling it (its middle).
+pub fn filling(path: &Path, side: u32) -> Option<Picture> {
+    asked(path, side, Made::Fill)
+}
+
+/// The icon of the file (or folder) at `path`, `side` physical px square: what Explorer shows of a file of its kind.
+pub fn icon(path: &Path, side: u32) -> Option<Picture> {
+    asked(path, side, Made::Icon)
+}
+
+fn asked(path: &Path, side: u32, made: Made) -> Option<Picture> {
+    let key = Key { path: path.to_path_buf(), written: std::fs::metadata(path).and_then(|meta| meta.modified()).ok(), side, made };
     let mut kept = KEPT.lock().unwrap();
     let kept = kept.as_mut()?;
     if let Some(made) = kept.made.get(&key) {
@@ -77,12 +101,16 @@ fn make(asks: Receiver<Key>) {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
     }
     while let Ok(key) = asks.recv() {
-        let made = picture(&key.path, key.side).map(|thumb| squared(&thumb, key.side, {
+        let number = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             key.hash(&mut hasher);
             hasher.finish()
-        }));
+        };
+        let made = picture(&key.path, key.side, key.made == Made::Icon).map(|thumb| match key.made {
+            Made::Fill => squared(&middle(&thumb), key.side, number),
+            Made::Fit | Made::Icon => squared(&thumb, key.side, number),
+        });
         {
             let mut kept = KEPT.lock().unwrap();
             let Some(kept) = kept.as_mut() else { continue };
@@ -197,14 +225,35 @@ fn squared(thumb: &Thumb, side: u32, key: u64) -> Picture {
     Picture { key, side, pixels: Arc::new(pixels) }
 }
 
-/// The picture of the file at `path`, as large as fits `side` square (its shape kept), as Explorer shows it.
-fn picture(path: &Path, side: u32) -> Option<Thumb> {
+/// The square in the middle of `thumb`, as large as it holds (what fills a square of its picture).
+fn middle(thumb: &Thumb) -> Thumb {
+    let (w, h) = thumb.size;
+    let side = w.min(h);
+    let (left, top) = ((w - side) / 2, (h - side) / 2);
+    let mut pixels = Vec::with_capacity((side * side * 4) as usize);
+    for row in top..top + side {
+        let from = ((row * w + left) * 4) as usize;
+        pixels.extend_from_slice(&thumb.pixels[from..from + (side * 4) as usize]);
+    }
+    Thumb { pixels, size: (side, side) }
+}
+
+/// The picture of the file at `path`, as large as fits `side` square (its shape kept), as Explorer shows it (`icon`:
+/// its icon alone, not a thumbnail of what it holds).
+fn picture(path: &Path, side: u32, icon: bool) -> Option<Thumb> {
     unsafe {
-        // (Its parts joined as Windows writes paths: the shell does not read one written with '/'.)
-        let path: PathBuf = path.components().collect();
+        // (A program the Start menu names by its file's path, "shell:AppsFolder\D:\App\a.exe", which the shell
+        // does not read by that name: by the file itself.)
+        let named = path.to_string_lossy();
+        let path = match named.strip_prefix("shell:AppsFolder\\").map(Path::new) {
+            Some(file) if file.is_absolute() => file.to_path_buf(),
+            // (Its parts joined as Windows writes paths: the shell does not read one written with '/'.)
+            _ => path.components().collect(),
+        };
         let factory: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
         let side = side.max(16) as i32;
-        let bitmap = factory.GetImage(SIZE { cx: side, cy: side }, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK).ok()?;
+        let how = if icon { SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK } else { SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK };
+        let bitmap = factory.GetImage(SIZE { cx: side, cy: side }, how).ok()?;
         let thumb = pixels_of(bitmap);
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
         thumb
@@ -285,9 +334,9 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let picture = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/website/apple-touch-icon.png")), 96).expect("a picture's");
+        let picture = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/website/apple-touch-icon.png")), 96, false).expect("a picture's");
         assert!(picture.size.0 <= 96 && picture.size.1 <= 96 && picture.size.0.max(picture.size.1) >= 48, "{:?}", picture.size);
-        let icon = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")), 48).expect("an icon");
+        let icon = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")), 48, false).expect("an icon");
         assert!(icon.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
         println!("picture {:?}, icon {:?}", picture.size, icon.size);
     }
