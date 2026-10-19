@@ -105,6 +105,8 @@ const DRAG_FROM: f32 = 4.0;
 enum Ask {
     Open(Opening),
     Close,
+    /// The skin, and its light or dark, as what it opened from has them now.
+    Restyle(Skin, bool),
 }
 
 static ASKS: OnceLock<Mutex<Sender<Ask>>> = OnceLock::new();
@@ -139,6 +141,14 @@ pub fn is_up() -> bool {
 /// The page `opening` asks for opened (another up goes), on its thread (started when first asked).
 pub fn open(opening: Opening) {
     ask(Ask::Open(opening));
+}
+
+/// The page up drawn in `skin`, light or `dark`, as what it opened from is now (the skin chosen anew, or the
+/// desktop gone light or dark): opened again so, where it was not.
+pub fn restyle(skin: Skin, dark: bool) {
+    if is_up() {
+        ask(Ask::Restyle(skin, dark));
+    }
 }
 
 /// The page up, gone.
@@ -321,6 +331,26 @@ fn run(asks: Receiver<Ask>) {
                     match ask {
                         Ask::Open(opening) => show(opening),
                         Ask::Close => gone(),
+                        // (Opened again as it was, in the skin now: its room round it is the skin's.)
+                        Ask::Restyle(skin, dark) => {
+                            let again = with(|beside| {
+                                let opening = beside.opening.clone()?;
+                                if opening.skin == skin && opening.dark == dark {
+                                    return None;
+                                }
+                                let page = match &beside.writing {
+                                    Some(writing) => Page::Note(writing.name.clone()),
+                                    None => beside.page.clone(),
+                                };
+                                let folder = beside.writing.as_ref().map(|writing| writing.folder.clone());
+                                Some(Opening { page, folder, skin, dark, ..opening })
+                            })
+                            .flatten();
+                            if let Some(opening) = again {
+                                gone();
+                                show(opening);
+                            }
+                        }
                     }
                 }
                 continue;

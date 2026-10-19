@@ -1893,6 +1893,10 @@ impl<'a> Panel<'a> {
         let dark = theme::is_dark(self.prefs.theme, behind.map(|(mean, _)| mean));
         self.theme = Theme::new(self.skin, dark);
         self.frost = behind.map_or(0.0, |(mean, spread)| skins::frost(mean, spread, dark));
+        // The page beside it, where one is up, as it is now.
+        if self.is_shown() {
+            crate::ui::beside::restyle(self.skin, dark);
+        }
     }
 
     /// Opens the panel as the shortcut and the tray do: where it was moved
