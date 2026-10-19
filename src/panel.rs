@@ -1988,10 +1988,7 @@ impl<'a> Panel<'a> {
         let dark = theme::is_dark(self.prefs.theme, behind.map(|(mean, _)| mean));
         self.theme = Theme::new(self.skin, dark);
         self.frost = behind.map_or(0.0, |(mean, spread)| skins::frost(mean, spread, dark));
-        // The page beside it, where one is up, as it is now.
-        if self.is_shown() {
-            crate::ui::beside::restyle(self.skin, dark);
-        }
+        // (The page beside it, where one is up, follows as the panel is next placed in its skin: see `follow_beside`.)
     }
 
     /// Opens the panel as the shortcut and the tray do: where it was moved
@@ -3038,7 +3035,18 @@ impl<'a> Panel<'a> {
         let rack = (self.music.layout_at(size, &shows) == crate::ui::music::Layout::Strip).then_some(RACK);
         let placement = self.placement.as_mut().unwrap();
         place(placement, self.edge, &self.theme, size, 1.0, rack);
+        self.follow_beside();
         size
+    }
+
+    /// The page beside it, where one is up from it, kept beside it as it is now: where it is (larger in another skin,
+    /// its lanes grown), in its skin.
+    fn follow_beside(&self) {
+        if let Some(placement) = &self.placement {
+            if crate::ui::beside::up_for(self.window.hwnd) {
+                crate::ui::beside::follow(placement.panel, self.theme.skin, self.theme.dark);
+            }
+        }
     }
 
     /// The panel's lanes, laid out (once each opening, and held), and the
@@ -3090,6 +3098,7 @@ impl<'a> Panel<'a> {
         drop(history);
         let placement = self.placement.as_mut().unwrap();
         place(placement, self.edge, &self.theme, (layout.width(), layout.height()), zoom, None);
+        self.follow_beside();
         (lanes, layout)
     }
 

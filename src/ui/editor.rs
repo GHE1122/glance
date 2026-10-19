@@ -333,6 +333,13 @@ impl Editor {
     }
 
     /// The caret, where it is shown now (in the window): its left, top, width and height.
+    pub fn place(&self, rect: RECT) {
+        self.kept.rect.set(rect);
+        unsafe {
+            let _ = self.services.OnTxPropertyBitsChange(TXTBIT_CLIENTRECTCHANGE, TXTBIT_CLIENTRECTCHANGE);
+        }
+    }
+
     pub fn caret(&self) -> Option<(i32, i32, i32, i32)> {
         self.kept.caret_shown.get().then(|| self.kept.caret.get()).flatten()
     }

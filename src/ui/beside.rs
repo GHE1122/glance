@@ -106,8 +106,8 @@ const DRAG_FROM: f32 = 4.0;
 enum Ask {
     Open(Opening),
     Close,
-    /// The skin, and its light or dark, as what it opened from has them now.
-    Restyle(Skin, bool),
+    /// What it opened from as it is now: where (physical px), in which skin, light or dark.
+    Follow(RECT, Skin, bool),
 }
 
 static ASKS: OnceLock<Mutex<Sender<Ask>>> = OnceLock::new();
@@ -171,13 +171,19 @@ pub fn open(opening: Opening) {
     ask(Ask::Open(opening));
 }
 
-/// The page up drawn in `skin`, light or `dark`, as what it opened from is now (the skin chosen anew, or the
-/// desktop gone light or dark): opened again so, where it was not.
-pub fn restyle(skin: Skin, dark: bool) {
-    if is_up() {
-        ask(Ask::Restyle(skin, dark));
+/// The page up kept beside what it opened from as that is now (`by`, physical px; drawn in `skin`, light or `dark`):
+/// moved along, where only that moved; opened again so, where its skin or its size is another.
+pub fn follow(by: RECT, skin: Skin, dark: bool) {
+    // (Asked as what it opened from changes, not each time that is placed as it was.)
+    let mut asked = FOLLOWED.lock().unwrap();
+    if is_up() && *asked != Some((by, skin, dark)) {
+        *asked = Some((by, skin, dark));
+        ask(Ask::Follow(by, skin, dark));
     }
 }
+
+/// What the page up was last asked to follow, or opened from (see `follow`).
+static FOLLOWED: Mutex<Option<(RECT, Skin, bool)>> = Mutex::new(None);
 
 /// The page up, gone.
 pub fn close() {
@@ -363,11 +369,18 @@ fn run(asks: Receiver<Ask>) {
                     match ask {
                         Ask::Open(opening) => show(opening),
                         Ask::Close => gone(),
-                        // (Opened again as it was, in the skin now: its room round it is the skin's.)
-                        Ask::Restyle(skin, dark) => {
+                        // (Moved along; or opened again as it was, in the skin now, its room round it the skin's, or as
+                        // large as it is to be.)
+                        Ask::Follow(by, skin, dark) => {
                             let again = with(|beside| {
                                 let opening = beside.opening.clone()?;
+                                if opening.by == by && opening.skin == skin && opening.dark == dark {
+                                    return None;
+                                }
+                                let now = Opening { by, skin, dark, ..opening.clone() };
                                 if opening.skin == skin && opening.dark == dark {
+                                    beside.move_to(placed(&now).0);
+                                    beside.opening = Some(now);
                                     return None;
                                 }
                                 let page = match &beside.writing {
@@ -375,7 +388,7 @@ fn run(asks: Receiver<Ask>) {
                                     None => beside.page.clone(),
                                 };
                                 let folder = beside.writing.as_ref().map(|writing| writing.folder.clone());
-                                Some(Opening { page, folder, skin, dark, ..opening })
+                                Some(Opening { page, folder, ..now })
                             })
                             .flatten();
                             if let Some(opening) = again {
@@ -426,6 +439,55 @@ fn run(asks: Receiver<Ask>) {
     }
 }
 
+/// Where the page `opening` asks for is on the screen (physical px, its shadow's room left out), and how many pixels a
+/// DIP is there: beside what it opens from on its side away from the edge, else on the other, else over it; under the
+/// top edge's panel, as tall as the room under it is; over a note stuck on the desktop, as wide and tall as its card,
+/// and no less than a page to write in.
+fn placed(opening: &Opening) -> (RECT, f32) {
+    let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let monitor = unsafe { MonitorFromRect(&opening.by, MONITOR_DEFAULTTONEAREST) };
+    let (mut dpi, mut unused) = (96u32, 96u32);
+    unsafe {
+        let _ = GetMonitorInfoW(monitor, &mut screen);
+        let _ = windows::Win32::UI::HiDpi::GetDpiForMonitor(monitor, windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI, &mut dpi, &mut unused);
+    }
+    let room = screen.rcWork;
+    let scale = dpi.max(96) as f32 / 96.0;
+    let (wide, gap) = ((WIDTH * scale).round() as i32, (GAP * scale).round() as i32);
+    let least = (480.0 * scale) as i32;
+    let wide = if opening.side == Side::Over { (opening.by.right - opening.by.left).max((OVER_LEAST.0 * scale) as i32).min(room.right - room.left) } else { wide };
+    let left_of = opening.by.left - gap - wide;
+    let right_of = opening.by.right + gap;
+    let (x, y, tall) = match opening.side {
+        Side::Over => {
+            let tall = (opening.by.bottom - opening.by.top).max((OVER_LEAST.1 * scale) as i32).min(room.bottom - room.top);
+            (opening.by.left, opening.by.top, tall)
+        }
+        Side::Below => {
+            let tall = (room.bottom - opening.by.bottom - gap - gap).max(least).min(room.bottom - room.top);
+            ((opening.by.left + opening.by.right - wide) / 2, opening.by.bottom + gap, tall)
+        }
+        side => {
+            let tall = (opening.by.bottom - opening.by.top).max(least).min(room.bottom - room.top);
+            let x = match (side == Side::Left, left_of >= room.left, right_of + wide <= room.right) {
+                (true, true, _) | (false, true, false) => left_of,
+                (false, _, true) | (true, false, true) => right_of,
+                _ => (opening.by.left + opening.by.right - wide) / 2,
+            };
+            (x, opening.by.top, tall)
+        }
+    };
+    let x = x.clamp(room.left, room.right - wide);
+    let y = y.clamp(room.top, room.bottom - tall);
+    (RECT { left: x, top: y, right: x + wide, bottom: y + tall }, scale)
+}
+
+/// Where a note's words are written in its page's window (physical px), its page `wide` × `tall` past `room` (its
+/// shadow's): under its head, over its foot.
+fn words_box(room: i32, wide: i32, tall: i32, scale: f32) -> RECT {
+    RECT { left: room + (PAD * scale) as i32, top: room + ((HEAD + 4.0) * scale) as i32, right: room + wide - (PAD * scale) as i32, bottom: room + tall - (FOOT * scale) as i32 }
+}
+
 /// The page `opening` asks for, up beside what it opens from.
 fn show(opening: Opening) {
     gone();
@@ -435,43 +497,9 @@ fn show(opening: Opening) {
     }
     let Ok(gfx) = gfx::current() else { return };
     let showing = super::life::Showing::of(&gfx);
+    let (page, scale) = placed(&opening);
+    let (x, y, wide, tall) = (page.left, page.top, page.right - page.left, page.bottom - page.top);
     unsafe {
-        let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let _ = GetMonitorInfoW(MonitorFromRect(&opening.by, MONITOR_DEFAULTTONEAREST), &mut screen);
-        let room = screen.rcWork;
-        let monitor = MonitorFromRect(&opening.by, MONITOR_DEFAULTTONEAREST);
-        let (mut dpi, mut unused) = (96u32, 96u32);
-        let _ = windows::Win32::UI::HiDpi::GetDpiForMonitor(monitor, windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI, &mut dpi, &mut unused);
-        let scale = dpi.max(96) as f32 / 96.0;
-        let (wide, gap) = ((WIDTH * scale).round() as i32, (GAP * scale).round() as i32);
-        let least = (480.0 * scale) as i32;
-        // (Over a note stuck on the desktop: as wide and tall as its card, and no less than a page to write in.)
-        let wide = if opening.side == Side::Over { (opening.by.right - opening.by.left).max((OVER_LEAST.0 * scale) as i32).min(room.right - room.left) } else { wide };
-        // Beside it on its side away from the edge, else on the other, else over it; under the top edge's panel, as
-        // tall as the room under it is.
-        let left_of = opening.by.left - gap - wide;
-        let right_of = opening.by.right + gap;
-        let (x, y, tall) = match opening.side {
-            Side::Over => {
-                let tall = (opening.by.bottom - opening.by.top).max((OVER_LEAST.1 * scale) as i32).min(room.bottom - room.top);
-                (opening.by.left, opening.by.top, tall)
-            }
-            Side::Below => {
-                let tall = (room.bottom - opening.by.bottom - gap - gap).max(least).min(room.bottom - room.top);
-                ((opening.by.left + opening.by.right - wide) / 2, opening.by.bottom + gap, tall)
-            }
-            side => {
-                let tall = (opening.by.bottom - opening.by.top).max(least).min(room.bottom - room.top);
-                let x = match (side == Side::Left, left_of >= room.left, right_of + wide <= room.right) {
-                    (true, true, _) | (false, true, false) => left_of,
-                    (false, _, true) | (true, false, true) => right_of,
-                    _ => (opening.by.left + opening.by.right - wide) / 2,
-                };
-                (x, opening.by.top, tall)
-            }
-        };
-        let x = x.clamp(room.left, room.right - wide);
-        let y = y.clamp(room.top, room.bottom - tall);
         // In the skin, a note's page too (as its card on the panel is): its window larger by its shadow's room each
         // way, its corners and shadow drawn as the panel's are.
         let theme = Theme::new(opening.skin, opening.dark);
@@ -524,8 +552,7 @@ fn show(opening: Opening) {
                 // (A new note takes the next colour round.)
                 None => crate::notes::Colour::ALL[shown.len() % crate::notes::Colour::ALL.len()],
             };
-            // (In its window: past its shadow's room.)
-            let rect = RECT { left: room_px + (PAD * scale) as i32, top: room_px + ((HEAD + 4.0) * scale) as i32, right: room_px + wide - (PAD * scale) as i32, bottom: room_px + tall - (FOOT * scale) as i32 };
+            let rect = words_box(room_px, wide, tall, scale);
             let pixels = 15.0 * scale;
             let accent = match theme.skin {
                 Skin::Paper => theme.text,
@@ -546,6 +573,7 @@ fn show(opening: Opening) {
             }
         }
         OWNER.store(opening.owner, Ordering::Release);
+        *FOLLOWED.lock().unwrap() = Some((opening.by, opening.skin, opening.dark));
         PAGE.store(hwnd.0 as isize, Ordering::Release);
         UP.store(true, Ordering::Release);
         // The widgets kept under it while it is up (one drawn again under it, as a note stuck on the desktop is as
@@ -890,6 +918,20 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 impl Beside {
     fn redraw(&self) {
         let _ = unsafe { InvalidateRect(Some(self.hwnd), None, false) };
+    }
+
+    /// Its page put at `page` (physical px, its shadow's room left out), as large as that is; a note's words' box
+    /// with it.
+    fn move_to(&mut self, page: RECT) {
+        let room = (self.inset * self.scale).round() as i32;
+        let (wide, tall) = (page.right - page.left, page.bottom - page.top);
+        unsafe {
+            let _ = SetWindowPos(self.hwnd, None, page.left - room, page.top - room, wide + 2 * room, tall + 2 * room, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if let Some(writing) = &self.writing {
+            writing.editor.place(words_box(room, wide, tall, self.scale));
+        }
+        self.redraw();
     }
 
     /// Whether it is drawn whole: the desktop behind it taken, where its skin shows it (chart paper's does not).
