@@ -76,7 +76,7 @@ use crate::update;
 const SIZE: (f32, f32) = (1300.0, 760.0);
 const MIN_SIZE: (f32, f32) = (1080.0, 560.0);
 /// The first Windows 11 build that lets a window ask for Mica.
-const FIRST_MICA_BUILD: u32 = 22621;
+pub(crate) const FIRST_MICA_BUILD: u32 = 22621;
 
 /// The list of choices: its width, its padding (top, sides, bottom), and
 /// the thin scroll bar's gutter.
@@ -370,7 +370,7 @@ fn tick(now: Instant) -> Option<Duration> {
 /// How often a minimized settings window is looked at (to be drawn again once it is restored).
 const MINIMIZED_LOOK: Duration = Duration::from_millis(500);
 
-fn windows_build() -> u32 {
+pub(crate) fn windows_build() -> u32 {
     metrics::reg_string(w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"), w!("CurrentBuild")).parse().unwrap_or(0)
 }
 

@@ -2499,7 +2499,7 @@ impl<'a> Panel<'a> {
         let (placement, opening) = (self.placement.as_ref()?, self.opening.as_ref()?);
         let (x, y) = (client.x as f32 / placement.px - self.corner.0, client.y as f32 / placement.px - self.corner.1);
         let lanes = opening.layout.lanes();
-        if lanes.len() < 2 || self.hit_at(client) == Some(Hit::Grip) {
+        if lanes.len() < 2 {
             return None;
         }
         // (The rail, quick launch's, taken anywhere it is free: it has no head.)

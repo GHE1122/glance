@@ -502,7 +502,7 @@ mod tests {
                 let (layout, _) = arrange(&theme, edge, heights.clone(), (1920.0, 1080.0), None, 1.0, Some(rail));
                 let lanes = layout.lanes();
                 let area = lanes[rail];
-                assert!(area.h >= 4.0 * 46.0 + 16.0, "{edge:?} {heights:?}: {area:?}");
+                assert!(area.h >= crate::ui::view::RAIL_LEAST, "{edge:?} {heights:?}: {area:?}");
                 assert!(area.y + area.h <= layout.height() + 0.01, "{edge:?} {heights:?}: {area:?} past {}", layout.height());
             }
         }

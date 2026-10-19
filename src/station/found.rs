@@ -1,5 +1,5 @@
-//! Every program Windows lists in its Start menu (`shell:AppsFolder`: desktop programs and Store apps alike), by name
-//! and by what opens it, for quick launch's choosing (see `ui::beside`). Read on a thread of its own, a single-threaded
+//! Every program Windows lists in its Start menu (`shell:AppsFolder`: desktop programs and Store apps alike, not the
+//! documents, folders and web addresses it lists beside them), by name and by what opens it, for quick launch's choosing (see `ui::beside`). Read on a thread of its own, a single-threaded
 //! apartment (the shell's folders expect one), when first asked and again each time after; searched by name and by
 //! the first letters of a Chinese name's pinyin.
 
@@ -73,8 +73,13 @@ fn read() -> Option<Vec<Found>> {
             }
             let Some(item) = one[0].take() else { break };
             let (Some(name), Some(parsing)) = (named(&item, SIGDN_NORMALDISPLAY), named(&item, SIGDN_PARENTRELATIVEPARSING)) else { continue };
+            // (Programs only: the documents, folders and web addresses listed beside them are left out.)
+            let target = format!("shell:AppsFolder\\{parsing}");
+            if !crate::station::apps::is_program(&target) {
+                continue;
+            }
             let initials = initials(&name);
-            found.push(Found { name, target: format!("shell:AppsFolder\\{parsing}"), initials });
+            found.push(Found { name, target, initials });
         }
         // (By the first letter each is listed under, as the Start menu groups them, then by name.)
         found.sort_by(|a, b| (a.initials.first().map(|bits| bits.trailing_zeros()), &a.name).cmp(&(b.initials.first().map(|bits| bits.trailing_zeros()), &b.name)));

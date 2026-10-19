@@ -184,11 +184,10 @@ pub enum Hit {
     /// A file come lately, by its number on its drive (see `station::recent`).
     Recent(crate::station::recent::Key),
     /// What is kept at hand, by its place (see `station::apps`); the place to add more; where something dragged may
-    /// be dropped to be kept at hand; the grip the panel is torn off whole by.
+    /// be dropped to be kept at hand.
     App(u16),
     AddApp,
     AppsArea,
-    Grip,
     /// A note, by its place among them (see `notes::shown`): opened beside; a new note; the menu of how they show.
     Note(u16),
     NewNote,
@@ -207,7 +206,7 @@ impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Grip)
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea)
     }
 
     /// The track it is, where it is one dragged along.
@@ -909,19 +908,14 @@ fn paint_adder(frame: &dyn Canvas, scene: &Scene, x: f32, y: f32, side: f32, hit
     let lit = scene.hover == Some(Hit::AddApp);
     let centre = Point { x: x + side / 2.0, y: y + side / 2.0 };
     let edge = if lit { theme.text2 } else { theme.text3 };
-    // Its ring as its skin draws one: glass's round and dashed, Windows 11's square-cornered and drawn whole, chart
-    // paper's square-cornered and dashed (as the mockup has them).
+    // Its ring dashed, as its skin rounds one: glass's round, Windows 11's and chart paper's square-cornered.
     let (ring, round) = (side * 0.92, match theme.skin {
         Skin::Glass => side * 0.46,
         Skin::Fluent => 4.0,
         Skin::Paper => 6.0,
     });
     let (rx, ry) = (centre.x - ring / 2.0, centre.y - ring / 2.0);
-    if theme.skin == Skin::Fluent {
-        frame.stroke_rounded(Fill::Solid(edge), rx, ry, ring, ring, round, 1.2);
-    } else {
-        frame.stroke_dashed(&rounded_outline(rx, ry, ring, ring, round), edge, 1.2);
-    }
+    frame.stroke_dashed(&rounded_outline(rx, ry, ring, ring, round), edge, 1.2);
     frame.icon(Icon::Add, centre, side * 0.45, if lit { theme.text } else { theme.text2 });
     hits.push((x, y, side, side, Hit::AddApp));
 }
@@ -991,13 +985,13 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
 }
 
 /// Quick launch's lane as a rail along the panel's edge (`area`, at `side`): what is kept at hand, a picture each,
-/// down it (across it, under the columns), the place to add more after them, and at its foot the panel's buttons:
-/// the grip it is torn off whole by, the pin, the settings.
+/// down it (across it, under the columns), the place to add more after them, and at its foot the panel's buttons
+/// as its bar has them (see `panel_button`): the pin, the settings.
 fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: RailSide, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let apps: &[(String, String)] = lane.blocks.iter().find_map(|block| if let Block::Apps { apps, .. } = block { Some(apps.as_slice()) } else { None }).unwrap_or(&[]);
     let across = side == RailSide::Bottom;
-    let foot = 3.0 * RAIL_CELL;
+    let foot = RAIL_FOOT;
     // (Along the rail: down it, or across it under the columns.)
     let (start, length) = if across { (area.x + 6.0, area.w - 12.0 - foot) } else { (area.y + 8.0, area.h - 16.0 - foot) };
     let cell = |at: usize| -> (f32, f32) {
@@ -1038,16 +1032,12 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
     }
     // Where something dragged may be dropped to be kept at hand: all of the rail (after its things).
     hits.push((area.x, area.y, area.w, area.h, Hit::AppsArea));
-    // The foot: the grip, the pin (lit while pinned), the settings.
-    for (at, (hit, icon, lit)) in [(Hit::Grip, Icon::Grip, false), (Hit::Pin, Icon::Pin, scene.pinned), (Hit::Settings, Icon::Settings, false)].into_iter().enumerate() {
-        let along = at as f32 * RAIL_CELL;
-        let (x, y) = if across { (area.x + area.w - 6.0 - foot + along, area.y + (area.h - RAIL_CELL) / 2.0) } else { (area.x + (area.w - RAIL_CELL) / 2.0, area.y + area.h - 8.0 - foot + along) };
-        let inset = (RAIL_CELL - MEDIA_ROW - 6.0) / 2.0;
-        if lit_on(hit) || lit {
-            frame.fill_rounded(theme.hover, x + inset, y + inset, MEDIA_ROW + 6.0, MEDIA_ROW + 6.0, theme.control_radius.min((MEDIA_ROW + 6.0) / 2.0));
-        }
-        frame.icon(icon, Point { x: x + RAIL_CELL / 2.0, y: y + RAIL_CELL / 2.0 }, 17.0, if lit_on(hit) || lit { theme.text } else { theme.text2 });
-        hits.insert(0, (x + inset, y + inset, MEDIA_ROW + 6.0, MEDIA_ROW + 6.0, hit));
+    // The foot: the pin (lit while pinned), the settings, as the bar has them and as far apart.
+    for (at, hit) in [Hit::Pin, Hit::Settings].into_iter().enumerate() {
+        let along = at as f32 * (BUTTON + BUTTON_GAP);
+        let (x, y) = if across { (area.x + area.w - 6.0 - (foot - RAIL_FOOT_GAP) + along, area.y + (area.h - BUTTON) / 2.0) } else { (area.x + (area.w - BUTTON) / 2.0, area.y + area.h - 8.0 - (foot - RAIL_FOOT_GAP) + along) };
+        // (Before the rail's own: a press on the foot is the button's.)
+        hits.insert(0, panel_button(frame, scene, hit, x, y));
     }
     // Chart paper sets the rail off from the columns by a rule.
     if theme.ruled {
@@ -2142,7 +2132,10 @@ pub const RAIL_W: f32 = 60.0;
 pub const RAIL_ROW: f32 = 56.0;
 /// The least a rail down a side is tall: its foot's buttons, a thing over them, and the room round them (see
 /// `paint_rail`).
-const RAIL_LEAST: f32 = 4.0 * RAIL_CELL + 16.0;
+pub(crate) const RAIL_LEAST: f32 = RAIL_FOOT + RAIL_CELL + 16.0;
+/// The room a rail's foot takes along it: the room before its two buttons (see `paint_rail`), and them.
+const RAIL_FOOT: f32 = RAIL_FOOT_GAP + 2.0 * BUTTON + BUTTON_GAP;
+const RAIL_FOOT_GAP: f32 = 8.0;
 
 #[derive(Clone)]
 pub struct Layout {
@@ -2781,7 +2774,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
     let gap = if theme.skin == Skin::Paper { 16.0 } else { 2.0 };
     let room = width + pad - (MEDIA_ROW + 2.0 + MEDIA_ROW + 12.0 + 6.0);
     let measured: Vec<(f32, f32)> = pages.iter().map(|(_, name, aside, badge)| {
-        let aside_w = if aside.is_empty() { 0.0 } else if *badge { frame.measure(aside, small) + 10.0 } else { frame.measure(aside, small) };
+        let aside_w = if aside.is_empty() { 0.0 } else if *badge { badge_width(frame, theme, aside) } else { frame.measure(aside, small) };
         (frame.measure(name, font), aside_w)
     }).collect();
     let whole: f32 = measured.iter().map(|(name_w, aside_w)| 2.0 * pad + name_w + if *aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).sum::<f32>() + gap * (pages.len() - 1) as f32;
@@ -2816,8 +2809,7 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
             let ax = x + pad + name_w + 5.0;
             if badge {
                 // What was copied since its page was last shown: how many, on a mark of the lane's ink.
-                frame.fill_rounded(ink.trace, ax, top + (HEAD - 16.0) / 2.0, aside_w, 16.0, 8.0);
-                centred(frame, &aside, small, ink_on(ink.trace), ax, top + (HEAD - 16.0) / 2.0 + 1.0, aside_w);
+                paint_badge(frame, theme, &aside, ink.trace, ax, top + HEAD / 2.0);
             } else {
                 frame.text(&aside, small, theme.text3, ax, name_top + 2.0, aside_w + 1.0, Align::Start);
             }
@@ -2845,6 +2837,28 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, 
         frame.icon(Icon::ChevronDown, Point { x: vx + MEDIA_ROW + 3.0, y: row + MEDIA_ROW / 2.0 + 0.5 }, 10.0, color);
         hits.push((vx, row, wide, MEDIA_ROW, Hit::StationView));
     }
+}
+
+/// A count's mark: a pill `BADGE` tall, as wide as its figures and the room either side of them (see `badge_width`).
+const BADGE: f32 = 16.0;
+
+/// A count's figures (see `paint_badge`): small and bold, in the skin's face.
+fn badge_font(theme: &Theme) -> Font {
+    Font { size: 10.5, weight: 700.0, ..theme.small }
+}
+
+/// How wide `text`'s mark is (see `paint_badge`): no narrower than tall.
+fn badge_width(frame: &dyn Canvas, theme: &Theme, text: &str) -> f32 {
+    (frame.measure(text, badge_font(theme)) + 12.0).max(BADGE)
+}
+
+/// `text` (a count) on a pill of `ground` from `x`, its middle at `middle` down: small bold figures, white on a dark
+/// ground and dark on a light one, in its middle.
+fn paint_badge(frame: &dyn Canvas, theme: &Theme, text: &str, ground: Color, x: f32, middle: f32) {
+    let (font, wide) = (badge_font(theme), badge_width(frame, theme, text));
+    frame.fill_rounded(ground, x, middle - BADGE / 2.0, wide, BADGE, BADGE / 2.0);
+    // (Figures stand from their line's top to its base: their middle is so far down it.)
+    centred(frame, text, font, ink_on(ground), x, middle - font.size * 0.71, wide);
 }
 
 /// What is written or drawn on a mark of `ground`: white on a dark one, near black on a light one (chart paper's dark
@@ -2902,26 +2916,36 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
     }
     match &tile.face {
         Face::Picture { path, more } => {
-            // A picture fills its plate; another file, or a folder, shows its kind's icon, as large as reads (a file's
-            // own thumbnail, as Explorer draws one, on a plate of its own looked like a picture of the screen).
+            // A picture fills its plate; a folder, or another file, is drawn as the panel's icons are (a line, not the
+            // shell's picture of it), a file's kind named on a tag of its colour.
+            let centre = Point { x: x + w / 2.0, y: y + h / 2.0 };
             if shows_itself(path) {
                 match crate::station::thumbs::filling(path, pixels) {
                     Some(picture) => frame.picture(&picture, x, y, w, h, radius, 1.0),
-                    None => frame.icon(Icon::Image, Point { x: x + w / 2.0, y: y + h / 2.0 }, small * 0.4, theme.text3),
+                    None => frame.icon(Icon::Image, centre, small * 0.4, theme.text3),
                 }
             } else {
-                let side = (small * 0.56).min(40.0);
-                match crate::station::thumbs::icon(path, (side * 3.0) as u32) {
-                    Some(picture) => frame.picture(&picture, x + (w - side) / 2.0, y + (h - side) / 2.0, side, side, 0.0, 1.0),
-                    None => frame.icon(Icon::File, Point { x: x + w / 2.0, y: y + h / 2.0 }, side * 0.7, theme.text3),
+                let side = (small * 0.5).min(44.0);
+                if path.is_dir() {
+                    frame.icon(Icon::Folder, centre, side, theme.text3);
+                } else {
+                    frame.icon(Icon::File, centre, side, theme.text3);
+                    let kind = path.extension().map(|extension| extension.to_string_lossy().to_uppercase()).unwrap_or_default();
+                    if small >= 40.0 && !kind.is_empty() && kind.chars().count() <= 4 {
+                        // (Over the page's foot, from its left edge out, as the mockup has it.)
+                        let font = Font { size: (side * 0.2).clamp(7.5, 9.0), weight: 700.0, ..theme.small };
+                        let wide = frame.measure(&kind, font) + 8.0;
+                        let tall = font.size + 5.0;
+                        let (tx, ty) = (centre.x - side * 0.42, centre.y + side * 0.36 - tall);
+                        frame.fill_rounded(kind_colour(&kind), tx, ty, wide, tall, 3.0);
+                        centred(frame, &kind, font, Color::hex(0xFFFFFF, 1.0), tx, ty + (tall - font.size * 1.33) / 2.0, wide);
+                    }
                 }
             }
             // Files put on it together: how many more.
             if *more > 0 && small >= 40.0 {
                 let badge = format!("+{more}");
-                let wide = frame.measure(&badge, theme.small) + 10.0;
-                frame.fill_rounded(ink.trace, x + w - wide - 4.0, y + h - 22.0, wide, 18.0, 9.0);
-                centred(frame, &badge, theme.small, ink_on(ink.trace), x + w - wide - 4.0, y + h - 21.0, wide);
+                paint_badge(frame, theme, &badge, ink.trace, x + w - badge_width(frame, theme, &badge) - 5.0, y + h - 5.0 - BADGE / 2.0);
             }
         }
         Face::Text(text) => {
@@ -2949,6 +2973,26 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
         frame.fill_circle(ink.trace, corner, 8.0);
         frame.icon(Icon::Pin, corner, 10.0, ink_on(ink.trace));
     }
+}
+
+/// The colour a file's kind is tagged with (see `paint_face`): by what it holds, as the programs that open it mark
+/// it (a document's blue, a sheet's green, a slide's orange, a PDF's red), grey for one of no known kind.
+fn kind_colour(kind: &str) -> Color {
+    let hex = match kind {
+        "PDF" => 0xD93A3A,
+        "DOC" | "DOCX" | "RTF" | "ODT" => 0x2B65C8,
+        "XLS" | "XLSX" | "CSV" | "ODS" => 0x1F8A4C,
+        "PPT" | "PPTX" | "ODP" | "KEY" => 0xD2562A,
+        "ZIP" | "RAR" | "7Z" | "TAR" | "GZ" | "XZ" | "ZST" | "ISO" => 0xB7861B,
+        "MP4" | "MKV" | "MOV" | "AVI" | "WEBM" | "WMV" | "FLV" => 0x7A4FC9,
+        "MP3" | "FLAC" | "WAV" | "M4A" | "AAC" | "OGG" | "OPUS" | "APE" => 0xC23F86,
+        "EXE" | "MSI" | "BAT" | "CMD" | "PS1" | "LNK" | "DLL" | "SYS" => 0x5D636D,
+        "TXT" | "MD" | "LOG" | "INI" | "JSON" | "XML" | "YAML" | "YML" | "TOML" => 0x6B7380,
+        "RS" | "PY" | "JS" | "TS" | "C" | "CPP" | "H" | "CS" | "GO" | "JAVA" | "HTML" | "CSS" | "SH" => 0x1F8A8A,
+        "PSD" | "AI" | "SVG" | "FIG" | "XD" | "SKETCH" => 0x2F7FD0,
+        _ => 0x7B8190,
+    };
+    Color::hex(hex, 1.0)
 }
 
 /// Whether the file at `path` is a picture, shown as itself (its thumbnail filling its plate); any other, or a folder,
@@ -3492,32 +3536,42 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
     let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
     let start = bar.x + theme.bar_pad.0;
     frame.text(&label, theme.small, theme.text2, start, bar.y + (bar.h - LINE) / 2.0, game - 8.0 - start, Align::Start);
-    let pin_glyph = if scene.pinned { "\u{E840}" } else { "\u{E718}" };
     // The overlay's: a window with a trace in it, lit while it is on.
     // And the game button before it, lit while a game shows (found, or asked for by hand), as a widget's is.
-    let game_lit = game_shown(scene.history.last().map(std::slice::from_ref).unwrap_or_default());
-    let buttons = [(game, "", Hit::Game, game_lit), (overlay, "\u{E9D9}", Hit::Overlay, scene.overlay), (pin, pin_glyph, Hit::Pin, scene.pinned), (settings, "\u{E713}", Hit::Settings, false)];
-    for (left, glyph, hit, lit) in buttons {
-        let hovered = scene.hover == Some(hit);
-        if hovered || lit {
-            frame.fill_rounded(theme.hover, left, top, BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
-        }
-        let colour = if hovered || lit { theme.text } else { theme.text2 };
-        if hit == Hit::Game {
-            // (Glance's own game icon, as on a widget's button.)
-            frame.icon(super::icons::Icon::Game, Point { x: left + BUTTON / 2.0, y: top + BUTTON / 2.0 }, 16.0, colour);
-            hits.push((left, top, BUTTON, BUTTON, hit));
-            continue;
-        }
+    for (left, hit) in [(game, Hit::Game), (overlay, Hit::Overlay), (pin, Hit::Pin), (settings, Hit::Settings)] {
+        hits.push(panel_button(frame, scene, hit, left, top));
+    }
+    frame.key("");
+}
+
+/// One of the panel's own buttons (the game's, the overlay's, the pin, the settings), as its bar and a rail's foot
+/// show them: its glyph (the system's icon font's; the game's Glance's own icon, as on a widget's button) in a square
+/// `BUTTON` wide from (`left`, `top`), on a plate while the pointer is over it or it is on (a game shown, the overlay
+/// up, pinned); the settings' marked by a dot where a newer Glance is out. Where it is pressed.
+fn panel_button(frame: &dyn Canvas, scene: &Scene, hit: Hit, left: f32, top: f32) -> HitBox {
+    let theme = scene.theme;
+    let (glyph, lit) = match hit {
+        Hit::Game => ("", game_shown(scene.history.last().map(std::slice::from_ref).unwrap_or_default())),
+        Hit::Overlay => ("\u{E9D9}", scene.overlay),
+        Hit::Pin => (if scene.pinned { "\u{E840}" } else { "\u{E718}" }, scene.pinned),
+        _ => ("\u{E713}", false),
+    };
+    let hovered = scene.hover == Some(hit);
+    if hovered || lit {
+        frame.fill_rounded(theme.hover, left, top, BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
+    }
+    let colour = if hovered || lit { theme.text } else { theme.text2 };
+    if hit == Hit::Game {
+        frame.icon(super::icons::Icon::Game, Point { x: left + BUTTON / 2.0, y: top + BUTTON / 2.0 }, 16.0, colour);
+    } else {
         let icon = Font::new(Family::Icons, 16.0, 400.0);
         let glyph_left = left + (BUTTON - frame.measure(glyph, icon)) / 2.0;
         frame.text(glyph, icon, colour, glyph_left, top + 8.0, BUTTON, Align::Start);
-        if hit == Hit::Settings && scene.newer {
-            frame.fill_circle(super::theme::accent(theme.dark), Point { x: left + BUTTON - 7.0, y: top + 7.0 }, 3.0);
-        }
-        hits.push((left, top, BUTTON, BUTTON, hit));
     }
-    frame.key("");
+    if hit == Hit::Settings && scene.newer {
+        frame.fill_circle(super::theme::accent(theme.dark), Point { x: left + BUTTON - 7.0, y: top + 7.0 }, 3.0);
+    }
+    (left, top, BUTTON, BUTTON, hit)
 }
 
 #[cfg(test)]

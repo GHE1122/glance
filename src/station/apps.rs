@@ -145,6 +145,20 @@ fn link_target(_: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Whether `target` (a thing the Start menu lists) is a program: a Store app, or a program known by its own name
+/// (neither has a folder in it), or a program file (a shortcut the shell could not read is taken for one: what it
+/// points at is a program installed to be set up when first opened). The Start menu lists documents, folders and
+/// web addresses beside them, which quick launch's picker leaves out.
+pub fn is_program(target: &str) -> bool {
+    const PROGRAMS: [&str; 8] = ["exe", "com", "bat", "cmd", "msc", "cpl", "appref-ms", "lnk"];
+    let opened = opens(target);
+    let named = opened.strip_prefix("shell:AppsFolder\\").unwrap_or(&opened);
+    if named.starts_with("http://") || named.starts_with("https://") {
+        return false;
+    }
+    !named.contains('\\') || Path::new(named).extension().is_some_and(|extension| PROGRAMS.iter().any(|program| extension.eq_ignore_ascii_case(program)))
+}
+
 /// What is kept at hand changed as `change` changes it (off the calling thread, which the settings then tell).
 pub fn change(change: impl FnOnce(&mut Vec<App>) + Send + 'static) {
     std::thread::spawn(move || crate::app().change(|settings| change(&mut settings.apps)));
@@ -166,6 +180,31 @@ mod tests {
         assert!(!same(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App"));
         assert!(same("https://github.com", "https://github.com"));
         assert!(!same("https://github.com", "https://GITHUB.com/a"));
+    }
+
+    /// What the Start menu lists that is a program: a Store app, a program known by its own name, a program file
+    /// however its folder is named; not a document, a folder or a web address it lists beside them.
+    #[test]
+    #[cfg(windows)]
+    fn lists_programs_only() {
+        for target in [
+            r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            r"shell:AppsFolder\Microsoft.Windows.Explorer",
+            r"shell:AppsFolder\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\charmap.exe",
+            r"shell:AppsFolder\D:\App\RivaTuner Statistics Server\RTSS.exe",
+            r"shell:AppsFolder\C:\Tools\Setup.CMD",
+        ] {
+            assert!(is_program(target), "{target}");
+        }
+        for target in [
+            r"shell:AppsFolder\D:\App\HWiNFO\HWiNFO Manual.pdf",
+            r"shell:AppsFolder\D:\App\MSI Afterburner\SDK\Samples",
+            r"shell:AppsFolder\{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}\Windows Kits\10\Shortcuts\DesktopAppsSamples.url",
+            r"shell:AppsFolder\http://cidian.youdao.com/",
+            r"shell:AppsFolder\https://nodejs.org/",
+        ] {
+            assert!(!is_program(target), "{target}");
+        }
     }
 
     /// A dropped file by its name without its extension, a web address by its site; where each is on the disk.

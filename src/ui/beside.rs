@@ -20,7 +20,7 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
+use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, MonitorFromRect, ValidateRect, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM};
@@ -155,6 +155,8 @@ struct Beside {
     theme: Rc<Theme>,
     lang: super::text::Lang,
     page: Page,
+    /// Windows' blurred desktop shows under it (see `ground`).
+    acrylic: bool,
     search: Typing,
     /// How far its list is scrolled, and the most it can be.
     scroll: f32,
@@ -355,9 +357,19 @@ fn show(opening: Opening) {
         let x = x.clamp(room.left, room.right - wide);
         let y = y.clamp(room.top, room.bottom - tall);
         let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP, w!("GlanceBeside"), &HSTRING::from("Glance"), WS_POPUP, x, y, wide, tall, None, None, None, None) else { return };
-        let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 });
         let round = DWMWCP_ROUND;
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const _, size_of_val(&round) as u32);
+        // The picker and a thing's page on the desktop blurred, as the panel's glass and Windows 11's sheet show it,
+        // where Windows has its material for that (a note's page is on its paper).
+        let acrylic = opening.skin != Skin::Paper && !matches!(opening.page, Page::Note(_)) && super::settings_window::windows_build() >= super::settings_window::FIRST_MICA_BUILD;
+        if acrylic {
+            let dark = windows::core::BOOL::from(opening.dark);
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, size_of_val(&dark) as u32);
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_TRANSIENTWINDOW as *const _ as *const _, size_of_val(&DWMSBT_TRANSIENTWINDOW) as u32);
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 });
+        } else {
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 });
+        }
         let beside = Beside {
             hwnd,
             gfx,
@@ -367,6 +379,7 @@ fn show(opening: Opening) {
             theme: Rc::new(Theme::new(opening.skin, opening.dark)),
             lang: crate::update::language(),
             page: opening.page.clone(),
+            acrylic,
             search: Typing::most(SEARCH_MOST),
             scroll: 0.0,
             scroll_most: 0.0,
@@ -1002,13 +1015,20 @@ impl Beside {
         }
     }
 
-    /// Its ground, in the skin's colours: chart paper's paper; the others a flyout's, light or dark.
-    fn ground(&self) -> Color {
-        match (self.theme.skin, self.theme.dark) {
-            (Skin::Paper, _) => self.theme.paper,
-            (_, true) => Color::hex(0x2C2C2C, 1.0),
-            (_, false) => Color::hex(0xF9F9F9, 1.0),
+    /// Its ground, in the skin's colours, as the panel's sheet is: chart paper's paper; over the blurred desktop
+    /// (see `acrylic`), Windows 11's tint, or the glass's at its most frosted; where Windows has no blurred desktop
+    /// for it (or on a note's page), on a flyout's ground, light or dark.
+    fn paint_ground(&self, frame: &Frame, (width, height): (f32, f32)) {
+        let theme = &self.theme;
+        let tint = match theme.skin {
+            Skin::Paper => return frame.fill(theme.paper, 0.0, 0.0, width, height),
+            Skin::Fluent => theme.tint,
+            Skin::Glass => theme.glass.alpha(theme.glass_clear + theme.glass_frosted),
+        };
+        if !self.acrylic {
+            frame.fill(if theme.dark { Color::hex(0x2C2C2C, 1.0) } else { Color::hex(0xF9F9F9, 1.0) }, 0.0, 0.0, width, height);
         }
+        frame.fill(tint, 0.0, 0.0, width, height);
     }
 
     /// The colour of what is chosen and of the one thing to press: Windows 11's accent, chart paper's ink.
@@ -1036,7 +1056,7 @@ impl Beside {
         let lang = self.lang;
         let mut hits = Vec::new();
         let lit = |at: (f32, f32, f32, f32), pointer: Option<(f32, f32)>| pointer.is_some_and(|(x, y)| x >= at.0 && x < at.0 + at.2 && y >= at.1 && y < at.1 + at.3);
-        frame.fill(self.ground(), 0.0, 0.0, width, height);
+        self.paint_ground(frame, (width, height));
         let close = (width - PAD - 28.0, 12.0, 28.0, 28.0);
         if lit(close, self.pointer) {
             frame.fill_rounded(theme.hover, close.0, close.1, close.2, close.3, theme.control_radius.min(14.0));
@@ -1107,7 +1127,7 @@ impl Beside {
         let lang = self.lang;
         let mut hits = Vec::new();
         let lit = |at: (f32, f32, f32, f32), pointer: Option<(f32, f32)>| pointer.is_some_and(|(x, y)| x >= at.0 && x < at.0 + at.2 && y >= at.1 && y < at.1 + at.3);
-        frame.fill(self.ground(), 0.0, 0.0, width, height);
+        self.paint_ground(frame, (width, height));
         let Some(writing) = &self.writing else {
             frame.text(lang.pick("没能打开编辑器", "The editor could not be opened"), theme.body, theme.text2, PAD, PAD, width - 2.0 * PAD, Align::Start);
             self.hits = hits;
@@ -1172,7 +1192,7 @@ impl Beside {
         let lang = self.lang;
         let mut hits = Vec::new();
         let lit = |hits_at: (f32, f32, f32, f32), pointer: Option<(f32, f32)>| pointer.is_some_and(|(x, y)| x >= hits_at.0 && x < hits_at.0 + hits_at.2 && y >= hits_at.1 && y < hits_at.1 + hits_at.3);
-        frame.fill(self.ground(), 0.0, 0.0, width, height);
+        self.paint_ground(frame, (width, height));
         // Its head: what it is, how many are kept, and its close.
         let kept = crate::station::apps::shown();
         let inner = width - 2.0 * PAD;
@@ -1259,21 +1279,21 @@ impl Beside {
                     frame.fill_rounded(theme.track, PAD, ry + (ROW - 26.0) / 2.0, 26.0, 26.0, 5.0);
                 }
             }
-            // What a press does: added, outlined in the accent; kept already, ticked (a press takes it off).
+            // What a press does, at its end as the panel's buttons are drawn: a plus, on a plate while the pointer is on
+            // the row; kept already, a tick in the accent and its word (a press takes it off).
             let is_kept = kept.iter().any(|app| crate::station::apps::same(&app.target, &found.target));
-            let (label, ink) = if is_kept { (lang.pick("已添加", "Kept"), theme.text3) } else { (lang.pick("添加", "Add"), self.accent()) };
-            let label_w = frame.measure(label, theme.small);
-            let pill_w = label_w + if is_kept { 18.0 } else { 20.0 };
-            let pill = (PAD + inner - pill_w, ry + (ROW - 24.0) / 2.0, pill_w, 24.0);
-            frame.text(&found.name, theme.body, theme.text, PAD + 38.0, ry + (ROW - theme.body.size * 1.35) / 2.0, inner - 38.0 - pill_w - 8.0, Align::Start);
-            let label_y = pill.1 + (pill.3 - 16.0) / 2.0;
+            let mark = (PAD + inner - 28.0, ry + (ROW - 28.0) / 2.0, 28.0, 28.0);
+            let said_w = if is_kept { frame.measure(lang.pick("已添加", "Kept"), theme.small) + 6.0 } else { 0.0 };
+            frame.text(&found.name, theme.body, theme.text, PAD + 38.0, ry + (ROW - theme.body.size * 1.35) / 2.0, inner - 38.0 - mark.2 - said_w - 8.0, Align::Start);
+            let centre = Point { x: mark.0 + mark.2 / 2.0, y: mark.1 + mark.3 / 2.0 };
             if is_kept {
-                frame.icon(Icon::Check, Point { x: pill.0 + 6.0, y: pill.1 + pill.3 / 2.0 }, 12.0, ink);
-                frame.text(label, theme.small, ink, pill.0 + 16.0, label_y, label_w + 2.0, Align::Start);
+                frame.icon(Icon::Check, centre, 15.0, self.accent());
+                frame.text(lang.pick("已添加", "Kept"), theme.small, theme.text3, mark.0 - said_w, ry + (ROW - 16.0) / 2.0, said_w, Align::Start);
             } else {
-                let radius = if theme.skin == Skin::Glass { pill.3 / 2.0 } else { theme.control_radius.max(4.0) };
-                frame.stroke_rounded(super::canvas::Fill::Solid(ink.alpha(0.7)), pill.0, pill.1, pill.2, pill.3, radius, 1.0);
-                frame.text(label, theme.small, ink, pill.0 + 10.0, label_y, label_w + 2.0, Align::Start);
+                if hovered {
+                    frame.fill_rounded(theme.hover, mark.0, mark.1, mark.2, mark.3, theme.control_radius.min(mark.3 / 2.0));
+                }
+                frame.icon(Icon::Add, centre, 15.0, if hovered { theme.text } else { theme.text2 });
             }
             hits.push((row.0, row.1.max(top), row.2, (row.1 + row.3).min(bottom) - row.1.max(top), Hit::Program(found.target.clone(), found.name.clone())));
         }
@@ -1337,6 +1357,7 @@ otepad.exe"),
                             theme: Rc::new(Theme::new(skin, dark)),
                             lang: super::super::text::Lang::Zh,
                             page: Page::Picker,
+                            acrylic: false,
                             search: Typing::most(SEARCH_MOST),
                             scroll: 0.0,
                             scroll_most: 0.0,
