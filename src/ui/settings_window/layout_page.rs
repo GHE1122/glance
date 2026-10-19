@@ -174,7 +174,7 @@ impl Ui {
         // Light or dark as the desktop is under the picture (where the skin follows it).
         let (sw, sh) = self.stage.size;
         let middle = RECT { left: (sw * 0.3) as i32, top: (sh * 0.3) as i32, right: (sw * 0.7) as i32, bottom: (sh * 0.7) as i32 };
-        let tone = self.stage.desktop.as_ref().map_or((0.5, 0.0), |desktop| desktop.luminance(middle, 1.0));
+        let tone = self.stage.tone(middle);
         let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
