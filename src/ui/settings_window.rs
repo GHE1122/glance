@@ -1019,6 +1019,9 @@ struct Ui {
     /// What the pointer is over as the frame being drawn is drawn: found among the last frame's targets before they
     /// are made anew (found among those being made, it was none, and nothing lit under the pointer).
     hovered_now: Option<Target>,
+    /// Where what is drawn follows the pointer itself, not what it is over (what plays, in its preview), as the last
+    /// frame was drawn: a move there, or out of there, is drawn.
+    follows_pointer: Vec<Rect>,
     /// The screens, as the map shows them.
     screens: Vec<crate::screens::Screen>,
     /// The edge last pressed in the layout's editor: the panel it opens slides out from it there.
@@ -1216,6 +1219,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             pointer: None,
             pressed: None,
             hovered_now: None,
+            follows_pointer: Vec::new(),
             screens: crate::screens::all(),
             shown_edge: None,
             view: None,
@@ -1358,8 +1362,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_MOUSELEAVE => {
             with_ui(|ui| {
+                // (Over nothing lit, nor what follows it, nothing changes as it goes.)
+                if ui.hovered().is_some() || ui.over_followed() {
+                    ui.next_frame = Instant::now();
+                }
                 ui.pointer = None;
-                ui.next_frame = Instant::now();
             });
             LRESULT(0)
         }
@@ -2827,7 +2834,13 @@ impl Ui {
     }
 
     fn moved(&mut self, x: f32, y: f32) {
+        let was = (self.hovered(), self.over_followed());
         self.pointer = Some((x, y));
+        // Drawn again only where the pointer changes what shows: what it is over (lit), what it has in hand (a
+        // slider, a row, a component carried: they follow it), or where what is drawn follows it. Moved over the
+        // same, nothing changes: a frame drawn at every move had the window drawn whole as often as the mouse
+        // reports, the preview with it.
+        let held = self.phone.slid.is_some() || self.sliding.is_some() || self.drag.is_some() || self.carry.is_some();
         if let Some((part, track, at)) = &mut self.phone.slid {
             *at = part.along(*track, x, y);
         }
@@ -2839,7 +2852,14 @@ impl Ui {
             self.reorder();
         }
         self.carry_to(x, y);
-        self.next_frame = Instant::now();
+        if held || was != (self.hovered(), self.over_followed()) || was.1 {
+            self.next_frame = Instant::now();
+        }
+    }
+
+    /// Whether the pointer is where what is drawn follows it (see `follows_pointer`).
+    fn over_followed(&self) -> bool {
+        self.pointer.is_some_and(|(x, y)| self.follows_pointer.iter().any(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h))
     }
 
     fn press(&mut self, x: f32, y: f32) {
@@ -3476,6 +3496,7 @@ impl Ui {
         }
         self.hovered_now = self.hovered();
         self.targets.clear();
+        self.follows_pointer.clear();
         self.paint_nav(frame, &palette);
         // The preview before the list (they do not meet): it finds how large the panel can be on its screen, which the
         // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
@@ -4428,6 +4449,7 @@ impl Ui {
         unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         let (at, scale) = ((ox + pos.0 * k, oy + pos.1 * k), zoom * k);
         let pointer = self.pointer.map(|(x, y)| ((x - at.0) / scale, (y - at.1) / scale)).filter(|(x, y)| *x >= 0.0 && *y >= 0.0 && *x < size.0 && *y < size.1);
+        self.follows_pointer.push(Rect { x: at.0, y: at.1, w: size.0 * scale, h: size.1 * scale });
         frame.place(Matrix3x2::scale(scale, scale) * Matrix3x2::translation(at.0, at.1));
         let ground = super::music::Ground::of(&shows);
         let now = Instant::now();
