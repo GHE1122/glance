@@ -421,10 +421,22 @@ impl Controller {
     /// settings' own thread as it happens, in the message: found out here as the message is taken, the window in
     /// front may not yet be the one that comes, nor the settings gone.
     pub fn settings_front(&self, front: Option<HWND>) {
+        self.in_front(front, 0);
+    }
+
+    /// The page beside the panel or a widget is up (`Some`: it), or no longer: the widgets give way to it meanwhile
+    /// (one under it, a note stuck on the desktop written in over its card, never comes over it as it is drawn
+    /// again). Told by the page's thread.
+    pub fn page_front(&self, front: Option<HWND>) {
+        self.in_front(front, 1);
+    }
+
+    /// The window `front` in front, or none (`which`: 0 the settings, 1 the page beside), told to the panel's thread.
+    fn in_front(&self, front: Option<HWND>, which: isize) {
         let sink = self.sink.load(Ordering::Acquire);
         if sink != 0 {
             let front = front.map_or(0, |hwnd| hwnd.0 as usize);
-            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), SETTINGS_FRONT, WPARAM(front), LPARAM(0)) };
+            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), SETTINGS_FRONT, WPARAM(front), LPARAM(which)) };
         }
     }
 
@@ -561,6 +573,8 @@ impl Controller {
         let mut pinned_at = self.config.lock().unwrap().panel_pinned;
         // A menu up, and what it is for: run by this loop, as every other window of this thread is (see `menu::Menu`).
         let mut menu: Option<(crate::ui::menu::Menu, MenuFor)> = None;
+        // The windows in front the panel and the widgets give way to: the settings, the page beside.
+        let mut in_front: (Option<HWND>, Option<HWND>) = (None, None);
         let mut msg = MSG::default();
         // In motion: when the next frame is due, with the screen's. Messages
         // that come before are taken as they come, not each followed by a
@@ -681,6 +695,13 @@ impl Controller {
                     open.close();
                 }
                 return;
+            }
+            // A press on the panel, or while its menu is up (which takes every press: one away from it only closes
+            // it): one of its own, not one elsewhere (see `Panel::track`).
+            if matches!(msg.message, windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN | windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONDOWN | windows::Win32::UI::WindowsAndMessaging::WM_MBUTTONDOWN)
+                && (msg.hwnd == panel.window.hwnd || menu.as_ref().is_some_and(|(open, _)| open.owns(msg.hwnd)))
+            {
+                OURS.fetch_add(1, Ordering::Relaxed);
             }
             // A menu's own messages; a shortcut leaves it (Esc, the panel's while it is open, is the menu's own: the
             // panel stays), the rest are taken up as ever. (The panel's own shortcut comes as `TOGGLE`.)
@@ -826,10 +847,17 @@ impl Controller {
                     panel.next_frame = now;
                     widgets.draw_soon();
                 }
+                // The settings, or the page beside, in front or no longer: the panel gives way to the settings, the
+                // widgets to the page while it is up, else to the settings.
                 SETTINGS_FRONT => {
-                    let settings = (msg.wParam.0 != 0).then(|| HWND(msg.wParam.0 as *mut _));
-                    panel.settings_front(settings);
-                    widgets.settings_front(settings);
+                    let front = (msg.wParam.0 != 0).then(|| HWND(msg.wParam.0 as *mut _));
+                    if msg.lParam.0 == 0 {
+                        in_front.0 = front;
+                        panel.settings_front(front);
+                    } else {
+                        in_front.1 = front;
+                    }
+                    widgets.settings_front(in_front.1.or(in_front.0));
                 }
                 RESTYLE => {
                     panel.restyle();
@@ -1640,6 +1668,11 @@ struct Panel<'a> {
     /// The presses the sensors' process had told when the panel last looked (one told since is a press, however
     /// short, as the panel is open).
     presses_seen: u64,
+    /// The presses on it (or its menu) seen when it last looked, those of them not yet matched by one the sensors'
+    /// process told, and whether a button was down then (where that process is not there to tell presses).
+    ours_seen: u64,
+    ours_owed: u64,
+    was_down: bool,
     /// Whether a menu of its own is up (see `stays`).
     menu_up: bool,
     /// A drag of the pinned panel under way.
@@ -1751,6 +1784,9 @@ impl<'a> Panel<'a> {
             tear_music: None,
             torn: false,
             presses_seen: 0,
+            ours_seen: 0,
+            ours_owed: 0,
+            was_down: false,
             menu_up: false,
             drag: None,
             largest: SIZES.1,
@@ -1984,7 +2020,7 @@ impl<'a> Panel<'a> {
         self.phase = Phase::Open { entered: false, outside_since: None, dragging: false };
         // Presses from before it opened are no press elsewhere (what was seen of them is otherwise as old as the
         // last look while it was away, which may be long ago: opened by the shortcut, it closed at once).
-        self.presses_seen = PRESSES.load(Ordering::Relaxed);
+        self.forget_presses();
         self.controller.set_seen(&self.controller.shown, true);
         self.exclude();
         // Away from the edge it has nowhere to slide from: it fades in.
@@ -2112,6 +2148,26 @@ impl<'a> Panel<'a> {
         self.controller.shown.store(false, Ordering::Relaxed);
     }
 
+    /// What was pressed since it last looked (`down`: a button is down now): whether anything was, and whether any of
+    /// it was elsewhere, not on it nor its menu.
+    fn presses_since(&mut self, down: bool) -> (bool, bool) {
+        let (told, ours) = (PRESSES.load(Ordering::Relaxed), OURS.load(Ordering::Relaxed));
+        let new_ours = ours - std::mem::replace(&mut self.ours_seen, ours);
+        let new = if crate::source::linked() { told - std::mem::replace(&mut self.presses_seen, told) } else { u64::from(down && !self.was_down).max(new_ours) };
+        self.was_down = down;
+        let elsewhere;
+        (self.ours_owed, elsewhere) = matched(new, new_ours, self.ours_owed);
+        (new > 0, elsewhere)
+    }
+
+    /// Presses so far taken as seen: none of them a press elsewhere.
+    fn forget_presses(&mut self) {
+        self.presses_seen = PRESSES.load(Ordering::Relaxed);
+        self.ours_seen = OURS.load(Ordering::Relaxed);
+        self.ours_owed = 0;
+        self.was_down = buttons_down();
+    }
+
     /// Follows the pointer while the panel is open: closes it once the
     /// pointer has been away long enough, or on a press elsewhere.
     fn track(&mut self, now: Instant) {
@@ -2125,9 +2181,13 @@ impl<'a> Panel<'a> {
         let on_panel = contains(&placement.panel, cursor) || placement.rack.is_some_and(|(rack, _)| contains(&rack, cursor));
         let in_reach = contains(&placement.reach, cursor);
         let close_delay = self.controller.config.lock().unwrap().close_delay;
-        // Down now, or pressed (and perhaps let go) since it last looked.
-        let presses = PRESSES.load(Ordering::Relaxed);
-        let held = buttons_down() || std::mem::replace(&mut self.presses_seen, presses) != presses;
+        // Down now, or pressed (and perhaps let go) since it last looked; and of those presses, any not on it nor its
+        // menu: a press elsewhere. (Told by the sensors' process, a press may come after the panel's menu took it and
+        // closed: matched with those seen on its own windows, it is not taken for one elsewhere. Where that process
+        // is not there, a press is a button come down since it last looked.)
+        let down = buttons_down();
+        let (pressed, elsewhere) = self.presses_since(down);
+        let held = down || pressed;
         if !on_panel {
             if let Some(was) = self.hover.take() {
                 // (What it said under it goes with it: a drive's row, the line that switches players.)
@@ -2148,7 +2208,7 @@ impl<'a> Panel<'a> {
         }
         // A press that begins away from the panel dismisses it; one that
         // begins on it keeps it open wherever the pointer then goes.
-        let pressed_outside = held && !*dragging && !in_reach;
+        let pressed_outside = elsewhere && !*dragging && !in_reach;
         *dragging = held && (*dragging || in_reach);
         *entered |= in_reach;
         if pressed_outside {
@@ -2172,7 +2232,7 @@ impl<'a> Panel<'a> {
             self.track(now);
         } else {
             // (What was pressed before it opened is not a press elsewhere.)
-            self.presses_seen = PRESSES.load(Ordering::Relaxed);
+            self.forget_presses();
         }
         // (Giving way to the settings, it is taken all the same: what is behind it is put together from the windows
         // under it, and the settings are in front of it, never among them; see `scene`.)
@@ -3732,6 +3792,15 @@ pub(crate) fn buttons_down() -> bool {
 /// The buttons as the sensors' process last said: whether one is down, and how many presses it has told.
 static BUTTONS_DOWN: AtomicBool = AtomicBool::new(false);
 static PRESSES: AtomicU64 = AtomicU64::new(0);
+/// Presses told (`new`) matched with those seen on the panel's own windows (`ours`, and `owed`: seen before and not
+/// yet matched, the telling coming after): those of its own not yet matched now, and whether any told was elsewhere.
+fn matched(new: u64, ours: u64, owed: u64) -> (u64, bool) {
+    let ours = ours + owed;
+    (ours.saturating_sub(new), new > ours)
+}
+
+/// The presses seen on the panel's own windows (it, its menu): see `Panel::presses_since`.
+static OURS: AtomicU64 = AtomicU64::new(0);
 
 /// What the sensors' process says of the buttons (see `Told::Buttons`).
 pub(crate) fn heard_buttons(down: bool, pressed: bool) {
@@ -3790,4 +3859,25 @@ fn seam_contact(cursor: POINT, edge: Edge, came_from: Option<RECT>) -> Option<Co
 /// button's state would say "up" all along).
 fn let_go(message: &MSG) -> bool {
     message.message == WM_MOUSEMOVE && message.wParam.0 & windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A press told by the sensors' process is one elsewhere only where no press on the panel or its menu accounts
+    /// for it, whichever came first: the menu's press seen before it is told (the menu closed meanwhile), or told
+    /// before it is seen.
+    #[test]
+    fn a_press_on_the_panels_own_menu_is_no_press_elsewhere() {
+        // Seen on the menu, told after: nothing elsewhere then, nor as it is told.
+        assert_eq!(matched(0, 1, 0), (1, false));
+        assert_eq!(matched(1, 0, 1), (0, false));
+        // Seen and told at once.
+        assert_eq!(matched(1, 1, 0), (0, false));
+        // Told, none seen: elsewhere.
+        assert_eq!(matched(1, 0, 0), (0, true));
+        // Two told, one of them the menu's: one elsewhere.
+        assert_eq!(matched(2, 1, 0), (0, true));
+    }
 }

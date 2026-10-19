@@ -406,6 +406,9 @@ fn show(opening: Opening) {
             }
         }
         UP.store(true, Ordering::Release);
+        // The widgets kept under it while it is up (one drawn again under it, as a note stuck on the desktop is as
+        // it is written in over it, came over it: on top of what is written, the input method's words broken off).
+        crate::app().controller.page_front(Some(hwnd));
         // The Start menu read (again): drawn once it is.
         let told = HWND(hwnd.0);
         let told = told.0 as isize;
@@ -456,6 +459,7 @@ fn gone() {
             let _ = DestroyWindow(beside.hwnd);
         }
         DROP_TARGET.with(|held| held.borrow_mut().take());
+        crate::app().controller.page_front(None);
     }
     UP.store(false, Ordering::Release);
 }
