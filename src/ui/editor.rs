@@ -35,7 +35,8 @@ struct Kept {
     caret_shown: Cell<bool>,
     /// The words' look as written from here on, and their paragraphs'.
     char_format: Box<CHARFORMAT2W>,
-    para_format: Box<PARAFORMAT>,
+    /// (Read by the text services where it is: its least line height set once they are made, see `Editor::new`.)
+    para_format: Box<std::cell::RefCell<PARAFORMAT2>>,
     /// What was written changed since it was last asked.
     changed: Cell<bool>,
 }
@@ -99,10 +100,11 @@ impl Editor {
         for (unit, to) in face.encode_utf16().zip(char_format.Base.szFaceName.iter_mut().take(31)) {
             *to = unit;
         }
-        let mut para_format = Box::new(PARAFORMAT::default());
-        para_format.cbSize = std::mem::size_of::<PARAFORMAT>() as u32;
-        para_format.dwMask = PFM_ALL;
-        para_format.wAlignment = PFA_LEFT;
+        let mut para_format = Box::new(PARAFORMAT2::default());
+        para_format.Base.cbSize = std::mem::size_of::<PARAFORMAT2>() as u32;
+        para_format.Base.dwMask = PFM_ALL | PFM_LINESPACING;
+        para_format.Base.wAlignment = PFA_LEFT;
+        let para_format = Box::new(std::cell::RefCell::new(*para_format));
         let kept = Rc::new(Kept { hwnd, rect: Cell::new(rect), caret: Cell::new(None), caret_size: Cell::new((1, 16)), caret_shown: Cell::new(false), char_format, para_format, changed: Cell::new(false) });
         let host: ITextHost2 = Host { kept: kept.clone() }.into();
         let (make, iid) = services_maker()?;
@@ -127,8 +129,29 @@ impl Editor {
             let _ = services.OnTxUIActivate();
             let mut result = LRESULT(0);
             let _ = services.TxSendMessage(EM_SETEVENTMASK, WPARAM(0), LPARAM(ENM_CHANGE as isize), &mut result);
-            Some(Editor { services: std::mem::ManuallyDrop::new(services), _host: host, kept, typed: Cell::new(Typed::Nothing) })
+            let editor = Editor { services: std::mem::ManuallyDrop::new(services), _host: host, kept, typed: Cell::new(Typed::Nothing) };
+            // Each line at least as tall as a line of Chinese is in it (whose characters, in a face without them, come
+            // from another, taller one): a line that holds some no taller than one that does not. Measured as two such
+            // lines lie.
+            editor.set_text("你\n你");
+            let line = editor.top_of(2) - editor.top_of(0);
+            editor.set_text("");
+            {
+                let mut format = editor.kept.para_format.borrow_mut();
+                format.bLineSpacingRule = 3;
+                format.dyLineSpacing = line * 15;
+            }
+            let _ = editor.services.OnTxPropertyBitsChange(TXTBIT_PARAFORMATCHANGE, TXTBIT_PARAFORMATCHANGE);
+            Some(editor)
         }
+    }
+
+    /// The top of the line the character at `at` is on (in the window).
+    fn top_of(&self, at: i32) -> i32 {
+        let mut point = windows::Win32::Foundation::POINTL::default();
+        // (EM_POSFROMCHAR, which the bindings leave out.)
+        self.answer(0x00D6, WPARAM(&mut point as *mut _ as usize), LPARAM(at as isize));
+        point.y
     }
 
     /// What is written.
@@ -404,7 +427,7 @@ impl ITextHost_Impl for Host_Impl {
         Ok(())
     }
     fn TxGetParaFormat(&self, format: *const *const PARAFORMAT) -> windows::core::Result<()> {
-        unsafe { *(format as *mut *const PARAFORMAT) = &*self.kept.para_format };
+        unsafe { *(format as *mut *const PARAFORMAT) = &(*self.kept.para_format.as_ptr()).Base };
         Ok(())
     }
     fn TxGetSysColor(&self, index: SYS_COLOR_INDEX) -> COLORREF {
@@ -558,6 +581,25 @@ mod tests {
             let _ = DestroyWindow(hwnd);
             assert!((caret.0 - right as i32).abs() <= 6, "caret at x {} where the words end at {right}", caret.0);
             assert!(caret.1 <= bottom as i32 && caret.1 + caret.3 >= bottom as i32 - 4, "caret at y {}..{} where the words' last line ends at {bottom}", caret.1, caret.1 + caret.3);
+        }
+    }
+
+    /// Lines of Latin and lines with Chinese in them, in a face without Chinese (as on a PC in English): each line as
+    /// tall as the others.
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn lines_with_chinese_are_as_tall_as_others() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""), WS_POPUP, 0, 0, 600, 400, None, None, None, None).unwrap();
+            let editor = Editor::new(hwnd, RECT { left: 0, top: 0, right: 600, bottom: 400 }, "Segoe UI", 20.0, COLORREF(0)).expect("text services");
+            editor.set_text("abc\nabc 你好\nabc\nabc");
+            // Each line's first character: 0, 4, 11, 15.
+            let tops = [editor.top_of(0), editor.top_of(4), editor.top_of(11), editor.top_of(15)];
+            drop(editor);
+            let _ = DestroyWindow(hwnd);
+            let heights: Vec<i32> = tops.windows(2).map(|pair| pair[1] - pair[0]).collect();
+            assert!(heights.iter().all(|height| (height - heights[2]).abs() <= 1), "lines {heights:?} tall");
         }
     }
 
