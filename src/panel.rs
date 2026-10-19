@@ -2348,7 +2348,7 @@ impl<'a> Panel<'a> {
             Edge::Right => Side::Left,
             Edge::Top => Side::Below,
         };
-        crate::ui::beside::open(Opening { page, by: placement.panel, side, skin: self.theme.skin, dark: self.theme.dark });
+        crate::ui::beside::open(Opening { page, by: placement.panel, side, skin: self.theme.skin, dark: self.theme.dark, folder: None });
     }
 
     /// The edges of the panel a point `(x, y)` from its corner (DIPs) is

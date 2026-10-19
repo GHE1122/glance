@@ -87,8 +87,8 @@ pub enum Written {
     /// Written in its place (its file as it is now).
     Done(Stamp),
     /// Its file had been changed outside since it was read (or deleted): left as it was, and what was written here
-    /// put in a copy beside it, by this name.
-    Apart(String),
+    /// put in a copy beside it, by this name (and that copy's file as written).
+    Apart(String, Stamp),
 }
 
 /// The notes' folder, and what a conflict's copy of a note is called after its name (see `Written::Apart`).
@@ -126,6 +126,7 @@ impl Folder {
     }
 
     /// The note `name`'s file as it is now, if it is there.
+    #[cfg(test)]
     pub fn stamp(&self, name: &str) -> Option<Stamp> {
         let path = self.path.join(name);
         Some(Stamp::of(&std::fs::read(&path).ok()?, written_ms(&path)?))
@@ -162,21 +163,25 @@ impl Folder {
         let placed = match was {
             None => put_new(&beside, &path),
             Some(was) => {
-                let displaced = self.path.join(format!(".{name}.glance-was"));
-                let _ = std::fs::remove_file(&displaced);
-                let placed = put_over(&beside, &path, &displaced);
-                if placed.is_ok() {
-                    let as_read = std::fs::read(&displaced).is_ok_and(|displaced| was.same(&Stamp::of(&displaced, 0)));
-                    if !as_read {
-                        let stem = Path::new(name).file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
-                        let apart = self.free_name(&format!("{stem}{}.md", self.apart));
-                        std::fs::rename(&path, self.path.join(&apart))?;
-                        std::fs::rename(&displaced, &path)?;
-                        return Ok(Written::Apart(apart));
+                // (Kept under a name of its own each time: one left by a save cut short, never looked at, is never
+                // written over or taken away by the next.)
+                let displaced = self.free_hidden(&format!(".{name}.glance-was"));
+                match put_over(&beside, &path, &displaced) {
+                    Ok(()) => {
+                        let as_read = std::fs::read(&displaced).is_ok_and(|displaced| was.same(&Stamp::of(&displaced, 0)));
+                        if !as_read {
+                            return self.put_back(name, text, &displaced);
+                        }
+                        let _ = std::fs::remove_file(&displaced);
+                        Ok(())
                     }
-                    let _ = std::fs::remove_file(&displaced);
+                    // (Its file moved to where it is kept, and this not put in its place: put back where it was.)
+                    Err(error) if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) => {
+                        let _ = put_new(&displaced, &path);
+                        Err(error)
+                    }
+                    Err(error) => Err(error),
                 }
-                placed
             }
         };
         match placed {
@@ -193,12 +198,57 @@ impl Folder {
         }
     }
 
-    /// What was written here as the note `name` put in a conflict's copy beside it.
+    /// `text` put in the place of the note `name` just now, and the file it took the place of (kept at `displaced`)
+    /// found changed outside meanwhile: what was written here put apart, and that file put back in its place, never
+    /// over another (one written there meanwhile stays, and it is kept apart too).
+    fn put_back(&self, name: &str, text: &str, displaced: &Path) -> std::io::Result<Written> {
+        let path = self.path.join(name);
+        let written = self.apart(name, text)?;
+        // (In its place still what was written here, kept apart now: taken away; anything else there is another's.)
+        if std::fs::read(&path).is_ok_and(|now| now == text.as_bytes()) {
+            std::fs::remove_file(&path)?;
+        }
+        if put_new(displaced, &path).is_err() {
+            let stem = Path::new(name).file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+            self.put_new_named(&format!("{stem}{}.md", self.apart), displaced)?;
+        }
+        Ok(written)
+    }
+
+    /// What was written here as the note `name` put in a conflict's copy beside it (never over another file).
     fn apart(&self, name: &str, text: &str) -> std::io::Result<Written> {
         let stem = Path::new(name).file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
-        let apart = self.free_name(&format!("{stem}{}.md", self.apart));
-        self.replace(&apart, text)?;
-        Ok(Written::Apart(apart))
+        let beside = self.path.join(format!(".{name}.glance-apart"));
+        std::fs::write(&beside, text.as_bytes())?;
+        let apart = self.put_new_named(&format!("{stem}{}.md", self.apart), &beside).inspect_err(|_| {
+            let _ = std::fs::remove_file(&beside);
+        })?;
+        let written = written_ms(&self.path.join(&apart)).unwrap_or_default();
+        Ok(Written::Apart(apart, Stamp::of(text.as_bytes(), written)))
+    }
+
+    /// The file at `from` given `name`, or that with a number after its stem, a name no file has (taken by another
+    /// meanwhile: the next); the name it was given.
+    fn put_new_named(&self, name: &str, from: &Path) -> std::io::Result<String> {
+        loop {
+            let free = self.free_name(name);
+            match put_new(from, &self.path.join(&free)) {
+                Ok(()) => return Ok(free),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// `name` (a file of Glance's own, hidden by its dot), or with a number after it, a name no file has.
+    fn free_hidden(&self, name: &str) -> PathBuf {
+        let mut candidate = self.path.join(name);
+        let mut more = 2;
+        while candidate.exists() {
+            candidate = self.path.join(format!("{name}.{more}"));
+            more += 1;
+        }
+        candidate
     }
 
     /// `text` in the file `name`: written beside it first, then put in its place.
@@ -262,10 +312,17 @@ impl Folder {
     }
 }
 
-/// A note's words from its file's `bytes`, as they say they are written: UTF-8 (its mark left out), UTF-16 by its mark,
-/// else the system's code page (another editor's, saving as programs did before Unicode); and whether they were read
-/// faithfully (none of the bytes lost: read as near as they go, they are never written over).
+/// A note's words from its file's `bytes`, as they say they are written: UTF-8 (its mark left out), UTF-32 or UTF-16
+/// by its mark, else the system's code page (another editor's, saving as programs did before Unicode); and whether
+/// they were read faithfully (none of the bytes lost, and no NUL in them, which the box they are written in would end
+/// them at: read as near as they go, they are never written over).
 pub fn decoded(bytes: &[u8]) -> (String, bool) {
+    let (text, faithful) = read_as_written(bytes);
+    let faithful = faithful && !text.contains('\0');
+    (text, faithful)
+}
+
+fn read_as_written(bytes: &[u8]) -> (String, bool) {
     if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         return match std::str::from_utf8(rest) {
             Ok(text) => (text.to_string(), true),
@@ -279,6 +336,20 @@ pub fn decoded(bytes: &[u8]) -> (String, bool) {
             Err(_) => (String::from_utf16_lossy(&units), false),
         }
     };
+    // (UTF-32's marks first: little-endian, its begins as UTF-16's does.)
+    let utf32 = |rest: &[u8], unit: fn([u8; 4]) -> u32| {
+        let read: Option<String> = rest.chunks_exact(4).map(|four| char::from_u32(unit([four[0], four[1], four[2], four[3]]))).collect();
+        match read {
+            Some(text) => (text, rest.len() % 4 == 0),
+            None => (rest.chunks_exact(4).map(|four| char::from_u32(unit([four[0], four[1], four[2], four[3]])).unwrap_or('\u{FFFD}')).collect(), false),
+        }
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE, 0x00, 0x00]) {
+        return utf32(rest, u32::from_le_bytes);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0x00, 0x00, 0xFE, 0xFF]) {
+        return utf32(rest, u32::from_be_bytes);
+    }
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         return utf16(rest, u16::from_le_bytes);
     }
@@ -311,6 +382,10 @@ fn system_code_page(bytes: &[u8]) -> Option<String> {
 fn system_code_page(_: &[u8]) -> Option<String> {
     None
 }
+
+/// What `ReplaceFileW` says when the file replaced was moved to where it is kept and the new one could not be put in
+/// its place (winerror.h's `ERROR_UNABLE_TO_MOVE_REPLACEMENT_2`): the file is then only where it is kept.
+const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
 
 /// The file at `from` given the name `to`, where no file has it (one that does: `AlreadyExists`).
 #[cfg(windows)]
@@ -393,15 +468,15 @@ mod tests {
         let folder = folder("conflict");
         let Written::Done(stamp) = folder.write("a.md", "here", None).unwrap() else { panic!("written") };
         std::fs::write(folder.path.join("a.md"), "outside, longer").unwrap();
-        let Written::Apart(apart) = folder.write("a.md", "here again", Some(stamp)).unwrap() else { panic!("put apart") };
+        let Written::Apart(apart, _) = folder.write("a.md", "here again", Some(stamp)).unwrap() else { panic!("put apart") };
         assert_eq!(folder.read("a.md").unwrap().0, "outside, longer");
         assert_eq!(folder.read(&apart).unwrap().0, "here again");
         // A note new here whose name was taken meanwhile: put apart too.
-        assert!(matches!(folder.write("a.md", "new", None).unwrap(), Written::Apart(_)));
+        assert!(matches!(folder.write("a.md", "new", None).unwrap(), Written::Apart(..)));
         // One deleted outside since it was read: not made again in its place, what was written kept apart.
         let Written::Done(stamp) = folder.write("b.md", "b", None).unwrap() else { panic!("written") };
         std::fs::remove_file(folder.path.join("b.md")).unwrap();
-        assert!(matches!(folder.write("b.md", "b again", Some(stamp)).unwrap(), Written::Apart(_)));
+        assert!(matches!(folder.write("b.md", "b again", Some(stamp)).unwrap(), Written::Apart(..)));
         assert!(!folder.path.join("b.md").exists());
         let _ = std::fs::remove_dir_all(&folder.path);
     }
@@ -415,14 +490,30 @@ mod tests {
         assert!(stamp.same(&Stamp::of(b"here", 0)));
         std::fs::write(folder.path.join("a.md"), "outside").unwrap();
         // (Past the look before writing, as if it came just after it.)
-        let Written::Apart(apart) = folder.put("a.md", "here again", Some(stamp)).unwrap() else { panic!("put apart") };
+        let Written::Apart(apart, apart_stamp) = folder.put("a.md", "here again", Some(stamp)).unwrap() else { panic!("put apart") };
         assert_eq!(folder.read("a.md").unwrap().0, "outside");
         assert_eq!(folder.read(&apart).unwrap().0, "here again");
+        // (The copy's stamp of the bytes written here.)
+        assert!(apart_stamp.same(&Stamp::of(b"here again", 0)));
         // A new note whose name another took meanwhile: not put over it.
-        assert!(matches!(folder.put("a.md", "new", None).unwrap(), Written::Apart(_)));
+        assert!(matches!(folder.put("a.md", "new", None).unwrap(), Written::Apart(..)));
         assert_eq!(folder.read("a.md").unwrap().0, "outside");
         // Nothing of its writing left beside them.
         assert!(std::fs::read_dir(&folder.path).unwrap().flatten().all(|entry| !entry.file_name().to_string_lossy().starts_with(".a.md")));
+        let _ = std::fs::remove_dir_all(&folder.path);
+    }
+
+    /// A save cut short before (the file it took the place of left where it is kept, never looked at): not written over
+    /// or taken away by the next, which keeps its own under another name, and takes that away.
+    #[test]
+    fn keeps_what_a_save_cut_short_left() {
+        let folder = folder("cut-short");
+        let Written::Done(stamp) = folder.write("a.md", "one", None).unwrap() else { panic!("written") };
+        std::fs::write(folder.path.join(".a.md.glance-was"), "left by a save cut short").unwrap();
+        assert!(matches!(folder.write("a.md", "two", Some(stamp)).unwrap(), Written::Done(_)));
+        assert_eq!(std::fs::read_to_string(folder.path.join(".a.md.glance-was")).unwrap(), "left by a save cut short");
+        assert!(!folder.path.join(".a.md.glance-was.2").exists());
+        assert_eq!(folder.read("a.md").unwrap().0, "two");
         let _ = std::fs::remove_dir_all(&folder.path);
     }
 
@@ -437,6 +528,13 @@ mod tests {
         assert_eq!(decoded(&be), ("便签 a".to_string(), true));
         // Half a unit at its end: read as near as it goes, never written over.
         assert!(!decoded(&le[..le.len() - 1]).1);
+        // UTF-32 by its mark (its little-endian mark begins as UTF-16's does), either way round.
+        let le32: Vec<u8> = [0xFF, 0xFE, 0, 0].into_iter().chain("便签 a".chars().flat_map(|c| u32::from(c).to_le_bytes())).collect();
+        let be32: Vec<u8> = [0, 0, 0xFE, 0xFF].into_iter().chain("便签 a".chars().flat_map(|c| u32::from(c).to_be_bytes())).collect();
+        assert_eq!(decoded(&le32), ("便签 a".to_string(), true));
+        assert_eq!(decoded(&be32), ("便签 a".to_string(), true));
+        // A NUL in what is written: never read faithfully (the box would end the words at it).
+        assert!(!decoded(b"a\0b").1);
         let folder = folder("utf16");
         std::fs::create_dir_all(&folder.path).unwrap();
         std::fs::write(folder.path.join("u.md"), &le).unwrap();
@@ -447,7 +545,7 @@ mod tests {
         // One not read faithfully: what is written here goes apart.
         std::fs::write(folder.path.join("half.md"), &le[..le.len() - 1]).unwrap();
         let (text, stamp) = folder.read("half.md").unwrap();
-        assert!(matches!(folder.write("half.md", &text, Some(stamp)).unwrap(), Written::Apart(_)));
+        assert!(matches!(folder.write("half.md", &text, Some(stamp)).unwrap(), Written::Apart(..)));
         assert_eq!(std::fs::read(folder.path.join("half.md")).unwrap(), &le[..le.len() - 1]);
         let _ = std::fs::remove_dir_all(&folder.path);
     }

@@ -55,6 +55,9 @@ pub struct Opening {
     pub side: Side,
     pub skin: Skin,
     pub dark: bool,
+    /// A note's folder, where it is not the one the settings name (a note opened again where it was read: see
+    /// `WM_DPICHANGED`).
+    pub folder: Option<std::path::PathBuf>,
 }
 
 /// Which side of what it opens from the page goes on, where there is room: left of it, right of it, or under it (the
@@ -261,11 +264,17 @@ fn run(asks: Receiver<Ask>) {
                 Some(super::menu::Handled::Done(choice)) => {
                     if let Some((open, choices)) = MENU.with(|menu| menu.borrow_mut().take()) {
                         open.close();
-                        if let Some(choice) = choice.and_then(|row| choices.get(row).copied()) {
-                            let gone_now = with(|beside| beside.note_chose(choice)).unwrap_or(false);
-                            if gone_now {
-                                gone();
+                        match choice.and_then(|row| choices.get(row).copied()) {
+                            Some(choice) => {
+                                let gone_now = with(|beside| beside.note_chose(choice)).unwrap_or(false);
+                                if gone_now {
+                                    gone();
+                                }
                             }
+                            // (Gone with nothing chosen as another program came in front, its capture lost: the page
+                            // goes with it, as it took no deactivation of its own, its menu having had the front.)
+                            None if !ours(GetForegroundWindow()) => gone(),
+                            None => {}
                         }
                     }
                     continue;
@@ -356,7 +365,7 @@ fn show(opening: Opening) {
         BESIDE.with(|cell| *cell.borrow_mut() = Some(beside));
         // A note: its words read, and a box for them where the page writes them.
         if let Page::Note(name) = page {
-            let folder = crate::notes::folder();
+            let folder = opening.folder.clone().map_or_else(crate::notes::folder, crate::notes::folder_at);
             let read = name.as_ref().and_then(|name| folder.read(name));
             let shown = crate::notes::shown();
             let colour = match &name {
@@ -514,17 +523,19 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         // Its screen's scale changed (moved to another screen, or the scale chosen): made again at the new one.
         WM_DPICHANGED => {
+            // (A note opened again as it is now, from where it was read: one new when it opened and kept since, or
+            // kept apart as a conflict's copy, by its name now; in its folder, whatever the settings name since.)
             let again = with(|beside| {
                 let _ = beside.keep();
-                beside.opening.as_ref().map(|opening| Opening { page: beside.page.clone(), ..opening.clone() })
+                let page = match &beside.writing {
+                    Some(writing) => Page::Note(writing.name.clone()),
+                    None => beside.page.clone(),
+                };
+                let folder = beside.writing.as_ref().map(|writing| writing.folder.clone());
+                beside.opening.as_ref().map(|opening| Opening { page, folder, ..opening.clone() })
             })
             .flatten();
             if let Some(opening) = again {
-                // (A note new when it opened, kept since: opened again as the note it now is.)
-                let opening = match (&opening.page, with(|beside| beside.writing.as_ref().and_then(|writing| writing.name.clone())).flatten()) {
-                    (Page::Note(None), Some(name)) => Opening { page: Page::Note(Some(name)), ..opening },
-                    _ => opening,
-                };
                 gone();
                 show(opening);
             }
@@ -639,12 +650,13 @@ impl Beside {
                 writing.stamp = Some(stamp);
                 writing.written_ms = stamp.written_ms;
             }
-            Ok(crate::notes::Written::Apart(apart)) => {
+            Ok(crate::notes::Written::Apart(apart, stamp)) => {
                 writing.said = Some(match lang {
                     super::text::Lang::Zh => format!("这条便签在别处被改过或删除，你写的已另存为“{apart}”"),
                     super::text::Lang::En => format!("Changed or deleted elsewhere meanwhile: what you wrote is kept as \"{apart}\""),
                 });
-                writing.stamp = folder.stamp(&apart);
+                // (Its stamp of the bytes written here: read again, another's change meanwhile would be taken for them.)
+                writing.stamp = Some(stamp);
                 writing.name = Some(apart);
             }
             Err(_) => {

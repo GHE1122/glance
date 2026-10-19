@@ -2040,7 +2040,7 @@ impl Widget {
         let screen = self.contact.monitor;
         let side = if (by.left + by.right) / 2 > (screen.left + screen.right) / 2 { Side::Left } else { Side::Right };
         let (skin, dark) = self.drawn_look;
-        crate::ui::beside::open(Opening { page, by, side, skin, dark });
+        crate::ui::beside::open(Opening { page, by, side, skin, dark, folder: None });
     }
 
     fn new(contact: Contact, at: POINT, content: Content) -> Option<Self> {
