@@ -127,6 +127,11 @@ const FLING: f32 = 1.1;
 const FLING_SPAN: Duration = Duration::from_millis(80);
 /// What a flung widget keeps of its speed each millisecond.
 const FRICTION: f32 = 0.997;
+/// How long a thing on a station's pages is held before it is dragged off them rather than swiped across: a quick
+/// stroke across turns its pages, as a phone's do; held a moment first, or drawn away up or down, it is dragged off.
+const HOLD: Duration = Duration::from_millis(300);
+/// How fast pages let go are flicked on to the next (DIPs a millisecond, over the last moments of the hand).
+const FLICK: f32 = 0.3;
 /// How near the edge of its screen's work area a widget let go sticks to
 /// it (DIPs), and how far from it, pulled, it comes away.
 /// The least a workbench widget is made (DIPs): smaller than all its lanes fit in, they take shapes of their own (see
@@ -338,6 +343,9 @@ enum Drag {
     /// widget's corner, its own DIPs).
     /// A track pressed: where it begins and how long it is (DIPs, its own; a track standing up begins at its bottom).
     Slide { slider: crate::playing::Slider, from: f32, wide: f32, upright: bool },
+    /// Pages swiped across (see `view::Hit::Pages`): which list, how far it turns, a page's width (its own DIPs),
+    /// where the hand and the list were as it began, and the hand's last places (for a flick).
+    Swipe { list: view::List, most: f32, wide: f32, from: POINT, start: f32, trail: Vec<(Instant, POINT)> },
 }
 
 /// What the widgets are drawn with, as the panel has them now.
@@ -539,6 +547,9 @@ struct Widget {
     /// A thing on its station pressed, and where the pointer was: dragged off it once moved far enough, else pressed
     /// as it is let go (see `Widgets::hover`, `Widgets::release`).
     shelf_press: Option<(view::Hit, POINT)>,
+    /// The pages under a press (the list turned by them, how far it turns, a page's width) and when it was pressed:
+    /// swiped across, the hand going across them first (see `begin_swipe`).
+    swipes: Option<(view::List, f32, f32, Instant)>,
     /// The skin it was last drawn in, and whether dark (what opens beside it is drawn alike).
     drawn_look: (Skin, bool),
     behind: Option<Behind>,
@@ -1521,6 +1532,11 @@ impl Widgets {
         if let (Some((hit, from)), Some(now)) = (widget.shelf_press, cursor_position()) {
             if crate::station::run::drag_begins(from, now) {
                 widget.shelf_press = None;
+                // Stroked across its pages at once: they are swiped (the pointer kept).
+                if widget.swipes.is_some_and(|(.., pressed)| pressed.elapsed() < HOLD) && widget.begin_swipe(from, now, Instant::now()) {
+                    widget.next_frame = Instant::now();
+                    return;
+                }
                 let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
                 crate::station::drag_off(hit, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() });
             }
@@ -1589,8 +1605,9 @@ impl Widgets {
     }
 
     /// Turns the process list under the pointer (`screen`, physical px) by the wheel's `delta`, as the panel's; or
-    /// the lines of what plays.
-    pub fn wheel(&mut self, hwnd: HWND, screen: POINT, delta: i16) {
+    /// the lines of what plays. Turned `across` (a touchpad stroked sideways, a wheel tilted), the pages under it alone,
+    /// to the right on.
+    pub fn wheel(&mut self, hwnd: HWND, screen: POINT, delta: i16, across: bool) {
         let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
         // What it shows where the wheel turned, as a press there finds it.
         let hit = {
@@ -1607,6 +1624,13 @@ impl Widgets {
         // (Under what is on it: the wheel over a thing on the station scrolls the station.)
         let list = hit.iter().find_map(|hit| hit.list());
         let pages = hit.iter().find_map(|hit| hit.pages());
+        if across {
+            if let (Some((list, most)), Some(readings)) = (pages, widget.content.readings_mut()) {
+                readings.scrolls.turn_pages(list, delta as f32 / 120.0 * view::PAGE, view::PAGE, most);
+                widget.next_frame = Instant::now();
+            }
+            return;
+        }
         let hit = hit.first().copied();
         let on_sound = hit.is_some_and(view::Hit::of_sound);
         if let Content::Music(shown) = &mut widget.content {
@@ -1659,7 +1683,7 @@ impl Widgets {
             }
         }
         if let Some(widget) = self.list.iter().find(|w| w.window.hwnd == hwnd) {
-            note(format!("widget: release ({}), {}", if cancelled { "its capture lost" } else { "let go" }, match &widget.drag { Some(Drag::Move { moved, torn, .. }) => format!("moving (moved {moved}, torn {torn})"), Some(Drag::Size { .. }) => "sizing".into(), Some(Drag::Slide { .. }) => "sliding".into(), None => "in no hand".into() }));
+            note(format!("widget: release ({}), {}", if cancelled { "its capture lost" } else { "let go" }, match &widget.drag { Some(Drag::Move { moved, torn, .. }) => format!("moving (moved {moved}, torn {torn})"), Some(Drag::Size { .. }) => "sizing".into(), Some(Drag::Slide { .. }) => "sliding".into(), Some(Drag::Swipe { .. }) => "swiping".into(), None => "in no hand".into() }));
         }
         // Held over another long enough: merged into it.
         if let Some(drop) = self.dropping.take() {
@@ -2213,6 +2237,7 @@ impl Widget {
             hits: Vec::new(),
             hits_from: (0.0, 0.0),
             shelf_press: None,
+            swipes: None,
             drawn_look: (Skin::Paper, false),
             behind: None,
             next_frame: Instant::now(),
@@ -2516,6 +2541,11 @@ impl Widget {
         self.opacity = 1.0;
         self.anchor = None;
         let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
+        // On pages more than one: swiped across them, the hand going across first.
+        self.swipes = self.hits.iter().find_map(|&(hx, hy, w, h, hit)| match hit {
+            view::Hit::Pages(list, most) if f32::from_bits(most) > 0.0 && lx >= hx && lx < hx + w && ly >= hy && ly < hy + h => Some((list, f32::from_bits(most), w, Instant::now())),
+            _ => None,
+        });
         // On a thing on its station: dragged off it, or pressed (see `shelf_press`).
         if let Some(hit) = self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4).filter(|hit| hit.drags()) {
             self.shelf_press = Some((hit, from));
@@ -2571,8 +2601,37 @@ impl Widget {
             Some(Drag::Size { edges, .. }) => format!("widget: sized by {edges:?} (left, right, top, bottom)"),
             Some(Drag::Move { .. }) => "widget: pressed to move".to_string(),
             Some(Drag::Slide { slider, .. }) => format!("widget: a track pressed ({slider:?})"),
+            Some(Drag::Swipe { list, .. }) => format!("widget: pages swiped ({list:?})"),
             None => "widget: pressed, nothing taken".to_string(),
         });
+    }
+
+    /// A press on pages (see `swipes`), the hand gone from `from` to `to` (physical px): swiped, if it went across
+    /// more than down. Whether it is.
+    fn begin_swipe(&mut self, from: POINT, to: POINT, now: Instant) -> bool {
+        let Some((list, most, wide, _)) = self.swipes.take() else { return false };
+        if (to.x - from.x).abs() <= (to.y - from.y).abs() {
+            return false;
+        }
+        let Some(readings) = self.content.readings_mut() else { return false };
+        let start = readings.scrolls.at(list);
+        note(format!("widget: pages swiped ({list:?})"));
+        self.drag = Some(Drag::Swipe { list, most, wide, from, start, trail: vec![(now, to)] });
+        true
+    }
+
+    /// The pages swiped as far across as the hand has gone: a page's width, a page.
+    fn swipe(&mut self, now: Instant) {
+        let Some(cursor) = cursor_position() else { return };
+        let px = self.contact.scale * self.zoom;
+        let Some(Drag::Swipe { list, most, wide, from, start, trail }) = &mut self.drag else { return };
+        trail.push((now, cursor));
+        trail.retain(|(at, _)| now.duration_since(*at) <= FLING_SPAN * 2);
+        let at = *start - (cursor.x - from.x) as f32 / px / *wide * view::PAGE;
+        let (list, most) = (*list, *most);
+        if let Some(readings) = self.content.readings_mut() {
+            readings.scrolls.hold_pages(list, at, most);
+        }
     }
 
     /// Follows the pointer while it is in hand.
@@ -2589,8 +2648,22 @@ impl Widget {
             self.slide();
             return;
         }
+        if matches!(self.drag, Some(Drag::Swipe { .. })) {
+            self.swipe(now);
+            return;
+        }
         let Some(cursor) = cursor_position() else { return };
         let scale = self.contact.scale;
+        // Pressed on pages and gone far enough across them before down: they are swiped (pinned too: that is not
+        // moving it).
+        if let Some(Drag::Move { grab, moved: false, .. }) = self.drag {
+            let from = POINT { x: self.at.x + grab.x, y: self.at.y + grab.y };
+            let (dx, dy) = ((cursor.x - from.x) as f32 / scale, (cursor.y - from.y) as f32 / scale);
+            if dx.hypot(dy) >= MOVE_FROM && self.begin_swipe(from, cursor, now) {
+                self.swipe(now);
+                return;
+            }
+        }
         match &mut self.drag {
             // Pinned: pressed on what it shows, acted on as it is let go; not moved.
             Some(Drag::Move { .. }) if self.pinned => {}
@@ -2662,7 +2735,7 @@ impl Widget {
                 let bottom = corner.y + start.1 as i32;
                 self.at = POINT { x: if l { right } else { corner.x }, y: if t { bottom } else { corner.y } };
             }
-            Some(Drag::Slide { .. }) | None => {}
+            Some(Drag::Slide { .. } | Drag::Swipe { .. }) | None => {}
         }
     }
 
@@ -2683,6 +2756,20 @@ impl Widget {
             // The track let go: as it was left (cancelled, as it was), and looked at again.
             Drag::Slide { slider, .. } => {
                 crate::playing::slid(slider, !cancelled);
+                Released::Nothing
+            }
+            // Pages let go: on to the page nearest; flicked, the next that way (the hand going left, the next on).
+            Drag::Swipe { list, most, trail, .. } => {
+                let px = self.contact.scale * self.zoom;
+                let recent: Vec<&(Instant, POINT)> = trail.iter().filter(|(at, _)| now.duration_since(*at) <= FLING_SPAN).collect();
+                let speed = match (recent.first(), recent.last()) {
+                    (Some(first), Some(last)) if last.0.duration_since(first.0).as_secs_f32() > 0.01 => (last.1.x - first.1.x) as f32 / px / (last.0.duration_since(first.0).as_secs_f32() * 1000.0),
+                    _ => 0.0,
+                };
+                let lean = if cancelled || speed.abs() < FLICK { 0.0 } else { -speed.signum() };
+                if let Some(readings) = self.content.readings_mut() {
+                    readings.scrolls.let_go_pages(list, lean, view::PAGE, most);
+                }
                 Released::Nothing
             }
             Drag::Size { .. } => {

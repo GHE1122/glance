@@ -36,7 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DispatchMessageW, KillTimer, WaitMessage, MsgWaitForMultipleObjects,
     PeekMessageW, PostMessageW, SetTimer, SystemParametersInfoW, HWND_MESSAGE, MSG, PM_REMOVE,
     QS_ALLINPUT, WM_HOTKEY,
-    SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
+    SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONUP, WM_MOUSEMOVE, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_QUIT,
     WM_TIMER,
 };
 
@@ -1263,7 +1263,8 @@ impl Controller {
                     let notches = (msg.wParam.0 >> 16) as u16 as i16 as f32 / 120.0;
                     std::thread::spawn(move || crate::app().clear_overlay(notches * 0.05));
                 }
-                WM_MOUSEWHEEL if widgets.owns(msg.hwnd) => widgets.wheel(msg.hwnd, lparam_point(msg.lParam), (msg.wParam.0 >> 16) as u16 as i16),
+                WM_MOUSEWHEEL if widgets.owns(msg.hwnd) => widgets.wheel(msg.hwnd, lparam_point(msg.lParam), (msg.wParam.0 >> 16) as u16 as i16, false),
+                WM_MOUSEHWHEEL if widgets.owns(msg.hwnd) => widgets.wheel(msg.hwnd, lparam_point(msg.lParam), (msg.wParam.0 >> 16) as u16 as i16, true),
                 WM_MOUSEWHEEL if owner.is_some() => {
                     let delta = (msg.wParam.0 >> 16) as u16 as i16;
                     panels[owner.unwrap()].wheel(lparam_point(msg.lParam), delta);
