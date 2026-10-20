@@ -240,8 +240,12 @@ impl Ladder {
                 });
             }
         }
-        for small in Small::ladder(readings) {
-            rungs.push(Rung { form: Form::Small(small), size: small.size_within(readings, theme.radius), stretch: small.stretch(), floor: small.floor() });
+        // (The small layouts show readings: with none to show (the workbench's station, notes, quick launch), none
+        // offered. Sized down, such a widget went to one, and showed nothing.)
+        if readings > 0 {
+            for small in Small::ladder(readings) {
+                rungs.push(Rung { form: Form::Small(small), size: small.size_within(readings, theme.radius), stretch: small.stretch(), floor: small.floor() });
+            }
         }
         Ladder { rungs }
     }
@@ -575,6 +579,9 @@ mod tests {
         assert_eq!(ladder.choose(three, None).form, Form::Lanes { detail: Detail::Full, columns: 3 });
         assert_eq!(ladder.choose((130.0, 40.0), None).form, Form::Small(Small::Micro));
         assert_eq!(ladder.choose((90.0, 320.0), None).form, Form::Small(Small::Rail));
+        // With no readings to show small (the workbench's lanes), sized down, still its lanes, at their least.
+        let none = Ladder::new(&theme, &lanes(), 0);
+        assert!(matches!(none.choose((130.0, 40.0), None).form, Form::Lanes { .. }));
         assert!(matches!(ladder.choose((700.0, 36.0), None).form, Form::Small(Small::Strip { .. })));
     }
 

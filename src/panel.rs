@@ -963,6 +963,23 @@ impl Controller {
                     panel.press(lparam_point(msg.lParam));
                 }
                 WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].shelf_press.is_some()) => panels[owner.unwrap()].shelf_moved(),
+                // A note pressed and pulled off the panel: stuck on the desktop under the hand (the panel stays).
+                WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].note_press.is_some()) => {
+                    let panel = &mut panels[owner.unwrap()];
+                    if let (Some(cursor), Some(placement)) = (cursor_position(), panel.placement.as_ref()) {
+                        let off = !contains(&placement.panel, cursor);
+                        let pulled = panel.note_press.as_ref().is_some_and(|(_, from)| crate::station::run::drag_begins(*from, cursor));
+                        if off && pulled {
+                            let (name, _) = panel.note_press.take().unwrap();
+                            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                            // (Held by its head, near its corner, as a note's card is taken.)
+                            let grab = POINT { x: (40.0 * placement.px) as i32, y: (20.0 * placement.px) as i32 };
+                            widgets.stick_note_held(&name, POINT { x: cursor.x - grab.x, y: cursor.y - grab.y }, grab);
+                        }
+                    }
+                    panel.hover_at(lparam_point(msg.lParam));
+                }
+                crate::ui::window::CAPTURE_LOST if owner.is_some_and(|at| panels[at].note_press.is_some()) => panels[owner.unwrap()].note_press = None,
                 // A thing kept at hand pressed and moved: put elsewhere among them as it is let go, over another.
                 WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].app_press.is_some()) => {
                     let panel = &mut panels[owner.unwrap()];
@@ -1201,6 +1218,10 @@ impl Controller {
                 }
                 WM_LBUTTONUP if owner.is_some() => {
                     let panel = &mut panels[owner.unwrap()];
+                    // (A note pressed and let go on the panel: opened, as a press on it is.)
+                    if panel.note_press.take().is_some() {
+                        let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                    }
                     panel.click(lparam_point(msg.lParam));
                     // Its music asked to be shown over the whole of its screen.
                     if let Some(contact) = panel.full_asked.take() {
@@ -1857,6 +1878,9 @@ struct Panel<'a> {
     pointer: Option<POINT>,
     /// Pressed since the settings last came in front: over them, in use (see the frame loop).
     forward: bool,
+    /// A note pressed (by its file's name), and where the pointer was: pulled off the panel, it is stuck on the
+    /// desktop under the hand; let go on it, it is opened beside.
+    note_press: Option<(String, POINT)>,
     /// One held so and moved: the place among them it would go to (the one the pointer was last over), and where
     /// the pointer has it (DIPs from the panel's corner).
     app_over: Option<u16>,
@@ -1966,6 +1990,7 @@ impl<'a> Panel<'a> {
             app_press: None,
             pointer: None,
             forward: false,
+            note_press: None,
             app_over: None,
             app_point: (0.0, 0.0),
             app_dropped: None,
@@ -2661,8 +2686,11 @@ impl<'a> Panel<'a> {
         self.hit_at(client).is_none_or(|hit| !hit.takes_press() || matches!(hit, Hit::Line(_))).then_some(edges)
     }
 
-    /// The lane whose head is at `client` (physical px in the window): its place among the opening's lanes; none where
-    /// the panel shows one lane only (pulled, the panel is torn off whole), or the point is on no lane's head.
+    /// The lane at `client` (physical px in the window), anywhere on a workbench's (its head, its free room, the clock's
+    /// figures), by its head on the readings':
+    /// its place among the opening's lanes, pulled, that lane alone torn off; none where the panel shows one lane only,
+    /// or the point is on none (between them, round them: pulled there, the panel is torn off whole). (By its head
+    /// alone, a lane was torn off only where its head was free, and a pull anywhere else on it took the whole panel.)
     fn head_at(&self, client: POINT) -> Option<usize> {
         let (placement, opening) = (self.placement.as_ref()?, self.opening.as_ref()?);
         let (x, y) = (client.x as f32 / placement.px - self.corner.0, client.y as f32 / placement.px - self.corner.1);
@@ -2670,9 +2698,9 @@ impl<'a> Panel<'a> {
         if lanes.len() < 2 {
             return None;
         }
-        // (The rail, quick launch's, taken anywhere it is free: it has no head.)
-        let rail = opening.layout.rail().map(|(at, _)| at);
-        lanes.iter().enumerate().position(|(at, lane)| x >= lane.x && x < lane.x + lane.w && y >= lane.y && y < lane.y + if Some(at) == rail { lane.h } else { self.theme.pad_top + view::HEAD_BAND })
+        // (The readings' lanes by their heads, as ever: pulled by its readings, the panel comes off whole.)
+        let reach = |lane: &view::Rect| if self.part == Part::Workbench { lane.h } else { (self.theme.pad_top + view::HEAD_BAND).min(lane.h) };
+        lanes.iter().position(|lane| x >= lane.x && x < lane.x + lane.w && y >= lane.y && y < lane.y + reach(lane))
     }
 
     /// Whether the press in hand is a tap so far: neither moved nor sized since.
@@ -2710,6 +2738,14 @@ impl<'a> Panel<'a> {
     fn press(&mut self, client: POINT) {
         // (Off the panel, in its window before it was told to let clicks through there: nothing of the panel's.)
         if !self.on_panel(client) {
+            return;
+        }
+        // On a note: pulled off, stuck on the desktop; else opened as it is let go (see `note_press`).
+        if let (Some(Hit::Note(at)), Some(from)) = (self.hit_at(client), cursor_position()) {
+            if let Some(note) = crate::notes::shown().get(usize::from(at)) {
+                self.note_press = Some((note.name.clone(), from));
+                unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd) };
+            }
             return;
         }
         // On a thing kept at hand: moved among them, or opened (see `app_press`).

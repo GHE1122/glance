@@ -2689,7 +2689,8 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
                 frame.fill(theme.rule, x, 0.0, 1.0, layout.lanes_height);
             }
         }
-        if rail.is_none() {
+        // (None where it has no room: a widget of the workbench's lanes.)
+        if rail.is_none() && layout.bar().h > 0.0 {
             paint_bar(frame, scene, layout, &mut hits);
         }
     }

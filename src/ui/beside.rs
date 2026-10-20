@@ -916,7 +916,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with(|beside| beside.carry_note(false));
         }
         WM_EXITSIZEMOVE => {
-            with(|beside| beside.carry_note(true));
+            if with(|beside| beside.carry_note(true)).unwrap_or(false) {
+                gone();
+            }
         }
         // (The choosing of programs stays: a program is dragged onto it from another window, Explorer pressed to take
         // it. It goes by its own close, Esc, or as the panel or widget it opened from goes.)
@@ -1114,7 +1116,10 @@ impl Beside {
     /// Whether a press at `at` (on the screen) takes it by its head, to be moved: over a note stuck on the desktop,
     /// in its head's row, on nothing of it pressed there.
     fn takes_by_head(&self, at: POINT) -> bool {
-        if !self.opening.as_ref().is_some_and(|opening| opening.side == Side::Over) || self.writing.is_none() {
+        // (Over a note stuck on the desktop, moved with it; beside the panel, a note kept in a file pulled off onto
+        // the desktop, see `carry_note`. A new note, in no file yet, stays where it is.)
+        let over = self.opening.as_ref().is_some_and(|opening| opening.side == Side::Over);
+        if !self.writing.as_ref().is_some_and(|writing| over || writing.name.is_some()) {
             return false;
         }
         let mut client = at;
@@ -1132,12 +1137,30 @@ impl Beside {
 
     /// Moved by its head over a note stuck on the desktop: the note moved along by as much (and, `done`, kept where it
     /// comes to).
-    fn carry_note(&mut self, done: bool) {
-        let Some(from) = self.moved_from else { return };
-        let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return };
+    ///
+    /// Beside the panel (or a widget), moved by its head as far as a drag goes and put down: the note stuck on the
+    /// desktop where its page was put (as from its menu), its page gone (whether it is to go).
+    fn carry_note(&mut self, done: bool) -> bool {
+        let Some(from) = self.moved_from else { return false };
+        let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return false };
         let to = self.corner();
+        if !self.opening.as_ref().is_some_and(|opening| opening.side == Side::Over) {
+            if !done {
+                return false;
+            }
+            self.moved_from = None;
+            let far = (24.0 * self.scale) as i32;
+            if (to.x - from.x).abs() < far && (to.y - from.y).abs() < far {
+                return false;
+            }
+            let _ = self.keep();
+            let place = self.page_on_screen();
+            crate::app().controller.stick_note(name, POINT { x: place.left, y: place.top });
+            return true;
+        }
         crate::app().controller.move_note(name, to.x - from.x, to.y - from.y, done);
         self.moved_from = if done { None } else { Some(to) };
+        false
     }
 
     /// `choice` made in the note's menu: done; whether the page is to go.

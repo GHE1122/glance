@@ -1046,15 +1046,30 @@ impl Content {
         }
     }
 
+    /// Whether it shows the workbench's lanes (torn off its panel), not the readings'.
+    fn workbench(&self) -> bool {
+        match self {
+            Content::Readings(readings) => readings.workbench,
+            Content::Merged(merged) => merged.parts.iter().any(|part| matches!(part, Content::Readings(readings) if readings.workbench)),
+            Content::Music(_) => false,
+        }
+    }
+
+    /// `theme` as it is drawn in: the workbench's with no bar under its lanes (its buttons are over it, as every
+    /// widget's are; the bar held only how long the PC has been up, which none of them is about).
+    fn dressed(&self, mut theme: Theme) -> Theme {
+        if self.workbench() {
+            theme.bar_gap = 0.0;
+            theme.bar_height = 0.0;
+        }
+        theme
+    }
+
     /// The preferences its readings are drawn by, where they are not the panel's (`prefs`): without the music lane
     /// (what plays is a widget of its own); merged with what plays as one of their lanes, with it, on.
     fn prefs(&self, prefs: &crate::ui::prefs::Prefs) -> Option<crate::ui::prefs::Prefs> {
         // The workbench's lanes, for readings torn off its panel.
-        let workbench = match self {
-            Content::Readings(readings) => readings.workbench,
-            Content::Merged(merged) => merged.parts.iter().any(|part| matches!(part, Content::Readings(readings) if readings.workbench)),
-            Content::Music(_) => false,
-        };
+        let workbench = self.workbench();
         let mut prefs = if workbench { prefs.clone().holding(crate::settings::Part::Workbench) } else { prefs.clone() };
         // One lane alone: that one, on, whatever else the panel shows (taken out of the edge since, or switched off
         // there, it is still what this widget shows).
@@ -1289,6 +1304,26 @@ impl Widgets {
         let Some(widget) = self.list.iter_mut().find(|widget| widget.content.holding(&only).is_some()) else { return false };
         widget.window.raise();
         widget.next_frame = Instant::now();
+        true
+    }
+
+    /// The note `name` pulled off the panel (or its page) onto the desktop: stuck there with its corner at `at`, in
+    /// hand, the pointer `grab` from its corner, to be put down where it is let go. Where it is stuck already, that one
+    /// raised instead (a note is never on the desktop twice); whether one was made.
+    pub fn stick_note_held(&mut self, name: &str, at: POINT, grab: POINT) -> bool {
+        if self.raise_note(name) {
+            return false;
+        }
+        let Some(contact) = monitor_at(at) else { return false };
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE)), ..Readings::new(choice) });
+        let Some(mut widget) = Widget::new(contact, at, content) else { return false };
+        // (Not torn off: the panel it came from stays, as it does as a note is stuck from its menu.)
+        widget.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: false, moved: true });
+        widget.window.yield_to(self.settings);
+        unsafe { SetCapture(widget.window.hwnd) };
+        self.list.push(widget);
+        self.save();
         true
     }
 
@@ -2955,7 +2990,7 @@ impl Widget {
         // On what plays' own ground (merged into it), dark, as that ground is.
         let on_music = self.on_music();
         let dark = on_music || theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| look.skin.sees_backdrop()));
-        let theme = Theme::new(look.skin, dark);
+        let theme = self.content.dressed(Theme::new(look.skin, dark));
         self.drawn_look = (look.skin, dark);
         // Room round it for its shadow (the skin's; what plays, its own), and above it for its buttons.
         let shadow = if matches!(self.content, Content::Music(_)) || on_music { MUSIC_SHADOW } else { theme.margin };
@@ -3282,7 +3317,7 @@ impl Widget {
         // been taken: a first frame drawn before that would show the other.
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| sees));
         let dark = dark || on_music;
-        let theme = if dark == theme.dark { theme } else { Theme::new(look.skin, dark) };
+        let theme = if dark == theme.dark { theme } else { self.content.dressed(Theme::new(look.skin, dark)) };
         let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, now);
