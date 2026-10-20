@@ -4676,6 +4676,13 @@ impl Ui {
         }
     }
 
+    /// Where the stage's whole screen is drawn in `area` (as `panel_on_stage` draws it whole).
+    fn whole_stage(&self, area: Rect) -> Rect {
+        let (sw, sh) = self.stage.size;
+        let (k, x, y) = self.staged(area, Edge::Left, 0.0, true);
+        Rect { x: area.x + x, y: area.y + y, w: sw * k, h: sh * k }
+    }
+
     /// What of the stage shows in `area`, drawn `k` DIPs to one of its own with its corner at `(x, y)` in the area
     /// (as `staged` places it): the preview's frame is drawn round that, with no empty room in it.
     fn shown_of(&self, area: Rect, k: f32, x: f32, y: f32) -> Rect {
@@ -5068,6 +5075,48 @@ mod pictures {
                 })
                 .unwrap();
                 crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
+            }
+            // The workbench carried from the library over an edge: of every screen small (the first screen's left),
+            // and of one screen large (its right).
+            for (large, name) in [(false, "layout-carry"), (true, "layout-carry-one")] {
+                with_ui(|ui| {
+                    ui.turn_to(Page::Layout);
+                    ui.view = None;
+                    ui.draw(Instant::now());
+                    // (A screen's picture, the largest of what shows one: the buttons above them show one too.)
+                    let screen = ui.targets.iter().filter(|(_, target)| matches!(target, Target::View(Some(_)))).max_by(|a, b| (a.0.w * a.0.h).total_cmp(&(b.0.w * b.0.h))).map(|(r, target)| (*r, target.clone())).unwrap();
+                    if large {
+                        ui.press_editor(&screen.1);
+                    }
+                    ui.carry = Some(layout_page::Carry { part: crate::settings::Part::Workbench, from: None, start: (0.0, 0.0), moved: true });
+                    ui.pointer = Some((screen.0.x + 8.0, screen.0.y + screen.0.h / 2.0));
+                    ui.draw(Instant::now());
+                    if large {
+                        let zone = ui.targets.iter().find_map(|(r, target)| matches!(target, Target::Zone(_, Edge::Right)).then_some(*r)).unwrap();
+                        ui.pointer = Some((zone.x + zone.w - 20.0, zone.y + zone.h / 2.0));
+                    }
+                });
+                for _ in 0..12 {
+                    with_ui(|ui| ui.draw(Instant::now()));
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+                let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+                let size = ((cw * scale).round() as u32, (ch * scale).round() as u32);
+                let pixels = gfx
+                    .draw_offscreen(size, scale, |frame| {
+                        with_ui(|ui| {
+                            fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                            ui.paint(frame, Instant::now())
+                        });
+                    })
+                    .unwrap();
+                crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
+                with_ui(|ui| {
+                    ui.carry = None;
+                    ui.pointer = None;
+                    ui.view = None;
+                    ui.shown_edge = None;
+                });
             }
         }
         unsafe {

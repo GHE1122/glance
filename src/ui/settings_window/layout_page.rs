@@ -36,6 +36,12 @@ const ZONE_TOP_LARGE: f32 = 48.0;
 const CHIP_SMALL: f32 = 22.0;
 const CHIP: f32 = 28.0;
 const EDGE_LINE: f32 = 3.0;
+/// While a component is carried: how far into a screen each edge's glow reaches (drawn small, and one screen large),
+/// and how strong it is at the edge (every edge, and the one under the pointer); how thick that edge's line grows.
+const GLOW_SMALL: f32 = 32.0;
+const GLOW_LARGE: f32 = 96.0;
+const GLOW: (f32, f32) = (0.25, 0.75);
+const EDGE_LINE_OVER: f32 = 5.0;
 /// How far the pointer moves before a press on a component carries it.
 const CARRY_FROM: f32 = 4.0;
 
@@ -347,7 +353,18 @@ impl Ui {
     /// and its edges with what they open.
     fn paint_one_screen(&mut self, frame: &Frame, palette: &Palette, places: &Places, screen: &str, canvas: Rect, hovered: &Option<Target>) -> Option<f32> {
         let index = self.screens.iter().position(|known| known.id == screen)?;
-        let held = self.shown_edge.and_then(|edge| Some((edge, places.part(screen, edge)?)));
+        // While one is carried over an edge, what it would open there; else what the edge last pressed opens. (The
+        // screen is drawn whole wherever a panel is: where it is is known before it is drawn.)
+        let r = self.whole_stage(canvas);
+        let carried = self.carry.as_ref().filter(|carry| carry.moved).and_then(|carry| {
+            let (x, y) = self.pointer?;
+            let edge = EDGES.into_iter().find(|&edge| {
+                let zone = zone_of(r, edge, ZONE_LARGE, ZONE_TOP_LARGE);
+                x >= zone.x && x < zone.x + zone.w && y >= zone.y && y < zone.y + zone.h
+            })?;
+            Some((edge, carry.part))
+        });
+        let held = carried.or_else(|| self.shown_edge.and_then(|edge| Some((edge, places.part(screen, edge)?))));
         let (creep, r) = match held {
             Some((edge, Part::Music)) => self.music_on_stage(frame, canvas, edge),
             Some((edge, part)) => {
@@ -405,23 +422,24 @@ impl Ui {
         let deep_top = if large { ZONE_TOP_LARGE } else { ZONE_SMALL.min(r.h / 4.0) };
         let carrying = self.carry.as_ref().is_some_and(|carry| carry.moved);
         let pale = Color::hex(0xFFFFFF, 0.55);
+        let now = Instant::now();
         for edge in EDGES {
             let upright = edge != Edge::Top;
-            let zone = match edge {
-                Edge::Left => Rect { x: r.x, y: r.y, w: deep, h: r.h },
-                Edge::Right => Rect { x: r.x + r.w - deep, y: r.y, w: deep, h: r.h },
-                Edge::Top => Rect { x: r.x + deep, y: r.y, w: r.w - 2.0 * deep, h: deep_top },
-            };
+            let zone = zone_of(r, edge, deep, deep_top);
             let part = places.part(screen, edge);
             let over = carrying && self.pointer.is_some_and(|(x, y)| x >= zone.x && x < zone.x + zone.w && y >= zone.y && y < zone.y + zone.h);
-            // While a component is carried, every edge shows where it takes it; the one under the pointer, more.
-            if carrying {
-                fill(frame, palette.selection.alpha(if over { 0.32 } else { 0.12 }), zone.x, zone.y, zone.w, zone.h, 6.0);
+            // While a component is carried, every edge glows where it takes it, the one under the pointer more, each
+            // easing to how it is; and the screen pointed at, large, shows what its edge would open lighter.
+            let glow = self.animate(format!("glow:{screen}:{edge:?}:{large}"), if over { GLOW.1 } else if carrying { GLOW.0 } else { 0.0 }, SLIDE, now, false);
+            if glow > 0.0 {
+                edge_glow(frame, r, edge, if large { GLOW_LARGE } else { GLOW_SMALL }.min(if upright { r.w } else { r.h } / 3.0), palette.selection, glow);
             } else if large && hovered.as_ref() == Some(&Target::Zone(screen.to_string(), edge)) {
-                fill(frame, Color::hex(0xFFFFFF, 0.14), zone.x, zone.y, zone.w, zone.h, 6.0);
+                edge_glow(frame, r, edge, GLOW_LARGE.min(if upright { r.w } else { r.h } / 3.0), Color::hex(0xFFFFFF, 1.0), 0.22);
             }
-            // The line along the edge, stretch by stretch.
-            let colour = if part.is_some() { palette.selection } else { pale };
+            // The line along the edge, stretch by stretch: in the accent while one is carried (thicker where it would
+            // go), else where the edge opens anything.
+            let colour = if part.is_some() || carrying { palette.selection } else { pale };
+            let line = EDGE_LINE + (EDGE_LINE_OVER - EDGE_LINE) * ((glow - GLOW.0) / (GLOW.1 - GLOW.0)).clamp(0.0, 1.0);
             // (Each kept clear of the corners, and of the line along the top: they meet none.)
             let corner = 2.0 + EDGE_LINE + MAP_RADIUS * 2.0;
             let (from, to) = if upright { (r.y + corner, r.y + r.h - corner) } else { (r.x + corner, r.x + r.w - corner) };
@@ -431,9 +449,9 @@ impl Ui {
                     continue;
                 }
                 let bar = |a: f32, b: f32| match edge {
-                    Edge::Left => fill(frame, colour, r.x + 2.0, a, EDGE_LINE, b - a, EDGE_LINE / 2.0),
-                    Edge::Right => fill(frame, colour, r.x + r.w - 2.0 - EDGE_LINE, a, EDGE_LINE, b - a, EDGE_LINE / 2.0),
-                    Edge::Top => fill(frame, colour, a, r.y + 2.0, b - a, EDGE_LINE, EDGE_LINE / 2.0),
+                    Edge::Left => fill(frame, colour, r.x + 2.0, a, line, b - a, line / 2.0),
+                    Edge::Right => fill(frame, colour, r.x + r.w - 2.0 - line, a, line, b - a, line / 2.0),
+                    Edge::Top => fill(frame, colour, a, r.y + 2.0, b - a, line, line / 2.0),
                 };
                 if seam {
                     let count = ((b - a + MAP_GAP) / (MAP_DASH + MAP_GAP)).floor().max(1.0);
@@ -446,10 +464,13 @@ impl Ui {
                     bar(a, b);
                 }
             }
-            // What it holds, in a pill at its middle (going, while one carried is over it to take its place); none
-            // while its panel shows there, slid out over where it would be (pressed again, the edge puts it away).
+            // What it holds, in a pill at its middle; none while its panel shows there, slid out over where it would
+            // be (pressed again, the edge puts it away). While one carried is over it, what would take its place:
+            // that one's pill, or on one screen large its panel (see `paint_one_screen`), not a pill.
             let showing = large && !carrying && self.shown_edge == Some(edge);
-            if let Some(part) = part.filter(|_| !showing) {
+            let carried = self.carry.as_ref().filter(|carry| carry.moved).map(|carry| carry.part);
+            let held = if over { carried.filter(|_| !large) } else { part.filter(|_| !showing) };
+            if let Some(part) = held {
                 let (w, h) = if large { (self.chip_width(frame, part), CHIP) } else { (CHIP_SMALL, CHIP_SMALL) };
                 let rect = match edge {
                     Edge::Left => Rect { x: r.x + 10.0, y: zone.y + (zone.h - h) / 2.0, w, h },
@@ -458,9 +479,9 @@ impl Ui {
                 };
                 let lifted = self.carry.as_ref().is_some_and(|carry| carry.moved && carry.from.as_ref().is_some_and(|(s, e)| s == screen && *e == edge));
                 let pointed = hovered.as_ref().is_some_and(|target| matches!(target, Target::Chip(s, e, _) | Target::Unplace(s, e) if s == screen && *e == edge));
-                self.chip(frame, palette, part, rect, large, if lifted || over { 0.35 } else { 1.0 }, large.then_some(pointed && !carrying));
+                self.chip(frame, palette, part, rect, large, if lifted && !over { 0.35 } else { 1.0 }, large.then_some(pointed && !carrying));
                 // What takes a press: the pill's button first, then the pill.
-                if large {
+                if large && !over {
                     self.targets.push((Rect { x: rect.x + rect.w - CHIP, y: rect.y, w: CHIP, h: rect.h }, Target::Unplace(screen.to_string(), edge)));
                 }
                 self.targets.push((rect, Target::Chip(screen.to_string(), edge, part)));
@@ -599,5 +620,55 @@ impl Ui {
             }
         }
         stops
+    }
+}
+
+/// Where edge `edge` of a screen drawn at `r` takes a drop: `deep` into it from a side, `deep_top` from its top
+/// (the top's between the sides').
+fn zone_of(r: Rect, edge: Edge, deep: f32, deep_top: f32) -> Rect {
+    match edge {
+        Edge::Left => Rect { x: r.x, y: r.y, w: deep, h: r.h },
+        Edge::Right => Rect { x: r.x + r.w - deep, y: r.y, w: deep, h: r.h },
+        Edge::Top => Rect { x: r.x + deep, y: r.y, w: r.w - 2.0 * deep, h: deep_top },
+    }
+}
+
+/// A glow along edge `edge` of a screen drawn at `r`, `color` at `strength` on the edge fading to nothing `reach`
+/// into the screen, inside the screen's rounded corners.
+fn edge_glow(frame: &Frame, r: Rect, edge: Edge, reach: f32, color: Color, strength: f32) {
+    let dc = &frame.dc;
+    let (start, end) = match edge {
+        Edge::Left => ((r.x, r.y), (r.x + reach, r.y)),
+        Edge::Right => ((r.x + r.w, r.y), (r.x + r.w - reach, r.y)),
+        Edge::Top => ((r.x, r.y), (r.x, r.y + reach)),
+    };
+    let band = match edge {
+        Edge::Left => Rect { x: r.x, y: r.y, w: reach, h: r.h },
+        Edge::Right => Rect { x: r.x + r.w - reach, y: r.y, w: reach, h: r.h },
+        Edge::Top => Rect { x: r.x, y: r.y, w: r.w, h: reach },
+    };
+    // (Eased off, not straight: brightest along the edge itself.)
+    let stops = [
+        D2D1_GRADIENT_STOP { position: 0.0, color: color.alpha(color.a * strength).d2d() },
+        D2D1_GRADIENT_STOP { position: 0.35, color: color.alpha(color.a * strength * 0.45).d2d() },
+        D2D1_GRADIENT_STOP { position: 1.0, color: color.alpha(0.0).d2d() },
+    ];
+    unsafe {
+        let Ok(stops) = ID2D1RenderTarget::CreateGradientStopCollection(dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+        let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: start.0, Y: start.1 }, endPoint: Vector2 { X: end.0, Y: end.1 } };
+        let Ok(brush) = dc.CreateLinearGradientBrush(&line, None, &stops) else { return };
+        let Ok(mask) = frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(r, MAP_RADIUS * 2.0)) else { return };
+        let layer = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: rect(band.x, band.y, band.w, band.h),
+            geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: 1.0,
+            ..Default::default()
+        };
+        dc.PushLayer(&layer, None);
+        dc.FillRectangle(&rect(band.x, band.y, band.w, band.h), &brush);
+        dc.PopLayer();
+        drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
     }
 }
