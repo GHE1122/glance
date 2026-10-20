@@ -931,6 +931,13 @@ fn note_card_fill(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colou
     }
 }
 
+/// How much a lane's marks of which page it is (its dots, "2/5") show, turned to `turned` (pages, as far along as they
+/// are): whole at a page, faded out as it is turned from it (by a quarter page on, its pages well apart), back as the
+/// next is come to (not over the pages as they go).
+fn page_marks_show(turned: f32) -> f32 {
+    (1.0 - (turned - turned.round()).abs() * 4.0).max(0.0)
+}
+
 /// The gap between a lane's pages side by side as they are turned, and between them and its edge (see `page_place`).
 const PAGE_GAP: f32 = 10.0;
 
@@ -4999,25 +5006,28 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             }
             frame.unclip();
             frame.key("");
-            // Its dots and a new one where they are whichever is shown, in its ink.
+            // Its dots and a new one where they are whichever is shown, in its ink (its marks of which page it is
+            // faded as it is turned: see `page_marks_show`).
+            let marks = page_marks_show(turned);
+            let (dots_ink, said_ink) = (title_ink.alpha(title_ink.a * marks), faint.alpha(faint.a * marks));
             match shape {
                 Shape::Down => {
-                    if many {
-                        paint_dots(frame, notes.len(), turned, x + w / 2.0, y + h - MEDIA_ROW - 9.0, title_ink, theme.small, w);
+                    if many && marks > 0.0 {
+                        paint_dots(frame, notes.len(), turned, x + w / 2.0, y + h - MEDIA_ROW - 9.0, dots_ink, theme.small, w);
                     }
                     paint_add_on(frame, scene, hits, x + (w - MEDIA_ROW) / 2.0, y + h - MEDIA_ROW, MEDIA_ROW, title_ink);
                 }
                 Shape::Across => {
                     let middle = y + h / 2.0;
-                    if many {
-                        paint_dots(frame, notes.len(), turned, x + w - MEDIA_ROW - 4.0 - dots / 2.0, middle, title_ink, theme.small, dots_room);
+                    if many && marks > 0.0 {
+                        paint_dots(frame, notes.len(), turned, x + w - MEDIA_ROW - 4.0 - dots / 2.0, middle, dots_ink, theme.small, dots_room);
                     }
                     paint_add_on(frame, scene, hits, x + w - MEDIA_ROW, middle - MEDIA_ROW / 2.0, MEDIA_ROW, title_ink);
                 }
                 // (Which of them it is in the corner.)
-                Shape::Least if many && w.min(h) >= 44.0 => {
+                Shape::Least if many && w.min(h) >= 44.0 && marks > 0.0 => {
                     let said = format!("{}/{}", turned.round() as usize + 1, notes.len());
-                    frame.text(&said, theme.small, faint, x, y + h - LINE, w, Align::End);
+                    frame.text(&said, theme.small, said_ink, x, y + h - LINE, w, Align::End);
                 }
                 Shape::Least => {}
             }
@@ -6098,6 +6108,19 @@ six".into()));
             let ((a, a_left, _), (b, b_left, _)) = (page_place(wide, -0.5), page_place(wide, 0.5));
             assert!((a - b).abs() < 1e-6 && (b_left - (a_left + a * wide) - PAGE_GAP).abs() < 1e-3);
             assert!((a_left - PAGE_GAP).abs() < 1e-3 && (wide - b_left - b * wide - PAGE_GAP).abs() < 1e-3);
+        }
+    }
+
+    /// A lane's marks of which page it is: whole at a page, gone a quarter page from it and on, fading between.
+    #[test]
+    fn page_marks_fade_as_pages_turn() {
+        for page in [0.0, 1.0, 4.0] {
+            assert_eq!(page_marks_show(page), 1.0);
+            for off in [0.25, 0.4, 0.5, 0.6, 0.75] {
+                assert_eq!(page_marks_show(page + off), 0.0, "{page} + {off}");
+            }
+            let near = page_marks_show(page + 0.1);
+            assert!(near > 0.0 && near < 1.0 && page_marks_show(page + 0.05) > near && (page_marks_show(page + 0.9) - near).abs() < 1e-5);
         }
     }
 
