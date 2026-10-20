@@ -1230,12 +1230,14 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         if scene.hover == Some(hit) {
             frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, (if named { cell_w } else { APP_SIDE }) + 4.0, cell_h + 4.0, plate_round(theme, GLASS_ROW_ROUND, 2.0));
         }
+        frame.key(&format!("app.{target}"));
         paint_app(frame, theme, name, target, px, y, APP_SIDE);
         if named {
             centred(frame, &fitted(frame, name, theme.small, cell_w), theme.small, theme.text2, x, y + APP_SIDE + 4.0, cell_w);
         }
         placed.push((x, y, if named { cell_w } else { APP_SIDE }, cell_h, hit));
     }
+    frame.key("");
     if let Some((held, point)) = scene.thumbs.app_held() {
         placed.retain(|hit| !matches!(hit.4, Hit::App(_)));
         if let Some((name, target)) = apps.iter().find(|(_, target)| target == held) {
@@ -1477,7 +1479,23 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     blocks
 }
 
+/// The least a list at a lane's foot is shown in (a couple of rows; the rest scrolled to), as its lane is made
+/// shorter than it is laid out (a workbench widget sized down: see `Layout::fitted`).
+const LIST_LEAST: f32 = 96.0;
+
+/// The least a workbench lane is drawn across (DIPs, its padding in): its things laid out again for the width it has
+/// down to this.
+pub const LANE_LEAST: f32 = 220.0;
+
 impl Block {
+    /// How tall a list at a lane's foot is laid out (what of it may give way, down to `LIST_LEAST`); none for others.
+    fn list_tall(&self) -> Option<f32> {
+        match self {
+            Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } => Some(*tall),
+            _ => None,
+        }
+    }
+
     fn height(&self) -> f32 {
         match self {
             Block::Head { .. } => HEAD + HEAD_GAP,
@@ -1683,6 +1701,23 @@ pub fn heights(scene: &Scene) -> Vec<(String, [f32; 2])> {
         .iter()
         .filter(|entry| shows_module(entry))
         .filter_map(|entry| Some((entry.id.clone(), [height(&entry.id, Detail::Full)?, height(&entry.id, Detail::Compact)?])))
+        .collect()
+}
+
+/// The least each lane of `heights` may be drawn as tall as (its list at its foot given way to `LIST_LEAST`), in the
+/// same order.
+pub fn least_heights(scene: &Scene) -> Vec<f32> {
+    scene
+        .prefs
+        .modules
+        .iter()
+        .filter(|entry| shows_module(entry))
+        .filter_map(|entry| {
+            let blocks = lane(scene, &entry.id, Detail::Full)?;
+            let natural = scene.theme.pad_top + scene.theme.pad_bottom + blocks.iter().map(Block::height).sum::<f32>();
+            let gives = blocks.last().and_then(Block::list_tall).map_or(0.0, |tall| (tall - LIST_LEAST).max(0.0));
+            Some(natural - gives)
+        })
         .collect()
 }
 
@@ -2587,6 +2622,24 @@ impl Layout {
         self
     }
 
+    /// The same, as large as `size` (DIPs) whatever it is laid out as: its columns as wide as that leaves them, and as
+    /// tall (shorter, its lanes' lists given way: see `paint_lane`). A workbench widget's, laid out again for its size,
+    /// not scaled to it.
+    pub fn fitted(mut self, size: (f32, f32)) -> Self {
+        let chrome = self.outer.0 + self.outer.2 + self.rail_down() + self.bar_gap + self.bar_height;
+        self.column_width = (size.0 - self.rail_across() - (self.columns - 1) as f32 * self.column_gap) / self.columns as f32;
+        self.lanes_height = size.1 - chrome;
+        self.grow = 0.0;
+        self
+    }
+
+    /// How what it shows flows in its columns: how many of the station's cards, and of quick launch's things, go
+    /// across one (as it is laid out again for another width, these change by steps: see `widget`'s turns).
+    pub fn flow(&self, theme: &Theme) -> (usize, usize) {
+        let inner = self.column_width - 2.0 * theme.pad_x;
+        (cards_across(inner), ((inner / APP_CELL_W) as usize).max(1))
+    }
+
     /// How much each lane's charts may grow, in order of the lanes: its
     /// column's share of what the layout was stretched by.
     pub fn grows(&self) -> Vec<f32> {
@@ -2736,7 +2789,11 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
     // The room the lane is given past what its blocks take (a column's lanes share what is left over): a list at its
     // foot takes it, its things down to the lane's foot, not stopping part way.
     let natural = theme.pad_top + theme.pad_bottom + lane.blocks.iter().map(Block::height).sum::<f32>() + taller * charts as f32;
-    let spare = if lane.blocks.last().is_some_and(|block| matches!(block, Block::Shelf { .. } | Block::Copies { .. } | Block::Recent { .. } | Block::Notes { .. })) { (area.h - natural).max(0.0) } else { 0.0 };
+    // (Given less, as a workbench widget is sized down, it gives way down to `LIST_LEAST`.)
+    let spare = match lane.blocks.last().and_then(Block::list_tall) {
+        Some(tall) => (area.h - natural).max(LIST_LEAST.min(tall) - tall),
+        None => 0.0,
+    };
     // Each part named by its lane and what it is, the small layouts naming
     // theirs alike (see `morph`): the CPU's figure is "cpu.value" in both.
     let id = &lane.id;
@@ -3605,6 +3662,8 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
             continue;
         }
         let pressed = hit(tile, at);
+        // (Named, each, that it moves from where it was as they flow anew: see `morph`.)
+        frame.key(&format!("tile.{pressed:?}"));
         let lit = scene.hover == Some(pressed);
         let words = if lit { theme.text } else { theme.text2 };
         let shown = match shows {
@@ -3649,6 +3708,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         hits.extend(shown_in((x, y, place.w, place.h, pressed), (left - 4.0, top, width + 8.0, tall)));
         name_shown(hits, pressed, &tile.label, &shown);
     }
+    frame.key("");
     frame.unclip();
     // What the wheel scrolls (after its things: a press finds a thing before the list it is on).
     if most > 0.0 {
@@ -4865,6 +4925,29 @@ six".into()));
         let mut hits = Vec::new();
         paint_apps(&Nothing, &scene, (0.0, top, width), &apps, APP_ROWS, true, false, &mut hits);
         within(&hits, top, APP_ROWS as f32 * APP_CELL_H + (APP_ROWS - 1) as f32 * APP_GAP, "apps");
+    }
+
+    /// A workbench laid out again for a size (a widget sized): as large as that, narrower and shorter than designed
+    /// too; its station's things flowing across the width it has, its list shown in the height left, down to its least.
+    #[test]
+    fn a_workbench_is_laid_out_again_for_its_size() {
+        let theme = Theme::new(Skin::Glass, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let heights: Vec<f32> = heights(&scene).iter().map(|(_, h)| h[0]).collect();
+        let designed = Layout::with_columns(heights.clone(), 1, &theme);
+        let least = Layout::with_columns(least_heights(&scene), 1, &theme);
+        assert!(least.height() < designed.height());
+        for size in [(designed.width() - 100.0, designed.height() - 80.0), (designed.width() + 150.0, designed.height() + 120.0)] {
+            let layout = designed.clone().fitted(size);
+            assert!((layout.width() - size.0).abs() < 0.01 && (layout.height() - size.1).abs() < 0.01, "{size:?}");
+            assert!((layout.lanes()[0].w - size.0 + 2.0 * 0.0).abs() < 60.0);
+        }
+        let narrow = designed.clone().fitted((240.0, designed.height()));
+        let wide = designed.clone().fitted((designed.width() + 150.0, designed.height()));
+        assert!(narrow.flow(&theme).0 < wide.flow(&theme).0, "{:?} {:?}", narrow.flow(&theme), wide.flow(&theme));
     }
 
     /// The station's head's menu button, on each page, found first by a press on it (a menu opens), in every skin.

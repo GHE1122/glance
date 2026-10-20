@@ -3035,6 +3035,24 @@ impl Widget {
             Content::Readings(readings) => {
                 let shown = match readings.last.clone().filter(|last| only_moved && last.form == readings.choice.form) {
                     Some(last) => last,
+                    // The workbench's lanes: laid out again for the size it is made (its columns as wide, its lists as
+                    // tall), not scaled to it, down to its least (see `view::LANE_LEAST`, `view::least_heights`).
+                    None if readings.workbench => {
+                        let heights = view::heights(&scene);
+                        let columns = match readings.choice.form {
+                            Form::Lanes { columns, .. } => columns.min(heights.len()).max(1),
+                            Form::Small(_) => 1,
+                        };
+                        let designed = view::Layout::with_columns(heights.iter().map(|(_, h)| h[0]).collect(), columns, &theme);
+                        let least = view::Layout::with_columns(view::least_heights(&scene), columns, &theme);
+                        let least = (designed.width() - columns as f32 * (view::COLUMN_WIDTH - view::LANE_LEAST), least.height().min(designed.height()));
+                        let wanted = sized_to.unwrap_or((designed.width() + readings.choice.extra.0, designed.height() + readings.choice.extra.1));
+                        let size = within(wanted, least);
+                        let form = Form::Lanes { detail: view::Detail::Full, columns };
+                        readings.choice = Choice { form, scale: 1.0, extra: (size.0 - designed.width(), size.1 - designed.height()) };
+                        let layout = designed.fitted(size);
+                        Shown { form, zoom: 1.0, size: (layout.width(), layout.height()), layout, small: None, detail: view::Detail::Full }
+                    }
                     None => {
                         let heights = view::heights(&scene);
                         let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
@@ -3056,7 +3074,10 @@ impl Widget {
                 self.shown = shown.size;
                 // Another layout: what showed turns into it, from where it is now if
                 // it was still turning.
-                if let Some(last) = readings.last.take().filter(|last| last.form != shown.form || last.layout.heights.len() != shown.layout.heights.len()) {
+                // (The workbench's: as its things flow anew across its columns too, cards and quick launch's things a
+                // row more or less.)
+                let flowed = |last: &Shown| readings.workbench && last.layout.flow(&theme) != shown.layout.flow(&theme);
+                if let Some(last) = readings.last.take().filter(|last| last.form != shown.form || last.layout.heights.len() != shown.layout.heights.len() || flowed(last)) {
                     note(format!("widget: {} -> {}", last.form.key(), shown.form.key()));
                     let before = if readings.morph.is_some() { Before::Drawn(std::mem::take(&mut readings.drawn)) } else { Before::Shown(last) };
                     readings.morph = Some((now, before));
