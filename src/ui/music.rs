@@ -2446,7 +2446,7 @@ const DOWN_ROW: f32 = 1.2;
 
 /// Whether `text` is in a script written down a character under another (Chinese, Japanese, Korean): others are set
 /// in rows across, as narrow as the strip, as they are never written down.
-fn written_down(text: &str) -> bool {
+pub(crate) fn written_down(text: &str) -> bool {
     text.chars().any(|c| matches!(c as u32, 0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF))
 }
 

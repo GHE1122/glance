@@ -153,6 +153,9 @@ pub enum Hit {
     Sort(ProcessSort),
     /// A list scrolled through (the processes', the station's), and how far it scrolls (DIPs, as `f32::to_bits`).
     List(List, u32),
+    /// A list turned through by pages (see `PAGE`), as far as it turns; and the way to its next page.
+    Pages(List, u32),
+    NextPage(List, u32),
     /// The overlay's switch.
     Overlay,
     /// The game button: the window in front taken for a game, or games turned off (see `presents::GameMode`).
@@ -262,6 +265,14 @@ impl Hit {
             _ => None,
         }
     }
+
+    /// The list turned through by pages it is, and how far it turns, for a hit on one.
+    pub fn pages(self) -> Option<(List, f32)> {
+        match self {
+            Hit::Pages(list, bits) | Hit::NextPage(list, bits) => Some((list, f32::from_bits(bits))),
+            _ => None,
+        }
+    }
 }
 
 /// A list a lane is scrolled through by the wheel.
@@ -301,6 +312,8 @@ impl Tab {
 pub struct Scrolls {
     at: [f32; 6],
     to: [f32; 6],
+    /// Where each list turned by pages is turned to, before it comes to a page (see `turn_pages`).
+    turning: [f32; 6],
     /// What each shows (see `lists_show`), as it was scrolled for it.
     shows: [u8; 6],
 }
@@ -315,6 +328,17 @@ impl Scrolls {
     pub fn turn(&mut self, list: List, by: f32, most: f32) {
         let to = &mut self.to[list as usize];
         *to = (*to + by).clamp(0.0, most);
+    }
+
+    /// `list`, turned through by pages `page` long, to be turned `by` more (DIPs), within `most`: to the page nearest
+    /// where that comes to (half a page turned by a touchpad goes on to the next; turned less, it goes back).
+    pub fn turn_pages(&mut self, list: List, by: f32, page: f32, most: f32) {
+        let (to, turning) = (&mut self.to[list as usize], &mut self.turning[list as usize]);
+        if (*turning - *to).abs() > page / 2.0 {
+            *turning = *to;
+        }
+        *turning = (*turning + by).clamp(0.0, most);
+        *to = ((*turning / page).round() * page).clamp(0.0, most);
     }
 
     /// Each list `dt` seconds nearer where it is going (`ease`: the seconds it takes to come most of the way);
@@ -338,7 +362,7 @@ impl Scrolls {
     pub fn follow(&mut self, shows: [u8; 6]) {
         for list in 0..shows.len() {
             if self.shows[list] != shows[list] {
-                (self.at[list], self.to[list]) = (0.0, 0.0);
+                (self.at[list], self.to[list], self.turning[list]) = (0.0, 0.0, 0.0);
             }
         }
         self.shows = shows;
@@ -504,6 +528,9 @@ pub enum Bench {
     /// The time, and the day.
     Time { figure: String, unit: String, date: String },
 }
+
+/// The most of a note's lines under its title a workbench lane in a shape shows (as many as its room takes).
+const BENCH_LINES: usize = 12;
 
 /// How tall a workbench lane in a shape is laid out (it is drawn in all the room it is given).
 const BENCH: f32 = 36.0;
@@ -3250,7 +3277,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             }
             (Block::Bench(what), Pass::Content) => {
                 let room = (left, y, width, (area.y + area.h - pad_bottom - y).max(0.0));
-                paint_bench(frame, scene, ink, room, what, Shape::of((room.2, room.3)), hits);
+                paint_bench(frame, scene, ink, room, area, what, Shape::of((room.2, room.3)), hits);
             }
             (Block::Notes { notes, view, tall, alone }, Pass::Content) => {
                 paint_notes(frame, scene, (left, y + if *alone { 0.0 } else { SHELF_GAP }, width), notes, *view, *tall + spare, hits);
@@ -4405,7 +4432,7 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
             };
             Bench::Station { tiles, tab }
         }
-        "notes" => Bench::Notes(crate::notes::shown().iter().enumerate().map(|(at, note)| note_card(at, note, lang, now, 1)).collect()),
+        "notes" => Bench::Notes(crate::notes::shown().iter().enumerate().map(|(at, note)| note_card(at, note, lang, now, BENCH_LINES)).collect()),
         "apps" => Bench::Apps(crate::station::apps::shown().iter().map(|app| (app.name.clone(), app.target.clone())).collect()),
         "time" => {
             let now = text::Local::at(scene.latest().t);
@@ -4431,224 +4458,391 @@ fn text_down(frame: &dyn Canvas, text: &str, font: Font, color: Color, x: f32, t
 
 /// The button that writes a new note, `side` square at (`left`, `top`).
 fn paint_add(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, left: f32, top: f32, side: f32) {
+    paint_add_on(frame, scene, hits, left, top, side, scene.theme.text);
+}
+
+/// The same, on a ground its words are `ink` on (a note's).
+fn paint_add_on(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, left: f32, top: f32, side: f32, ink: Color) {
     let theme = scene.theme;
     let lit = scene.hover == Some(Hit::NewNote);
     if lit {
         frame.fill_rounded(theme.hover, left, top, side, side, theme.control_radius.min(side / 2.0));
     }
-    frame.icon(Icon::Add, Point { x: left + side / 2.0, y: top + side / 2.0 }, (side * 0.62).min(15.0), if lit { theme.text } else { theme.text2 });
+    frame.icon(Icon::Add, Point { x: left + side / 2.0, y: top + side / 2.0 }, (side * 0.62).min(15.0), ink.alpha(ink.a * if lit { 1.0 } else { 0.72 }));
     hits.push((left, top, side, side, Hit::NewNote));
 }
 
-/// A workbench lane drawn as `shape` in `area` (x, y, width, height: all of it, its padding in): its things in a row
-/// or a column, as many as fit (how many more, after them), each named as in its whole lane (they move between the
-/// two as the widget is sized: see `morph`); or the least, one and how many.
-#[allow(clippy::too_many_arguments)]
-fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y, w, h): (f32, f32, f32, f32), what: &Bench, shape: Shape, hits: &mut Vec<HitBox>) {
-    let theme = scene.theme;
-    let gap = 6.0;
-    // Places along it for `count` things `side` square, after `lead` of it: as many as fit (the last marked with how many
-    // more there are, where they do not all fit).
-    let places = |count: usize, side: f32, lead: f32| -> (Vec<(f32, f32)>, usize) {
-        let room = if shape == Shape::Down { h - lead } else { w - lead };
-        let fit = if side > 0.0 { ((room + gap) / (side + gap)).floor().max(0.0) as usize } else { 0 };
-        let shown = count.min(fit);
-        let at = |n: usize| {
-            let along = lead + n as f32 * (side + gap);
-            if shape == Shape::Down { (x + (w - side) / 2.0, y + along) } else { (x + along, y + (h - side) / 2.0) }
-        };
-        ((0..shown).map(at).collect(), count - shown)
-    };
-    let more = |frame: &dyn Canvas, n: usize, (px, py): (f32, f32), side: f32| {
-        if n > 0 && side >= BADGE {
-            let badge = format!("+{n}");
-            paint_badge(frame, theme, &badge, theme.text2, px + side - badge_width(frame, theme, &badge), py + side - BADGE / 2.0);
+/// How far a page of a paged grid is turned in its list's scroll (DIPs): as far as a notch of the wheel turns a list,
+/// so a notch turns a page.
+pub const PAGE: f32 = TABLE_ROW * crate::panel::WHEEL_ROWS;
+/// The room under a grid two rows tall or more: its pages' dots, or the name of the thing under the pointer.
+const GRID_FOOT: f32 = 18.0;
+/// The room under a cell for its name, where the cells are named.
+const GRID_NAME: f32 = 17.0;
+const GRID_GAP: f32 = 10.0;
+
+/// A grid of things as a phone's large folder sets them: so many across and down, each cell `cell` square (its name
+/// under it where `named`), its corner at (`x`, `y`), and `foot` under it.
+struct Grid {
+    cols: usize,
+    rows: usize,
+    cell: f32,
+    named: bool,
+    x: f32,
+    y: f32,
+    foot: f32,
+}
+
+impl Grid {
+    /// The grid in the room `(x, y, w, h)` of cells about `near` square: as many across and down as that comes to,
+    /// named where `names` says and it is three across and two down or more (smaller, the name under the pointer is said
+    /// in its foot instead).
+    fn in_room((x, y, w, h): (f32, f32, f32, f32), near: f32, names: bool) -> Grid {
+        let gap = GRID_GAP;
+        let fit = |room: f32, each: f32| (((room + gap) / (each + gap)).round().max(1.0)) as usize;
+        let cols = fit(w, near);
+        let foot = if fit(h, near) >= 2 { GRID_FOOT } else { 0.0 };
+        let named = names && cols >= 3 && fit(h - foot, near + GRID_NAME) >= 2;
+        let name = if named { GRID_NAME } else { 0.0 };
+        let rows = fit(h - foot, near + name);
+        let cell = ((w - (cols - 1) as f32 * gap) / cols as f32).min((h - foot - (rows - 1) as f32 * gap) / rows as f32 - name).min(near * 1.3).max(0.0);
+        let (wide, tall) = (cols as f32 * cell + (cols - 1) as f32 * gap, rows as f32 * (cell + name) + (rows - 1) as f32 * gap);
+        Grid { cols, rows, cell, named, x: x + (w - wide) / 2.0, y: y + (h - foot - tall) / 2.0, foot }
+    }
+
+    /// Where the `n`th cell of a page is (its corner).
+    fn at(&self, n: usize) -> (f32, f32) {
+        let name = if self.named { GRID_NAME } else { 0.0 };
+        (self.x + (n % self.cols) as f32 * (self.cell + GRID_GAP), self.y + (n / self.cols) as f32 * (self.cell + name + GRID_GAP))
+    }
+}
+
+/// How `count` things go on pages of `per` cells: each page's first and how many are on it. Where they do not all go
+/// on one, the last cell of each page but the last is the way to the next (holding none of them).
+fn pages_of(count: usize, per: usize) -> Vec<(usize, usize)> {
+    if per <= 1 {
+        return (0..count.max(1)).map(|at| (at, usize::from(at < count))).collect();
+    }
+    let mut pages = Vec::new();
+    let mut from = 0;
+    loop {
+        let left = count - from;
+        if left <= per {
+            pages.push((from, left));
+            return pages;
         }
-    };
+        pages.push((from, per - 1));
+        from += per - 1;
+    }
+}
+
+/// `count` dots in a row, its middle at (`middle`, `y`), the one `at` (between two as the pages slide) drawn long.
+fn paint_dots(frame: &dyn Canvas, count: usize, at: f32, middle: f32, y: f32, ink: Color) {
+    let (dot, long, gap) = (5.0, 12.0, 4.0);
+    let wide = count as f32 * (dot + gap) - gap + (long - dot);
+    let mut x = middle - wide / 2.0;
+    for n in 0..count {
+        let near = (1.0 - (n as f32 - at).abs()).clamp(0.0, 1.0);
+        let w = dot + (long - dot) * near;
+        frame.fill_rounded(ink.alpha(ink.a * (0.4 + 0.5 * near)), x, y - dot / 2.0, w, dot, dot / 2.0);
+        x += w + gap;
+    }
+}
+
+/// What draws a thing of a grid: its index, its cell's corner and side, and whether its page is the one shown (only
+/// that one's things are pressed, and named for a turn between forms).
+type DrawCell<'a> = &'a dyn Fn(&mut Vec<HitBox>, usize, (f32, f32), f32, bool);
+
+/// A grid (see `Grid`) of `count` things in `room`, on pages turned with `list`'s scroll (see `PAGE`): each drawn by
+/// `draw`, a page sliding in as it is turned to; the last cell of a page but the last the way to the next, its next
+/// four drawn small in it by `small` (as a phone's folder shows what more it holds). In its foot, the name of the thing
+/// under the pointer (`hovered`), else the pages' dots.
+#[allow(clippy::too_many_arguments)]
+fn paint_grid(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, room: (f32, f32, f32, f32), grid: &Grid, count: usize, list: List, draw: DrawCell, small: &dyn Fn(usize, (f32, f32), f32), hovered: Option<&str>) {
+    let theme = scene.theme;
+    let (x, y, w, h) = room;
+    let pages = pages_of(count, grid.cols * grid.rows);
+    let last = (pages.len() - 1) as f32;
+    let most = last * PAGE;
+    let turned = (scene.scrolls.at(list) / PAGE).clamp(0.0, last);
+    let shown = turned.round() as usize;
+    let name = if grid.named { GRID_NAME } else { 0.0 };
+    let cell = grid.cell;
+    frame.clip(x, y, w, h - grid.foot);
+    for (page, &(from, on)) in pages.iter().enumerate() {
+        let off = page as f32 - turned;
+        if off.abs() >= 1.0 {
+            continue;
+        }
+        let dx = off * (w + GRID_GAP);
+        let current = page == shown;
+        for n in 0..on {
+            let (cx, cy) = grid.at(n);
+            draw(hits, from + n, (cx + dx, cy), cell, current);
+        }
+        // The way to the next page: a plate holding its first four, small. (A grid of one cell has no room for it: its
+        // pages are turned by the wheel alone.)
+        let Some(&(next, _)) = pages.get(page + 1).filter(|_| grid.cols * grid.rows > 1) else { continue };
+        let (cx, cy) = grid.at(on);
+        let cx = cx + dx;
+        let hit = Hit::NextPage(list, most.to_bits());
+        let round = face_round(theme, cell);
+        frame.fill_rounded(theme.hover, cx, cy, cell, cell, round);
+        if current && scene.hover == Some(hit) {
+            frame.fill_rounded(theme.hover, cx, cy, cell, cell, round);
+        }
+        let inset = cell * 0.14;
+        let side = (cell - 2.0 * inset - inset * 0.6) / 2.0;
+        for k in 0..(count - next).min(4) {
+            small(next + k, (cx + inset + (k % 2) as f32 * (side + inset * 0.6), cy + inset + (k / 2) as f32 * (side + inset * 0.6)), side);
+        }
+        if grid.named {
+            let more = scene.lang.pick("还有 {} 项", "{} more").replace("{}", &(count - next).to_string());
+            centred(frame, &fitted(frame, &more, theme.small, cell + GRID_GAP), theme.small, theme.text2, cx - GRID_GAP / 2.0, cy + cell + 2.0, cell + GRID_GAP);
+        }
+        if current {
+            hits.push((cx, cy, cell, cell + name, hit));
+        }
+    }
+    frame.unclip();
+    if grid.foot > 0.0 {
+        let middle = y + h - grid.foot / 2.0;
+        match hovered {
+            Some(said) => centred(frame, &fitted(frame, said, theme.small, w), theme.small, theme.text2, x, middle - LINE / 2.0, w),
+            None if pages.len() > 1 => paint_dots(frame, pages.len(), turned, x + w / 2.0, middle, theme.text2),
+            None => {}
+        }
+    }
+    // (Last: what is on it is found first; the wheel finds this under it.)
+    hits.push((x, y, w, h, Hit::Pages(list, most.to_bits())));
+}
+
+/// `text` in rows `width` wide in `font`, at most `most` of them (the last cut short with an ellipsis where it runs
+/// on): broken between words, or between characters where a word is too long for a row (and in Chinese).
+fn rows_of(frame: &dyn Canvas, text: &str, font: Font, width: f32, most: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut row = String::new();
+    for c in text.chars() {
+        let mut longer = row.clone();
+        longer.push(c);
+        if frame.measure(&longer, font) <= width || row.is_empty() {
+            row = longer;
+            continue;
+        }
+        // Back to the space before the word it breaks, where there is one.
+        let (kept, carried) = match row.rfind(' ').filter(|_| !c.is_whitespace()) {
+            Some(space) if space > 0 => (row[..space].to_string(), row[space + 1..].to_string()),
+            _ => (row.clone(), String::new()),
+        };
+        rows.push(kept);
+        row = carried.trim_start().to_string();
+        if !c.is_whitespace() {
+            row.push(c);
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    if rows.len() > most {
+        rows.truncate(most);
+        if let Some(last) = rows.last_mut() {
+            *last = fitted(frame, &format!("{last}…"), font, width).to_string();
+        }
+    }
+    rows
+}
+
+/// A workbench lane drawn as `shape` in `area` (x, y, width, height: all of it but its padding; `lane`: the whole of
+/// it): the station's things and quick launch's in a grid, as a phone's large folder (see `paint_grid`); the notes,
+/// the lane the note shown (it is the note, in its colour), turned through as pages; the time. Each thing is named as
+/// in its whole lane, that it moves between the two as the widget is sized (see `morph`).
+#[allow(clippy::too_many_arguments)]
+fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y, w, h): (f32, f32, f32, f32), lane: Rect, what: &Bench, shape: Shape, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
     let lit = |hit: Hit| scene.hover == Some(hit);
     match what {
         Bench::Station { tiles, tab } => {
-            // Its page's name and how many, its menu of the pages; across, before them, down, over them.
-            let count = tiles.len().to_string();
-            let name = match tab {
-                Tab::Shelf => scene.lang.pick("中转站", "Station"),
-                Tab::Copies => scene.lang.pick("最近复制", "Copied"),
-                Tab::Recent(_) => scene.lang.pick("最近文件", "Recent"),
-            };
-            let label = if shape == Shape::Across { format!("{name} {count}") } else { count.clone() };
-            let label_w = frame.measure(&label, theme.title) + 18.0;
-            let chip = match shape {
-                Shape::Across => (x, y + (h - TAB_H) / 2.0, label_w, TAB_H),
-                _ => (x + (w - label_w) / 2.0, y, label_w, TAB_H),
-            };
-            // (Where it has the room: across, half of it at most, down, its width and a tile under it.)
-            let with_chip = match shape {
-                Shape::Across => h >= TAB_H && label_w <= w / 2.0,
-                Shape::Down => w >= label_w && h >= 2.0 * TAB_H,
-                Shape::Least => false,
-            };
-            if with_chip {
+            // Its page's name and how many, its menu of the pages, over the grid where it is roomy.
+            let mut room = (x, y, w, h);
+            if h >= 150.0 && w >= 110.0 {
+                let name = match tab {
+                    Tab::Shelf => scene.lang.pick("中转站", "Station"),
+                    Tab::Copies => scene.lang.pick("最近复制", "Copied"),
+                    Tab::Recent(_) => scene.lang.pick("最近文件", "Recent"),
+                };
+                let count = tiles.len().to_string();
+                let small = theme.small;
+                let name_w = frame.measure(name, theme.title).min(w - 40.0);
+                let count_w = frame.measure(&count, small);
+                let chip = (x - 4.0, y, (name_w + count_w + 30.0).min(w + 4.0), TAB_H);
                 if lit(Hit::StationPages) {
                     frame.fill_rounded(theme.hover, chip.0, chip.1, chip.2, chip.3, TAB_H / 2.0);
                 }
-                frame.text(&label, theme.title, theme.text, chip.0 + 4.0, chip.1 + (TAB_H - theme.title.size * 1.3) / 2.0, label_w, Align::Start);
-                frame.icon(Icon::ChevronDown, Point { x: chip.0 + chip.2 - 7.0, y: chip.1 + TAB_H / 2.0 + 0.5 }, 9.0, theme.text2);
+                let top = y + (TAB_H - theme.title.size * 1.3) / 2.0;
+                frame.text(&fitted(frame, name, theme.title, name_w), theme.title, theme.text, x + 4.0, top, name_w + 1.0, Align::Start);
+                frame.text(&count, small, theme.text3, x + 4.0 + name_w + 5.0, top + 2.0, count_w + 1.0, Align::Start);
+                frame.icon(Icon::ChevronDown, Point { x: x + name_w + count_w + 18.0, y: y + TAB_H / 2.0 + 0.5 }, 9.0, theme.text2);
                 hits.push((chip.0, chip.1, chip.2, chip.3, Hit::StationPages));
+                room = (x, y + TAB_H + 6.0, w, h - TAB_H - 6.0);
             }
-            let side = match shape {
-                Shape::Across => (h - 4.0).min(64.0),
-                Shape::Down => (w - 4.0).min(64.0),
-                Shape::Least => w.min(h) - 8.0,
-            }
-            .max(0.0);
-            let lead = match shape {
-                Shape::Across if with_chip => label_w + gap,
-                Shape::Down if with_chip => TAB_H + gap,
-                _ => 0.0,
+            let grid = Grid::in_room(room, 60.0, true);
+            let list = match tab {
+                Tab::Shelf => List::Shelf,
+                Tab::Copies => List::Copies,
+                Tab::Recent(_) => List::Recent,
             };
-            if shape == Shape::Least {
-                let (px, py) = (x + (w - side) / 2.0, y + (h - side) / 2.0);
-                if let Some((tile, hit)) = tiles.first() {
+            let pixels = pixels_for(ShelfView::Cards);
+            let (named, footed) = (grid.named, grid.foot > 0.0);
+            let draw = |hits: &mut Vec<HitBox>, at: usize, (cx, cy): (f32, f32), side: f32, current: bool| {
+                let (tile, hit) = &tiles[at];
+                if current {
                     frame.key(&format!("tile.{hit:?}"));
-                    paint_face(frame, theme, ink, tile, px, py, side, side, pixels_for(ShelfView::Cards));
+                    if lit(*hit) {
+                        frame.fill_rounded(theme.hover, cx - 3.0, cy - 3.0, side + 6.0, side + 6.0 + if named { GRID_NAME } else { 0.0 }, face_round(theme, side) + 3.0);
+                    }
+                }
+                paint_face(frame, theme, ink, tile, cx, cy, side, side, pixels);
+                let shown = if named { fitted(frame, &tile.label, theme.small, side + GRID_GAP - 2.0).to_string() } else { String::new() };
+                if named {
+                    centred(frame, &shown, theme.small, theme.text2, cx - GRID_GAP / 2.0, cy + side + 2.0, side + GRID_GAP);
+                }
+                if current {
                     frame.key("");
-                    hits.push((px, py, side, side, *hit));
+                    hits.push((cx, cy, side, side + if named { GRID_NAME } else { 0.0 }, *hit));
+                    // (Its whole name told as the pointer rests on it, where the foot does not say it.)
+                    if named || !footed {
+                        name_shown(hits, *hit, &tile.label, &shown);
+                    }
                 }
-                if side >= 2.0 * BADGE {
-                    paint_badge(frame, theme, &count, theme.text2, px + side - badge_width(frame, theme, &count) + 4.0, py + 4.0);
-                }
-                hits.push((x, y, w, h, Hit::StationPages));
-                return;
-            }
-            let (spots, rest) = places(tiles.len(), side, lead);
-            for (at, ((tile, hit), spot)) in tiles.iter().zip(&spots).enumerate() {
-                frame.key(&format!("tile.{hit:?}"));
-                if lit(*hit) {
-                    frame.fill_rounded(theme.hover, spot.0 - 2.0, spot.1 - 2.0, side + 4.0, side + 4.0, 10.0);
-                }
-                paint_face(frame, theme, ink, tile, spot.0, spot.1, side, side, pixels_for(ShelfView::Cards));
-                frame.key("");
-                if at + 1 == spots.len() {
-                    more(frame, rest, *spot, side);
-                }
-                hits.push((spot.0, spot.1, side, side, *hit));
-            }
+            };
+            let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_face(frame, theme, ink, &tiles[at].0, cx, cy, side, side, pixels);
+            let hovered = tiles.iter().find(|(_, hit)| lit(*hit)).map(|(tile, _)| tile.label.as_str()).filter(|_| !named);
+            paint_grid(frame, scene, hits, room, &grid, tiles.len(), list, &draw, &small, hovered);
         }
         Bench::Apps(apps) => {
-            if shape == Shape::Least {
-                // Four, two by two, the rest by its count.
-                let side = ((w.min(h) - 12.0) / 2.0).max(0.0);
-                let (left, top) = (x + (w - 2.0 * side - 4.0) / 2.0, y + (h - 2.0 * side - 4.0) / 2.0);
-                for (at, (name, target)) in apps.iter().take(4).enumerate() {
-                    let (px, py) = (left + (at % 2) as f32 * (side + 4.0), top + (at / 2) as f32 * (side + 4.0));
-                    frame.key(&format!("app.{target}"));
-                    paint_app(frame, theme, name, target, px, py, side);
-                    frame.key("");
-                    hits.push((px, py, side, side, Hit::App(at as u16)));
-                }
-                return;
-            }
-            let side = match shape {
-                Shape::Across => (h - 8.0).min(APP_SIDE),
-                _ => (w - 8.0).min(APP_SIDE),
-            }
-            .max(0.0);
-            let (spots, rest) = places(apps.len(), side, 0.0);
-            for (at, ((name, target), spot)) in apps.iter().zip(&spots).enumerate() {
+            let grid = Grid::in_room((x, y, w, h), 52.0, false);
+            let footed = grid.foot > 0.0;
+            let draw = |hits: &mut Vec<HitBox>, at: usize, (cx, cy): (f32, f32), side: f32, current: bool| {
+                let (name, target) = &apps[at];
                 let hit = Hit::App(at as u16);
-                if lit(hit) {
-                    frame.fill_rounded(theme.hover, spot.0 - 3.0, spot.1 - 3.0, side + 6.0, side + 6.0, plate_round(theme, GLASS_ROW_ROUND, 3.0));
+                if current {
+                    if lit(hit) {
+                        frame.fill_rounded(theme.hover, cx - 3.0, cy - 3.0, side + 6.0, side + 6.0, plate_round(theme, GLASS_ROW_ROUND, 3.0));
+                    }
+                    frame.key(&format!("app.{target}"));
                 }
-                frame.key(&format!("app.{target}"));
-                paint_app(frame, theme, name, target, spot.0, spot.1, side);
-                frame.key("");
-                if at + 1 == spots.len() {
-                    more(frame, rest, *spot, side);
+                paint_app(frame, theme, name, target, cx, cy, side);
+                if current {
+                    frame.key("");
+                    hits.push((cx, cy, side, side, hit));
+                    if !footed {
+                        name_shown(hits, hit, name, "");
+                    }
                 }
-                hits.push((spot.0, spot.1, side, side, hit));
-            }
+            };
+            let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_app(frame, theme, &apps[at].0, &apps[at].1, cx, cy, side);
+            let hovered = apps.iter().enumerate().find(|(at, _)| lit(Hit::App(*at as u16))).map(|(_, (name, _))| name.as_str());
+            paint_grid(frame, scene, hits, (x, y, w, h), &grid, apps.len(), List::Apps, &draw, &small, hovered);
             hits.push((x, y, w, h, Hit::AppsArea));
         }
         Bench::Notes(notes) => {
-            let Some(front) = notes.first() else {
+            if notes.is_empty() {
                 let side = MEDIA_ROW.min(w).min(h);
                 paint_add(frame, scene, hits, x + (w - side) / 2.0, y + (h - side) / 2.0, side);
                 return;
-            };
-            let radius = note_radius(theme, true).min(w.min(h) / 3.0);
-            let (title_ink, words, _) = note_inks(theme, front.colour);
-            let others = &notes[1..];
-            let dot = 10.0;
+            }
+            // The lane is the note shown, in its colour; the others turned to as pages (the wheel, its dots).
+            let last = (notes.len() - 1) as f32;
+            let turned = (scene.scrolls.at(List::Notes) / PAGE).clamp(0.0, last);
+            let note = &notes[turned.round() as usize];
+            let radius = theme.radius.min(lane.w.min(lane.h) / 2.0);
+            frame.key(&format!("note.{}", note.at));
+            note_card_ground(frame, theme, note.colour, (lane.x, lane.y, lane.w, lane.h), radius, lit(Hit::Note(note.at)), false, None);
+            let (title_ink, words, faint) = note_inks(theme, note.colour);
+            let title = Font { weight: 700.0, ..theme.body };
+            let first = note.lines.first();
+            let many = notes.len() > 1;
             match shape {
-                Shape::Least => {
-                    frame.key(&format!("note.{}", front.at));
-                    note_card_ground(frame, theme, front.colour, (x, y, w, h), radius, lit(Hit::Note(front.at)), false, None);
-                    let figure = notes.len().to_string();
-                    centred(frame, &figure, theme.title, title_ink, x, y + (h - theme.title.size * 1.3) / 2.0, w);
+                Shape::Down => {
+                    // Its title written down at the right, its first line beside it where two go across; at its foot
+                    // the dots, and a new one.
+                    let foot = MEDIA_ROW + if many { 14.0 } else { 0.0 } + 6.0;
+                    let column = title.size * 1.5;
+                    let tall = (h - foot).max(0.0);
+                    // (Its first line beside it only where each word of it is written down too: Latin letters and
+                    // figures one under another are not read.)
+                    let two = first.is_some_and(|first| first.split_whitespace().all(crate::ui::music::written_down)) && w >= 2.0 * column + 2.0;
+                    let right = if two { x + w - column / 2.0 } else { x + w / 2.0 };
+                    text_down(frame, &note.title, title, title_ink, right, y + 2.0, tall);
+                    if let (true, Some(first)) = (two, first) {
+                        text_down(frame, first, theme.small, words, right - column, y + 4.0, tall);
+                    }
+                    if many {
+                        paint_dots(frame, notes.len(), turned, x + w / 2.0, y + h - MEDIA_ROW - 9.0, title_ink);
+                    }
                     frame.key("");
-                    hits.push((x, y, w, h, Hit::Note(front.at)));
+                    paint_add_on(frame, scene, hits, x + (w - MEDIA_ROW) / 2.0, y + h - MEDIA_ROW, MEDIA_ROW, title_ink);
                 }
                 Shape::Across => {
-                    // The last written on its card, the others' colours after it, a new one last (where the card is
-                    // left room).
-                    let tail = others.len().min(4) as f32 * (dot + 6.0) + MEDIA_ROW + 6.0;
-                    let tail = if w - tail >= 60.0 && h >= MEDIA_ROW { tail } else { 0.0 };
-                    let card = (x, y, w - tail, h);
-                    frame.key(&format!("note.{}", front.at));
-                    note_card_ground(frame, theme, front.colour, card, radius, lit(Hit::Note(front.at)), false, None);
-                    let room = (card.2 - 20.0).max(0.0);
-                    let title = Font { weight: 650.0, ..theme.body };
+                    // Its title over its first line; the dots and a new one at its end.
+                    let dots = if many { notes.len() as f32 * 9.0 + 12.0 } else { 0.0 };
+                    let room = (w - dots - MEDIA_ROW - 8.0).max(0.0);
                     let middle = y + h / 2.0;
-                    let first = front.lines.first();
-                    let title_y = if first.is_some() && h >= 2.0 * LINE + 8.0 { middle - LINE } else { middle - LINE / 2.0 };
-                    frame.text(&fitted(frame, &front.title, title, room), title, title_ink, x + 10.0, title_y, room, Align::Start);
-                    if let (Some(first), true) = (first, h >= 2.0 * LINE + 8.0) {
-                        frame.text(&fitted(frame, first, theme.small, room), theme.small, words, x + 10.0, middle, room, Align::Start);
+                    let both = first.is_some() && h >= 2.0 * LINE + 6.0;
+                    let title_y = if both { middle - LINE - 1.0 } else { middle - LINE / 2.0 - 1.0 };
+                    frame.text(&fitted(frame, &note.title, title, room), title, title_ink, x + 2.0, title_y, room, Align::Start);
+                    if let (true, Some(first)) = (both, first) {
+                        frame.text(&fitted(frame, first, theme.small, room), theme.small, words, x + 2.0, middle + 1.0, room, Align::Start);
+                    }
+                    if many {
+                        paint_dots(frame, notes.len(), turned, x + w - MEDIA_ROW - 4.0 - dots / 2.0, middle, title_ink);
                     }
                     frame.key("");
-                    hits.push((card.0, card.1, card.2, card.3, Hit::Note(front.at)));
-                    if tail > 0.0 {
-                        let mut dx = card.0 + card.2 + 8.0;
-                        for note in others.iter().take(4) {
-                            frame.key(&format!("note.{}", note.at));
-                            frame.fill_circle(note_colour(note.colour), Point { x: dx + dot / 2.0, y: middle }, dot / 2.0);
-                            frame.key("");
-                            hits.push((dx - 3.0, middle - dot, dot + 6.0, 2.0 * dot, Hit::Note(note.at)));
-                            dx += dot + 6.0;
-                        }
-                        paint_add(frame, scene, hits, x + w - MEDIA_ROW, middle - MEDIA_ROW / 2.0, MEDIA_ROW);
-                    }
+                    paint_add_on(frame, scene, hits, x + w - MEDIA_ROW, middle - MEDIA_ROW / 2.0, MEDIA_ROW, title_ink);
                 }
-                Shape::Down => {
-                    // How many over the last written on its card, its title down it; the others' colours under it, a
-                    // new one last.
-                    // (Each where the card is left room.)
-                    let tail = others.len().min(4) as f32 * (dot + 6.0) + MEDIA_ROW + 6.0;
-                    let head = LINE + 6.0;
-                    let head = if h - head >= 90.0 { head } else { 0.0 };
-                    let tail = if h - head - tail >= 60.0 && w >= MEDIA_ROW { tail } else { 0.0 };
-                    if head > 0.0 {
-                        centred(frame, &notes.len().to_string(), theme.title, theme.text, x, y, w);
-                    }
-                    let card = (x, y + head, w, h - head - tail);
-                    frame.key(&format!("note.{}", front.at));
-                    note_card_ground(frame, theme, front.colour, card, radius, lit(Hit::Note(front.at)), false, None);
-                    text_down(frame, &front.title, Font { weight: 650.0, ..theme.body }, title_ink, x + w / 2.0, card.1 + 10.0, card.3 - 20.0);
-                    frame.key("");
-                    hits.push((card.0, card.1, card.2, card.3, Hit::Note(front.at)));
-                    if tail > 0.0 {
-                        let mut dy = card.1 + card.3 + 8.0;
-                        for note in others.iter().take(4) {
-                            frame.key(&format!("note.{}", note.at));
-                            frame.fill_circle(note_colour(note.colour), Point { x: x + w / 2.0, y: dy + dot / 2.0 }, dot / 2.0);
-                            frame.key("");
-                            hits.push((x, dy - 3.0, w, dot + 6.0, Hit::Note(note.at)));
-                            dy += dot + 6.0;
+                Shape::Least => {
+                    if w.min(h) < 44.0 {
+                        // Too small for words: its title's first character, large.
+                        let one: String = note.title.chars().take(1).collect();
+                        let big = Font { size: (w.min(h) * 0.5).max(10.0), ..title };
+                        centred(frame, &one, big, title_ink, x, y + (h - big.size * 1.3) / 2.0, w);
+                    } else {
+                        // Its title in as many rows as go (three at most), then its lines as far as there is room, which of
+                        // them it is in the corner.
+                        let font = Font { size: theme.body.size - 1.0, ..title };
+                        let row = font.size * 1.32;
+                        let bottom = y + h - if many { LINE + 2.0 } else { 0.0 };
+                        let most = (((bottom - y) / row).floor() as usize).clamp(1, 3);
+                        let mut top = y;
+                        for line in rows_of(frame, &note.title, font, w, most) {
+                            frame.text(&line, font, title_ink, x, top, w + 1.0, Align::Start);
+                            top += row;
                         }
-                        paint_add(frame, scene, hits, x + (w - MEDIA_ROW) / 2.0, y + h - MEDIA_ROW, MEDIA_ROW);
+                        let small_row = theme.small.size * 1.45;
+                        top += 4.0;
+                        'lines: for line in &note.lines {
+                            let left = ((bottom - top) / small_row).floor() as usize;
+                            if left == 0 {
+                                break;
+                            }
+                            for part in rows_of(frame, line, theme.small, w, left) {
+                                frame.text(&part, theme.small, words, x, top, w + 1.0, Align::Start);
+                                top += small_row;
+                                if top + small_row > bottom {
+                                    break 'lines;
+                                }
+                            }
+                        }
+                        if many {
+                            let said = format!("{}/{}", turned.round() as usize + 1, notes.len());
+                            frame.text(&said, theme.small, faint, x, y + h - LINE, w, Align::End);
+                        }
                     }
+                    frame.key("");
                 }
             }
+            hits.push((lane.x, lane.y, lane.w, lane.h, Hit::Note(note.at)));
+            hits.push((lane.x, lane.y, lane.w, lane.h, Hit::Pages(List::Notes, (last * PAGE).to_bits())));
         }
         Bench::Time { figure, unit, date } => {
             let big = Font { size: theme.figure.size.min(h * 0.6).min(w / 3.2), ..theme.figure };
@@ -4871,7 +5065,7 @@ otepad.exe", "Notepad"),
         }
         crate::station::thumbs::start(|| {});
         pretend_workbench();
-        let (width, height, px) = (1100u32, 760u32, 1.5f32);
+        let (width, height, px) = (1600u32, 900u32, 1.5f32);
         let desktop = crate::ui::wallpaper::picture(r"C:\Windows\Web\Wallpaper\Windows\img19.jpg", (width as f32 * px) as u32, (height as f32 * px) as u32).expect("wallpaper");
         let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
         let out = std::path::PathBuf::from(format!("{}/target/shapes", env!("CARGO_MANIFEST_DIR")));
@@ -4899,6 +5093,11 @@ otepad.exe", "Notepad"),
                     widgets.push((ids.to_vec(), Shape::Across, (640.0, 70.0), (420.0, 380.0)));
                     widgets.push((ids.to_vec(), Shape::Down, (80.0, 220.0), (790.0, 30.0)));
                     widgets.push((ids.to_vec(), Shape::Least, (120.0, 120.0), (900.0, 30.0)));
+                    // Squares, as a phone's large folders: two by two, three by three.
+                    for (at, id) in ids[..3].iter().enumerate() {
+                        widgets.push((vec![id], Shape::Least, (150.0, 150.0), (30.0 + at as f32 * 170.0, 540.0)));
+                        widgets.push((vec![id], Shape::Least, (300.0, 330.0), (560.0 + at as f32 * 330.0, 540.0)));
+                    }
                     let pixels = gfx.draw_offscreen(((width as f32 * px) as u32, (height as f32 * px) as u32), px, |frame| {
                         if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
                             unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
@@ -5495,6 +5694,33 @@ six".into()));
         let narrow = designed.clone().fitted((240.0, designed.height()));
         let wide = designed.clone().fitted((designed.width() + 150.0, designed.height()));
         assert!(narrow.flow(&theme).0 < wide.flow(&theme).0, "{:?} {:?}", narrow.flow(&theme), wide.flow(&theme));
+    }
+
+    /// A grid's pages: as many as go on one, else each but the last a cell short (that cell the way to the next).
+    #[test]
+    fn a_grid_s_things_go_on_pages() {
+        assert_eq!(pages_of(9, 9), [(0, 9)]);
+        assert_eq!(pages_of(13, 9), [(0, 8), (8, 5)]);
+        assert_eq!(pages_of(10, 4), [(0, 3), (3, 3), (6, 4)]);
+        assert_eq!(pages_of(3, 1), [(0, 1), (1, 1), (2, 1)]);
+        assert_eq!(pages_of(0, 4), [(0, 0)]);
+    }
+
+    /// Pages turned by the wheel come to a page: a notch turns one, a touchpad's small turns go on to the next once
+    /// they come to half a page, and never past the last.
+    #[test]
+    fn pages_are_turned_to_a_page() {
+        let mut scrolls = Scrolls::default();
+        scrolls.turn_pages(List::Apps, PAGE, PAGE, 2.0 * PAGE);
+        assert_eq!(scrolls.to[List::Apps as usize], PAGE);
+        scrolls.turn_pages(List::Apps, PAGE * 0.3, PAGE, 2.0 * PAGE);
+        assert_eq!(scrolls.to[List::Apps as usize], PAGE);
+        scrolls.turn_pages(List::Apps, PAGE * 0.3, PAGE, 2.0 * PAGE);
+        assert_eq!(scrolls.to[List::Apps as usize], 2.0 * PAGE);
+        scrolls.turn_pages(List::Apps, 5.0 * PAGE, PAGE, 2.0 * PAGE);
+        assert_eq!(scrolls.to[List::Apps as usize], 2.0 * PAGE);
+        scrolls.turn_pages(List::Apps, -PAGE, PAGE, 2.0 * PAGE);
+        assert_eq!(scrolls.to[List::Apps as usize], PAGE);
     }
 
     /// A workbench widget made smaller than all of it fits in, at any size down to the least, in every skin: what it

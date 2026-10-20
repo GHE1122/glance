@@ -1606,6 +1606,7 @@ impl Widgets {
         };
         // (Under what is on it: the wheel over a thing on the station scrolls the station.)
         let list = hit.iter().find_map(|hit| hit.list());
+        let pages = hit.iter().find_map(|hit| hit.pages());
         let hit = hit.first().copied();
         let on_sound = hit.is_some_and(view::Hit::of_sound);
         if let Content::Music(shown) = &mut widget.content {
@@ -1629,13 +1630,16 @@ impl Widgets {
             }
         }
 
-        let readings = match &mut widget.content {
+        let mut readings = match &mut widget.content {
             Content::Readings(readings) => Some(readings),
             Content::Merged(merged) => merged.parts.iter_mut().find_map(|part| if let Content::Readings(readings) = part { Some(readings) } else { None }),
             Content::Music(_) => None,
         };
-        if let (Some((list, most)), Some(readings)) = (list, readings) {
-            let rows = -(delta as f32) / 120.0 * crate::panel::WHEEL_ROWS;
+        let rows = -(delta as f32) / 120.0 * crate::panel::WHEEL_ROWS;
+        if let (Some((list, most)), Some(readings)) = (pages, readings.as_deref_mut()) {
+            readings.scrolls.turn_pages(list, rows * view::TABLE_ROW, view::PAGE, most);
+            widget.next_frame = Instant::now();
+        } else if let (Some((list, most)), Some(readings)) = (list, readings) {
             readings.scrolls.turn(list, rows * view::TABLE_ROW, most);
             widget.next_frame = Instant::now();
         }
@@ -2735,6 +2739,12 @@ impl Widget {
                                 Some(view::Hit::Tab(tab)) => {
                                     if let Some(readings) = self.content.readings_mut() {
                                         readings.tab = tab;
+                                    }
+                                }
+                                // A grid's way to its next page: turned to it.
+                                Some(view::Hit::NextPage(list, most)) => {
+                                    if let Some(readings) = self.content.readings_mut() {
+                                        readings.scrolls.turn_pages(list, view::PAGE, view::PAGE, f32::from_bits(most));
                                     }
                                 }
                                 Some(hit) if hit.opens_menu() => return Released::Menu(hit),
