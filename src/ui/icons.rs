@@ -56,6 +56,7 @@ pub enum Icon {
     Search,
     Palette,
     Smartphone,
+    PencilRuler,
 }
 
 impl Icon {
@@ -64,7 +65,7 @@ impl Icon {
     /// "mouse-pointer-2", "panel-right", "undo-2", "refresh-cw", "power", "layers", "clock", "image-plus", "skip-back", "play", "pause", "skip-forward",
     /// "music", "volume-2", "volume-x" (their speaker an older Lucide's, as lines), "layout-grid", "gauge",
     /// "chevron-down", "briefcase", "maximize", "minimize", "file", "link", "inbox", "clipboard", "ellipsis", "list",
-    /// "image", "grip-vertical", "plus", "search", "palette", "smartphone";
+    /// "image", "grip-vertical", "plus", "search", "palette", "smartphone", "pencil-ruler";
     /// lucide-static 1.53.0), its
     /// rectangles and circles written as paths.
     fn data(self) -> &'static [&'static str] {
@@ -106,6 +107,14 @@ impl Icon {
                 "M17 10.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0-1 0z",
                 "M6 12.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0-1 0z",
                 "M8 7.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0-1 0z",
+            ],
+            Icon::PencilRuler => &[
+                "M13 7 8.7 2.7a2.41 2.41 0 0 0-3.4 0L2.7 5.3a2.41 2.41 0 0 0 0 3.4L7 13",
+                "m8 6 2-2",
+                "m18 16 2-2",
+                "m17 11 4.3 4.3c.94.94.94 2.46 0 3.4l-2.6 2.6c-.94.94-2.46.94-3.4 0L11 17",
+                "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z",
+                "m15 5 4 4",
             ],
             Icon::Smartphone => &["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z", "M12 18h0.01"],
             Icon::Activity => &["M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z", "M17 12h-2l-2 5-2-10-2 5H7"],
@@ -360,7 +369,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::PencilRuler] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid.

@@ -649,7 +649,7 @@ impl Page {
             Page::Layout => Icon::LayoutGrid,
             Page::Look => Icon::Palette,
             Page::Monitor => Icon::Gauge,
-            Page::Workbench => Icon::Briefcase,
+            Page::Workbench => Icon::PencilRuler,
             Page::Music => Icon::Music,
             Page::Phone => Icon::Smartphone,
             Page::General => Icon::Settings,
