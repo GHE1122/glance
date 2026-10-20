@@ -74,6 +74,9 @@ impl Color {
 pub struct Gfx {
     /// Whether its device's immediate context may be used from several threads (see `new`).
     pub guarded: bool,
+    /// Drawn with Windows' software renderer, the graphics card having failed to make a device as it was made: when
+    /// the card is to be asked again (None: not, there being no card that draws; see `current`). None on the card.
+    software: Option<Cell<Option<Instant>>>,
     pub factory: ID2D1Factory1,
     pub(super) device: ID2D1Device,
     dxgi: IDXGIDevice3,
@@ -123,8 +126,7 @@ pub struct Gfx {
     /// The two colours each gradient fades between, as made for them (a resource of the device, any of its
     /// contexts draws with), and when each was last used.
     stops: RefCell<HashMap<[u32; 8], (windows::Win32::Graphics::Direct2D::ID2D1GradientStopCollection, Instant)>>,
-    /// What a frame handed out a region of the compositor's atlas is drawn on first (see `Frame::begun`), as large
-    /// as the largest such frame yet.
+    /// What each frame is drawn on first (see `Frame::apart`), as large as the largest frame yet.
     scratch: RefCell<Option<(ID2D1Bitmap1, (u32, u32))>>,
     /// The context that draws on it: Glance's own, made once (the compositor's, its target changed to the bitmap and
     /// back, failed now and then, and the window showed nothing for a frame, or another window's drawing).
@@ -151,12 +153,35 @@ thread_local! {
     static CURRENT: RefCell<Option<Rc<Gfx>>> = const { RefCell::new(None) };
 }
 
-/// This thread's graphics device, which its windows share; made when first
-/// asked for, and again after it was lost.
+/// How often a device drawn in software for a card's moment's failure asks the card again.
+const CARD_ASKED_AGAIN: Duration = Duration::from_secs(2);
+
+/// This thread's graphics device, which its windows share; made when first asked for, and again after it was lost.
+/// One drawn in software for a card's moment's failure (see `software_instead`) gives way to one on the card as soon
+/// as the card makes one: each window, seeing it, makes its surfaces again on it, as after a loss.
 pub fn current() -> Result<Rc<Gfx>> {
     CURRENT.with(|cell| {
-        if let Some(gfx) = cell.borrow().as_ref() {
-            return Ok(gfx.clone());
+        let held = cell.borrow().clone();
+        if let Some(gfx) = held {
+            let asked = gfx.software.as_ref().and_then(Cell::get);
+            if asked.is_none_or(|at| Instant::now() < at) {
+                return Ok(gfx);
+            }
+            match Gfx::new() {
+                Ok(made) if made.software.is_none() => {
+                    crate::journal::note("drawing on the graphics card again, not in software");
+                    let made = Rc::new(made);
+                    *cell.borrow_mut() = Some(made.clone());
+                    return Ok(made);
+                }
+                // (Not yet: asked again later.)
+                _ => {
+                    if let Some(software) = &gfx.software {
+                        software.set(Some(Instant::now() + CARD_ASKED_AGAIN));
+                    }
+                    return Ok(gfx);
+                }
+            }
         }
         let gfx = Rc::new(Gfx::new()?);
         *cell.borrow_mut() = Some(gfx.clone());
@@ -188,13 +213,60 @@ impl Drop for Held {
     }
 }
 
-/// Drawing failed: the device is gone (a driver update, a graphics reset).
-/// The next `current` makes a new one, and each window, seeing it, makes its
-/// surfaces again.
-pub fn lost() {
-    if CURRENT.with(|cell| cell.borrow_mut().take()).is_some() {
-        crate::journal::note("the graphics device was lost; drawing on a new one");
+thread_local! {
+    /// When drawing that failed with the device still there was last noted, for each window that failed so.
+    static FAILED_NOTED: RefCell<HashMap<&'static str, Instant>> = RefCell::new(HashMap::new());
+}
+
+/// How often a window failing to draw with the device still there is noted.
+const FAILED_NOTED_EVERY: Duration = Duration::from_secs(60);
+
+/// Drawing failed for `what` (a window's name), with `error` where it is had. Only where the device is gone (a
+/// driver update, a graphics reset: removed, as it says; or the compositor's device no longer valid) is it let go
+/// of: the next `current` makes a new one, and each window, seeing it, makes its surfaces again. Drawing that failed
+/// on a device still there (short of memory for a moment, a window's sized) is drawn again on it as the window next
+/// draws: the frame not shown meanwhile (see `Frame::apart`), and the window left as it showed, not emptied as its
+/// surfaces are made anew. Either is noted, the reason a device was removed with it. Whether the device is gone (a
+/// window that keeps its surfaces till then makes them anew).
+pub fn failed(what: &'static str, error: Option<&windows::core::Error>) -> bool {
+    let Some(gfx) = CURRENT.with(|cell| cell.borrow().clone()) else { return true };
+    let kind = if gfx.software.is_some() { "in software" } else { "on the graphics card" };
+    let said = error.map_or_else(String::new, |error| format!(" ({error}, {:#010X})", error.code().0));
+    let removed = gfx.d3d().ok().and_then(|d3d| unsafe { d3d.GetDeviceRemovedReason() }.err());
+    let composing = gfx
+        .dcomp
+        .cast::<windows::Win32::Graphics::DirectComposition::IDCompositionDevice>()
+        .ok()
+        .is_none_or(|device| unsafe { device.CheckDeviceState() }.is_ok_and(|valid| valid.as_bool()));
+    if removed.is_none() && composing {
+        let now = Instant::now();
+        let due = FAILED_NOTED.with(|noted| {
+            let mut noted = noted.borrow_mut();
+            let due = noted.get(what).is_none_or(|at| now.duration_since(*at) >= FAILED_NOTED_EVERY);
+            if due {
+                noted.insert(what, now);
+            }
+            due
+        });
+        if due {
+            crate::journal::note(format!("{what}: a frame not drawn{said}, the graphics device ({kind}) still there; drawn again on it"));
+        }
+        return false;
     }
+    CURRENT.with(|cell| cell.borrow_mut().take());
+    crate::journal::note(match removed {
+        Some(why) => format!("{what}: the graphics device ({kind}) was lost{said}: {why} ({:#010X}); drawing on a new one", why.code().0),
+        None => format!("{what}: the compositor's device is no longer valid{said}; drawing on a new one"),
+    });
+    true
+}
+
+/// Whether hardware failing to make a device with `error` leaves Windows' software renderer to draw on: only where
+/// no graphics card can (none there, or none that does Direct3D 11). Any other failure is the card's for the moment
+/// (being reset, out of memory): the device is asked for again shortly (see `current`), on the card; drawn in
+/// software meanwhile, everything would be drawn slowly on the processor till Glance started again.
+fn software_instead(error: windows::core::HRESULT) -> bool {
+    error == windows::Win32::Graphics::Dxgi::DXGI_ERROR_UNSUPPORTED
 }
 
 impl Gfx {
@@ -207,7 +279,21 @@ impl Gfx {
             }
             .map(|_| d3d.unwrap())
         };
-        let d3d = create(D3D_DRIVER_TYPE_HARDWARE).or_else(|_| create(D3D_DRIVER_TYPE_WARP))?;
+        // A card that failed for a moment (as it is reset) is drawn on in software meanwhile, and asked again (see
+        // `current`): its windows are not left undrawn, nor drawn slowly for good.
+        let made = Instant::now();
+        let (d3d, software) = match create(D3D_DRIVER_TYPE_HARDWARE) {
+            Ok(d3d) => (d3d, None),
+            Err(error) => {
+                let again = (!software_instead(error.code())).then(|| Instant::now() + CARD_ASKED_AGAIN);
+                crate::journal::note(format!("the graphics card made no device ({error}); drawing in software{}", if again.is_some() { " till it does" } else { "" }));
+                (create(D3D_DRIVER_TYPE_WARP)?, Some(Cell::new(again)))
+            }
+        };
+        let took = made.elapsed();
+        if took > Duration::from_millis(500) {
+            crate::journal::note(format!("a graphics device took {} ms to make", took.as_millis()));
+        }
         // Its immediate context guarded (the context, not the device, answers for that): the frames of what is
         // behind are read back on it from other threads (see `scene`), which they are not unless it is.
         let guarded = unsafe { d3d.GetImmediateContext() }
@@ -251,6 +337,7 @@ impl Gfx {
             )?
         };
         Ok(Gfx {
+            software,
             scratch: RefCell::new(None),
             scratch_context: RefCell::new(None),
             guarded,
@@ -729,7 +816,7 @@ impl Gfx {
             dc.SetTransform(&Matrix3x2::identity());
             dc.Clear(Some(&D2D1_COLOR_F::default()));
             let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
-            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Matrix3x2::identity(), atlas: None, moving: Cell::new(false) });
+            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Matrix3x2::identity(), on: None, failed: Default::default(), moving: Cell::new(false) });
             dc.EndDraw(None, None)?;
             let read = dc.CreateBitmap(pixels, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
             read.CopyFromBitmap(None, &target, None)?;
@@ -745,7 +832,7 @@ impl Gfx {
     }
 
     /// As `draw_offscreen`, the picture drawn as a frame handed a region `size` large at `offset` (physical pixels)
-    /// of a larger atlas is (see `Frame::begun`): that region's pixels, as `draw_offscreen` gives them. (For tests.)
+    /// of a larger atlas is (see `Frame::apart`): that region's pixels, as `draw_offscreen` gives them. (For tests.)
     #[cfg(test)]
     pub fn draw_in_atlas(&self, size: (u32, u32), offset: (i32, i32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<Vec<u8>> {
         use windows::Win32::Graphics::Direct2D::{
@@ -762,11 +849,10 @@ impl Gfx {
         unsafe {
             let dc = self.device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
             let atlas = dc.CreateBitmap(whole, None, 0, &properties(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
+            let frame = Frame::whole(self, size, scale, paint)?;
             dc.SetTarget(&atlas);
             dc.BeginDraw();
-            let frame = Frame::begun(self, dc.clone(), POINT { x: offset.0, y: offset.1 }, size, scale)?;
-            paint(&frame);
-            frame.finish()?;
+            frame.put(&dc, POINT { x: offset.0, y: offset.1 })?;
             dc.EndDraw(None, None)?;
             let read = dc.CreateBitmap(whole, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
             read.CopyFromBitmap(None, &atlas, None)?;
@@ -802,9 +888,10 @@ pub struct Frame<'a> {
     brush: ID2D1SolidColorBrush,
     /// Where the surface's region starts (DIPs).
     base: Matrix3x2,
-    /// Handed a region of the atlas: the compositor's context (`dc` is then Glance's own, drawing on the bitmap), the
-    /// bitmap drawn on meanwhile, and the region's corner and size (physical pixels; see `begun`).
-    atlas: Option<(ID2D1DeviceContext, ID2D1Bitmap1, POINT, (u32, u32))>,
+    /// Drawn apart (see `apart`): the bitmap drawn on, and how much of it (physical pixels).
+    on: Option<(ID2D1Bitmap1, (u32, u32))>,
+    /// What failed of the frame's drawing as it was drawn (see `fail`): the first.
+    failed: std::cell::RefCell<Option<windows::core::Error>>,
     /// Drawing what moves (see `set_moving`): nothing put on whole pixels meanwhile.
     moving: Cell<bool>,
 }
@@ -1135,17 +1222,25 @@ impl Frame<'_> {
 }
 
 impl<'a> Frame<'a> {
-    /// A frame on a composition surface's context just handed out for
-    /// drawing, at `offset` (physical pixels) in it, `size` (physical pixels) large: cleared, at `scale`
-    /// physical pixels per DIP. Drawn, it is to be `finish`ed before the surface's drawing ends.
+    /// A frame `size` physical pixels large, cleared, at `scale` physical pixels per DIP, drawn apart: on the device's
+    /// own bitmap (see `Gfx::scratch`), from its corner, through Glance's own context. Drawn whole (see `finish`), it
+    /// is put where it shows (see `put`); one whose drawing failed is not, and what showed there stays.
     ///
-    /// Handed a region of a larger atlas, it is drawn from its own corner on a bitmap of its own first, then put in
-    /// its region pixel for pixel (see `finish`). Drawn straight into the region, its place there is reckoned in DIPs
-    /// (355 px at 1.5 is 236.666…), rarely exactly, and where it was put by a hair either way, text's baselines,
-    /// which DirectWrite puts on whole pixels, and its glyphs' places along the line went to one pixel or step or the
-    /// other as the region did from frame to frame: the overlay's words shook by a pixel as its readings changed.
-    pub(super) fn begun(gfx: &'a Gfx, dc: ID2D1DeviceContext, offset: POINT, size: (u32, u32), scale: f32) -> Result<Self> {
-        let (dc, atlas) = if offset.x != 0 || offset.y != 0 {
+    /// Put where it shows pixel for pixel: a surface's region of the compositor's atlas is rarely at a whole DIP
+    /// (355 px at 1.5 is 236.666…), and drawn straight into it, text's baselines, which DirectWrite puts on whole
+    /// pixels, and its glyphs' places along the line went to one pixel or the other as the region did from frame to
+    /// frame: the overlay's words shook by a pixel as its readings changed. And drawn straight onto a surface, a frame
+    /// that failed part way showed as far as it was drawn (a panel sized on a card short of memory showed its ground
+    /// with a reading or two on it), a new surface's whatever its memory held.
+    pub(super) fn apart(gfx: &'a Gfx, size: (u32, u32), scale: f32) -> Result<Self> {
+        let own = {
+            let mut own = gfx.scratch_context.borrow_mut();
+            if own.is_none() {
+                *own = Some(unsafe { gfx.device.CreateDeviceContext(windows::Win32::Graphics::Direct2D::D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? });
+            }
+            own.clone().unwrap()
+        };
+        let scratch = {
             let mut kept = gfx.scratch.borrow_mut();
             let fits = kept.as_ref().is_some_and(|(_, has)| has.0 >= size.0 && has.1 >= size.1);
             if !fits {
@@ -1158,26 +1253,18 @@ impl<'a> Frame<'a> {
                     bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
                     ..Default::default()
                 };
-                let bitmap = unsafe { dc.CreateBitmap(D2D_SIZE_U { width: made.0, height: made.1 }, None, 0, &properties)? };
+                // (The one it had let go of first: at the largest, two windows' worth of the card's memory held.)
+                *kept = None;
+                let bitmap = unsafe { own.CreateBitmap(D2D_SIZE_U { width: made.0, height: made.1 }, None, 0, &properties)? };
                 *kept = Some((bitmap, made));
             }
-            let scratch = kept.as_ref().unwrap().0.clone();
-            // Drawn on through Glance's own context (the compositor's is left as it was handed out, to copy into).
-            let own = {
-                let mut own = gfx.scratch_context.borrow_mut();
-                if own.is_none() {
-                    *own = Some(unsafe { gfx.device.CreateDeviceContext(windows::Win32::Graphics::Direct2D::D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? });
-                }
-                own.clone().unwrap()
-            };
-            unsafe {
-                own.SetTarget(&scratch);
-                own.BeginDraw();
-            }
-            (own, Some((dc, scratch, offset, size)))
-        } else {
-            (dc, None)
+            kept.as_ref().unwrap().0.clone()
         };
+        let dc = own;
+        unsafe {
+            dc.SetTarget(&scratch);
+            dc.BeginDraw();
+        }
         let base = Matrix3x2::identity();
         unsafe {
             dc.SetDpi(96.0 * scale, 96.0 * scale);
@@ -1192,17 +1279,30 @@ impl<'a> Frame<'a> {
         let brush = match unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None) } {
             Ok(brush) => brush,
             Err(error) => {
-                // (Its own context's drawing ended, its bitmap let go: left begun, the next frame could not begin it.)
-                if atlas.is_some() {
-                    unsafe {
-                        let _ = dc.EndDraw(None, None);
-                        dc.SetTarget(None);
-                    }
+                // (Its drawing ended, its bitmap let go: left begun, the next frame could not begin it.)
+                unsafe {
+                    let _ = dc.EndDraw(None, None);
+                    dc.SetTarget(None);
                 }
                 return Err(error);
             }
         };
-        Ok(Frame { gfx, dc, brush, base, atlas, moving: Cell::new(false) })
+        Ok(Frame { gfx, dc, brush, base, on: Some((scratch, size)), failed: Default::default(), moving: Cell::new(false) })
+    }
+
+    /// A frame drawn apart by `paint` (see `apart`) and finished, ready to be put where it shows; failed, if anything
+    /// of it did, and then the surface it was for left as it was.
+    pub(super) fn whole(gfx: &'a Gfx, size: (u32, u32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<Self> {
+        let frame = Frame::apart(gfx, size, scale)?;
+        paint(&frame);
+        frame.finish()?;
+        Ok(frame)
+    }
+
+    /// Something of the frame failed as it was drawn (a layer, a bitmap not made): the frame is not shown (see
+    /// `finish`).
+    pub fn fail(&self, error: windows::core::Error) {
+        self.failed.borrow_mut().get_or_insert(error);
     }
 
     /// `draw` done on its context counted in physical pixels (as the text services count: see `editor`), at the
@@ -1225,27 +1325,34 @@ impl<'a> Frame<'a> {
         }
     }
 
-    /// What was drawn put in the region of the atlas the frame was handed (see `begun`), pixel for pixel: its
-    /// place given in pixels, no DIPs between.
+    /// Its drawing done (handed to the card), as drawn apart (see `apart`): failed, if anything of it did (see
+    /// `fail`), and then not to be put where it shows.
     pub(super) fn finish(&self) -> Result<()> {
-        let Some((dc, scratch, offset, size)) = &self.atlas else { return Ok(()) };
+        if self.on.is_some() {
+            unsafe {
+                let ended = self.dc.EndDraw(None, None);
+                self.dc.SetTarget(None);
+                ended?;
+            }
+        }
+        match self.failed.borrow_mut().take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// What was drawn apart (see `apart`), finished, put on `dc` (a surface's context, handed out for drawing) at
+    /// `offset`, pixel for pixel: its place given in pixels, no DIPs between.
+    pub(super) fn put(&self, dc: &ID2D1DeviceContext, offset: POINT) -> Result<()> {
         use windows::Win32::Graphics::Direct2D::Common::D2D1_COMPOSITE_MODE_SOURCE_COPY;
-        use windows::Win32::Graphics::Direct2D::{D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_UNIT_MODE_DIPS, D2D1_UNIT_MODE_PIXELS};
+        use windows::Win32::Graphics::Direct2D::{D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_UNIT_MODE_PIXELS};
+        let Some((scratch, size)) = &self.on else { return Ok(()) };
         unsafe {
-            // What was drawn on the bitmap done (handed to the card), then copied by the compositor's context. (Its
-            // bitmap let go of either way.)
-            let ended = self.dc.EndDraw(None, None);
-            self.dc.SetTarget(None);
-            ended?;
             let image: ID2D1Image = scratch.cast()?;
-            let mut was = Matrix3x2::default();
-            dc.GetTransform(&mut was);
             dc.SetUnitMode(D2D1_UNIT_MODE_PIXELS);
             dc.SetTransform(&Matrix3x2::identity());
             let from = D2D_RECT_F { left: 0.0, top: 0.0, right: size.0 as f32, bottom: size.1 as f32 };
             dc.DrawImage(&image, Some(&Vector2 { X: offset.x as f32, Y: offset.y as f32 }), Some(&from), D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
-            dc.SetUnitMode(D2D1_UNIT_MODE_DIPS);
-            dc.SetTransform(&was);
             // Handed to the card now, before the next frame (another window's, on the same bitmap) draws on it: else
             // the compositor's context may keep the copying a while, and the next window's drawing be done first.
             dc.Flush(None, None)?;
@@ -1693,19 +1800,21 @@ impl Surface {
         gfx.last_drawn.set(Some(Instant::now()));
         gfx.trimmed.set(false);
         let surface = self.surface.as_ref().unwrap();
-        let mut offset = POINT::default();
         let began = std::time::Instant::now();
-        let dc: ID2D1DeviceContext = unsafe { surface.BeginDraw(None, &mut offset)? };
-        // (The surface's drawing ended whatever became of the frame's: left begun, nothing more was drawn on it.)
+        // Drawn apart first, and put on the surface only once drawn whole (see `Frame::apart`): failing, the surface
+        // is not touched, and shows what it showed.
         let mut given = std::time::Duration::ZERO;
-        let drawn = Frame::begun(gfx, dc, offset, self.size, scale).and_then(|frame| {
+        let frame = Frame::whole(gfx, self.size, scale, |frame| {
             given = began.elapsed();
-            paint(&frame);
-            frame.finish()
-        });
+            paint(frame);
+        })?;
         let painted = began.elapsed();
+        let mut offset = POINT::default();
+        let dc: ID2D1DeviceContext = unsafe { surface.BeginDraw(None, &mut offset)? };
+        // (The surface's drawing ended whatever became of the putting: left begun, nothing more was drawn on it.)
+        let put = frame.put(&dc, offset);
         let ended = unsafe { surface.EndDraw() };
-        drawn?;
+        put?;
         ended?;
         unsafe {
             if !self.shown {
@@ -1962,6 +2071,34 @@ pub fn rect(left: f32, top: f32, width: f32, height: f32) -> D2D_RECT_F {
 #[cfg(test)]
 mod tests {
     use super::room;
+
+    /// A frame something of which failed as it was drawn is not had to be shown: what it was for shows what it
+    /// showed. (Drawn straight onto its surface, a panel sized on a card short of memory showed its ground with a
+    /// reading or two on it.)
+    #[test]
+    fn a_frame_failed_is_not_shown() {
+        use super::Canvas;
+        let gfx = super::Gfx::new().expect("graphics");
+        let failed = super::Frame::whole(&gfx, (8, 8), 1.0, |frame| {
+            frame.fill(super::Color::hex(0xFF0000, 1.0), 0.0, 0.0, 8.0, 8.0);
+            frame.fail(windows::Win32::Foundation::E_FAIL.into());
+        });
+        assert!(failed.is_err());
+        // (One not failed, drawn on the same bitmap after it, as ever.)
+        assert!(super::Frame::whole(&gfx, (8, 8), 1.0, |_| {}).is_ok());
+    }
+
+    /// Windows' software renderer is drawn on only where there is no graphics card to draw on at all; a card that
+    /// failed for a moment (as it is reset) is asked again, not given up for good.
+    #[test]
+    fn software_only_without_a_card() {
+        use windows::Win32::Foundation::{E_FAIL, E_OUTOFMEMORY};
+        use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_UNSUPPORTED};
+        assert!(super::software_instead(DXGI_ERROR_UNSUPPORTED));
+        for passing in [DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, E_FAIL, E_OUTOFMEMORY] {
+            assert!(!super::software_instead(passing), "{passing:?}");
+        }
+    }
 
     /// Drawn off screen at 100%, `size` pixels square: each pixel's alpha, rows top to bottom.
     #[cfg(feature = "studio")]

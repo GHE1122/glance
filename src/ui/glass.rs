@@ -184,15 +184,14 @@ impl Frosted {
         };
         self.size = size;
         let interop: ICompositionDrawingSurfaceInterop = surface.cast()?;
+        // Drawn apart first, and put on the surface only once drawn whole (see `Frame::apart`).
+        let frame = Frame::whole(gfx, size, scale, paint)?;
         let mut offset = POINT::default();
         let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, &mut offset)? };
-        // (The surface's drawing ended whatever became of the frame's: left begun, nothing more was drawn on it.)
-        let drawn = Frame::begun(gfx, dc, offset, size, scale).and_then(|frame| {
-            paint(&frame);
-            frame.finish()
-        });
+        // (The surface's drawing ended whatever became of the putting: left begun, nothing more was drawn on it.)
+        let put = frame.put(&dc, offset);
         let ended = unsafe { interop.EndDraw() };
-        drawn?;
+        put?;
         ended
     }
 

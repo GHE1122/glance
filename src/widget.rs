@@ -3538,10 +3538,13 @@ impl Widget {
             // All it drew with, and kept, was the other device's (see `life`). (A window has one composition target:
             // the old one goes first.)
             self.gone();
-            self.surface = Surface::new(&current, self.window.hwnd).ok();
-            if self.surface.is_none() {
-                gfx::lost();
-            }
+            self.surface = match Surface::new(&current, self.window.hwnd) {
+                Ok(surface) => Some(surface),
+                Err(error) => {
+                    gfx::failed("widget", Some(&error));
+                    None
+                }
+            };
             self.gfx = current;
         }
         self.surface.is_some()
@@ -3638,6 +3641,7 @@ impl Widget {
                     if let Err(error) = drew {
                         note(format!("widget: what plays not drawn: {error}"));
                         whole = false;
+                        frame.fail(error);
                     }
                     if let Some(painted) = painted {
                         *busy = painted.busy;
@@ -3693,10 +3697,11 @@ impl Widget {
             (self.hits, self.hits_from) = (hits, from);
             self.show_stations();
         }
+        // (Not drawn: drawn again on its surface; the device gone, on one made anew on the next.)
         if let Err(error) = &drawn {
-            note(format!("widget: its surface not drawn: {error}"));
-            gfx::lost();
-            self.surface = None;
+            if gfx::failed("widget", Some(error)) {
+                self.surface = None;
+            }
         }
         gfx.sweep();
         // Placed and shown once drawn: never the last picture in the new

@@ -136,11 +136,14 @@ pub fn show(text: &str, about: RECT, dark: bool) {
                 frame.text_wrapped(&said, font, ink, PAD, (TALL - font.size * 1.3) / 2.0, wide - 2.0 * PAD);
             }
         });
-        tip.surface = Some(surface);
-        if drawn.is_err() {
-            gfx::lost();
+        // (The device gone, its surface is made anew on the next.)
+        if let Err(error) = &drawn {
+            if !gfx::failed("tip", Some(error)) {
+                tip.surface = Some(surface);
+            }
             return;
         }
+        tip.surface = Some(surface);
         tip.window.place(rect);
         tip.window.show();
         tip.said = (said, rect);

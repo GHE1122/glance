@@ -661,10 +661,10 @@ impl Dialog {
         let Some(mut surface) = self.surface.take() else { return };
         let gfx = self.gfx.clone();
         let (scale, area) = (self.scale, (size.0 as f32 / self.scale, size.1 as f32 / self.scale));
-        if surface.draw(&gfx, size, scale, |frame| self.paint(frame, area)).is_ok() {
-            self.surface = Some(surface);
-        } else {
-            gfx::lost();
+        // (Not drawn, it keeps its surface, and draws again on it; the device gone, it makes one anew on the next.)
+        match surface.draw(&gfx, size, scale, |frame| self.paint(frame, area)) {
+            Err(error) if gfx::failed("dialog", Some(&error)) => {}
+            _ => self.surface = Some(surface),
         }
         if self.focus == Hit::Words {
             self.place_ime();

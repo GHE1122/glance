@@ -1130,8 +1130,6 @@ struct Ui {
     next_frame: Instant,
     /// The client size it was last drawn at (physical pixels), if it has been drawn.
     drawn_size: Option<(u32, u32)>,
-    /// Drawing the preview failed this frame (the device was lost).
-    failed: bool,
     /// The largest panel size at which the panel still grows on the screen the preview shows (see
     /// `arrange::largest`): past it a larger size changed the figure and nothing else.
     largest: f32,
@@ -1315,7 +1313,6 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             last_frame: Instant::now(),
             next_frame: Instant::now(),
             drawn_size: None,
-            failed: false,
             largest: SIZES.1,
         };
         ui.raise_more();
@@ -3606,9 +3603,12 @@ impl Ui {
         // All it drew with was the other device's (see `life`). (A window has one composition target: the old one
         // goes first.)
         self.gone();
-        let Ok(surface) = Surface::new(&current, self.hwnd) else {
-            gfx::lost();
-            return false;
+        let surface = match Surface::new(&current, self.hwnd) {
+            Ok(surface) => surface,
+            Err(error) => {
+                gfx::failed("settings", Some(&error));
+                return false;
+            }
         };
         self.surface = Some(surface);
         self.gfx = current;
@@ -3677,7 +3677,6 @@ impl Ui {
         let gfx = self.gfx.clone();
         let mut surface = self.surface.take().unwrap();
         let mut creep = None;
-        self.failed = false;
         let began = Instant::now();
         let sizing = gfx::sizing(self.by_hand);
         let drawn = surface.draw(&gfx, size, self.scale, |frame| {
@@ -3696,9 +3695,9 @@ impl Ui {
         }
         self.surface = Some(surface);
         self.drawn_size = drawn.is_ok().then_some(size);
-        // The device is gone; a new one is made for the next frame.
-        if drawn.is_err() || self.failed {
-            gfx::lost();
+        // Not drawn: drawn again shortly (the device gone, on a new one).
+        if let Err(error) = &drawn {
+            gfx::failed("settings", Some(error));
             self.next_frame = now + DEVICE_RETRY;
             return;
         }
@@ -4938,7 +4937,8 @@ impl Ui {
         match drawn {
             Ok(drawn) if drawn.grounded => self.gfx.clear_caches(),
             Ok(_) => {}
-            Err(_) => self.failed = true,
+            // (Not shown, the frame: see `Frame::fail`.)
+            Err(error) => frame.fail(error),
         }
         (Some(layout.plot_width(&theme) * self.scale * zoom * k / prefs.chart_seconds as f32), Rect { x: ox, y: oy, w: sw * k, h: sh * k })
     }

@@ -1499,8 +1499,11 @@ impl Beside {
             if !self.shown && self.ready() {
                 self.show_now();
             }
-        } else {
-            gfx::lost();
+        } else if let Err(error) = &drawn {
+            // (Not drawn, it keeps its surface, and draws again on it; the device gone, it makes one anew on the next.)
+            if !gfx::failed("page beside", Some(error)) {
+                self.surface = Some(surface);
+            }
         }
         self.place_ime();
         // Pictures still being made: drawn again soon; else not.

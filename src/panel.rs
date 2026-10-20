@@ -3242,9 +3242,12 @@ impl<'a> Panel<'a> {
         // (A window has one composition target: the old one goes first.)
         self.gone();
         self.behind = behind.map(|behind| Behind { bitmap: None, former: None, ..behind });
-        let Ok(surface) = Surface::new(&current, self.window.hwnd).map(Surface::clipped) else {
-            gfx::lost();
-            return false;
+        let surface = match Surface::new(&current, self.window.hwnd) {
+            Ok(surface) => surface.clipped(),
+            Err(error) => {
+                gfx::failed("panel", Some(&error));
+                return false;
+            }
         };
         self.surface = Some(surface);
         self.gfx = current;
@@ -3421,6 +3424,10 @@ impl<'a> Panel<'a> {
                 })(),
                 _ => layers.draw(frame, &picture, local, px),
             });
+            // (Not shown, a frame part of which failed: see `Frame::fail`.)
+            if let Some(Err(error)) = &drawn {
+                frame.fail(error.clone());
+            }
             if let Some((size, limit)) = sizing {
                 frame.place(Matrix3x2::translation(x, y));
                 size_badge(frame, theme, size, limit, lang, (width, height));
@@ -3433,9 +3440,9 @@ impl<'a> Panel<'a> {
         drop(history);
         let drawn = match (painted, drawn) {
             (Ok(()), Some(Ok(drawn))) => drawn,
-            // The device is gone; a new one is made for the next frame.
-            _ => {
-                gfx::lost();
+            // Not drawn: drawn again shortly (the device gone, on a new one).
+            (painted, drawn) => {
+                gfx::failed("panel", painted.as_ref().err().or(drawn.as_ref().and_then(|drawn| drawn.as_ref().err())));
                 self.next_frame = now + DEVICE_RETRY;
                 return;
             }
@@ -3578,8 +3585,8 @@ impl<'a> Panel<'a> {
             }
         });
         let Some(painted) = painted.filter(|_| drawn.is_ok()) else {
-            // The device is gone; a new one is made for the next frame.
-            gfx::lost();
+            // Not drawn: drawn again shortly (the device gone, on a new one).
+            gfx::failed("panel", drawn.as_ref().err());
             self.next_frame = now + DEVICE_RETRY;
             return;
         };

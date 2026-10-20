@@ -202,8 +202,8 @@ impl Ui {
         let picture = render::Picture { scene: &scene, lanes: &shown, layout: &opening.layout, small: opening.small().map(|small| (small, opening.size)), size: opening.size, at: (0.0, 0.0), edge: None, backdrop: None, frost, rough: false };
         let zoom = opening.zoom * k;
         let drew = self.library_layers[layers].draw(frame, &picture, Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(at.0, at.1), self.scale * zoom);
-        if drew.is_err() {
-            self.failed = true;
+        if let Err(error) = drew {
+            frame.fail(error);
         }
     }
 

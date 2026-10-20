@@ -140,9 +140,9 @@ impl Menu {
             }
             None => match Surface::new(&gfx, window.hwnd) {
                 Ok(surface) => Drawn::Plain(surface),
-                Err(_) => {
+                Err(error) => {
                     window.destroy();
-                    gfx::lost();
+                    gfx::failed("menu", Some(&error));
                     return None;
                 }
             },
@@ -291,8 +291,8 @@ impl Menu {
                 })
             }
         };
-        if drawn.is_err() {
-            gfx::lost();
+        if let Err(error) = &drawn {
+            gfx::failed("menu", Some(error));
         }
         drawn.is_ok()
     }

@@ -286,10 +286,11 @@ impl FullMusic {
                 frame.origin(0.0, 0.0);
             }
         });
-        // Not drawn: the device lost (the next frame is drawn on the one made in its place, above).
-        if drawn.is_err() {
-            crate::ui::gfx::lost();
-            self.surface = None;
+        // Not drawn: drawn again as it next draws; the device gone, on the one made in its place (above).
+        if let Err(error) = &drawn {
+            if crate::ui::gfx::failed("music full screen", Some(error)) {
+                self.surface = None;
+            }
         }
         self.hits = hits;
         self.volume_open = volume_open;

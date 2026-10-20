@@ -496,9 +496,9 @@ impl Overlay {
                 overlay::say(frame, (name, figure, "%"), (width as f32 / scale, height as f32 / scale), Glass { presence: 1.0, ..glass });
             }
         });
-        if painted.is_err() {
-            // Made again on a new device at the next sample.
-            gfx::lost();
+        if let Err(error) = &painted {
+            // Drawn again at the next sample (the device gone, on a new one).
+            gfx::failed("overlay", Some(error));
             return;
         }
         self.gfx.sweep();
@@ -578,8 +578,8 @@ impl Overlay {
             }
         });
         self.bar_surface = Some((self.gfx.clone(), surface));
-        if drawn.is_err() {
-            gfx::lost();
+        if let Err(error) = &drawn {
+            gfx::failed("overlay", Some(error));
             return;
         }
         self.bar.place_under(rect, self.beneath);
