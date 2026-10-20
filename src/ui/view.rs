@@ -341,6 +341,17 @@ impl Scrolls {
         *to = ((*turning / page).round() * page).clamp(0.0, most);
     }
 
+    /// How far `list` is going (see `at`: how far it is now, on its way there).
+    pub fn to(&self, list: List) -> f32 {
+        self.to[list as usize]
+    }
+
+    /// `list`, turned through by pages, turned to `at` (DIPs, within `most`): sliding there.
+    pub fn to_page(&mut self, list: List, at: f32, most: f32) {
+        let at = at.clamp(0.0, most);
+        (self.to[list as usize], self.turning[list as usize]) = (at, at);
+    }
+
     /// `list`, turned through by pages, held at `at` (DIPs, within `most`) by a hand swiping it: there at once.
     pub fn hold_pages(&mut self, list: List, at: f32, most: f32) {
         let at = at.clamp(0.0, most);
@@ -404,6 +415,37 @@ pub fn lists_show(tab: Tab) -> [u8; 6] {
     shows[List::Recent as usize] = if let Tab::Recent(filter) = tab { filter as u8 + 1 } else { 0 };
     shows[List::Notes as usize] = crate::notes::view() as u8;
     shows
+}
+
+/// Which note the notes turned through by pages show (see `keep_note`): its name and its place as last drawn, and the
+/// note open beside them as last seen.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct NoteShown {
+    kept: Option<(String, usize)>,
+    writing: Option<String>,
+}
+
+/// The notes turned through by pages (`notes`, in their order: a workbench lane in a shape) kept on the note they show
+/// as their order changes (a note written in comes first): the same note shown, where it is now, at once. A note
+/// opened beside them (`writing`, by its name: a new one, once it is first kept) turned to, as it is opened.
+pub fn keep_note(scrolls: &mut Scrolls, shown: &mut NoteShown, notes: &[crate::notes::Note], writing: Option<&str>) {
+    let place = |name: &str| notes.iter().position(|note| note.name == name);
+    let most = notes.len().saturating_sub(1) as f32 * PAGE;
+    if shown.writing.as_deref() != writing {
+        shown.writing = writing.map(str::to_string);
+        if let Some(at) = writing.and_then(place) {
+            scrolls.to_page(List::Notes, at as f32 * PAGE, most);
+        }
+    } else if let Some((name, at)) = &shown.kept {
+        // (Its place holding another: the order changed, not the page turned, which is to another place.)
+        if notes.get(*at).is_none_or(|note| note.name != *name) {
+            if let Some(now) = place(name) {
+                scrolls.hold_pages(List::Notes, now as f32 * PAGE, most);
+            }
+        }
+    }
+    let at = ((scrolls.to(List::Notes) / PAGE).round().max(0.0) as usize).min(notes.len().saturating_sub(1));
+    shown.kept = notes.get(at).map(|note| (note.name.clone(), at));
 }
 
 /// Sliders' knobs all at rest (for what keeps none of its own).
@@ -559,6 +601,9 @@ const BENCH: f32 = 36.0;
 
 /// The most a workbench lane in a shape is padded by (DIPs): small, it is mostly its things.
 const BENCH_PAD: f32 = 8.0;
+
+/// The least room a workbench lane in a shape leaves round what it shows (DIPs; see `paint_bench`).
+const BENCH_BREATH: f32 = 12.0;
 
 /// How a workbench lane in a shape is padded (across, over, under): as `theme`'s lanes, at most `BENCH_PAD`.
 fn bench_pads(theme: &Theme) -> (f32, f32, f32) {
@@ -840,44 +885,57 @@ type Under<'a> = &'a dyn Fn(&dyn Canvas);
 /// - chart paper what lies on its sheet (the station's things' plates), ruled round; its colour a dot by its title
 ///   (see `note_dot`).
 #[allow(clippy::too_many_arguments)]
-/// How a note's card lies (see `note_card_ground`).
-#[derive(Clone, Copy, PartialEq)]
-enum Lies {
-    /// On the sheet, casting its shadow on it.
-    Raised,
-    /// The widget's ground itself (a workbench lane in a shape that is the note): the widget casts the shadow, round its
-    /// rounded edge (its own, offset and spread, was cut off square at the widget's corners).
-    Whole,
-    /// Under another in a deck: its colour alone.
-    Plain,
-}
-
-fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (x, y, w, h): (f32, f32, f32, f32), radius: f32, lit: bool, lies: Lies, below: Option<Under>) {
-    let plain = lies == Lies::Plain;
-    match theme.skin {
-        Skin::Glass => {
-            let (tint, _) = note_glass(colour);
-            let tint = tint.alpha(glass_tint(theme.dark));
-            let light = note_light(theme.dark);
-            if plain {
-                if let Some(light) = light {
-                    frame.fill_rounded(light, x, y, w, h, radius);
-                }
-                frame.fill_rounded(tint, x, y, w, h, radius);
-                return;
-            }
-            if lies == Lies::Raised {
-                let shade = if theme.dark { 2.5 } else { 1.0 };
+/// A note's card: its shadow on the sheet, its ground of its colour (see `note_card_fill`), its rim (see
+/// `note_card_rim`). `plain` (under another in a deck), on glass its colour alone.
+#[allow(clippy::too_many_arguments)]
+fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (x, y, w, h): (f32, f32, f32, f32), radius: f32, lit: bool, plain: bool, below: Option<Under>) {
+    let glass = theme.skin == Skin::Glass;
+    if !plain {
+        let shade = if theme.dark { 2.5 } else { 1.0 };
+        match theme.skin {
+            Skin::Glass => {
                 frame.shadow(Color::hex(0, (if lit { 0.06 } else { 0.035 }) * shade), x, y, w, h, radius, 12.0, 8.0);
                 frame.shadow(Color::hex(0, 0.045 * shade), x, y, w, h, radius, 3.0, 2.0);
             }
+            // (A soft shadow under it, as Windows 11's cards on a sheet have, and as it needs stuck on the desktop.)
+            Skin::Fluent => frame.shadow(Color::hex(0, if theme.dark { 0.3 } else { 0.08 }), x, y, w, h, radius, 4.0, 2.0),
+            Skin::Paper => {}
+        }
+    }
+    note_card_fill(frame, theme, colour, (x, y, w, h), radius, below.filter(|_| !plain));
+    if !(plain && glass) {
+        note_card_rim(frame, theme, colour, (x, y, w, h), radius, lit);
+    }
+}
+
+/// A note's card's ground: glass's its coloured glass (the desktop frosted under it by `below`), Windows 11's its
+/// sheet a little of the colour, the band of it along its top; chart paper's its paper, opaque as an index card is.
+fn note_card_fill(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (x, y, w, h): (f32, f32, f32, f32), radius: f32, below: Option<Under>) {
+    match theme.skin {
+        Skin::Glass => {
             if let Some(below) = below {
                 frame.frosted(x, y, w, h, radius, NOTE_FROST, below);
             }
-            if let Some(light) = light {
+            if let Some(light) = note_light(theme.dark) {
                 frame.fill_rounded(light, x, y, w, h, radius);
             }
-            frame.fill_rounded(tint, x, y, w, h, radius);
+            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark)), x, y, w, h, radius);
+        }
+        Skin::Fluent => {
+            frame.fill_rounded(fluent_note_ground(theme, colour), x, y, w, h, radius);
+            frame.clip(x, y, w, 4.0);
+            frame.fill_rounded(note_colour(colour), x, y, w, h.min(2.0 * radius + 4.0), radius);
+            frame.unclip();
+        }
+        Skin::Paper => frame.fill_rounded(over(theme.paper, theme.track), x, y, w, h, radius),
+    }
+}
+
+/// A note's card's rim: glass's soft white, brighter under the pointer; Windows 11's a rule, the note's colour under
+/// the pointer; chart paper's ruled round in the sheet's ink, as chart paper's rules are (and lit all over).
+fn note_card_rim(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (x, y, w, h): (f32, f32, f32, f32), radius: f32, lit: bool) {
+    match theme.skin {
+        Skin::Glass => {
             let rim = match (theme.dark, lit) {
                 (false, false) => 0.65,
                 (false, true) => 0.9,
@@ -886,22 +944,8 @@ fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Col
             };
             frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, rim)), x, y, w, h, radius, 1.5);
         }
-        Skin::Fluent => {
-            // (A soft shadow under it, as Windows 11's cards on a sheet have, and as it needs stuck on the desktop.)
-            if lies == Lies::Raised {
-                frame.shadow(Color::hex(0, if theme.dark { 0.3 } else { 0.08 }), x, y, w, h, radius, 4.0, 2.0);
-            }
-            frame.fill_rounded(fluent_note_ground(theme, colour), x, y, w, h, radius);
-            frame.stroke_rounded(Fill::Solid(if lit { note_colour(colour).alpha(0.8) } else { theme.rule }), x, y, w, h, radius, if lit { 1.5 } else { 1.0 });
-            frame.clip(x, y, w, 4.0);
-            frame.fill_rounded(note_colour(colour), x, y, w, h.min(2.0 * radius + 4.0), radius);
-            frame.unclip();
-        }
-        // (Opaque, as an index card is: in a deck, the one under it hidden where it lies; ruled round in the sheet's
-        // ink, as chart paper's rules are.)
+        Skin::Fluent => frame.stroke_rounded(Fill::Solid(if lit { note_colour(colour).alpha(0.8) } else { theme.rule }), x, y, w, h, radius, if lit { 1.5 } else { 1.0 }),
         Skin::Paper => {
-            let card = over(theme.paper, theme.track);
-            frame.fill_rounded(card, x, y, w, h, radius);
             frame.stroke_rounded(Fill::Solid(theme.stroke), x, y, w, h, radius, 1.0);
             if lit {
                 frame.fill_rounded(theme.hover, x, y, w, h, radius);
@@ -1025,12 +1069,12 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                     frame.clip(left - side, top - 2.0, width + 2.0 * side, under_room);
                     for below in (1..at).filter(|below| shows(*below)) {
                         let (x, w) = across(below);
-                        note_card_ground(frame, theme, notes[below].colour, (x, strip_y(below), w, NOTE_STRIP + foot), radius, false, Lies::Plain, None);
+                        note_card_ground(frame, theme, notes[below].colour, (x, strip_y(below), w, NOTE_STRIP + foot), radius, false, true, None);
                     }
                     frame.unclip();
                 };
                 let (x, w) = across(at);
-                note_card_ground(frame, theme, note.colour, (x, y, w, NOTE_STRIP + foot), radius, !plain && lit(at), if plain { Lies::Plain } else { Lies::Raised }, (at > 1).then_some(&under as Under));
+                note_card_ground(frame, theme, note.colour, (x, y, w, NOTE_STRIP + foot), radius, !plain && lit(at), plain, (at > 1).then_some(&under as Under));
                 let (title_ink, _, faint) = note_inks(theme, note.colour);
                 let line = y + (NOTE_STRIP - LINE) / 2.0 + banded;
                 let when_w = frame.measure(&note.when, theme.small);
@@ -1089,7 +1133,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                     continue;
                 }
                 frame.key(&format!("note.{}", note.at));
-                note_card_ground(frame, theme, note.colour, (x, y, card_w, NOTE_CARD), radius, lit(at), Lies::Raised, None);
+                note_card_ground(frame, theme, note.colour, (x, y, card_w, NOTE_CARD), radius, lit(at), false, None);
                 let (title_ink, words, faint) = note_inks(theme, note.colour);
                 let inner = if theme.skin == Skin::Glass { 13.0 } else { 11.0 };
                 let head = y + 10.0 + banded;
@@ -1155,7 +1199,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
 #[allow(clippy::too_many_arguments)]
 fn paint_front_note(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (left, y, width, card): (f32, f32, f32, f32), lit: bool, below: Option<Under>, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
-    note_card_ground(frame, theme, note.colour, (left, y, width, card), note_radius(theme, false), lit, Lies::Raised, below);
+    note_card_ground(frame, theme, note.colour, (left, y, width, card), note_radius(theme, false), lit, false, below);
     let (title_ink, words, faint) = note_inks(theme, note.colour);
     let x = left + if theme.skin == Skin::Glass { 16.0 } else { 14.0 };
     let head = y + if theme.skin == Skin::Glass { 14.0 } else { 12.0 } + if theme.skin == Skin::Fluent { 2.0 } else { 0.0 };
@@ -4515,7 +4559,7 @@ fn paint_add_on(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, left:
 /// so a notch turns a page.
 pub const PAGE: f32 = TABLE_ROW * crate::panel::WHEEL_ROWS;
 /// The room under a grid two rows tall or more: its pages' dots, or the name of the thing under the pointer.
-const GRID_FOOT: f32 = 18.0;
+const GRID_FOOT: f32 = 26.0;
 /// The room under a cell for its name, where the cells are named.
 const GRID_NAME: f32 = 17.0;
 const GRID_GAP: f32 = 10.0;
@@ -4574,6 +4618,9 @@ fn pages_of(count: usize, per: usize) -> Vec<(usize, usize)> {
         from += per - 1;
     }
 }
+
+/// How tall a grid's foot's line is (its dots, a name): at the foot of its foot, the rest of it room over it.
+const FOOT_LINE: f32 = 18.0;
 
 /// The dots of `count` pages: each dot's side, the long one's length and the gap between them.
 const DOT: (f32, f32, f32) = (5.0, 12.0, 4.0);
@@ -4665,7 +4712,8 @@ fn paint_grid(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, room: (
     }
     frame.unclip();
     if grid.foot > 0.0 {
-        let middle = y + h - grid.foot / 2.0;
+        // (Low in it: what is over it apart from the grid.)
+        let middle = y + h - FOOT_LINE / 2.0;
         match hovered {
             Some(said) => centred(frame, &fitted(frame, said, theme.small, w), theme.small, theme.text2, x, middle - LINE / 2.0, w),
             None if pages.len() > 1 => paint_dots(frame, pages.len(), turned, x + w / 2.0, middle, theme.text2, theme.small, w),
@@ -4718,6 +4766,12 @@ fn rows_of(frame: &dyn Canvas, text: &str, font: Font, width: f32, most: usize) 
 #[allow(clippy::too_many_arguments)]
 fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y, w, h): (f32, f32, f32, f32), lane: Rect, what: &Bench, shape: Shape, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
+    // What it shows kept off its edge as far as its rounded corners take, and room to breathe round it (at the lane's
+    // padding alone, its things ran into the curve and it read crammed); a fifth of it at most, small.
+    let radius = theme.radius.min(lane.w.min(lane.h) / 2.0);
+    let inset = (radius * 0.6).max(BENCH_BREATH).min(lane.w.min(lane.h) / 5.0);
+    let (left, top) = (x.max(lane.x + inset), y.max(lane.y + inset));
+    let (x, y, w, h) = (left, top, ((x + w).min(lane.x + lane.w - inset) - left).max(0.0), ((y + h).min(lane.y + lane.h - inset) - top).max(0.0));
     let lit = |hit: Hit| scene.hover == Some(hit);
     match what {
         Bench::Station { tiles, tab } => {
@@ -4815,12 +4869,6 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             let last = (notes.len() - 1) as f32;
             let turned = (scene.scrolls.at(List::Notes) / PAGE).clamp(0.0, last);
             let note = &notes[turned.round() as usize];
-            let radius = theme.radius.min(lane.w.min(lane.h) / 2.0);
-            // What it says kept off its edge as far as its rounded corners take (a little over half their radius: at
-            // the lane's padding alone, its first and last words ran into the curve), a quarter of it at most.
-            let inset = (radius * 0.6).min(lane.w.min(lane.h) / 4.0);
-            let (left, top) = (x.max(lane.x + inset), y.max(lane.y + inset));
-            let (x, y, w, h) = (left, top, (x + w).min(lane.x + lane.w - inset) - left, (y + h).min(lane.y + lane.h - inset) - top);
             let (title_ink, _, faint) = note_inks(theme, note.colour);
             let title = Font { weight: 700.0, ..theme.body };
             let many = notes.len() > 1;
@@ -4900,25 +4948,26 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                     Shape::Least => across(y + h - if many { LINE + 2.0 } else { 0.0 }),
                 }
             };
-            // Each note its own page as wide as the lane: those turned between both in it, sliding across.
-            frame.clip(lane.x, lane.y, lane.w, lane.h);
+            // Each note its own page as wide as the lane: those turned between both in it, sliding across, side by side
+            // within its rounded edge (no edge of their own between them: one note going as the next comes, not two
+            // cards); its rim round it, of the note shown. (No shadow of their own: the widget casts it round its
+            // rounded edge; theirs, offset and spread, was cut off square at its corners.)
+            // (All of it named as the note shown, its clip with it: drawn again as the widget is sized, the clip is
+            // where what is in it is.)
+            frame.key(&format!("note.{}", note.at));
+            frame.clip_rounded(lane.x, lane.y, lane.w, lane.h, radius);
             for (page, each) in notes.iter().enumerate() {
                 let off = page as f32 - turned;
                 if off.abs() >= 1.0 {
                     continue;
                 }
                 let dx = off * lane.w;
-                let shown = std::ptr::eq(each, note);
-                if shown {
-                    frame.key(&format!("note.{}", each.at));
-                }
-                note_card_ground(frame, theme, each.colour, (lane.x + dx, lane.y, lane.w, lane.h), radius, shown && lit(Hit::Note(each.at)), Lies::Whole, None);
+                note_card_fill(frame, theme, each.colour, (lane.x + dx, lane.y, lane.w, lane.h), 0.0, None);
                 words_of(each, dx);
-                if shown {
-                    frame.key("");
-                }
             }
             frame.unclip();
+            note_card_rim(frame, theme, note.colour, (lane.x, lane.y, lane.w, lane.h), radius, lit(Hit::Note(note.at)));
+            frame.key("");
             // Its dots and a new one where they are whichever is shown, in its ink.
             match shape {
                 Shape::Down => {
@@ -5637,6 +5686,7 @@ six".into()));
             (font.size * 0.2, font.size)
         }
         fn clip(&self, _: f32, _: f32, _: f32, _: f32) {}
+        fn clip_rounded(&self, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn unclip(&self) {}
         fn fill(&self, _: Color, _: f32, _: f32, _: f32, _: f32) {}
         fn fill_rounded(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32) {}
@@ -5656,17 +5706,15 @@ six".into()));
     /// clipped no further than its clip).
     #[derive(Default)]
     struct Reach {
-        clip: std::cell::Cell<Option<(f32, f32, f32, f32)>>,
+        /// The clips begun and not ended.
+        clips: std::cell::RefCell<Vec<(f32, f32, f32, f32)>>,
         reach: std::cell::Cell<Option<(f32, f32, f32, f32)>>,
     }
 
     impl Reach {
         /// The box (left, top, right, bottom) drawn over.
         fn drew(&self, (left, top, right, bottom): (f32, f32, f32, f32)) {
-            let (left, top, right, bottom) = match self.clip.get() {
-                Some((cx, cy, cw, ch)) => (left.max(cx), top.max(cy), right.min(cx + cw), bottom.min(cy + ch)),
-                None => (left, top, right, bottom),
-            };
+            let (left, top, right, bottom) = self.clips.borrow().iter().fold((left, top, right, bottom), |(l, t, r, b), &(cx, cy, cw, ch)| (l.max(cx), t.max(cy), r.min(cx + cw), b.min(cy + ch)));
             if right <= left || bottom <= top {
                 return;
             }
@@ -5707,10 +5755,14 @@ six".into()));
             Nothing.ink(text, font)
         }
         fn clip(&self, x: f32, y: f32, w: f32, h: f32) {
-            self.clip.set(Some((x, y, w, h)));
+            self.clips.borrow_mut().push((x, y, w, h));
+        }
+        // (Its box: what is kept to the rounded box reaches no further than that.)
+        fn clip_rounded(&self, x: f32, y: f32, w: f32, h: f32, _: f32) {
+            self.clips.borrow_mut().push((x, y, w, h));
         }
         fn unclip(&self) {
-            self.clip.set(None);
+            self.clips.borrow_mut().pop();
         }
         fn fill(&self, _: Color, x: f32, y: f32, w: f32, h: f32) {
             self.drew_box(x, y, w, h);
@@ -5948,6 +6000,40 @@ six".into()));
         scrolls.hold_pages(List::Notes, -PAGE, most);
         scrolls.let_go_pages(List::Notes, -1.0, PAGE, most);
         assert_eq!(scrolls.to[List::Notes as usize], 0.0);
+    }
+
+    /// The notes turned through by pages: the note shown stays shown as their order changes (written in, it comes
+    /// first), wherever it goes; turned by hand, the note turned to is; one opened beside them is turned to.
+    #[test]
+    fn the_note_shown_stays_as_their_order_changes() {
+        use crate::notes::{Colour, Note};
+        let note = |name: &str| Note { name: name.into(), text: name.into(), colour: Colour::Blue, stamp: crate::notes::store::Stamp { bytes: 0, written_ms: 0, digest: 0 } };
+        let order = |names: &[&str]| names.iter().map(|name| note(name)).collect::<Vec<Note>>();
+        let (mut scrolls, mut shown) = (Scrolls::default(), NoteShown::default());
+        let shows = |scrolls: &Scrolls| (scrolls.at(List::Notes) / PAGE, scrolls.to(List::Notes) / PAGE);
+        let abc = order(&["a", "b", "c"]);
+        keep_note(&mut scrolls, &mut shown, &abc, None);
+        // Turned by hand to the third.
+        scrolls.turn_pages(List::Notes, 2.0 * PAGE, PAGE, 2.0 * PAGE);
+        keep_note(&mut scrolls, &mut shown, &abc, None);
+        assert_eq!(shows(&scrolls).1, 2.0);
+        // It written in: first now, and shown there at once.
+        scrolls.ease(10.0, 0.1);
+        keep_note(&mut scrolls, &mut shown, &order(&["c", "a", "b"]), None);
+        assert_eq!(shows(&scrolls), (0.0, 0.0));
+        // Another written in elsewhere: it stays shown, second now.
+        keep_note(&mut scrolls, &mut shown, &order(&["b", "c", "a"]), None);
+        assert_eq!(shows(&scrolls), (1.0, 1.0));
+        // One opened beside: turned to (sliding there).
+        keep_note(&mut scrolls, &mut shown, &order(&["b", "c", "a"]), Some("a"));
+        assert_eq!(shows(&scrolls).1, 2.0);
+        // A new one written beside, first kept: turned to.
+        keep_note(&mut scrolls, &mut shown, &order(&["new", "b", "c", "a"]), Some("new"));
+        assert_eq!(shows(&scrolls).1, 0.0);
+        // The one shown taken away: the page it was on.
+        scrolls.ease(10.0, 0.1);
+        keep_note(&mut scrolls, &mut shown, &order(&["b", "c", "a"]), None);
+        assert_eq!(shows(&scrolls).1, 0.0);
     }
 
     /// Pages' dots too many for their room: which of them it is said instead, within it.

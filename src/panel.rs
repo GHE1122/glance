@@ -1811,6 +1811,9 @@ struct Panel<'a> {
     /// Its station's page shown (see `view::Tab`).
     tab: view::Tab,
     hover: Option<Hit>,
+    /// What is under the pointer said under it (see `hover_at`): taken away as the pointer leaves it, the panel goes,
+    /// or what is under the pointer changes without it moving (see `hover_again`).
+    saying: bool,
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
     pinned: bool,
@@ -1970,6 +1973,7 @@ impl<'a> Panel<'a> {
             scrolls: view::Scrolls::default(),
             tab: view::Tab::default(),
             hover: None,
+            saying: false,
             pinned: false,
             full_asked: None,
             game: None,
@@ -2333,9 +2337,8 @@ impl<'a> Panel<'a> {
         }
         self.end_drag();
         // (What it said under what the pointer was on goes with it: a drive's row, the line that switches players.)
-        if self.hover.take().is_some_and(|hit| says(hit, self.lang, &self.hits).is_some()) {
-            crate::ui::tip::hide();
-        }
+        self.hover = None;
+        self.unsay();
         self.recapture = false;
         self.generation += 1;
         self.torn = false;
@@ -2401,11 +2404,9 @@ impl<'a> Panel<'a> {
         let (pressed, elsewhere) = self.presses_since(down);
         let held = down || pressed;
         if !on_panel {
-            if let Some(was) = self.hover.take() {
-                // (What it said under it goes with it: a drive's row, the line that switches players.)
-                if says(was, self.lang, &self.hits).is_some() {
-                    crate::ui::tip::hide();
-                }
+            // (What it said under it goes with it: a drive's row, the line that switches players, a name cut short.)
+            self.unsay();
+            if self.hover.take().is_some() {
                 self.next_frame = now;
             }
         }
@@ -3629,8 +3630,17 @@ impl<'a> Panel<'a> {
         let Some(at) = self.pointer else { return };
         let hover = self.hit_at(at).filter(|hit| hit.list().is_none());
         if hover != self.hover {
+            // (What was said of what was there is not of what is there now.)
+            self.unsay();
             self.hover = hover;
             self.next_frame = Instant::now();
+        }
+    }
+
+    /// What it said under the pointer taken away.
+    fn unsay(&mut self) {
+        if std::mem::take(&mut self.saying) {
+            crate::ui::tip::hide();
         }
     }
 
@@ -3680,10 +3690,10 @@ impl<'a> Panel<'a> {
                         let on_screen = |dx: f32, dy: f32| ((placement.window.left as f32 + (self.corner.0 + dx) * placement.px).round() as i32, (placement.window.top as f32 + (self.corner.1 + dy) * placement.px).round() as i32);
                         let ((left, top), (right, bottom)) = (on_screen(x, y), on_screen(x + w, y + h));
                         crate::ui::tip::show(&said, RECT { left, top, right, bottom }, crate::os::apps_dark());
+                        self.saying = true;
                     }
                 }
-                _ if self.hover.is_some_and(|hit| says(hit, self.lang, &self.hits).is_some()) => crate::ui::tip::hide(),
-                _ => {}
+                _ => self.unsay(),
             }
             self.hover = hover;
             self.next_frame = Instant::now();

@@ -729,7 +729,7 @@ impl Gfx {
             dc.SetTransform(&Matrix3x2::identity());
             dc.Clear(Some(&D2D1_COLOR_F::default()));
             let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
-            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Matrix3x2::identity(), atlas: None, moving: Cell::new(false) });
+            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Matrix3x2::identity(), atlas: None, moving: Cell::new(false), clips: RefCell::new(Vec::new()) });
             dc.EndDraw(None, None)?;
             let read = dc.CreateBitmap(pixels, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
             read.CopyFromBitmap(None, &target, None)?;
@@ -807,6 +807,8 @@ pub struct Frame<'a> {
     atlas: Option<(ID2D1DeviceContext, ID2D1Bitmap1, POINT, (u32, u32))>,
     /// Drawing what moves (see `set_moving`): nothing put on whole pixels meanwhile.
     moving: Cell<bool>,
+    /// The clips begun and not yet ended, innermost last: whether each is a layer (a rounded one) or a box.
+    clips: RefCell<Vec<bool>>,
 }
 
 impl Canvas for Frame<'_> {
@@ -844,6 +846,27 @@ impl Canvas for Frame<'_> {
         // fill unclipped, and what was under showed there.)
         let (x, y, width, height) = self.on_pixels(x, y, width, height);
         unsafe { self.dc.PushAxisAlignedClip(&rect(x, y, width, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        self.clips.borrow_mut().push(false);
+    }
+
+    fn clip_rounded(&self, x: f32, y: f32, width: f32, height: f32, radius: f32) {
+        use windows::Win32::Graphics::Direct2D::{D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1};
+        let (x, y, width, height) = self.on_pixels(x, y, width, height);
+        let radius = radius.max(0.0).min(width / 2.0).min(height / 2.0);
+        let shape = unsafe { self.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius }) };
+        let layer = D2D1_LAYER_PARAMETERS1 {
+            // (Its bounds the box: the layer is kept to that much whatever its mask.)
+            contentBounds: rect(x, y, width, height),
+            geometricMask: std::mem::ManuallyDrop::new(shape.ok().and_then(|shape| shape.cast().ok())),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: 1.0,
+            opacityBrush: std::mem::ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+        };
+        unsafe { self.dc.PushLayer(&layer, None) };
+        drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+        self.clips.borrow_mut().push(true);
     }
 
     fn on_pixels(&self, x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
@@ -851,7 +874,10 @@ impl Canvas for Frame<'_> {
     }
 
     fn unclip(&self) {
-        unsafe { self.dc.PopAxisAlignedClip() };
+        match self.clips.borrow_mut().pop() {
+            Some(true) => unsafe { self.dc.PopLayer() },
+            _ => unsafe { self.dc.PopAxisAlignedClip() },
+        }
     }
 
     fn fill(&self, color: Color, x: f32, y: f32, width: f32, height: f32) {
@@ -1202,7 +1228,7 @@ impl<'a> Frame<'a> {
                 return Err(error);
             }
         };
-        Ok(Frame { gfx, dc, brush, base, atlas, moving: Cell::new(false) })
+        Ok(Frame { gfx, dc, brush, base, atlas, moving: Cell::new(false), clips: RefCell::new(Vec::new()) })
     }
 
     /// `draw` done on its context counted in physical pixels (as the text services count: see `editor`), at the

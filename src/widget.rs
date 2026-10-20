@@ -531,6 +531,9 @@ struct Widget {
     hover: bool,
     /// What a press would do something with under the pointer (see `view::Hit::takes_press`): lit as it is drawn.
     hit_hover: Option<view::Hit>,
+    /// What is under the pointer said under it (see `hover`): taken away as the pointer leaves it, the widget goes, or
+    /// what is under the pointer changes without it (pages turned).
+    saying: bool,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
     thumbs: crate::ui::thumb::Dots<view::Hit>,
     /// Letting clicks through: since when the pointer has been over it, and
@@ -971,11 +974,13 @@ struct Readings {
     /// The one lane it shows (its module's id: torn off by that lane's head), whatever else the panel shows, and shown
     /// though it is switched off there.
     only: Option<String>,
+    /// Which note its notes turned through by pages show (see `view::keep_note`).
+    note_shown: view::NoteShown,
 }
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false, only: None }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false, only: None, note_shown: view::NoteShown::default() }
     }
 
     /// What it shows, as the settings keep it.
@@ -1568,6 +1573,7 @@ impl Widgets {
                         _ => false,
                     };
                     crate::ui::tip::show(button.says(lit, lang, false), at, crate::os::apps_dark());
+                    widget.saying = false;
                 }
                 _ => crate::ui::tip::hide(),
             }
@@ -1587,9 +1593,13 @@ impl Widgets {
                         };
                         let ((left, top), (right, bottom)) = (on_screen(hx, hy), on_screen(hx + hw, hy + hh));
                         crate::ui::tip::show(&said, RECT { left, top, right, bottom }, crate::os::apps_dark());
+                        widget.saying = true;
                     }
                 }
-                _ if widget.hit_hover.is_some_and(|hit| crate::panel::says(hit, lang, &widget.hits).is_some()) && over.is_none() => crate::ui::tip::hide(),
+                _ if widget.saying && over.is_none() => {
+                    crate::ui::tip::hide();
+                    widget.saying = false;
+                }
                 _ => {}
             }
             widget.hit_hover = hit;
@@ -1627,6 +1637,7 @@ impl Widgets {
         if across {
             if let (Some((list, most)), Some(readings)) = (pages, widget.content.readings_mut()) {
                 readings.scrolls.turn_pages(list, delta as f32 / 120.0 * view::PAGE, view::PAGE, most);
+                widget.unsay();
                 widget.next_frame = Instant::now();
             }
             return;
@@ -1662,9 +1673,11 @@ impl Widgets {
         let rows = -(delta as f32) / 120.0 * crate::panel::WHEEL_ROWS;
         if let (Some((list, most)), Some(readings)) = (pages, readings.as_deref_mut()) {
             readings.scrolls.turn_pages(list, rows * view::TABLE_ROW, view::PAGE, most);
+            widget.unsay();
             widget.next_frame = Instant::now();
         } else if let (Some((list, most)), Some(readings)) = (list, readings) {
             readings.scrolls.turn(list, rows * view::TABLE_ROW, most);
+            widget.unsay();
             widget.next_frame = Instant::now();
         }
     }
@@ -1987,7 +2000,7 @@ impl Widgets {
         let mut guest = self.list.remove(guest);
         let _ = unsafe { ReleaseCapture() };
         guest.hide_hint();
-        if guest.tip.take().is_some() {
+        if guest.tip.take().is_some() | std::mem::take(&mut guest.saying) {
             crate::ui::tip::hide();
         }
         let content = std::mem::replace(&mut guest.content, Content::Music(MusicShown::new(music::LEAST)));
@@ -2049,7 +2062,7 @@ impl Widgets {
     /// under the pointer gone with it (the pointer, no longer over it, would never take it away).
     fn put_away_at(&mut self, index: usize) {
         let widget = self.list.remove(index);
-        if widget.tip.is_some() || matches!(widget.hit_hover, Some(view::Hit::Drive(_) | view::Hit::Media(crate::playing::Key::Player, _))) {
+        if widget.tip.is_some() || widget.saying {
             crate::ui::tip::hide();
         }
         self.put_away.push(widget.kept());
@@ -2230,6 +2243,7 @@ impl Widget {
             split: None,
             hover: false,
             hit_hover: None,
+            saying: false,
             thumbs: crate::ui::thumb::Dots::new(),
             lingered: None,
             reached: false,
@@ -2606,6 +2620,15 @@ impl Widget {
         });
     }
 
+    /// What is under the pointer changed without it (pages turned): what was said of what was there taken away, and
+    /// it lit no more (the pointer moved again, what is there now is).
+    fn unsay(&mut self) {
+        if std::mem::take(&mut self.saying) {
+            crate::ui::tip::hide();
+        }
+        self.hit_hover = None;
+    }
+
     /// A press on pages (see `swipes`), the hand gone from `from` to `to` (physical px): swiped, if it went across
     /// more than down. Whether it is.
     fn begin_swipe(&mut self, from: POINT, to: POINT, now: Instant) -> bool {
@@ -2617,6 +2640,7 @@ impl Widget {
         let start = readings.scrolls.at(list);
         note(format!("widget: pages swiped ({list:?})"));
         self.drag = Some(Drag::Swipe { list, most, wide, from, start, trail: vec![(now, to)] });
+        self.unsay();
         true
     }
 
@@ -2833,6 +2857,7 @@ impl Widget {
                                     if let Some(readings) = self.content.readings_mut() {
                                         readings.scrolls.turn_pages(list, view::PAGE, view::PAGE, f32::from_bits(most));
                                     }
+                                    self.unsay();
                                 }
                                 Some(hit) if hit.opens_menu() => return Released::Menu(hit),
                                 // Quick launch's choosing of programs, a note: beside it on the side with more room.
@@ -3055,6 +3080,9 @@ impl Widget {
             moving |= self.thumbs.apps(now, &order, None);
         }
         let thumbs = self.thumbs.clone();
+        // Its notes turned through by pages: kept on the note they show as their order changes, on one opened beside.
+        let note_pages = shows(|hit| matches!(hit, view::Hit::Pages(view::List::Notes, _)));
+        let writing = if note_pages { crate::ui::beside::writing_for(self.window.hwnd) } else { None };
         // Its process list turned on toward where the wheel turned it, as the panel's is.
         let readings: Vec<&mut Readings> = match &mut self.content {
             Content::Readings(readings) => vec![readings],
@@ -3063,6 +3091,9 @@ impl Widget {
         };
         for readings in readings {
             readings.scrolls.follow(view::lists_show(readings.tab));
+            if note_pages {
+                view::keep_note(&mut readings.scrolls, &mut readings.note_shown, &crate::notes::shown(), writing.as_deref());
+            }
             moving |= readings.scrolls.ease(dt / 1000.0, crate::panel::SCROLL_EASE);
         }
         // Settling this frame (its last too): its far edges held.
@@ -3314,17 +3345,12 @@ impl Widget {
         // and with the pointer on that the window takes the click.
         self.lingered = if hovered && self.click_through { self.lingered.or(Some(now)) } else { None };
         self.reached = self.click_through && cursor.is_some_and(|c| self.button_at((c.x - self.at.x) as f32 / px, (c.y - self.at.y) as f32 / px) == Some(Button::Through));
-        if !hovered && self.tip.take().is_some() {
+        // (What it said under the pointer goes with it: a button's, a drive's row, a name cut short.)
+        if !hovered && (self.tip.take().is_some() | std::mem::take(&mut self.saying)) {
             crate::ui::tip::hide();
         }
-        if !hovered {
-            if let Some(was) = self.hit_hover.take() {
-                // (What it said under it goes with it: a drive's row, the line that switches players.)
-                if matches!(was, view::Hit::Drive(_) | view::Hit::Media(crate::playing::Key::Player, _)) {
-                    crate::ui::tip::hide();
-                }
-                self.next_frame = now;
-            }
+        if !hovered && self.hit_hover.take().is_some() {
+            self.next_frame = now;
         }
         // Moved near an edge, not stuck: where it would stick, as it would
         // be there, nearer and firmer the nearer it is.

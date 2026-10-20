@@ -162,6 +162,14 @@ pub fn is_up() -> bool {
     UP.load(Ordering::Acquire)
 }
 
+/// The note written in on the page up, by its name (a new one, once it is first kept).
+static WRITING: Mutex<Option<String>> = Mutex::new(None);
+
+/// The note written in on the page up, opened from `window`, by its name (a new one, once it is first kept).
+pub fn writing_for(window: HWND) -> Option<String> {
+    up_for(window).then(|| WRITING.lock().unwrap().clone()).flatten()
+}
+
 /// The window the page up opened from (see `Opening::owner`).
 static OWNER: AtomicIsize = AtomicIsize::new(0);
 
@@ -595,6 +603,7 @@ fn show(opening: Opening) {
                 let editor = Rc::new(editor);
                 EDITOR.with(|held| *held.borrow_mut() = Some(editor.clone()));
                 let written_ms = read.as_ref().map_or_else(crate::station::now_ms, |(_, stamp)| stamp.written_ms);
+                *WRITING.lock().unwrap() = name.clone();
                 let writing = Writing { folder: folder.path.clone(), name, stamp: read.map(|(_, stamp)| stamp), colour, written_ms, editor, palette, unkept: false, said: None };
                 writing.dress();
                 with(|beside| beside.writing = Some(writing));
@@ -696,6 +705,7 @@ fn let_go(told: bool) {
     }
     PAGE.store(0, Ordering::Release);
     UP.store(false, Ordering::Release);
+    *WRITING.lock().unwrap() = None;
 }
 
 /// A message for a note's words' box, given it where it is one of its: what it answers (none: the page's own). Given it
@@ -1053,6 +1063,7 @@ impl Beside {
         };
         match folder.write(&name, &text, writing.stamp) {
             Ok(crate::notes::Written::Done(stamp)) => {
+                *WRITING.lock().unwrap() = Some(name.clone());
                 writing.name = Some(name);
                 writing.stamp = Some(stamp);
                 writing.written_ms = stamp.written_ms;
@@ -1064,6 +1075,7 @@ impl Beside {
                 });
                 // (Its stamp of the bytes written here: read again, another's change meanwhile would be taken for them.)
                 writing.stamp = Some(stamp);
+                *WRITING.lock().unwrap() = Some(apart.clone());
                 writing.name = Some(apart);
             }
             Err(_) => {

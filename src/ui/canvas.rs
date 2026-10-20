@@ -162,6 +162,8 @@ pub trait Canvas {
     /// left: the box put on whole pixels once, the part as many whole pixels as that comes to, ending where the box
     /// does (see `filled_part`). (One call, not the box worked out by the caller: a recording of it, played back as a
     /// layout turns into another, works it out on the pixels it is played on.)
+    /// Clips to the rounded box (ended by `unclip`, as `clip` is).
+    fn clip_rounded(&self, x: f32, y: f32, width: f32, height: f32, radius: f32);
     fn clip_part(&self, x: f32, y: f32, width: f32, height: f32, fraction: f32, up: bool) {
         let whole = self.on_pixels(x, y, width, height);
         let part = filled_part(whole, fraction, up, |x, y, w, h| self.on_pixels(x, y, w, h));
