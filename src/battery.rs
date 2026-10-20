@@ -70,7 +70,10 @@ pub fn read() -> BatteryFigures {
 /// What the batteries whose rate is reckoned held when last seen to change (or first looked at), when that was,
 /// whether it was a change (the time from the first look to the first change is no step's length), and the rate last
 /// reckoned (see `trend`).
-static TREND: std::sync::Mutex<Option<(u64, std::time::Instant, bool, Option<f32>)>> = std::sync::Mutex::new(None);
+type Trend = (u64, std::time::Instant, bool, Option<f32>);
+
+/// The batteries' trend, as last seen (see `Trend`).
+static TREND: std::sync::Mutex<Option<Trend>> = std::sync::Mutex::new(None);
 /// What a battery that does not know what it holds says it holds.
 const BATTERY_UNKNOWN_CAPACITY: u32 = 0xFFFF_FFFF;
 

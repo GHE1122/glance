@@ -448,7 +448,7 @@ impl Colours {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "studio"))]
 mod tests {
     use super::*;
 
@@ -456,7 +456,6 @@ mod tests {
     /// writes `target/looks/menus.png`).
     #[test]
     #[ignore = "writes a picture to look at"]
-    #[cfg(feature = "studio")]
     fn menu_looks() {
         use super::super::theme::Skin;
         unsafe {

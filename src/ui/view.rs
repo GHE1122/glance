@@ -897,9 +897,9 @@ type Under<'a> = &'a dyn Fn(&dyn Canvas);
 /// - Windows 11 its sheet a little of its colour, ruled round, a band of the colour along its top;
 /// - chart paper what lies on its sheet (the station's things' plates), ruled round; its colour a dot by its title
 ///   (see `note_dot`).
-#[allow(clippy::too_many_arguments)]
-/// A note's card: its shadow on the sheet, its ground of its colour (see `note_card_fill`), its rim (see
-/// `note_card_rim`). `plain` (under another in a deck), on glass its colour alone.
+///
+/// Its shadow on the sheet, its ground of its colour (see `note_card_fill`), its rim (see `note_card_rim`). `plain`
+/// (under another in a deck), on glass its colour alone.
 #[allow(clippy::too_many_arguments)]
 fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (x, y, w, h): (f32, f32, f32, f32), radius: f32, lit: bool, plain: bool, below: Option<Under>) {
     let glass = theme.skin == Skin::Glass;

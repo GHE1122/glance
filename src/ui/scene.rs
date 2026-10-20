@@ -305,7 +305,7 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
                 luma.push((lightness * 255.0).round() as u8);
                 if !held {
                     let screen_x = area.left + (2 * x.min(row_width - 1)) as i32;
-                    if opaque.iter().any(|rect| screen_x >= rect.left && screen_x + 2 <= rect.right && screen_y - 1 >= rect.top && screen_y + 1 <= rect.bottom) {
+                    if opaque.iter().any(|rect| screen_x >= rect.left && screen_x + 2 <= rect.right && screen_y > rect.top && screen_y < rect.bottom) {
                         looked = true;
                         held = line[i + 3] > 0;
                     }
@@ -1490,7 +1490,7 @@ mod tests {
                         let mut paint = PAINTSTRUCT::default();
                         let dc = BeginPaint(window, &mut paint);
                         let tick = TICK.load(Ordering::Relaxed);
-                        let colour = windows::Win32::Foundation::COLORREF(((tick * 37) % 256 | ((tick * 91) % 256) << 8 | ((tick * 53) % 256) << 16) as u32);
+                        let colour = windows::Win32::Foundation::COLORREF((((tick * 37) % 256) | (((tick * 91) % 256) << 8) | (((tick * 53) % 256) << 16)) as u32);
                         let brush = CreateSolidBrush(colour);
                         FillRect(dc, &paint.rcPaint, brush);
                         let _ = DeleteObject(brush.into());
