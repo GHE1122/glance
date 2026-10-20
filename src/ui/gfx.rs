@@ -153,6 +153,27 @@ thread_local! {
     static CURRENT: RefCell<Option<Rc<Gfx>>> = const { RefCell::new(None) };
 }
 
+/// What the device last made (on any thread) draws on: for a report (see `drawn_on`).
+static DRAWN_ON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// What Glance draws on, as its last device made does: the adapter, its driver's version, and whether in software
+/// (none made yet).
+pub fn drawn_on() -> Option<String> {
+    DRAWN_ON.lock().unwrap().clone()
+}
+
+/// The adapter `dxgi` is a device of, as a report says it: its name and its driver's version (the user-mode
+/// driver's, as DXGI gives it: four parts of 16 bits).
+fn adapter(dxgi: &IDXGIDevice, software: bool) -> String {
+    let Ok(adapter) = (unsafe { dxgi.GetAdapter() }) else { return "an adapter not asked".into() };
+    let name = unsafe { adapter.GetDesc() }.map_or_else(|_| "an adapter not named".to_string(), |desc| String::from_utf16_lossy(desc.Description.split(|unit| *unit == 0).next().unwrap_or_default()));
+    let driver = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }.map_or_else(|_| "not said".to_string(), |version| {
+        let version = version as u64;
+        format!("{}.{}.{}.{}", version >> 48, (version >> 32) & 0xFFFF, (version >> 16) & 0xFFFF, version & 0xFFFF)
+    });
+    format!("{name} (driver {driver}){}", if software { ", in software" } else { "" })
+}
+
 /// How often a device drawn in software for a card's moment's failure asks the card again.
 const CARD_ASKED_AGAIN: Duration = Duration::from_secs(2);
 
@@ -303,6 +324,7 @@ impl Gfx {
                 guard.GetMultithreadProtected().as_bool()
             });
         let dxgi: IDXGIDevice = d3d.cast()?;
+        *DRAWN_ON.lock().unwrap() = Some(adapter(&dxgi, software.is_some()));
         let factory: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, None)? };
         let device: ID2D1Device = unsafe { factory.CreateDevice(&dxgi)? };
         // What Direct2D keeps of the textures its effects draw through (the frost's blur, shadows), past which it
@@ -2098,6 +2120,15 @@ mod tests {
         for passing in [DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, E_FAIL, E_OUTOFMEMORY] {
             assert!(!super::software_instead(passing), "{passing:?}");
         }
+    }
+
+    /// A report says what Glance draws on: the adapter by name, and its driver's version.
+    #[test]
+    fn says_what_it_draws_on() {
+        let _gfx = super::Gfx::new().expect("graphics");
+        let said = super::drawn_on().expect("not said");
+        println!("{said}");
+        assert!(!said.starts_with(' ') && !said.contains('\u{0}') && said.contains(" (driver ") && !said.contains("not said"), "{said}");
     }
 
     /// Drawn off screen at 100%, `size` pixels square: each pixel's alpha, rows top to bottom.
