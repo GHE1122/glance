@@ -3551,6 +3551,7 @@ impl Widget {
     }
 
     fn draw(&mut self, theme: &Theme, scene: &Scene, now: Instant) {
+        let _timed = crate::perf::Timed::start("widget frame", || format!("{:?}", self.surface_size));
         if matches!(&self.content, Content::Readings(Readings { last: None, .. })) {
             return;
         }

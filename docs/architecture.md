@@ -809,6 +809,15 @@ pool is made only larger (a quarter more than asked, the screen's size at
 most), never smaller: arranged 80 times over ten sizes, it holds 22 MB, where
 made anew at each size it held 239 MB and went on growing.
 
+What stays is the process's count, not the card's (measured 2026-10-20 with
+the `\GPU Process Memory` and `\GPU Adapter Memory` counters): the desktop's
+capture ended and taken again 15 times grew Glance's count by 85 MB each
+(1.28 GB), the adapter's own use came back to where it was, and DXGI's
+`QueryVideoMemoryInfo` showed nothing held. The count is what Task Manager
+shows for Glance, so captures are still not made anew: the desktop's own
+(`scene::Feed`, two frames of the whole desktop, 167 MB of the card's on a
+5600 x 3840 one) is made once and slowed while nothing shows it, never ended.
+
 ## Verification
 
 ### Conditions

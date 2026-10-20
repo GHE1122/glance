@@ -166,6 +166,8 @@ static OPENING: AtomicBool = AtomicBool::new(false);
 /// overlay's page asked for (see `open_at_overlay`).
 const FOLLOW: u32 = WM_APP + 40;
 const TO_OVERLAY: u32 = WM_APP + 41;
+/// (Measuring only: see `procedure`.)
+const PERF_TURN: u32 = WM_APP + 90;
 /// Asked to turn to the workbench's page.
 const TO_WORKBENCH: u32 = WM_APP + 42;
 
@@ -228,6 +230,7 @@ enum To {
 }
 
 fn open_at(to: Option<To>) {
+    crate::perf::mark(|| "settings asked".into());
     if let Some(hwnd) = hwnd() {
         let message = match to {
             Some(To::Overlay) => Some(TO_OVERLAY),
@@ -254,7 +257,9 @@ fn run(to: Option<To>) {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
     let _ending = Ending;
+    crate::perf::mark(|| "settings thread".into());
     let made = gfx::current().ok().and_then(|gfx| make(gfx, true));
+    crate::perf::mark(|| "settings made".into());
     if let Some(hwnd) = made {
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
         // (What plays, looked at only while something on the screen can show it: at once, for the previews.)
@@ -297,6 +302,7 @@ impl Drop for Ending {
     fn drop(&mut self) {
         drop(UI.with(|ui| ui.borrow_mut().take()));
         gfx::let_go();
+        crate::perf::mark(|| "settings gone".into());
     }
 }
 
@@ -1374,6 +1380,17 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         TO_WORKBENCH => {
             WORKBENCH_OWED.store(true, Ordering::Release);
             to_workbench();
+            LRESULT(0)
+        }
+        // (Measuring: a page, and a tab of the monitor's, turned to as a press on it turns to it; see `perf`.)
+        PERF_TURN if crate::perf::on() => {
+            const PAGES: [Page; 7] = [Page::Layout, Page::Look, Page::Monitor, Page::Workbench, Page::Music, Page::Phone, Page::General];
+            const TABS: [Tab; 3] = [Tab::Shown, Tab::Data, Tab::Overlay];
+            with_ui(|ui| {
+                crate::perf::mark(|| format!("settings turn {} {}", wparam.0, lparam.0));
+                ui.tab = TABS[lparam.0 as usize % TABS.len()];
+                ui.turn_to(PAGES[wparam.0 % PAGES.len()]);
+            });
             LRESULT(0)
         }
         // The screens changed: this thread asks for them anew too (see `screens::changed`).
@@ -3633,6 +3650,7 @@ impl Ui {
     }
 
     fn draw(&mut self, now: Instant) {
+        let _timed = crate::perf::Timed::start("settings frame", || format!("{:?} {:?}", self.page, self.tab));
         // The screens as they are about now, and the one the preview
         // shows.
         if now.duration_since(self.screens_at) >= Duration::from_secs(1) {

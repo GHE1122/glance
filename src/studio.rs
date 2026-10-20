@@ -1122,16 +1122,34 @@ pub fn surface_memory(way: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_secs(4));
         // Made and let go of again and again at one size, as a panel's is as it opens and goes: what stays.
         if let Some(cycles) = std::env::var("GLANCE_CYCLES").ok().and_then(|s| s.parse::<usize>().ok()) {
-            for _ in 0..cycles {
+            // Kept, resting between (as a panel's is while it is hidden), where GLANCE_REST is set.
+            let rests = std::env::var_os("GLANCE_REST").is_some();
+            let mut kept: Option<crate::ui::scene::Scene> = None;
+            // At another size each time, where GLANCE_GROW is set (a pool made anew at each).
+            let grows = std::env::var_os("GLANCE_GROW").is_some();
+            for cycle in 0..cycles {
+                let grow = if grows { (cycle % 10) as i32 * 37 } else { 0 };
+                let area = RECT { left: 200, top: 200, right: 1000 + grow, bottom: 700 + grow };
                 let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| {});
-                let mut scene = crate::ui::scene::Scene::new(RECT { left: 200, top: 200, right: 1000, bottom: 700 }, wake, &gfx).ok_or("no scene")?;
-                scene.arrange(RECT { left: 200, top: 200, right: 1000, bottom: 700 }, window);
+                let mut scene = match kept.take() {
+                    Some(scene) => scene,
+                    None => crate::ui::scene::Scene::new(area, wake, &gfx).ok_or("no scene")?,
+                };
+                let arranging = Instant::now();
+                scene.arrange(area, window);
+                let arranged = arranging.elapsed();
                 let began = Instant::now();
                 scene.want();
                 while began.elapsed() < Duration::from_millis(600) && scene.ready().is_none() {
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                drop(scene);
+                println!("  arranged in {:.1} ms, a frame read {:.1} ms after", arranged.as_secs_f64() * 1000.0, began.elapsed().as_secs_f64() * 1000.0);
+                if rests {
+                    scene.rest();
+                    kept = Some(scene);
+                } else {
+                    drop(scene);
+                }
                 std::thread::sleep(Duration::from_millis(200));
             }
             gfx.trim();

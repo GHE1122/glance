@@ -837,6 +837,7 @@ impl Controller {
                 // The shortcut and the tray: the panel of the edge last opened (see `hand_target`), opened, or (the
                 // shortcut) closed where it is up.
                 OPEN_FROM_TRAY | TOGGLE => {
+                    crate::perf::mark(|| "panel asked".into());
                     let at = self.hand_target(&mut panels, last_place);
                     if panels[at].is_open() {
                         if msg.message == TOGGLE {
@@ -2241,6 +2242,7 @@ impl<'a> Panel<'a> {
         self.last_frame = now;
         self.frame(now);
         self.window.show();
+        crate::perf::mark(|| format!("panel shown {:.3} ms", began.elapsed().as_secs_f64() * 1000.0));
         // (Where it stands among the windows as it shows, for the journal with its opening: see below.)
         let standing = self.window.standing();
         if let Some(placement) = &self.placement {
@@ -2346,6 +2348,7 @@ impl<'a> Panel<'a> {
         self.phase = Phase::Hidden;
         self.pinned = false;
         self.window.hide();
+        crate::perf::mark(|| "panel hidden".into());
         if let Some(placement) = &self.placement {
             crate::widget::own_window_changed(placement.painted);
         }
@@ -3260,6 +3263,7 @@ impl<'a> Panel<'a> {
 
     /// Draws the panel as it is at `now` where it is laid out in its window, and finishes a closing that is done.
     fn frame(&mut self, now: Instant) {
+        let _timed = crate::perf::Timed::start("panel frame", || format!("{} moving={}", match self.phase { Phase::Hidden => "hidden", Phase::Closing => "closing", _ => "open" }, !(self.shift.done(now) && self.opacity.done(now))));
         let by_hand = self.drag.is_some_and(|drag| drag.edges.any());
         let _sizing = gfx::sizing(by_hand);
         if matches!(self.phase, Phase::Closing) && self.shift.done(now) && self.opacity.done(now) {
