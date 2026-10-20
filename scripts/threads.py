@@ -2,9 +2,9 @@
 processor time and context switches over a few seconds, the busiest first. For the performance pass
 (docs/performance.md): attributes what scripts/usage.py measures as a whole.
 
-    python -I scripts/threads.py [process name] [seconds]
+    python -I scripts/threads.py [process name] [seconds] [pid]
 
-Defaults: glance.exe, 5 seconds. Threads with no name are grouped by their start address's module.
+Defaults: glance.exe, 5 seconds, the first process of that name (a pid picks one of several). Threads with no name are grouped by their start address's module.
 """
 
 import ctypes
@@ -98,6 +98,7 @@ def modules_of(pid):
 def main():
     process = (sys.argv[1] if len(sys.argv) > 1 else "glance.exe").removesuffix(".exe")
     seconds = float(sys.argv[2]) if len(sys.argv) > 2 else 5.0
+    wanted = int(sys.argv[3]) if len(sys.argv) > 3 else None
     query = ctypes.c_void_p()
     pdh.PdhOpenQueryW(None, 0, ctypes.byref(query))
     switches = counter(query, rf"\Thread({process}/*)\Context Switches/sec")
@@ -109,7 +110,7 @@ def main():
     pdh.PdhCollectQueryData(query)
     switched, used, tids, pids = read(switches), read(busy), read(ids), read(owner)
     # (The instance pattern matches other processes' threads too: only those of the process named, by its pid.)
-    pid = int(next(value for instance, value in pids.items() if instance.split("/")[0].split("#")[0] == process))
+    pid = wanted or int(next(value for instance, value in pids.items() if instance.split("/")[0].split("#")[0] == process))
     tids = {instance: tid for instance, tid in tids.items() if int(pids.get(instance, -1)) == pid}
     modules = modules_of(pid)
     rows = {}

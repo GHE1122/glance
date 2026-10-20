@@ -88,7 +88,7 @@ const WATCH_MS: u32 = 100;
 /// How soon to try again when drawing failed for want of a device.
 const DEVICE_RETRY: Duration = Duration::from_millis(250);
 /// How often a live backdrop is taken again as it changes (see `widget::LIVE_INTERVAL`).
-const LIVE_INTERVAL: Duration = Duration::from_millis(33);
+const LIVE_INTERVAL: Duration = crate::ui::scene::LIVE;
 /// Rows a wheel notch scrolls the process list by.
 pub(crate) const WHEEL_ROWS: f32 = 3.0;
 /// How quickly the process list catches up with the wheel.
@@ -2540,8 +2540,8 @@ impl<'a> Panel<'a> {
                 scene.rest();
                 return;
             }
-            // (Live, as often as it is looked at: see `refresh_behind`.)
-            if self.capturing.is_some() || (self.live && self.behind.as_ref().is_none_or(|behind| now.duration_since(behind.taken) >= LIVE_INTERVAL)) {
+            // (Live, as often as it is looked at: see `refresh_behind`; each as it comes where they come no oftener.)
+            if self.capturing.is_some() || (self.live && self.behind.as_ref().is_none_or(|behind| scene.paced() || now.duration_since(behind.taken) >= LIVE_INTERVAL)) {
                 scene.want();
             }
             return;
@@ -3266,6 +3266,8 @@ impl<'a> Panel<'a> {
         let _timed = crate::perf::Timed::start("panel frame", || format!("{} moving={}", match self.phase { Phase::Hidden => "hidden", Phase::Closing => "closing", _ => "open" }, !(self.shift.done(now) && self.opacity.done(now))));
         let by_hand = self.drag.is_some_and(|drag| drag.edges.any());
         let _sizing = gfx::sizing(by_hand);
+        // (What another window drew on this thread before forgotten: see `view::gliding_drawn`.)
+        crate::ui::view::gliding_drawn();
         if matches!(self.phase, Phase::Closing) && self.shift.done(now) && self.opacity.done(now) {
             // Closed: a game the panel sent to the background comes back.
             let game = self.game.take();
@@ -3475,7 +3477,7 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel.
-        let moving = thumbs_moving || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::playing::gliding() || self.turning.is_some();
+        let moving = thumbs_moving || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turning.is_some();
         self.next_frame = if moving {
             now
         } else {

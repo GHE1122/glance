@@ -158,9 +158,8 @@ const FROST_EASE: Duration = Duration::from_millis(400);
 /// How often, the time up, a frame being read meanwhile is waited for.
 const LOOK_AGAIN_STEP: Duration = Duration::from_millis(16);
 /// With live refraction, how often the desktop behind is taken again as it
-/// changes, as the panel's is: thirty times a second (at fifteen, what moves
-/// behind the glass, a game's picture, was seen to step).
-const LIVE_INTERVAL: Duration = Duration::from_millis(33);
+/// changes, as the panel's is (see `scene::LIVE`).
+const LIVE_INTERVAL: Duration = crate::ui::scene::LIVE;
 /// Without live refraction, how old the desktop taken behind a widget is
 /// before letting go of it takes it again.
 const RETAKE_AFTER: Duration = Duration::from_secs(3);
@@ -504,6 +503,8 @@ struct Widget {
     /// Without live refraction, a frame taken: till when another is looked for before the scene rests (see
     /// `collect`).
     look_again: Option<Instant>,
+    /// How many times what is behind it has changed as a frame of it was taken (see `look_behind`).
+    behind_changes: u64,
     /// What is behind it is to be replaced at once, even in hand: the
     /// panel's, lent as it was torn off (`false`: its tone kept), or taken
     /// of its screen as it was (`true`: toned afresh).
@@ -1423,14 +1424,15 @@ impl Widgets {
         }
     }
 
-    /// A frame of what is behind `hwnd` has come (see `CAPTURED`): taken,
-    /// if it is due, and drawn with at once.
+    /// A frame of what is behind `hwnd` has come, or has been read (see `CAPTURED`): taken, if it is due, and drawn
+    /// with at once, if what is behind changed (see `Widget::look_behind`).
     pub fn captured(&mut self, hwnd: HWND) {
         let live = self.live;
         if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
-            let px = widget.contact.scale * widget.zoom;
-            widget.collect(live, px);
-            widget.next_frame = Instant::now();
+            let live = live && widget.content.skinned();
+            if widget.look_behind(live) {
+                widget.next_frame = Instant::now();
+            }
         }
     }
 
@@ -1915,11 +1917,18 @@ impl Widgets {
                 widget.hidden();
                 continue;
             }
+            // What is behind it, looked at as often as it is due, drawn only as it changes.
+            let sees = look.skin.sees_backdrop() && widget.content.skinned();
+            if sees && widget.look_behind(self.live && sees) {
+                widget.next_frame = now;
+            }
+            let behind_due = widget.backdrop_wait(self.live && sees);
             // Drawn when it is due: in hand, flung or turning, at once; else
             // after its rest, not each time the panel draws a frame.
             let due_now = widget.drag.is_some() || widget.fling.is_some() || now >= widget.next_frame;
             if !due_now {
                 due = due.min(widget.next_frame.saturating_duration_since(now));
+                due = behind_due.map_or(due, |wait| due.min(wait));
                 continue;
             }
             if widget.drag.is_some() {
@@ -1937,10 +1946,13 @@ impl Widgets {
                 Frame::Rest | Frame::Waiting => {
                     // (The pointer over it: looked at often, so that what comes with it goes as soon as it leaves.)
                     let rest = if widget.lingered.is_some() { WATCHED } else if widget.hover { HOVERED_FRAME } else { REST_FRAME };
-                    // (Or sooner, a frame of what is behind it having come.)
-                    let rest = widget.backdrop_wait(self.live).map_or(rest, |wait| rest.min(wait));
                     widget.next_frame = now + rest;
                     due = due.min(rest);
+                    // (What is behind looked at sooner, a frame of it having come: drawn only if it changed.)
+                    let sees = look.skin.sees_backdrop() && widget.content.skinned();
+                    if let Some(wait) = widget.backdrop_wait(self.live && sees) {
+                        due = due.min(wait);
+                    }
                 }
             }
         }
@@ -2229,6 +2241,7 @@ impl Widget {
             retake: false,
             pending: None,
             look_again: None,
+            behind_changes: 0,
             replace: None,
             generation: 0,
             unsaved: false,
@@ -2345,6 +2358,11 @@ impl Widget {
     /// than the last was).
     fn took(&mut self, capture: Option<Capture>, moved: bool, taken: Instant, px: f32) {
         let now = taken;
+        // (The same desktop taken again where the last was, nothing waiting on it: nothing to draw anew.)
+        let same = matches!((&capture, &self.behind), (Some(capture), Some(behind)) if capture.digest == behind.capture.digest && capture.rect == behind.capture.rect && !moved);
+        if !(same && self.replace.is_none() && self.frost_at.is_none()) {
+            self.behind_changes += 1;
+        }
         // None could be taken (the lock screen): what it had stands as it
         // was, as old as it was, and is taken again once it has rested.
         let Some(capture) = capture else {
@@ -2407,8 +2425,9 @@ impl Widget {
                 }
                 return;
             }
-            // (Without live refraction, only the one awaited.)
-            let again = live && self.behind.as_ref().is_some_and(|behind| behind.taken.elapsed() >= Self::backdrop_every(live));
+            // (Without live refraction, only the one awaited. With it, each as it comes where they come no oftener than
+            // they are taken, else as often as they are.)
+            let again = live && self.behind.as_ref().is_some_and(|behind| scene.paced() || behind.taken.elapsed() >= Self::backdrop_every(live));
             if self.pending.is_some() || self.behind.is_none() || again {
                 scene.want();
             }
@@ -2447,6 +2466,22 @@ impl Widget {
             Some(request) => self.took(Some(capture), request.moved, now, px),
             None => self.took(Some(capture), false, now, px),
         }
+        // Live, its frames paced: the next wanted now, read as it comes.
+        if let Some(scene) = self.backdrop.as_ref().filter(|scene| live && scene.paced() && self.behind.is_some()) {
+            scene.want();
+        }
+    }
+
+    /// What is behind looked at between its frames (see `collect`): a frame of it read, taken; one due, wanted (read
+    /// on another thread, which tells the thread that draws as it has been). Whether what it shows changed, or what
+    /// is to be done about it (to be drawn at once): a live backdrop the same as before is not drawn again.
+    fn look_behind(&mut self, live: bool) -> bool {
+        if self.backdrop.is_none() {
+            return false;
+        }
+        let before = (self.behind_changes, self.retake, self.pending.is_some(), self.look_again.is_some());
+        self.collect(live, self.contact.scale * self.zoom);
+        (self.behind_changes, self.retake, self.pending.is_some(), self.look_again.is_some()) != before
     }
 
     /// With live refraction, how long till a frame of what is behind that
@@ -2457,7 +2492,9 @@ impl Widget {
         if let Some(till) = self.look_again.filter(|_| !live && self.backdrop.is_some()) {
             return Some(till.saturating_duration_since(Instant::now()).max(LOOK_AGAIN_STEP));
         }
-        self.backdrop.as_ref().filter(|scene| live && scene.fresh())?;
+        // (Not while one is read: it tells the thread that draws as it has been. Nor where each is taken as it comes:
+        // see `collect`.)
+        self.backdrop.as_ref().filter(|scene| live && !scene.paced() && scene.fresh() && !scene.reading())?;
         Some(self.behind.as_ref().map_or(Duration::ZERO, |behind| Self::backdrop_every(live).saturating_sub(behind.taken.elapsed())))
     }
 
@@ -3055,6 +3092,8 @@ impl Widget {
         // (Settling to its size after it is let go, too.)
         let sizing = matches!(self.drag, Some(Drag::Size { .. })) || self.settle.is_some();
         let _sizing = gfx::sizing(sizing);
+        // (What another window drew on this thread before forgotten: see `view::gliding_drawn`.)
+        crate::ui::view::gliding_drawn();
         let dt = now.duration_since(self.last_frame).as_secs_f32() * 1000.0;
         self.last_frame = now;
         // Each part of a frame timed, and a slow one noted.
@@ -3523,7 +3562,7 @@ impl Widget {
         }
         // (The lyrics gliding to the next line are drawn every frame too, and the glass easing to how frosted it is.)
         let easing = self.frost_shown.is_some_and(|(shown, target, _)| shown != target);
-        if moving || easing || crate::playing::gliding() { Frame::Moving } else { Frame::Rest }
+        if moving || easing || crate::ui::view::gliding_drawn() { Frame::Moving } else { Frame::Rest }
     }
 
     /// On the device that draws now, if it is not (a driver reset, a device lost): its surface made anew, what it

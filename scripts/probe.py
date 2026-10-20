@@ -10,9 +10,15 @@ Scripts:
     panel      the panel opened and closed by its shortcut: how soon it showed, settled, and went
     pages      the settings opened once, then each page and the monitor's tabs turned to in turn: how soon the
                first frame of each came, and its longest frame
+    rest       the settings opened once, then each page and the monitor's tabs turned to and left alone: how many
+               frames each draws a second at rest, and the milliseconds of drawing a second
     resize     the settings opened once, then sized larger and smaller step by step as a drag would: each frame's
                time and the gaps between frames
     idle       nothing: the probe as it is, sampled every few seconds
+    live       nothing, for widgets with a live backdrop (the probe's settings given one): how often a frame of what
+               is behind is read, and how often the widgets are drawn; drawn more often than read is drawn for nothing
+               (GLANCE_UNPACED=1: the frames as on a system that cannot be asked to pace them, Windows 10 and 11
+               before 24H2)
 """
 
 import ctypes
@@ -244,6 +250,41 @@ def run_pages(pid, marks, rounds):
     close_settings(pid, marks)
 
 
+def run_live(pid, marks, rounds):
+    time.sleep(2)
+    since = time.perf_counter()
+    time.sleep(5.0 * rounds)
+    seconds = 5.0 * rounds
+    reads = [mark for mark in marks.after(since, "scene read") if mark[0] <= since + seconds]
+    frames = [mark for mark in marks.after(since, "widget frame") if mark[0] <= since + seconds]
+    print(f"  {len(reads) / seconds:6.1f} frames of what is behind read a second, {len(frames) / seconds:6.1f} widget frames drawn a second", flush=True)
+    summary("widget frames' drawing", [took(mark) for mark in frames])
+    if len(frames) > 1.2 * len(reads) + 2 * rounds:
+        print("  DRAWN FOR NOTHING: more frames drawn than read")
+
+
+def run_rest(pid, marks, rounds):
+    since, first = open_settings(pid, marks)
+    if not first:
+        print("  the settings did not open")
+        return
+    time.sleep(3)
+    hwnd = windows_of(pid, "GlanceSettings")[0]
+    turns = [(page, 0) for page in range(7)] + [(2, 1), (2, 2)]
+    names = ["layout", "look", "monitor", "workbench", "music", "phone", "general"]
+    for page, tab in turns:
+        user32.PostMessageW(hwnd, PERF_TURN, page, tab)
+        time.sleep(1.0)
+        since = time.perf_counter()
+        time.sleep(3.0 * rounds)
+        drawn = [took(mark) for mark in marks.after(since, "settings frame") if mark[0] <= since + 3.0 * rounds]
+        seconds = 3.0 * rounds
+        name = f"{names[page]}{'/' + ['shown', 'data', 'overlay'][tab] if page == 2 else ''}"
+        median = statistics.median(drawn) if drawn else 0.0
+        print(f"  {name:18} {len(drawn) / seconds:6.1f} frames/s  {sum(drawn) / seconds:6.1f} ms/s of drawing  (each {median:.2f} ms at the median)", flush=True)
+    close_settings(pid, marks)
+
+
 def run_resize(pid, marks, rounds):
     since, first = open_settings(pid, marks)
     if not first:
@@ -293,6 +334,10 @@ def main():
             run_panel(probe.pid, marks, rounds)
         elif script == "pages":
             run_pages(probe.pid, marks, rounds)
+        elif script == "live":
+            run_live(probe.pid, marks, rounds)
+        elif script == "rest":
+            run_rest(probe.pid, marks, rounds)
         elif script == "resize":
             run_resize(probe.pid, marks, rounds)
         else:

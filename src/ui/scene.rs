@@ -33,7 +33,8 @@
 //!
 //! While a frame is met as it comes, its pool is held: on Windows 10, closing
 //! a frame of it or making it anew waits till the frame has been met (on 11
-//! neither does). So a frame is met quickly, and read on a thread of its own;
+//! neither does). So a frame is met quickly, and read on a thread of its own
+//! (one for every scene's, see `reader`);
 //! and no frame is closed, nor the pool made anew, while a lock that meeting
 //! a frame takes is held (the thread that draws held one and closed a frame,
 //! a frame met meanwhile waited on that lock, and the panel and the widgets
@@ -111,7 +112,7 @@ impl Device {
     }
 }
 
-/// (Tests: how long a read is made to take, see `Shared::read_counted`.)
+/// (Tests: how long a read is made to take, see `Shared::read`.)
 #[cfg(test)]
 static READ_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -138,7 +139,7 @@ struct Shared {
     spare: Arc<Spare>,
     /// How many frames have been taken: what tells one from another.
     taken: std::sync::atomic::AtomicU64,
-    /// How many frames are being read now (on whatever thread).
+    /// How many frames are being read now, or are handed on to be (see `read_apart`).
     reading: std::sync::atomic::AtomicU32,
 }
 
@@ -155,15 +156,9 @@ struct Halves {
 unsafe impl Send for Halves {}
 
 impl Shared {
-    /// Reads `frame` back (if it is of the area as it is now), for it to be taken; whether it was.
+    /// Reads `frame` back (if it is of the area as it is now), for it to be taken (the thread that draws to be told:
+    /// see `reader`); whether it was.
     fn read(&self, frame: &Direct3D11CaptureFrame) -> bool {
-        self.reading.fetch_add(1, Ordering::AcqRel);
-        let read = self.read_counted(frame);
-        self.reading.fetch_sub(1, Ordering::AcqRel);
-        read
-    }
-
-    fn read_counted(&self, frame: &Direct3D11CaptureFrame) -> bool {
         // (Tests: a read as slow as on a slow card, to widen what a frame met while it is read overlaps.)
         #[cfg(test)]
         std::thread::sleep(std::time::Duration::from_millis(READ_DELAY_MS.load(Ordering::Relaxed)));
@@ -202,7 +197,6 @@ impl Shared {
         }
         *self.ready.lock().unwrap() = Some(capture);
         drop(of);
-        (self.wake)();
         true
     }
 }
@@ -330,8 +324,8 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
 }
 
 /// A capture of `item` (a scene's window) at `size`: its frame pool, made on the scene's device, each frame met as it
-/// comes (see `Shared`), and its session, started.
-fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) -> Option<(Direct3D11CaptureFramePool, GraphicsCaptureSession, i64)> {
+/// comes (see `Shared`), and its session, started; whether its frames come no oftener than `LIVE`.
+fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) -> Option<(Direct3D11CaptureFramePool, GraphicsCaptureSession, i64, bool)> {
     let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&shared.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).ok()?;
     let arrived = pool.FrameArrived(&TypedEventHandler::new({
         let shared = shared.clone();
@@ -363,9 +357,12 @@ fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) ->
     let session = pool.CreateCaptureSession(item).ok()?;
     // (Not on every system: a border no one sees is drawn then.)
     let _ = session.SetIsBorderRequired(false);
+    // (Debug builds, where GLANCE_UNPACED is set: as on a system that cannot be asked, see scripts/probe.py.)
+    let unpaced = cfg!(debug_assertions) && std::env::var_os("GLANCE_UNPACED").is_some();
+    let paced = !unpaced && session.SetMinUpdateInterval(live_span()).is_ok();
     let _ = session.SetIsCursorCaptureEnabled(false);
     session.StartCapture().ok()?;
-    Some((pool, session, arrived))
+    Some((pool, session, arrived, paced))
 }
 
 /// The desktop's own window captured itself, for every scene that is to show it so (see the top): its capture's pool
@@ -379,6 +376,17 @@ struct Feed {
     session: GraphicsCaptureSession,
     seldom: bool,
     shared: Arc<FeedShared>,
+}
+
+/// How often what is behind is taken anew at most, for a live backdrop (the panel's, a widget's): thirty times a
+/// second (at fifteen, what moves behind the glass, a game's picture, was seen to step). No frame comes oftener,
+/// the scenes' nor the desktop's own (where the system can be asked: Windows 11 24H2 and later): a live wallpaper
+/// was taken, put in and put together at every refresh of the screen, for a third of it to be read.
+pub const LIVE: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// `LIVE` as the capture is told it (100 ns).
+fn live_span() -> windows::Foundation::TimeSpan {
+    windows::Foundation::TimeSpan { Duration: (LIVE.as_nanos() / 100) as i64 }
 }
 
 /// How often the desktop is taken while no layer is shown (100 ns): seldom, its newest frame kept for a layer shown
@@ -572,16 +580,17 @@ impl Feed {
         let session = pool.CreateCaptureSession(&item).ok()?;
         session.SetIsBorderRequired(false).ok()?;
         let _ = session.SetIsCursorCaptureEnabled(false);
+        let _ = session.SetMinUpdateInterval(live_span());
         session.StartCapture().ok()?;
         Some(Feed { shell, pool, session, seldom: false, shared })
     }
 
-    /// Taken as often as it changes while a layer does not rest, seldom while none does (where the system can be
+    /// Taken as often as it changes (`LIVE` at most) while a layer does not rest, seldom while none does (where the system can be
     /// asked to: Windows 11 24H2 and later).
     fn follow_use(&mut self) {
         let seldom = !self.shared.live_layers().iter().any(|layer| !layer.held.lock().unwrap().resting);
         if seldom != self.seldom {
-            let every = windows::Foundation::TimeSpan { Duration: if seldom { SELDOM } else { 0 } };
+            let every = if seldom { windows::Foundation::TimeSpan { Duration: SELDOM } } else { live_span() };
             if self.session.SetMinUpdateInterval(every).is_ok() {
                 self.seldom = seldom;
             }
@@ -702,6 +711,8 @@ pub struct Scene {
     arrived: i64,
     /// The size the frames are made at.
     size: SizeInt32,
+    /// Its frames come no oftener than `LIVE` (see `paced`).
+    paced: bool,
     shared: Arc<Shared>,
     /// The desktop, captured itself and put under the windows behind, where a thumbnail of its window would leave out
     /// what it shows (see `Feed`): the window it is put in, its layer, and the desktop's window it is of; the device to
@@ -710,16 +721,41 @@ pub struct Scene {
     d3d: ID3D11Device,
 }
 
-/// `frame` read on a thread of its own, then closed (one of what was there before is not read, and the next is
-/// wanted still).
+/// `frame` read on the thread frames are read on (see the top), then closed (one of what was there before is not
+/// read, and the next is wanted still). Counted as being read from now (see `Scene::want`).
 fn read_apart(shared: &Arc<Shared>, frame: Direct3D11CaptureFrame) {
-    let shared = shared.clone();
-    std::thread::spawn(move || {
-        if !shared.read(&frame) {
-            shared.wanted.store(true, Ordering::Release);
-        }
-        close(Some(frame));
-    });
+    shared.reading.fetch_add(1, Ordering::AcqRel);
+    let _ = reader().send((shared.clone(), frame));
+}
+
+/// What takes the frames to be read, for every scene, and reads them one after another, on a thread of its own,
+/// started as the first is (one started for each frame was some thirty a second for a live backdrop).
+fn reader() -> &'static std::sync::mpsc::Sender<(Arc<Shared>, Direct3D11CaptureFrame)> {
+    static READER: std::sync::OnceLock<std::sync::mpsc::Sender<(Arc<Shared>, Direct3D11CaptureFrame)>> = std::sync::OnceLock::new();
+    READER.get_or_init(|| {
+        let (sender, frames) = std::sync::mpsc::channel::<(Arc<Shared>, Direct3D11CaptureFrame)>();
+        std::thread::Builder::new()
+            .name("glance: frames read".into())
+            .spawn(move || {
+                for (shared, frame) in frames {
+                    let read = {
+                        let _timed = crate::perf::Timed::start("scene read", String::new);
+                        shared.read(&frame)
+                    };
+                    if !read {
+                        shared.wanted.store(true, Ordering::Release);
+                    }
+                    close(Some(frame));
+                    // No longer being read before the thread that draws is told: what it wants then is wanted.
+                    shared.reading.fetch_sub(1, Ordering::AcqRel);
+                    if read {
+                        (shared.wake)();
+                    }
+                }
+            })
+            .expect("a thread started");
+        sender
+    })
 }
 
 /// A frame done with, closed: its buffer back in its pool at once, not once the last reference to it goes. Never
@@ -854,16 +890,16 @@ impl Scene {
             let shared = Arc::new(Shared { of: Mutex::new((area, now_100ns(), Vec::new())), latest: Mutex::new(None), wanted: AtomicBool::new(false), ready: Mutex::new(None), wake, device, halves: Mutex::new(None), spare: Arc::default(), resting: AtomicBool::new(false), taken: std::sync::atomic::AtomicU64::new(0), reading: std::sync::atomic::AtomicU32::new(0) });
             let made = (|| {
                 let size = item.Size().ok()?;
-                let (pool, session, arrived) = capture(&shared, &item, size)?;
-                Some((pool, session, arrived, size))
+                let (pool, session, arrived, paced) = capture(&shared, &item, size)?;
+                Some((pool, session, arrived, size, paced))
             })();
-            let Some((pool, session, arrived, size)) = made else {
+            let Some((pool, session, arrived, size, paced)) = made else {
                 let _ = DestroyWindow(window);
                 let _ = DestroyWindow(owner);
                 return None;
             };
             let d3d = shared.device.device.clone();
-            Some(Scene { owner, window, area, shown: Vec::new(), pool, session, arrived, size, shared, desktop: None, d3d })
+            Some(Scene { owner, window, area, shown: Vec::new(), pool, session, arrived, size, paced, shared, desktop: None, d3d })
         }
     }
 
@@ -1131,20 +1167,27 @@ impl Scene {
         true
     }
 
-    /// Whether a frame has come that was not wanted as it came (and is not read yet).
+    /// Whether its frames come no oftener than `LIVE`, the system asked (Windows 11 24H2 and later): a live backdrop
+    /// can take each as it comes. Else they come as often as the screen is drawn, and are taken as often as `LIVE`.
+    pub fn paced(&self) -> bool {
+        self.paced
+    }
+
     /// Whether a frame is being read now (to be told as it is: see `ready`).
     pub fn reading(&self) -> bool {
         self.shared.reading.load(Ordering::Acquire) > 0
     }
 
+    /// Whether a frame has come that was not wanted as it came (and is not read yet).
     pub fn fresh(&self) -> bool {
         self.shared.latest.lock().unwrap().is_some()
     }
 
     /// Wants a frame: one come already, read at once (on another thread); else the next, as it comes. Told as it
-    /// has been read (see `ready`).
+    /// has been read (see `ready`). One read, or being read, serves: wanted meanwhile, no other is (one that comes
+    /// to nothing wants the next itself).
     pub fn want(&self) {
-        if self.shared.ready.lock().unwrap().is_some() {
+        if self.reading() || self.shared.ready.lock().unwrap().is_some() {
             return;
         }
         let come = self.shared.latest.lock().unwrap().take();
@@ -1432,24 +1475,14 @@ mod tests {
         }
     }
 
-    /// A scene arranged at alternating places and sizes over a window that changes all the time (so frames keep
-    /// coming), wanted, polled and rested, for a minute, its reads made slow: a watchdog reports any step that takes
-    /// more than 5 s (the thread that draws hung on the capture's pool) and ends the test.
-    /// `cargo test --lib -- --ignored --exact ui::scene::tests::scene_stress --nocapture`.
-    #[test]
-    #[ignore = "captures this PC's desktop"]
-    fn scene_stress() {
-        use std::sync::atomic::{AtomicU64, AtomicUsize};
-        use std::time::{Duration, Instant};
+    /// How many times the window `changing_window` puts up has changed.
+    static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// What changes behind (for a frame to come again and again): a window of its own at (100, 100), 700 × 500,
+    /// another colour every 15 ms, on a thread of its own.
+    fn changing_window() {
         use windows::Win32::Graphics::Gdi::{BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT};
-        use windows::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, GetMessageW, PeekMessageW, SetTimer, TranslateMessage, HWND_TOP, MSG, PM_REMOVE, SWP_NOMOVE, WM_PAINT, WM_TIMER, WS_VISIBLE,
-        };
-        unsafe {
-            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
-        }
-        READ_DELAY_MS.store(std::env::var("SCENE_READ_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(40), Ordering::Relaxed);
-        static TICK: AtomicU64 = AtomicU64::new(0);
+        use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, SetTimer, TranslateMessage, MSG, WM_PAINT, WM_TIMER, WS_VISIBLE};
         unsafe extern "system" fn painted(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
             unsafe {
                 match message {
@@ -1473,7 +1506,6 @@ mod tests {
                 }
             }
         }
-        // What changes behind: a window of its own, repainted every 15 ms, on a thread of its own.
         let (sent, got) = std::sync::mpsc::channel::<isize>();
         std::thread::spawn(move || unsafe {
             let module = GetModuleHandleW(None).unwrap();
@@ -1488,18 +1520,79 @@ mod tests {
                 DispatchMessageW(&message);
             }
         });
-        let _behind = got.recv().unwrap();
-        std::thread::sleep(Duration::from_millis(300));
-        let gfx = super::super::gfx::Gfx::new().expect("graphics");
-        // What the scene is over: a hidden window of its own put on top, every other window behind it.
-        let over = unsafe {
+        got.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    /// What a scene is to be over: a hidden window of its own (class `name`) put on top, every other window behind it.
+    fn over_all(name: &str) -> HWND {
+        use windows::Win32::UI::WindowsAndMessaging::{HWND_TOP, SWP_NOMOVE};
+        unsafe {
             let module = GetModuleHandleW(None).unwrap();
-            let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: w!("GlanceStressOver"), ..Default::default() };
+            let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+            let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: module.into(), lpszClassName: windows::core::PCWSTR(name.as_ptr()), ..Default::default() };
             RegisterClassW(&class);
             let over = CreateWindowExW(WINDOW_EX_STYLE(0), class.lpszClassName, w!("over"), WS_POPUP, 0, 0, 1, 1, None, None, Some(module.into()), None).unwrap();
             let _ = SetWindowPos(over, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             over
-        };
+        }
+    }
+
+    /// A frame wanted again and again while one is read (slowly) starts no other read: the one read serves (one
+    /// started for each want was some three reads at once behind a live backdrop, each drawn).
+    /// `cargo test --lib -- --ignored --exact ui::scene::tests::wanted_while_one_is_read_no_other_is --nocapture`.
+    #[test]
+    #[ignore = "puts a window on this PC's screen and captures it"]
+    fn wanted_while_one_is_read_no_other_is() {
+        use std::time::{Duration, Instant};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        READ_DELAY_MS.store(40, Ordering::Relaxed);
+        changing_window();
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        let over = over_all("GlanceWantedOver");
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let mut scene = Scene::new(RECT { left: 150, top: 150, right: 450, bottom: 350 }, wake, &gfx).expect("scene");
+        scene.arrange(RECT { left: 150, top: 150, right: 450, bottom: 350 }, over);
+        let (began, mut most, mut ready) = (Instant::now(), 0, 0);
+        while began.elapsed() < Duration::from_secs(2) {
+            scene.want();
+            most = most.max(scene.shared.reading.load(Ordering::Acquire));
+            ready += usize::from(scene.ready().is_some());
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
+                let mut message = MSG::default();
+                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        READ_DELAY_MS.store(0, Ordering::Relaxed);
+        println!("{ready} read in 2 s; at most {most} being read at once");
+        assert!(ready > 5, "{ready} read");
+        assert_eq!(most, 1, "{most} read at once");
+    }
+
+    /// A scene arranged at alternating places and sizes over a window that changes all the time (so frames keep
+    /// coming), wanted, polled and rested, for a minute, its reads made slow: a watchdog reports any step that takes
+    /// more than 5 s (the thread that draws hung on the capture's pool) and ends the test.
+    /// `cargo test --lib -- --ignored --exact ui::scene::tests::scene_stress --nocapture`.
+    #[test]
+    #[ignore = "captures this PC's desktop"]
+    fn scene_stress() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
+        use std::time::{Duration, Instant};
+        use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        READ_DELAY_MS.store(std::env::var("SCENE_READ_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(40), Ordering::Relaxed);
+        changing_window();
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        let over = over_all("GlanceStressOver");
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
         let mut scene = Scene::new(RECT { left: 150, top: 150, right: 450, bottom: 350 }, wake, &gfx).expect("scene");
         let pump = || unsafe {

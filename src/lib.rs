@@ -513,7 +513,7 @@ pub fn run() {
     if phone::helper().is_some() {
         touches::start();
     }
-    thread::spawn(move || {
+    thread::Builder::new().name("glance: samples".into()).spawn(move || {
         // What plays and how loud, while the module that shows them is on and something that can show it is on the
         // screen (the panel, a widget, the settings). The lyrics too, while either shows them.
         playing::watch(|| {
@@ -551,7 +551,7 @@ pub fn run() {
                 controller.record(sample);
             }
         }
-    });
+    }).expect("a thread started");
     // The desktops the settings' preview shows, read once Glance has settled: the settings open on them.
     thread::Builder::new()
         .name("glance: desktops read for the settings".into())

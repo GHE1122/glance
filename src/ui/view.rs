@@ -45,6 +45,18 @@ impl Hash for Glide {
     }
 }
 
+thread_local! {
+    /// Whether a line sung was drawn on this thread still gliding into its place (see `gliding_drawn`).
+    static GLIDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether what was drawn on this thread since this was last asked held a line sung still gliding into its place
+/// (to be drawn again at the next frame): asked before a window draws (it forgets), and after. Only a window that
+/// shows the line is drawn as often as it glides.
+pub fn gliding_drawn() -> bool {
+    GLIDING.with(|gliding| gliding.replace(false))
+}
+
 /// The glide to the line sung now, as far as it has gone (eased: quick, then settling).
 fn glide_of(heard: Option<&crate::playing::Now>) -> Glide {
     use crate::playing::Sung;
@@ -3280,6 +3292,9 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 // The line sung now rises into its place as the one before rises away, each fading as it goes.
                 let top = y + MEDIA_GAP;
                 let rise = (1.0 - glide.done) * LINE;
+                if glide.done < 1.0 {
+                    GLIDING.with(|gliding| gliding.set(true));
+                }
                 frame.clip(left - 2.0, top, width + 4.0, 2.0 * LINE);
                 if glide.done < 1.0 && !glide.was.is_empty() {
                     part("was");
@@ -5837,6 +5852,29 @@ six".into()));
         fn picture(&self, _: &super::super::canvas::Picture, x: f32, y: f32, w: f32, h: f32, _: f32, _: f32) {
             self.drew_box(x, y, w, h);
         }
+    }
+
+    /// A line sung drawn gliding into its place says so to the window that drew it (drawn again at the next frame);
+    /// drawn at rest, or by a window that shows none, it says nothing: only what shows the line is drawn as often as
+    /// it glides (every window was, while any line glided anywhere).
+    #[test]
+    fn only_a_gliding_line_drawn_asks_for_frames() {
+        let theme = Theme::new(Skin::Fluent, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+        let drawn = |done: f32| {
+            let glide = Glide { done, was: "the line before".into() };
+            let lane = Lane { id: "time".into(), blocks: vec![Block::Lyric { line: "the line sung".into(), under: String::new(), said: false, glide }], ink: theme.ink("time") };
+            gliding_drawn();
+            paint_lane(&Nothing, &scene, &lane, Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, 0.0, Pass::Content, &mut Vec::new());
+            gliding_drawn()
+        };
+        assert!(drawn(0.4), "gliding");
+        assert!(!drawn(1.0), "at rest");
+        // (Nothing drawn since: nothing glides.)
+        assert!(!gliding_drawn());
     }
 
     /// A thing on the station whose name does not fit says its whole name as the pointer comes over it, in every view;

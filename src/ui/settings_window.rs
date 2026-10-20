@@ -3769,9 +3769,15 @@ impl Ui {
         // The preview before the list (they do not meet): it finds how large the panel can be on its screen, which the
         // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
         // largest there is, and its knob jumped as the window first showed).
-        let creep = self.paint_preview(frame, &palette, width, height);
+        let creep = {
+            let _timed = crate::perf::Timed::start("settings preview", String::new);
+            self.paint_preview(frame, &palette, width, height)
+        };
         unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, self.pane(), height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-        self.paint_list(frame, &palette, now, height);
+        {
+            let _timed = crate::perf::Timed::start("settings list", String::new);
+            self.paint_list(frame, &palette, now, height);
+        }
         unsafe { frame.dc.PopAxisAlignedClip() };
         creep
     }

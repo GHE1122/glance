@@ -71,10 +71,6 @@ pub enum Sung {
 /// How long the lyrics take to glide from one line to the next.
 pub const GLIDE: std::time::Duration = std::time::Duration::from_millis(420);
 
-/// Whether the lyrics are gliding to the line sung now: what shows them is drawn every frame meanwhile.
-pub fn gliding() -> bool {
-    NOW[Follow::Music as usize].lock().unwrap().as_ref().and_then(|now| now.sung.as_ref()).is_some_and(|sung| matches!(sung, Sung::Lines { since, .. } if since.elapsed() < GLIDE))
-}
 
 /// What is told that the line sung has changed (the windows that show it are drawn at once then).
 #[cfg(windows)]
