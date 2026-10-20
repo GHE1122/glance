@@ -931,70 +931,30 @@ fn note_card_fill(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colou
     }
 }
 
-/// A note's ground (as its card's: see `note_card_fill`) over as much of the rounded box `lane` as lies `across` (from
-/// left to right): a page of it sliding through it, the lane's own corners its, no edge of its own where it is cut.
-fn note_page_slice(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, lane: (f32, f32, f32, f32), radius: f32, across: (f32, f32)) {
-    let (x, y, w, h) = lane;
-    let slice = |top: f32, bottom: f32| rounded_within((x, y, w, h), radius, (across.0, top, across.1, bottom));
-    let fill = |color: Color, points: &[Point]| {
-        if points.len() >= 3 {
-            frame.fill_shape(points, Fill::Solid(color));
-        }
-    };
-    let whole = slice(y, y + h);
-    match theme.skin {
-        Skin::Glass => {
-            if let Some(light) = note_light(theme.dark) {
-                fill(light, &whole);
-            }
-            fill(note_glass(colour).0.alpha(glass_tint(theme.dark)), &whole);
-        }
-        Skin::Fluent => {
-            fill(fluent_note_ground(theme, colour), &whole);
-            fill(note_colour(colour), &slice(y, y + 4.0));
-        }
-        Skin::Paper => fill(over(theme.paper, theme.track), &whole),
-    }
-}
+/// The gap between a lane's pages side by side as they are turned, and between them and its edge (see `page_place`).
+const PAGE_GAP: f32 = 10.0;
 
-/// The outline of the rounded box `(x, y, w, h)` (corners `radius`), as much of it as lies within the box `(left,
-/// top, right, bottom)`: a shape of points round it (its corners' curves in short straight steps, finer than a pixel
-/// shows).
-fn rounded_within((x, y, w, h): (f32, f32, f32, f32), radius: f32, (left, top, right, bottom): (f32, f32, f32, f32)) -> Vec<Point> {
-    let radius = radius.max(0.0).min(w / 2.0).min(h / 2.0);
-    const STEPS: usize = 12;
-    let mut outline = Vec::with_capacity(4 * (STEPS + 1));
-    // Each corner's centre, and the angle its curve starts at (clockwise from the top left's).
-    let corners = [(x + radius, y + radius, std::f32::consts::PI), (x + w - radius, y + radius, 1.5 * std::f32::consts::PI), (x + w - radius, y + h - radius, 0.0), (x + radius, y + h - radius, 0.5 * std::f32::consts::PI)];
-    for (cx, cy, from) in corners {
-        for step in 0..=STEPS {
-            let angle = from + std::f32::consts::FRAC_PI_2 * step as f32 / STEPS as f32;
-            outline.push(Point { x: cx + radius * angle.cos(), y: cy + radius * angle.sin() });
-        }
-    }
-    // Cut to the box, a side at a time (the outline is convex: what is cut stays one shape).
-    let cut = |points: Vec<Point>, inside: &dyn Fn(Point) -> bool, cross: &dyn Fn(Point, Point) -> Point| {
-        let mut kept = Vec::with_capacity(points.len() + 2);
-        for (at, &p) in points.iter().enumerate() {
-            let q = points[(at + 1) % points.len()];
-            match (inside(p), inside(q)) {
-                (true, true) => kept.push(q),
-                (true, false) => kept.push(cross(p, q)),
-                (false, true) => {
-                    kept.push(cross(p, q));
-                    kept.push(q);
-                }
-                (false, false) => {}
-            }
-        }
-        kept
+/// Where a lane's page is drawn, `off` pages from where the lane is turned to (the lane `wide` across): how large (of
+/// the lane), how far along it its left edge is, and how much of it shows. Each page whole within the lane all the
+/// while: the one turned from going smaller to one side as the one turned to comes up from nothing at the other,
+/// at that edge; half way, the two side by side, as large as two go in it with the gap between them and
+/// round them; then the one turned from going to nothing by its edge as the one turned to comes to the middle, whole.
+/// (Slid in from past the lane's edge, a page was cut off there, or faded to nothing before it was in.)
+fn page_place(wide: f32, off: f32) -> (f32, f32, f32) {
+    let (far, side) = (off.abs().min(1.0), off.signum());
+    // Its left and right edges half way: its half of the lane, the gap round it.
+    let half = ((wide - 3.0 * PAGE_GAP) / 2.0).max(0.0);
+    let (left, right) = if side > 0.0 { (wide - PAGE_GAP - half, wide - PAGE_GAP) } else { (PAGE_GAP, PAGE_GAP + half) };
+    let (left, right, shows) = if far <= 0.5 {
+        // From the whole lane to its half.
+        let t = far / 0.5;
+        (left * t, wide + (right - wide) * t, 1.0)
+    } else {
+        // From its half to nothing at the lane's edge (the gap between it and the other page opening as they go).
+        let t = (far - 0.5) / 0.5;
+        if side > 0.0 { (left + (wide - left) * t, right + (wide - right) * t, 1.0 - t) } else { (left * (1.0 - t), right * (1.0 - t), 1.0 - t) }
     };
-    let at_x = |edge: f32| move |p: Point, q: Point| Point { x: edge, y: p.y + (q.y - p.y) * (edge - p.x) / (q.x - p.x) };
-    let at_y = |edge: f32| move |p: Point, q: Point| Point { x: p.x + (q.x - p.x) * (edge - p.y) / (q.y - p.y), y: edge };
-    let outline = cut(outline, &|p| p.x >= left, &at_x(left));
-    let outline = cut(outline, &|p| p.x <= right, &at_x(right));
-    let outline = cut(outline, &|p| p.y >= top, &at_y(top));
-    cut(outline, &|p| p.y <= bottom, &at_y(bottom))
+    ((right - left) / wide, left, shows)
 }
 
 /// A note's card's rim: glass's soft white, brighter under the pointer; Windows 11's a rule, the note's colour under
@@ -4942,9 +4902,8 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             let foot = MEDIA_ROW + if many { 14.0 } else { 0.0 } + 6.0;
             let dots_room = w / 3.0;
             let dots = if many { dots_wide(frame, notes.len(), theme.small, dots_room) + 12.0 } else { 0.0 };
-            // A note's words, `dx` along: as its shape lays them out.
-            let words_of = |note: &NoteCard, dx: f32| {
-                let x = x + dx;
+            // A note's words on `frame` (its page: see below), as its shape lays them out.
+            let words_of = |frame: &dyn Canvas, note: &NoteCard| {
                 let (title_ink, words, _) = note_inks(theme, note.colour);
                 let first = note.lines.first();
                 // Its title across in as many rows as go (three at most), then its lines as far as there is room, down
@@ -5014,12 +4973,10 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                     Shape::Least => across(y + h - if many { LINE + 2.0 } else { 0.0 }),
                 }
             };
-            // Each note its own page as wide as the lane: those turned between both in it, sliding across, side by side
-            // within its rounded edge (no edge of their own between them: one note going as the next comes, not two
-            // cards); its rim round it, of the note shown. (No shadow of their own: the widget casts it round its
-            // rounded edge; theirs, offset and spread, was cut off square at its corners.)
-            // (All of it named as the note shown, its clip with it: drawn again as the widget is sized, the clip is
-            // where what is in it is.)
+            // Each note a page, the whole lane at rest. Turned, the pages go smaller, each whole, its own rounded edge and
+            // rim round it (see `page_place`); at rest again, the one come to is the lane again. (All of it named as
+            // the note shown, its clip with it: drawn again as the widget is sized, the clip is where what is in it
+            // is.)
             frame.key(&format!("note.{}", note.at));
             frame.clip(lane.x, lane.y, lane.w, lane.h);
             for (page, each) in notes.iter().enumerate() {
@@ -5027,12 +4984,20 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 if off.abs() >= 1.0 {
                     continue;
                 }
-                let dx = off * lane.w;
-                note_page_slice(frame, theme, each.colour, (lane.x, lane.y, lane.w, lane.h), radius, (lane.x + dx, lane.x + dx + lane.w));
-                words_of(each, dx);
+                let (scale, along, shows) = page_place(lane.w, off);
+                if shows <= 0.0 || scale <= 0.0 {
+                    continue;
+                }
+                let (left, top) = (lane.x + along, lane.y + (lane.h - lane.h * scale) / 2.0);
+                // Drawn as at rest, recorded, and drawn back smaller where it is now.
+                let page_frame = super::morph::Recorder::new(frame, scale, (left - lane.x * scale, top - lane.y * scale));
+                note_card_fill(&page_frame, theme, each.colour, (lane.x, lane.y, lane.w, lane.h), radius, None);
+                words_of(&page_frame, each);
+                note_card_rim(&page_frame, theme, each.colour, (lane.x, lane.y, lane.w, lane.h), radius, std::ptr::eq(each, note) && lit(Hit::Note(each.at)));
+                let parts: Vec<super::morph::Part> = page_frame.parts().iter().map(|part| part.faded(shows)).collect();
+                super::morph::draw(frame, &parts);
             }
             frame.unclip();
-            note_card_rim(frame, theme, note.colour, (lane.x, lane.y, lane.w, lane.h), radius, lit(Hit::Note(note.at)));
             frame.key("");
             // Its dots and a new one where they are whichever is shown, in its ink.
             match shape {
@@ -5295,38 +5260,39 @@ otepad.exe", "Notepad"),
                     let history: &'static [Sample] = Box::leak(Box::new([sample(Some(4200.0), None, None)]));
                     let seen = Seen::of(history);
                     let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
-                    // Each widget: its lanes, its shape, its size, where it is, and whether its pages are part way turned.
-                    type Widget<'a> = (Vec<&'a str>, Shape, (f32, f32), (f32, f32), bool);
+                    // Each widget: its lanes, its shape, its size, where it is, and how far its notes are turned (pages).
+                    type Widget<'a> = (Vec<&'a str>, Shape, (f32, f32), (f32, f32), f32);
                     let mut widgets: Vec<Widget> = Vec::new();
                     for (at, id) in ids.iter().enumerate() {
                         let x = 30.0 + at as f32 * 90.0;
-                        widgets.push((vec![id], Shape::Down, (70.0, 300.0), (x, 30.0), false));
-                        widgets.push((vec![id], Shape::Least, (70.0, 70.0), (x, 360.0), false));
-                        widgets.push((vec![id], Shape::Least, (44.0, 44.0), (x + 12.0, 450.0), false));
-                        widgets.push((vec![id], Shape::Across, (330.0, 64.0), (420.0, 30.0 + at as f32 * 84.0), false));
+                        widgets.push((vec![id], Shape::Down, (70.0, 300.0), (x, 30.0), 0.0));
+                        widgets.push((vec![id], Shape::Least, (70.0, 70.0), (x, 360.0), 0.0));
+                        widgets.push((vec![id], Shape::Least, (44.0, 44.0), (x + 12.0, 450.0), 0.0));
+                        widgets.push((vec![id], Shape::Across, (330.0, 64.0), (420.0, 30.0 + at as f32 * 84.0), 0.0));
                     }
-                    widgets.push((ids.to_vec(), Shape::Across, (640.0, 70.0), (420.0, 380.0), false));
-                    widgets.push((ids.to_vec(), Shape::Down, (80.0, 220.0), (790.0, 30.0), false));
-                    widgets.push((ids.to_vec(), Shape::Least, (120.0, 120.0), (900.0, 30.0), false));
-                    // The notes part way to their next page: the two in the one rounded edge.
-                    widgets.push((vec!["notes"], Shape::Least, (150.0, 150.0), (1100.0, 30.0), true));
-                    widgets.push((vec!["notes"], Shape::Down, (70.0, 300.0), (1300.0, 30.0), true));
-                    widgets.push((vec!["notes"], Shape::Across, (330.0, 64.0), (1100.0, 360.0), true));
+                    widgets.push((ids.to_vec(), Shape::Across, (640.0, 70.0), (420.0, 380.0), 0.0));
+                    widgets.push((ids.to_vec(), Shape::Down, (80.0, 220.0), (790.0, 30.0), 0.0));
+                    widgets.push((ids.to_vec(), Shape::Least, (120.0, 120.0), (900.0, 30.0), 0.0));
+                    // The notes part way to their next page: each a whole rounded page, smaller, side by side.
+                    widgets.push((vec!["notes"], Shape::Least, (150.0, 150.0), (1100.0, 30.0), 0.1));
+                    widgets.push((vec!["notes"], Shape::Least, (150.0, 150.0), (1100.0, 200.0), 0.25));
+                    widgets.push((vec!["notes"], Shape::Least, (150.0, 150.0), (1270.0, 200.0), 0.5));
+                    widgets.push((vec!["notes"], Shape::Down, (70.0, 300.0), (1440.0, 30.0), 0.5));
+                    widgets.push((vec!["notes"], Shape::Down, (70.0, 300.0), (1530.0, 30.0), 0.0));
+                    widgets.push((vec!["notes"], Shape::Across, (330.0, 64.0), (1100.0, 380.0), 0.5));
                     // Squares, as a phone's large folders: two by two, three by three.
                     for (at, id) in ids[..3].iter().enumerate() {
-                        widgets.push((vec![id], Shape::Least, (150.0, 150.0), (30.0 + at as f32 * 170.0, 540.0), false));
-                        widgets.push((vec![id], Shape::Least, (300.0, 330.0), (560.0 + at as f32 * 330.0, 540.0), false));
+                        widgets.push((vec![id], Shape::Least, (150.0, 150.0), (30.0 + at as f32 * 170.0, 540.0), 0.0));
+                        widgets.push((vec![id], Shape::Least, (300.0, 330.0), (560.0 + at as f32 * 330.0, 540.0), 0.0));
                     }
                     let pixels = gfx.draw_offscreen(((width as f32 * px) as u32, (height as f32 * px) as u32), px, |frame| {
                         if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
                             unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
                         }
                         let behind = desktop.bitmap(&frame.dc, px).ok();
-                        for (lane_ids, shape, size, at, sliding) in &widgets {
+                        for (lane_ids, shape, size, at, turned) in &widgets {
                             let mut scrolls = Scrolls::default();
-                            if *sliding {
-                                scrolls.hold_pages(List::Notes, 0.4 * PAGE, 2.0 * PAGE);
-                            }
+                            scrolls.hold_pages(List::Notes, turned * PAGE, 2.0 * PAGE);
                             let scene = Scene { scrolls, ..scene };
                             let lanes: Vec<Lane> = lane_ids.iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Shape(*shape))?, ink: theme.ink(id) })).collect();
                             let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
@@ -6106,27 +6072,33 @@ six".into()));
         assert_eq!(shows(&scrolls).1, 0.0);
     }
 
-    /// A rounded box cut to a box: whole where the box holds it all, the part in it where it lies across (its corners
-    /// round where they are its, straight where it is cut), nothing where it misses it.
+    /// A lane's pages as they are turned: the one turned to whole at rest, the lane; all along, the two turned
+    /// between each whole within the lane and apart (the gap between them and round them half way); the one turned from smaller as
+    /// it goes, the one turned to larger as it comes.
     #[test]
-    fn a_rounded_box_is_cut_to_a_box() {
-        let bounds = |points: &[Point]| points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |(l, t, r, b), p| (l.min(p.x), t.min(p.y), r.max(p.x), b.max(p.y)));
-        let near = |a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)| (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3 && (a.2 - b.2).abs() < 1e-3 && (a.3 - b.3).abs() < 1e-3;
-        let lane = (10.0, 20.0, 100.0, 60.0);
-        let whole = rounded_within(lane, 16.0, (0.0, 0.0, 200.0, 200.0));
-        assert!(near(bounds(&whole), (10.0, 20.0, 110.0, 80.0)));
-        // Its top left corner round: no point of it nearer that corner of the box than the curve.
-        assert!(whole.iter().all(|p| p.x >= 26.0 - 1e-3 || p.y >= 36.0 - 1e-3 || (p.x - 26.0).hypot(p.y - 36.0) >= 16.0 - 1e-2));
-        // Its right half: from the middle, straight there, to its right edge.
-        let half = rounded_within(lane, 16.0, (60.0, 0.0, 200.0, 200.0));
-        assert!(near(bounds(&half), (60.0, 20.0, 110.0, 80.0)));
-        assert!(half.iter().any(|p| (p.x - 60.0).abs() < 1e-3 && (p.y - 20.0).abs() < 1e-3) && half.iter().any(|p| (p.x - 60.0).abs() < 1e-3 && (p.y - 80.0).abs() < 1e-3));
-        // Its top band, four high.
-        let band = rounded_within(lane, 16.0, (0.0, 20.0, 200.0, 24.0));
-        let (_, top, _, bottom) = bounds(&band);
-        assert!((top - 20.0).abs() < 1e-3 && (bottom - 24.0).abs() < 1e-3);
-        // Missed: nothing.
-        assert!(rounded_within(lane, 16.0, (120.0, 0.0, 200.0, 200.0)).is_empty());
+    fn pages_turned_stay_whole_within_the_lane() {
+        for wide in [44.0, 70.0, 150.0, 330.0] {
+            assert_eq!(page_place(wide, 0.0), (1.0, 0.0, 1.0));
+            let mut last: Option<(f32, f32)> = None;
+            for step in 0..=40 {
+                let turned = step as f32 / 40.0;
+                let (from, to) = (page_place(wide, -turned), page_place(wide, 1.0 - turned));
+                for (scale, left, _) in [from, to] {
+                    assert!(scale <= 1.0 + 1e-6 && left >= -1e-3 && left + scale * wide <= wide + 1e-3, "{wide} at {turned}: {scale} from {left}");
+                }
+                // (One gone to nothing is nowhere.)
+                if from.0 > 0.0 && to.0 > 0.0 {
+                    assert!(from.1 + from.0 * wide <= to.1 + 1e-3, "{wide} at {turned}: they meet");
+                }
+                if let Some((was_from, was_to)) = last {
+                    assert!(from.0 <= was_from + 1e-6 && to.0 >= was_to - 1e-6, "{wide} at {turned}");
+                }
+                last = Some((from.0, to.0));
+            }
+            let ((a, a_left, _), (b, b_left, _)) = (page_place(wide, -0.5), page_place(wide, 0.5));
+            assert!((a - b).abs() < 1e-6 && (b_left - (a_left + a * wide) - PAGE_GAP).abs() < 1e-3);
+            assert!((a_left - PAGE_GAP).abs() < 1e-3 && (wide - b_left - b * wide - PAGE_GAP).abs() < 1e-3);
+        }
     }
 
     /// Pages' dots too many for their room: which of them it is said instead, within it.

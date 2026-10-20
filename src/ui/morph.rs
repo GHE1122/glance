@@ -384,7 +384,7 @@ impl Part {
         ops.iter().any(|op| !matches!(op, Op::Clip { .. } | Op::Unclip)).then_some(Part { key: self.key, ops })
     }
 
-    fn faded(&self, alpha: f32) -> Part {
+    pub fn faded(&self, alpha: f32) -> Part {
         Part { key: self.key.clone(), ops: self.ops.iter().map(|op| op.clone().faded(alpha)).collect() }
     }
 
