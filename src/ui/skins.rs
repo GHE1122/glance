@@ -562,7 +562,7 @@ fn glass(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
     if part == Part::Under {
         return shadows_outside(frame, &pieces, &theme.shadows);
     }
-    let tint = glass_tint(&theme, ground.frost, ground.backdrop.is_some());
+    let tint = glass_tint(theme, ground.frost, ground.backdrop.is_some());
     for (piece, radius) in &pieces {
         if part == Part::Desktop {
             if let Some(backdrop) = ground.backdrop {
@@ -632,36 +632,64 @@ fn displacement_map(frame: &Frame, piece: Rect, radius: f32) -> Result<ID2D1Bitm
     frame.gfx.made(key, || made_displacement_map(frame, piece, radius, dpi, (w, h)))
 }
 
+/// The displacement map's pixel at (`column`, `row`) of a piece's, `px` pixels a DIP (see `displacement_map`): BGRA,
+/// opaque.
+fn displaced(piece: Rect, radius: f32, px: f32, column: usize, row: usize) -> [u8; 4] {
+    let (hx, hy) = (piece.w / 2.0, piece.h / 2.0);
+    let r = radius.min(hx).min(hy);
+    // The pixel's centre, from the piece's centre (DIPs).
+    let (x, y) = ((column as f32 + 0.5) / px - hx, (row as f32 + 0.5) / px - hy);
+    let (qx, qy) = (x.abs() - (hx - r), y.abs() - (hy - r));
+    // Distance in from the edge, and the outward direction there.
+    let (depth, nx, ny) = if qx > 0.0 && qy > 0.0 {
+        let length = qx.hypot(qy);
+        (r - length, qx / length, qy / length)
+    } else if qx > qy {
+        (hx - x.abs(), 1.0, 0.0)
+    } else {
+        (hy - y.abs(), 0.0, 1.0)
+    };
+    let strength = (1.0 - (depth / RIM).clamp(0.0, 1.0)).powi(2);
+    [128, (128.0 + ny * y.signum() * strength * 127.0).round() as u8, (128.0 + nx * x.signum() * strength * 127.0).round() as u8, 255]
+}
+
+/// A piece's displacement map, `size` pixels at `px` a DIP, as `displaced` has each pixel; worked out only where it
+/// differs from row to row and column to column. Between the corners (further in from the ends than the rounding
+/// and the rim both reach: `RIM`), each row is as far from the sides as the next and bent only by them, alike all
+/// down the middle; each column, only by the top and the bottom. Only the corners are worked out pixel by pixel (a
+/// wide piece's map a few times sooner: a glass panel made its lanes' maps in a third of its first frame).
+fn displacement_pixels(piece: Rect, radius: f32, px: f32, (w, h): (usize, usize)) -> Vec<u8> {
+    let (hx, hy) = (piece.w / 2.0, piece.h / 2.0);
+    let reach = radius.min(hx).min(hy).max(RIM);
+    let middle = |index: usize, half: f32| ((index as f32 + 0.5) / px - half).abs() <= half - reach;
+    let mut pixels = vec![0u8; w * h * 4];
+    let mut middle_row = None;
+    for row in 0..h {
+        let line = row * w * 4..(row + 1) * w * 4;
+        let row_middle = middle(row, hy);
+        if row_middle {
+            if let Some(first) = middle_row {
+                pixels.copy_within(first * w * 4..(first + 1) * w * 4, line.start);
+                continue;
+            }
+            middle_row = Some(row);
+        }
+        let mut across = None;
+        for (column, pixel) in pixels[line].chunks_exact_mut(4).enumerate() {
+            let value = match !row_middle && middle(column, hx) {
+                true => *across.get_or_insert_with(|| displaced(piece, radius, px, column, row)),
+                false => displaced(piece, radius, px, column, row),
+            };
+            pixel.copy_from_slice(&value);
+        }
+    }
+    pixels
+}
+
 /// A piece's displacement map, `size` pixels at `dpi` (see
 /// `displacement_map`).
 fn made_displacement_map(frame: &Frame, piece: Rect, radius: f32, dpi: (f32, f32), (w, h): (usize, usize)) -> Result<ID2D1Bitmap1> {
-    let px = dpi.0 / 96.0;
-    let (hx, hy) = (piece.w / 2.0, piece.h / 2.0);
-    let r = radius.min(hx).min(hy);
-    let mut pixels = vec![0u8; w * h * 4];
-    for row in 0..h {
-        for column in 0..w {
-            // The pixel's centre, from the piece's centre (DIPs).
-            let (x, y) = ((column as f32 + 0.5) / px - hx, (row as f32 + 0.5) / px - hy);
-            let (qx, qy) = (x.abs() - (hx - r), y.abs() - (hy - r));
-            // Distance in from the edge, and the outward direction there.
-            let (depth, nx, ny) = if qx > 0.0 && qy > 0.0 {
-                let length = qx.hypot(qy);
-                (r - length, qx / length, qy / length)
-            } else if qx > qy {
-                (hx - x.abs(), 1.0, 0.0)
-            } else {
-                (hy - y.abs(), 0.0, 1.0)
-            };
-            let strength = (1.0 - (depth / RIM).clamp(0.0, 1.0)).powi(2);
-            let i = (row * w + column) * 4;
-            // BGRA, opaque.
-            pixels[i] = 128;
-            pixels[i + 1] = (128.0 + ny * y.signum() * strength * 127.0).round() as u8;
-            pixels[i + 2] = (128.0 + nx * x.signum() * strength * 127.0).round() as u8;
-            pixels[i + 3] = 255;
-        }
-    }
+    let pixels = displacement_pixels(piece, radius, dpi.0 / 96.0, (w, h));
     let properties = D2D1_BITMAP_PROPERTIES1 {
         pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
         dpiX: dpi.0,
@@ -708,6 +736,27 @@ mod tests {
     /// Glass with no picture of the desktop to frost (none taken yet, or taken on a device since lost) is tinted as
     /// at its most frosted: the desktop shows through it sharp, and how busy it is is not known; tinted as the
     /// picture last had it, a busy desktop came through all but clear, and the readings over it were lost.
+    /// A displacement map worked out only where it changes is the one worked out pixel by pixel, for pieces long and
+    /// short, rounded more and less than the rim reaches, at whole and fractional sizes and scales.
+    #[test]
+    fn a_displacement_map_is_the_same_worked_out_pixel_by_pixel() {
+        for (pw, ph) in [(356.3, 189.7), (356.0, 44.5), (90.0, 400.25), (20.0, 10.0), (81.0, 81.0), (500.0, 500.0)] {
+            for radius in [0.0, 8.0, 60.0] {
+                for px in [1.0, 1.5, 2.0, 3.0] {
+                    let piece = Rect { x: 3.25, y: 7.5, w: pw, h: ph };
+                    let size = ((pw * px).round() as usize, (ph * px).round() as usize);
+                    let fast = displacement_pixels(piece, radius, px, size);
+                    for row in 0..size.1 {
+                        for column in 0..size.0 {
+                            let i = (row * size.0 + column) * 4;
+                            assert_eq!(fast[i..i + 4], displaced(piece, radius, px, column, row), "{pw}x{ph} r{radius} at {px}: ({column}, {row})");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn glass_without_a_picture_is_tinted_as_most_frosted() {
         for dark in [false, true] {

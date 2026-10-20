@@ -90,7 +90,19 @@ fn squares(pixels: i32) -> i32 {
 
 /// The relative luminance (0–1) of a BGRA pixel at `i`.
 fn pixel_luminance(pixels: &[u8], i: usize) -> f64 {
-    (0.2126 * pixels[i + 2] as f64 + 0.7152 * pixels[i + 1] as f64 + 0.0722 * pixels[i] as f64) / 255.0
+    channels_luminance(pixels[i + 2] as f64, pixels[i + 1] as f64, pixels[i] as f64)
+}
+
+/// The relative luminance (0–1) of red, green and blue (0–255 each), or of sums of them (0–255 times as many as
+/// summed: the luminance is a weighted sum, and that of their mean is the mean of theirs).
+fn channels_luminance(red: f64, green: f64, blue: f64) -> f64 {
+    (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255.0
+}
+
+/// A BGRA pixel's luminance as kept for its square (see `Capture::luma`): out of 255, the nearest whole one (the
+/// weights in ten-thousandths, whole numbers: no float of a sum of them rounded the wrong way).
+fn pixel_luma(pixel: &[u8]) -> u8 {
+    ((2126 * pixel[2] as u32 + 7152 * pixel[1] as u32 + 722 * pixel[0] as u32 + 5000) / 10000) as u8
 }
 
 impl Capture {
@@ -147,11 +159,9 @@ impl Capture {
         let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
         let (columns, rows) = (squares(width), squares(height));
         let mut luma = Vec::with_capacity((columns * rows) as usize);
-        for row in 0..rows {
-            for column in 0..columns {
-                let i = (((row * LUMA_STEP) * width + column * LUMA_STEP) * 4) as usize;
-                luma.push((pixel_luminance(&pixels, i) * 255.0).round() as u8);
-            }
+        // (Each square's top left pixel's, row by row.)
+        for line in pixels.chunks_exact((width * 4) as usize).step_by(LUMA_STEP as usize) {
+            luma.extend(line.chunks_exact(4).step_by(LUMA_STEP as usize).map(pixel_luma));
         }
         let digest = digest(&pixels);
         Capture { rect, pixels: Some(pixels), luma, digest, texture: None }
@@ -200,6 +210,36 @@ impl Capture {
         match &self.pixels {
             Some(pixels) => pixel_luminance(pixels, ((y * self.width() + x) * 4) as usize),
             None => self.luma[((y / LUMA_STEP) * squares(self.width()) + x / LUMA_STEP) as usize] as f64 / 255.0,
+        }
+    }
+
+    /// The mean relative luminance (0–1) of the pixels in `columns` × `rows` from its corner, as `luminance_at` has
+    /// each: the channels (or the squares' values) summed as whole numbers, and weighted once.
+    fn mean_luminance(&self, columns: std::ops::Range<i32>, rows: std::ops::Range<i32>) -> f64 {
+        let count = (columns.len() * rows.len()) as f64;
+        let width = self.width();
+        match &self.pixels {
+            Some(pixels) => {
+                let (mut red, mut green, mut blue) = (0u32, 0u32, 0u32);
+                for y in rows {
+                    let line = &pixels[((y * width + columns.start) * 4) as usize..((y * width + columns.end) * 4) as usize];
+                    for pixel in line.chunks_exact(4) {
+                        blue += pixel[0] as u32;
+                        green += pixel[1] as u32;
+                        red += pixel[2] as u32;
+                    }
+                }
+                channels_luminance(red as f64, green as f64, blue as f64) / count
+            }
+            None => {
+                let across = squares(width);
+                let mut total = 0u32;
+                for y in rows {
+                    let line = &self.luma[((y / LUMA_STEP) * across) as usize..];
+                    total += columns.clone().map(|x| line[(x / LUMA_STEP) as usize] as u32).sum::<u32>();
+                }
+                total as f64 / 255.0 / count
+            }
         }
     }
 
@@ -323,17 +363,61 @@ impl Capture {
         if columns <= 0 || rows <= 0 {
             return (0.5, 0.0);
         }
+        // The pixels each DIP covers across (at least one), the same in every row.
+        let spans: Vec<(i32, i32)> = (0..columns)
+            .map(|column| {
+                let (x0, x1) = (left + (column as f32 * px) as i32, left + ((column + 1) as f32 * px) as i32);
+                (x0, x1.max(x0 + 1))
+            })
+            .collect();
+        let (mut sum, mut squares) = (0.0f64, 0.0f64);
+        for row in 0..rows {
+            let (y0, y1) = (top + (row as f32 * px) as i32, top + ((row + 1) as f32 * px) as i32);
+            let y1 = y1.max(y0 + 1);
+            for &(x0, x1) in &spans {
+                // The average of the pixels in this DIP.
+                let value = self.mean_luminance(x0..x1, y0..y1);
+                sum += value;
+                squares += value * value;
+            }
+        }
+        let count = (columns * rows) as f64;
+        let mean = sum / count;
+        (mean as f32, (squares / count - mean * mean).max(0.0).sqrt() as f32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A screenful of pixels varied enough that no two neighbours are alike: (x, y) mixed as a hash mixes.
+    fn varied(width: i32, height: i32) -> Vec<u8> {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let mixed = ((x as u32).wrapping_mul(0x9E37_79B9) ^ (y as u32).wrapping_mul(0x85EB_CA6B)).wrapping_mul(0xC2B2_AE35);
+                pixels.extend([(mixed >> 8) as u8, (mixed >> 16) as u8, (mixed >> 24) as u8, 0]);
+            }
+        }
+        pixels
+    }
+
+    /// The mean and spread of the luminance behind `area`, worked out pixel by pixel as `luminance_at` has each.
+    fn luminance_pixel_by_pixel(capture: &Capture, area: RECT, px: f32) -> (f32, f32) {
+        let r = capture.rect;
+        let (left, right) = (area.left.clamp(r.left, r.right) - r.left, area.right.clamp(r.left, r.right) - r.left);
+        let (top, bottom) = (area.top.clamp(r.top, r.bottom) - r.top, area.bottom.clamp(r.top, r.bottom) - r.top);
+        let (columns, rows) = (((right - left) as f32 / px) as i32, ((bottom - top) as f32 / px) as i32);
         let (mut sum, mut squares) = (0.0f64, 0.0f64);
         for row in 0..rows {
             let (y0, y1) = (top + (row as f32 * px) as i32, top + ((row + 1) as f32 * px) as i32);
             for column in 0..columns {
                 let (x0, x1) = (left + (column as f32 * px) as i32, left + ((column + 1) as f32 * px) as i32);
-                // The average of the pixels in this DIP.
-                let mut cell = 0.0f64;
-                let mut count = 0;
+                let (mut cell, mut count) = (0.0f64, 0);
                 for y in y0..y1.max(y0 + 1) {
                     for x in x0..x1.max(x0 + 1) {
-                        cell += self.luminance_at(x, y);
+                        cell += capture.luminance_at(x, y);
                         count += 1;
                     }
                 }
@@ -345,5 +429,42 @@ impl Capture {
         let count = (columns * rows) as f64;
         let mean = sum / count;
         (mean as f32, (squares / count - mean * mean).max(0.0).sqrt() as f32)
+    }
+
+    /// How light the desktop behind is, summed a DIP at a time, is what it is pixel by pixel: at every scale, over
+    /// the whole capture and a part of it, from its pixels and from its squares' values once they are let go.
+    #[test]
+    fn the_luminance_behind_is_as_it_is_pixel_by_pixel() {
+        let rect = RECT { left: 100, top: 40, right: 100 + 181, bottom: 40 + 123 };
+        let mut capture = Capture::from_pixels(rect, varied(181, 123));
+        let areas = [rect, RECT { left: 117, top: 51, right: 260, bottom: 140 }, RECT { left: 0, top: 0, right: 150, bottom: 90 }];
+        for kept in [true, false] {
+            if !kept {
+                capture.forget_pixels();
+            }
+            for area in areas {
+                for px in [1.0, 1.25, 1.5, 2.0, 2.5] {
+                    let (mean, spread) = capture.luminance(area, px);
+                    let (expected_mean, expected_spread) = luminance_pixel_by_pixel(&capture, area, px);
+                    assert!((mean - expected_mean).abs() < 1e-5 && (spread - expected_spread).abs() < 1e-5, "{area:?} at {px} (pixels kept: {kept}): {mean}, {spread}; pixel by pixel {expected_mean}, {expected_spread}");
+                }
+            }
+        }
+    }
+
+    /// Each square's value is its top left pixel's luminance out of 255, the nearest whole one.
+    #[test]
+    fn a_square_is_as_light_as_its_first_pixel() {
+        let (width, height) = (37, 21);
+        let pixels = varied(width, height);
+        let capture = Capture::from_pixels(RECT { left: 0, top: 0, right: width, bottom: height }, pixels.clone());
+        assert_eq!(capture.luma.len(), (squares(width) * squares(height)) as usize);
+        for row in 0..squares(height) {
+            for column in 0..squares(width) {
+                let i = (((row * LUMA_STEP) * width + column * LUMA_STEP) * 4) as usize;
+                let exact = 0.2126 * pixels[i + 2] as f64 + 0.7152 * pixels[i + 1] as f64 + 0.0722 * pixels[i] as f64;
+                assert_eq!(capture.luma[(row * squares(width) + column) as usize], exact.round() as u8, "({column}, {row})");
+            }
+        }
     }
 }

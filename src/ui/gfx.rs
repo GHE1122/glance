@@ -104,9 +104,11 @@ pub struct Gfx {
     icon_paths: RefCell<HashMap<Icon, ID2D1PathGeometry1>>,
     /// The pictures drawn (see `Canvas::picture`), as bitmaps on the card, by key, and when each was last drawn.
     pictures: RefCell<HashMap<u64, (ID2D1Bitmap1, Instant)>>,
-    /// Bitmaps made from nothing but their key (the glass's displacement
-    /// maps, by size, radius and scale): kept while frames keep drawing
-    /// them, as text is.
+    /// Bitmaps made from nothing but their key (the glass's displacement maps, by size, radius and scale; the pieces
+    /// of shadows): kept for as long as the device, while they fit in `MADE_BUDGET`, with when each was last drawn.
+    /// What a window's layers are painted from, the same each time they are painted for the same shape: let go of as
+    /// it hid, the panel made them all again as it next opened (tens of them, a glass panel's first frame three
+    /// times as long).
     made: RefCell<HashMap<[u32; 4], (ID2D1Bitmap1, Instant)>>,
     /// Bitmaps drawn on that were let go of (see `made`), to be drawn on again for what is made next (see
     /// `drawn_on`), as much as `MADE_BUDGET` of them.
@@ -583,17 +585,16 @@ impl Gfx {
         }
     }
 
-    /// What painting a layer anew took (its effects' textures, the bitmaps made for it from their keys alone) given
-    /// back once no layer has been painted anew for `IDLE`, if one has since it was last given back: a panel or a
-    /// widget that stays up redraws each second only what is not kept in its layers, and what painted those is
-    /// otherwise held for good (a large glass widget's, tens of megabytes). Painted anew, they are made again.
+    /// What painting a layer anew took (its effects' textures) given back once no layer has been painted anew for
+    /// `IDLE`, if one has since it was last given back: a panel or a widget that stays up redraws each second only
+    /// what is not kept in its layers, and what painted those is otherwise held for good (a large glass widget's,
+    /// tens of megabytes). Painted anew, they are made again. (What is made from its key alone stays: see `made`.)
     pub fn let_go_once_settled(&self) {
         if self.settled.get() || self.last_painted.get().is_none_or(|at| at.elapsed() < IDLE) {
             return;
         }
         self.settled.set(true);
         self.scratch.borrow_mut().take();
-        self.made.borrow_mut().clear();
         self.spare.borrow_mut().clear();
         unsafe {
             self.device.ClearResources(0);
@@ -604,14 +605,14 @@ impl Gfx {
         }
     }
 
-    /// Gives back what drawing holds on to while nothing is on screen.
+    /// Gives back what drawing holds on to while nothing is on screen (but what is made from its key alone: see
+    /// `made`).
     pub fn trim(&self) {
         self.trimmed.set(true);
         self.scratch.borrow_mut().take();
         self.scratch_context.borrow_mut().take();
         self.pictures.borrow_mut().clear();
         self.layouts.borrow_mut().clear();
-        self.made.borrow_mut().clear();
         self.spare.borrow_mut().clear();
         self.stops.borrow_mut().clear();
         unsafe {
@@ -637,15 +638,6 @@ impl Gfx {
         self.pictures.borrow_mut().retain(|_, (_, used)| used.elapsed() < PICTURE_KEPT);
         self.layouts.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
         self.formats.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
-        let mut gone = Vec::new();
-        self.made.borrow_mut().retain(|_, (bitmap, used)| {
-            let kept = used.elapsed() < TEXT_KEPT;
-            if !kept {
-                gone.push(bitmap.clone());
-            }
-            kept
-        });
-        gone.into_iter().for_each(|bitmap| self.let_go(bitmap));
         self.stops.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
     }
 
@@ -1682,8 +1674,8 @@ impl<'a> Frame<'a> {
     }
 }
 
-/// How much the bitmaps made from their keys alone may hold (bytes; see
-/// `Gfx::made`).
+/// How much the bitmaps made from their keys alone may hold (bytes; see `Gfx::made`): a glass panel's on a 4K screen
+/// at 150 %, about 13 MB.
 const MADE_BUDGET: usize = 32 << 20;
 
 /// How long no window draws before what drawing holds is given back (see `Gfx::trim_when_idle`): longer than
