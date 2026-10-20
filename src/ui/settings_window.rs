@@ -253,6 +253,7 @@ fn run(to: Option<To>) {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
+    let _ending = Ending;
     let made = gfx::current().ok().and_then(|gfx| make(gfx, true));
     if let Some(hwnd) = made {
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
@@ -285,6 +286,17 @@ fn run(to: Option<To>) {
             let ms = due.as_micros().div_ceil(1000).min(u32::MAX as u128) as u32;
             unsafe { MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT) };
         }
+    }
+}
+
+/// The window's thread ending, however it ends: what it drew with let go of first, its window's, then its device (see
+/// `gfx::let_go`), not left to the thread's own end.
+struct Ending;
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        drop(UI.with(|ui| ui.borrow_mut().take()));
+        gfx::let_go();
     }
 }
 

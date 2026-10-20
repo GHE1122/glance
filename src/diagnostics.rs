@@ -46,7 +46,7 @@ pub fn report() -> String {
         format!("Memory: {}", info.memory_modules.clone().unwrap_or_else(|| "unknown".into())),
     ];
     lines.extend(info.gpus.iter().map(|gpu| format!("GPU: {}", gpu.name)));
-    lines.push(format!("Drawn on: {}", crate::ui::gfx::drawn_on().unwrap_or_else(|| "nothing yet".into())));
+    lines.push(format!("Drawn on: {} ({} devices held)", crate::ui::gfx::drawn_on().unwrap_or_else(|| "nothing yet".into()), crate::ui::gfx::alive()));
     lines.extend(info.found.iter().cloned());
     lines.extend(crate::source::sensor_lines());
     lines.extend(crate::drives::describe());

@@ -140,8 +140,26 @@ const CRISP_CONTRAST: f32 = 2.0;
 /// Text, font, width, at the end, and broken into lines.
 type LayoutKey = (String, FontKey, u32, bool, bool);
 
+/// How many devices are made and not let go of, for a report (see `alive`): one a thread that draws, as it draws.
+static ALIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many graphics devices Glance holds now.
+pub fn alive() -> usize {
+    ALIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Drop for Gfx {
     fn drop(&mut self) {
+        ALIVE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // What its windows' surfaces were let go of in the compositor too: till a commit tells it, the composition
+        // device holds what they showed, and through that the whole device, its driver's threads and its memory
+        // (a settings window opened and closed left some 100 threads and 70 MB each time).
+        unsafe {
+            let _ = self.dcomp.Commit();
+            if let Ok(device) = self.dcomp.cast::<windows::Win32::Graphics::DirectComposition::IDCompositionDevice>() {
+                let _ = device.WaitForCommitCompletion();
+            }
+        }
         if self.tending.get() != 0 {
             let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::KillTimer(None, self.tending.get()) };
         }
@@ -241,6 +259,14 @@ thread_local! {
 
 /// How often a window failing to draw with the device still there is noted.
 const FAILED_NOTED_EVERY: Duration = Duration::from_secs(60);
+
+/// This thread's device let go of now, by a thread that drew and is to end (once what it drew with is let go of: its
+/// windows' surfaces). Left to the thread's end, it would be let go of as the thread's own are, under the loader's
+/// lock, where the driver's threads it waits on cannot end: the thread hung there, and the device stayed with all it
+/// held.
+pub fn let_go() {
+    drop(CURRENT.with(|cell| cell.borrow_mut().take()));
+}
 
 /// Drawing failed for `what` (a window's name), with `error` where it is had. Only where the device is gone (a
 /// driver update, a graphics reset: removed, as it says; or the compositor's device no longer valid) is it let go
@@ -358,6 +384,7 @@ impl Gfx {
                 Some(&[2.0, 2.0]),
             )?
         };
+        ALIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Gfx {
             software,
             scratch: RefCell::new(None),
@@ -2090,6 +2117,23 @@ pub fn rect(left: f32, top: f32, width: f32, height: f32) -> D2D_RECT_F {
     D2D_RECT_F { left, top, right: left + width, bottom: top + height }
 }
 
+/// (Tests: this process's threads now, for what a device leaves running.)
+#[cfg(test)]
+pub(crate) fn threads_now() -> usize {
+    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32};
+    let pid = std::process::id();
+    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }.unwrap();
+    let mut entry = THREADENTRY32 { dwSize: size_of::<THREADENTRY32>() as u32, ..Default::default() };
+    let mut count = 0;
+    let mut more = unsafe { Thread32First(snap, &mut entry) }.is_ok();
+    while more {
+        count += usize::from(entry.th32OwnerProcessID == pid);
+        more = unsafe { Thread32Next(snap, &mut entry) }.is_ok();
+    }
+    let _ = unsafe { windows::Win32::Foundation::CloseHandle(snap) };
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::room;
@@ -2120,6 +2164,56 @@ mod tests {
         for passing in [DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, E_FAIL, E_OUTOFMEMORY] {
             assert!(!super::software_instead(passing), "{passing:?}");
         }
+    }
+
+    /// A device made, drawn with, and let go of leaves nothing of itself running: the driver's threads it started
+    /// end with it.
+    #[test]
+    #[ignore = "counts the graphics driver's threads: alone in its process"]
+    fn a_device_let_go_of_leaves_no_threads() {
+        let before = super::threads_now();
+        let held: Vec<_> = (0..3).map(|_| super::Gfx::new().expect("graphics")).collect();
+        println!("threads: {before} before, {} with three devices held", super::threads_now());
+        drop(held);
+        for _ in 0..5 {
+            let gfx = super::Gfx::new().expect("graphics");
+            assert!(super::Frame::whole(&gfx, (64, 64), 1.0, |frame| { use super::Canvas; frame.fill_rounded(super::Color::hex(0xFF0000, 1.0), 0.0, 0.0, 64.0, 64.0, 4.0) }).is_ok());
+            drop(gfx);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let after = super::threads_now();
+        println!("threads: {before} before, {after} after five devices");
+        assert!(after <= before + 2, "{before} -> {after}");
+    }
+
+    /// A window's thread (as the settings' is) that drew on a device of its own and ended, letting go of it as it
+    /// did, leaves nothing of the device running, however often that is done.
+    #[test]
+    #[ignore = "makes windows, and counts the graphics driver's threads: alone in its process"]
+    fn a_windows_thread_lets_its_device_go() {
+        let before = super::threads_now();
+        for _ in 0..3 {
+            std::thread::spawn(|| {
+                use super::Canvas;
+                unsafe {
+                    let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+                }
+                let gfx = super::current().expect("graphics");
+                let window = crate::ui::window::Window::new().expect("a window");
+                let mut surface = super::Surface::new(&gfx, window.hwnd).expect("a surface");
+                surface.draw(&gfx, (200, 100), 1.0, |frame| frame.fill_rounded(super::Color::hex(0xFF0000, 1.0), 0.0, 0.0, 200.0, 100.0, 4.0)).expect("drawn");
+                drop(surface);
+                drop(window);
+                drop(gfx);
+                super::let_go();
+            })
+            .join()
+            .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let after = super::threads_now();
+        println!("threads: {before} before, {after} after three windows' threads");
+        assert!(after <= before + 4, "{before} -> {after}");
     }
 
     /// A report says what Glance draws on: the adapter by name, and its driver's version.

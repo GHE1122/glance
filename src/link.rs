@@ -158,10 +158,13 @@ impl From<GameModeSent> for GameMode {
 /// The most one message may be (bytes): a sample of a busy machine is some tens of kilobytes.
 const MOST: usize = 8 << 20;
 
-/// The pipes' names, this user's: what the sensors tell, and what they are asked.
+/// The pipes' names, this user's: what the sensors tell, and what they are asked. A debug build's are its own, as
+/// its settings and its single instance are (see `lib::SINGLE_INSTANCE`): run beside an installed Glance, it neither
+/// links to that Glance's sensors nor tells them, as another version, to go.
 fn names() -> Option<(String, String)> {
     let sid = crate::elevation::user_sid()?;
-    Some((format!(r"\\.\pipe\glance-told-{sid}"), format!(r"\\.\pipe\glance-asked-{sid}")))
+    let kind = if cfg!(debug_assertions) { "-debug" } else { "" };
+    Some((format!(r"\\.\pipe\glance-told{kind}-{sid}"), format!(r"\\.\pipe\glance-asked{kind}-{sid}")))
 }
 
 /// Writes `message`, its length first.
