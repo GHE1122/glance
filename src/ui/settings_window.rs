@@ -3395,14 +3395,17 @@ impl Ui {
     /// glide from where they were to where they now belong.
     fn reorder(&mut self) {
         let Some(drag) = &self.drag else { return };
-        let middle = drag.pointer - drag.grab + ROW / 2.0;
+        // (Each row as tall as its words make it.)
+        let spans: HashMap<String, (f32, f32)> =
+            self.layout().into_iter().filter_map(|(row, y, height)| if let Row::Module(id) = row { Some((id, (y, height))) } else { None }).collect();
+        let middle = drag.pointer - drag.grab + spans.get(&drag.id).map_or(0.0, |(_, height)| height / 2.0);
         let before = self.row_tops();
         let id = drag.id.clone();
         let prefix = [OVERLAY, WORKBENCH].into_iter().find(|prefix| id.starts_with(prefix)).unwrap_or("");
         let (list, bare) = self.list(&id);
         let held = list.iter().position(|entry| entry.id == bare).unwrap();
         let entry = list.remove(held);
-        let next = list.iter().position(|other| before.get(&format!("{prefix}{}", other.id)).is_some_and(|top| middle < top + ROW / 2.0)).unwrap_or(list.len());
+        let next = list.iter().position(|other| before.get(&format!("{prefix}{}", other.id)).is_some_and(|top| middle < top + spans[&format!("{prefix}{}", other.id)].1 / 2.0)).unwrap_or(list.len());
         list.insert(next, entry);
         if next == held {
             return;
@@ -3758,11 +3761,13 @@ impl Ui {
         // A card's rows follow its module's.
         let mut reach: HashMap<String, f32> = HashMap::new();
         let mut card_top: HashMap<String, f32> = HashMap::new();
+        let mut own: HashMap<String, f32> = HashMap::new();
         for (row, top, row_height) in &placed {
             match row {
                 Row::Module(id) => {
                     card_top.insert(id.clone(), *top);
                     reach.insert(id.clone(), *row_height);
+                    own.insert(id.clone(), *row_height);
                 }
                 Row::Item(id, _) | Row::ModuleChoice(id, _) => {
                     reach.insert(id.clone(), top + row_height - card_top[id]);
@@ -3772,7 +3777,8 @@ impl Ui {
         }
         let open: HashMap<String, f32> = card_top.keys().map(|id| (id.clone(), self.opened(id))).collect();
         for (id, extent) in reach.iter_mut() {
-            *extent = ROW + (*extent - ROW) * open[id];
+            // (Closed, as tall as the module's own row, its words in as many lines as they take.)
+            *extent = own[id] + (*extent - own[id]) * open[id];
         }
         for (row, top, row_height) in placed {
             let y = top - scroll;
@@ -4935,53 +4941,53 @@ fn field_label_line(frame: &Frame, palette: &Palette, label: &str, hint: Option<
 /// A miniature of each skin, drawn the same whichever is active.
 fn skin_miniature(frame: &Frame, skin: Skin, r: Rect) {
     let dc = &frame.dc;
-    // The same desktop under each: a soft gradient, corner to corner.
-    let stops = [
-        D2D1_GRADIENT_STOP { position: 0.0, color: Color::hex(0x7AA7FF, 1.0).d2d() },
-        D2D1_GRADIENT_STOP { position: 0.55, color: Color::hex(0xC79BFF, 1.0).d2d() },
-        D2D1_GRADIENT_STOP { position: 1.0, color: Color::hex(0xFFB38A, 1.0).d2d() },
-    ];
-    let span = (r.w + r.h) * std::f32::consts::FRAC_1_SQRT_2 / 2.0 * std::f32::consts::FRAC_1_SQRT_2;
-    let (cx, my) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-    unsafe {
-        if let Ok(stops) = ID2D1RenderTarget::CreateGradientStopCollection(dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) {
-            let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: cx - span, Y: my - span }, endPoint: Vector2 { X: cx + span, Y: my + span } };
-            if let Ok(brush) = dc.CreateLinearGradientBrush(&line, None, &stops) {
-                let (x, y, w, h) = frame.on_pixels(r.x, r.y, r.w, r.h);
-                dc.FillRoundedRectangle(&rounded(Rect { x, y, w, h }, 6.0), &brush);
+    let inner = (r.x + 10.0, r.w - 20.0);
+    let cy = r.y + r.h / 2.0;
+    match skin {
+        Skin::Paper => {
+            fill(frame, Color::hex(0xEEF2EC, 1.0), r.x, r.y, r.w, r.h, 6.0);
+            // Three ruled lines, the middle one in the signal colour.
+            for (i, color) in [0x16221E, 0xD23F1C, 0x16221E].into_iter().enumerate() {
+                let y = cy + (i as f32 - 1.0) * 13.5;
+                fill(frame, Color::hex(color, 1.0), inner.0, y - 0.75, inner.1, 1.5, 0.0);
             }
         }
-    }
-    // The same small panel on it, in the skin's own ground, edge and colours: a heading, a reading, and a chart.
-    let panel = Rect { x: r.x + 14.0, y: r.y + 12.0, w: r.w - 28.0, h: r.h - 24.0 };
-    let (text, signal, faint) = match skin {
-        Skin::Paper => {
-            fill(frame, Color::hex(0xEEF2EC, 1.0), panel.x, panel.y, panel.w, panel.h, 2.0);
-            fill(frame, Color::hex(0x16221E, 1.0), panel.x, panel.y, panel.w, 1.5, 0.0);
-            (Color::hex(0x16221E, 1.0), Color::hex(0xD23F1C, 1.0), Color::hex(0x16221E, 0.25))
-        }
         Skin::Glass => {
-            fill(frame, Color::hex(0xFFFFFF, 0.35), panel.x, panel.y, panel.w, panel.h, 8.0);
-            stroke_inside(frame, panel, 8.0, Color::hex(0xFFFFFF, 0.55));
-            fill(frame, Color::hex(0xFFFFFF, 0.9), panel.x + 8.0, panel.y, panel.w - 16.0, 1.0, 0.0);
-            (Color::hex(0xFFFFFF, 0.95), Color::hex(0xFFFFFF, 0.95), Color::hex(0xFFFFFF, 0.45))
+            let stops = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: Color::hex(0x7AA7FF, 1.0).d2d() },
+                D2D1_GRADIENT_STOP { position: 0.55, color: Color::hex(0xC79BFF, 1.0).d2d() },
+                D2D1_GRADIENT_STOP { position: 1.0, color: Color::hex(0xFFB38A, 1.0).d2d() },
+            ];
+            let span = (r.w + r.h) * std::f32::consts::FRAC_1_SQRT_2 / 2.0 * std::f32::consts::FRAC_1_SQRT_2;
+            let (cx, my) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            unsafe {
+                if let Ok(stops) = ID2D1RenderTarget::CreateGradientStopCollection(dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) {
+                    let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                        startPoint: Vector2 { X: cx - span, Y: my - span },
+                        endPoint: Vector2 { X: cx + span, Y: my + span },
+                    };
+                    if let Ok(brush) = dc.CreateLinearGradientBrush(&line, None, &stops) {
+                        let (x, y, w, h) = frame.on_pixels(r.x, r.y, r.w, r.h);
+                        dc.FillRoundedRectangle(&rounded(Rect { x, y, w, h }, 6.0), &brush);
+                    }
+                }
+            }
+            for i in 0..3 {
+                let y = cy - 19.0 + i as f32 * 14.0;
+                let pill = Rect { x: inner.0, y, w: inner.1, h: 10.0 };
+                fill(frame, Color::hex(0xFFFFFF, 0.35), pill.x, pill.y, pill.w, pill.h, 5.0);
+                stroke_inside(frame, pill, 5.0, Color::hex(0xFFFFFF, 0.4));
+                fill(frame, Color::hex(0xFFFFFF, 0.9), pill.x + 4.0, pill.y, pill.w - 8.0, 1.0, 0.0);
+            }
         }
         Skin::Fluent => {
-            fill(frame, Color::hex(0xF7F7F8, 1.0), panel.x, panel.y, panel.w, panel.h, 6.0);
-            stroke_inside(frame, panel, 6.0, Color::hex(0x000000, 0.08));
-            (Color::hex(0x1A1A1A, 0.8), theme::accent(false), Color::hex(0x1A1A1A, 0.18))
+            fill(frame, Color::hex(0xECEEF2, 1.0), r.x, r.y, r.w, r.h, 6.0);
+            for i in 0..3 {
+                let y = cy - 8.5 + i as f32 * 7.0;
+                let (w, color) = if i == 0 { (inner.1 * 0.6, theme::accent(false)) } else { (inner.1, Color::hex(0xC8CCD2, 1.0)) };
+                fill(frame, color, inner.0, y, w, 3.0, 1.5);
+            }
         }
-    };
-    let (x, w) = (panel.x + 8.0, panel.w - 16.0);
-    fill(frame, signal, x, panel.y + 8.0, w * 0.32, 3.0, 1.5);
-    fill(frame, text, x, panel.y + 16.0, w * 0.18, 8.0, 1.5);
-    // The chart: bars rising and falling along its foot.
-    let foot = panel.y + panel.h - 7.0;
-    fill(frame, faint, x, foot, w, 1.0, 0.0);
-    let heights = [4.0, 7.0, 5.0, 9.0, 6.0, 11.0, 8.0, 12.0, 7.0, 10.0];
-    let step = w / heights.len() as f32;
-    for (i, h) in heights.into_iter().enumerate() {
-        fill(frame, signal, x + i as f32 * step + step * 0.25, foot - h, step * 0.5, h, 1.0);
     }
 }
 
