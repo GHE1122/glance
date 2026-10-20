@@ -31,6 +31,7 @@ pub const CAPTURE_LOST: u32 = WM_APP + 8;
 impl Drop for Window {
     fn drop(&mut self) {
         let _ = unsafe { DestroyWindow(self.hwnd) };
+        super::tip::went(self.hwnd);
     }
 }
 
@@ -400,6 +401,7 @@ impl Window {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
+        super::tip::went(self.hwnd);
     }
 
     /// Lets clicks through to whatever is underneath, or takes them. Only

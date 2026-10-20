@@ -4,10 +4,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use std::cell::Cell;
+
 use windows::Win32::Foundation::{HWND, POINT, RECT};
-use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
-use windows::Win32::UI::WindowsAndMessaging::{EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, OBJID_WINDOW, WINEVENT_OUTOFCONTEXT};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 
@@ -18,8 +17,6 @@ use super::window::Window;
 
 struct Tip {
     window: Window,
-    /// The window whose part it speaks of: hidden or gone, the tip goes with it (see `owner_went`).
-    owner: HWND,
     /// The device it draws with, and its surface on it.
     gfx: Rc<Gfx>,
     surface: Option<Surface>,
@@ -53,6 +50,9 @@ impl Lives for Tip {
 
 thread_local! {
     static TIP: RefCell<Option<Tip>> = const { RefCell::new(None) };
+    /// The window whose part the tip speaks of: hidden or gone, the tip goes with it (see `went`). Kept apart from
+    /// the tip, which is borrowed as its own window hides.
+    static OWNER: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
 }
 
 /// How far from what it speaks of it shows, its height, and the room beside its words (DIPs).
@@ -81,10 +81,11 @@ fn held(gfx: &Gfx, text: &str, font: Font) -> String {
     cut(fits)
 }
 
-/// A window of this thread hidden or destroyed (EVENT_OBJECT_HIDE, EVENT_OBJECT_DESTROY): the one the tip speaks of,
-/// the tip hidden.
-unsafe extern "system" fn owner_went(_: HWINEVENTHOOK, _: u32, hwnd: HWND, object: i32, _: i32, _: u32, _: u32) {
-    if object == OBJID_WINDOW.0 && TIP.with(|kept| kept.borrow().as_ref().is_some_and(|tip| tip.owner == hwnd)) {
+/// A window of this thread hidden or destroyed (told by `Window`, which every window of Glance's is): the one the tip
+/// speaks of, whatever took it away (a widget closed, a note taken off the desktop, the panel put away as the pointer
+/// was on it), the tip goes with it, not only as the pointer leaves.
+pub fn went(hwnd: HWND) {
+    if OWNER.get() == hwnd {
         hide();
     }
 }
@@ -101,16 +102,10 @@ pub fn show(owner: HWND, text: &str, about: RECT, dark: bool) {
         if kept.is_none() {
             let Ok(mut window) = Window::new() else { return };
             window.set_click_through(true);
-            // Told of each of this thread's windows hidden or destroyed, for as long as the thread lives: the tip is
-            // put away with the window it speaks of, whatever took that away (a widget closed, the panel put away as
-            // the pointer was on it), not only as the pointer leaves.
-            unsafe {
-                SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, None, Some(owner_went), std::process::id(), GetCurrentThreadId(), WINEVENT_OUTOFCONTEXT);
-            }
-            *kept = Some(Tip { window, owner, gfx: gfx.clone(), surface: None, showing: None, said: (String::new(), RECT::default()) });
+            *kept = Some(Tip { window, gfx: gfx.clone(), surface: None, showing: None, said: (String::new(), RECT::default()) });
         }
         let tip = kept.as_mut().unwrap();
-        tip.owner = owner;
+        OWNER.set(owner);
         // (What it drew with on another device goes with it: see `life`.)
         if !Rc::ptr_eq(&tip.gfx, &gfx) {
             tip.gone();
@@ -227,18 +222,6 @@ mod tests {
         super::TIP.with(|kept| std::mem::forget(kept.borrow_mut().take()));
     }
 
-    /// Lets the thread take in what it was told (the hook's calls among it).
-    fn pump() {
-        use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
-        let mut message = MSG::default();
-        unsafe {
-            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
-                let _ = TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-        }
-    }
-
     /// On a desktop: the window a tip speaks of hidden, or destroyed, without the pointer leaving what it said it of
     /// (a widget closed from its menu, the panel put away), the tip goes with it. Another of the thread's windows
     /// hidden, it stays.
@@ -254,16 +237,13 @@ mod tests {
         let tip = super::TIP.with(|kept| kept.borrow().as_ref().map(|tip| tip.window.hwnd)).expect("no tip was made");
         let shown = || unsafe { IsWindowVisible(tip) }.as_bool();
         other.hide();
-        pump();
         let other_hidden = shown();
         owner.hide();
-        pump();
         let owner_hidden = shown();
         owner.show();
         super::show(owner.hwnd, "关闭", about, true);
         let again = shown();
         owner.destroy();
-        pump();
         let owner_gone = shown();
         // (Let go of before anything is asserted: taken down with a failed test's thread, it waits on a desktop gone.)
         super::TIP.with(|kept| std::mem::forget(kept.borrow_mut().take()));
