@@ -41,7 +41,7 @@ pub fn run() {
     }
     // Watched from now: the first look at the hardware as each reading is, the rest waiting on it meanwhile.
     std::thread::Builder::new().name("glance sensors: readings watched".into()).spawn(watch_readings).expect("a thread started");
-    *READING_SINCE.lock().unwrap() = Some(Instant::now());
+    *READING_SINCE.lock().unwrap() = Some(awake());
     let mut sampler = Sampler::new();
     *READING_SINCE.lock().unwrap() = None;
     crate::presents::start();
@@ -151,7 +151,7 @@ pub fn run() {
             if !crate::journal::take_held().into_iter().all(|line| tell(&Told::Note(line))) {
                 break;
             }
-            *READING_SINCE.lock().unwrap() = Some(Instant::now());
+            *READING_SINCE.lock().unwrap() = Some(awake());
             let sample = sampler.sample(refresh_slow, wanted.wsl, wanted.docker, interval);
             *READING_SINCE.lock().unwrap() = None;
             if let Some(sample) = sample {
@@ -178,8 +178,22 @@ pub fn run() {
     crate::presents::stop();
 }
 
-/// When the reading under way began (none: none is).
-static READING_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+/// When the reading under way began, in time awake (see `awake`; none: none is).
+static READING_SINCE: Mutex<Option<Duration>> = Mutex::new(None);
+
+/// How long the system has run awake: the time it slept left out (a reading under way as it went to sleep has not
+/// been taking all that while; counted by the clock, every one was taken for stuck as the PC woke, the sensors
+/// ended, and its CPU's readings lost).
+fn awake() -> Duration {
+    let mut unbiased = 0u64;
+    let _ = unsafe { windows::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime(&mut unbiased) };
+    Duration::from_nanos(unbiased * 100)
+}
+
+/// Whether a reading that began `since` (in time awake) has been under way too long by `now`.
+fn stuck(since: Option<Duration>, now: Duration) -> bool {
+    since.is_some_and(|since| now.saturating_sub(since) > STUCK_AFTER)
+}
 
 /// Ends the sensors once a reading has been under way for longer than `STUCK_AFTER`, the rest of Glance told why
 /// (on the pipe the reading does not hold meanwhile): stuck, they serve nothing, and the rest starts them again.
@@ -187,7 +201,7 @@ fn watch_readings() {
     loop {
         std::thread::sleep(STUCK_AFTER / 6);
         let since = *READING_SINCE.lock().unwrap();
-        if since.is_some_and(|since| since.elapsed() > STUCK_AFTER) {
+        if stuck(since, awake()) {
             let why = format!("sensors: starting or a reading has taken over {} s; ending, to be started again", STUCK_AFTER.as_secs());
             // Told on a thread of its own, waited for a second at most (a pipe the rest has stopped reading holds
             // whoever writes to it): the end comes either way.
@@ -353,5 +367,26 @@ fn watch_edges() {
             }
             DispatchMessageW(&message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reading is stuck by the time it has taken awake: the clock counted on through a sleep (the clock as
+    /// `Instant` keeps it, on Windows) is not what it took.
+    #[test]
+    fn stuck_by_time_awake() {
+        let began = awake();
+        assert!(!stuck(Some(began), awake()));
+        assert!(!stuck(None, began + Duration::from_secs(3600)));
+        assert!(!stuck(Some(began), began + STUCK_AFTER));
+        assert!(stuck(Some(began), began + STUCK_AFTER + Duration::from_secs(1)));
+        // The time awake goes on as the clock does while awake, by much the same.
+        let (clock, from) = (Instant::now(), awake());
+        std::thread::sleep(Duration::from_millis(200));
+        let (by_clock, by_awake) = (clock.elapsed(), awake() - from);
+        assert!(by_awake.abs_diff(by_clock) < Duration::from_millis(50), "{by_clock:?} {by_awake:?}");
     }
 }

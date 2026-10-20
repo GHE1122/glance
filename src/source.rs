@@ -28,7 +28,8 @@ const LASTED_TO_START_AGAIN: Duration = Duration::from_secs(60);
 
 /// What the readings come from.
 pub enum Source {
-    Linked(Link),
+    /// (Its link let go of, for a moment, as the sensors are started again: see `next`.)
+    Linked(Option<Link>),
     Own { sampler: Sampler, next: Instant, tick: u64 },
 }
 
@@ -121,7 +122,7 @@ pub fn open() -> (StaticInfo, Source) {
         if let Some((link, info)) = linked {
             linked_to(&link);
             crate::journal::note("readings: from the sensors' process");
-            return (info, Source::Linked(link));
+            return (info, Source::Linked(Some(link)));
         }
         crate::journal::note("readings: Glance's own, without administrator rights (the sensors' process was not had)");
     }
@@ -254,7 +255,8 @@ impl Source {
     /// process watches `edges` meanwhile, and tells each push it sees.
     pub fn next(&mut self, want: Want, edges: Edges) -> Option<Sample> {
         match self {
-            Source::Linked(link) => {
+            Source::Linked(held) => {
+                let link = held.as_mut().expect("a link");
                 if *WANTED.lock().unwrap() != Some(want) {
                     *WANTED.lock().unwrap() = Some(want);
                     ask(&Asked::Want(want));
@@ -285,12 +287,19 @@ impl Source {
                             LINKED.store(false, Ordering::Relaxed);
                             *ASKING.lock().unwrap() = None;
                             let lasted = LINKED_SINCE.lock().unwrap().take().is_some_and(|since| since.elapsed() >= LASTED_TO_START_AGAIN);
+                            // The link let go of, and the process it was to gone, before they are started again: a pipe
+                            // lasts while either end holds it, and the new process, finding its pipes still there, could
+                            // not make them its own, and ended.
+                            let old = held.take().expect("a link");
+                            if !old.gone_within(GONE_WITHIN) {
+                                crate::journal::note("readings: the sensors' process that went had not ended in time");
+                            }
                             if lasted && crate::elevation::start_sensors_unasked() {
                                 if let Some((again, info)) = Link::connect(STARTED_AGAIN_WITHIN).and_then(|link| greeted(&link).map(|info| (link, info))) {
                                     crate::journal::note("readings: the sensors' process went, and was started again");
                                     linked_to(&again);
                                     gpus_found(&info);
-                                    *link = again;
+                                    *held = Some(again);
                                     return None;
                                 }
                             }
