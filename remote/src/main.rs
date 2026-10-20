@@ -91,6 +91,8 @@ struct State {
     seen: sign::Seen,
     /// Whether the lights are on, once this helper has set them.
     lights: Option<bool>,
+    /// How many lighting devices OpenRGB had as it last set them (not set yet: not known).
+    devices: Option<usize>,
     night: Option<Night>,
 }
 
@@ -98,6 +100,26 @@ struct State {
 fn shown(light: &Light) -> [u8; 3] {
     let rgb = u32::from_str_radix(&light.color, 16).unwrap_or(0xFFFFFF);
     [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8].map(|part| (part as u32 * light.brightness.min(100) as u32 / 100) as u8)
+}
+
+/// Whether there are lights here the phone can set: the light under the keys, a cooler's display, or devices OpenRGB
+/// sets (as many as it had as it last set them; not set yet, some, as far as is known: it is not started to be asked).
+fn lights_there(keys: bool, cooler: bool, openrgb: bool, devices: Option<usize>) -> bool {
+    keys || cooler || (openrgb && devices != Some(0))
+}
+
+/// The lights put on or out, as what was asked came to: the keys' light, a cooler's display, and how many devices
+/// OpenRGB set (0, where it was not asked). Taken by any, they were set (what failed of the rest is noted); taken by
+/// none, they were not, and the phone is told so.
+fn lights_taken(on: bool, keyed: bool, cooled: bool, set: Result<usize, String>) -> Result<(), String> {
+    match set {
+        Err(error) if keyed || cooled => {
+            journal::note(format!("the lights {}: the keys' or the cooler's were set; OpenRGB: {error}", if on { "on" } else { "out" }));
+            Ok(())
+        }
+        Ok(0) if !keyed && !cooled => Err("no lights took it".into()),
+        other => other.map(|_| ()),
+    }
 }
 
 /// Whether this PC's lights are the light under its keys: a laptop whose
@@ -188,13 +210,14 @@ impl Helper {
         // A laptop whose keys' light is set here has that for its lights: OpenRGB is not asked there (it knows
         // few laptops, and not starting on one must not stand for the keys' light not having been set). With no
         // OpenRGB on this PC, the lights it would set are left to their makers' programs: there is still the rest.
-        let set = if lights_are_keys() || lights::program(&self.config).is_none() { Ok(()) } else { lights::set(&self.config, on, &light).map(|_| ()).map_err(|error| error.to_string()) };
-        let cooled = cooler.join().is_ok() && cooler::there();
-        // (One kind of light set stands for the lights set: what did not take it is noted, not answered.)
-        match set {
-            Err(error) if keyed || cooled => journal::note(format!("the lights {}: the keys' or the cooler's were set; OpenRGB: {error}", if on { "on" } else { "out" })),
-            other => other?,
+        let set = if lights_are_keys() || lights::program(&self.config).is_none() { Ok(0) } else { lights::set(&self.config, on, &light).map_err(|error| error.to_string()) };
+        if let Ok(devices) = set {
+            if !lights_are_keys() && lights::program(&self.config).is_some() {
+                self.state.lock().unwrap().devices = Some(devices);
+            }
         }
+        let cooled = cooler.join().unwrap_or(false);
+        lights_taken(on, keyed, cooled, set)?;
         self.state.lock().unwrap().lights = Some(on);
         let _ = Config::change(|config| config.lit = Some(on));
         // (The OpenRGB that set them stays: some devices fall back to their own light once it goes, OpenRGB having
@@ -393,7 +416,8 @@ impl Helper {
         // set them. A laptop whose lights are its keys' is never asked of
         // OpenRGB (see `lights`): as set here, whatever OpenRGB last had.
         let kept = self.state.lock().unwrap().lights;
-        let lights = if lights_are_keys() { kept } else { lights::lit().or(kept) };
+        let known = if lights_are_keys() { None } else { lights::known() };
+        let lights = known.as_ref().map(|devices| devices.iter().any(lights::Device::lit)).or(kept);
         let light = self.light.lock().unwrap().clone();
         let playing = media::playing();
         let state = self.state.lock().unwrap();
@@ -403,7 +427,7 @@ impl Helper {
             "version": env!("CARGO_PKG_VERSION"),
             "lights": lights,
             // Whether there is the program the lights are set by at all (none: the phone has no lights to show).
-            "lights_there": lights::program(&self.config).is_some() || cooler::there() || keys::there(),
+            "lights_there": lights_there(keys::there(), cooler::there(), lights::program(&self.config).is_some(), known.map(|devices| devices.len()).or(state.devices)),
             // And whether, of those, there is the program that sets a board's and a card's lights and their colours
             // (not asked on a laptop whose lights are its keys': see `lights`).
             "colours_there": if lights_are_keys() { keys::coloured() } else { lights::program(&self.config).is_some() },
@@ -1062,6 +1086,28 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Lights there only where something would take them: OpenRGB with no devices (as it last set them) is none,
+    /// not yet asked, it may have some.
+    #[test]
+    fn lights_there_only_where_something_takes_them() {
+        assert!(!super::lights_there(false, false, true, Some(0)));
+        assert!(super::lights_there(false, false, true, Some(2)));
+        assert!(super::lights_there(false, false, true, None));
+        assert!(super::lights_there(true, false, true, Some(0)));
+        assert!(super::lights_there(false, true, false, None));
+        assert!(!super::lights_there(false, false, false, None));
+    }
+
+    /// Lights taken by none of what sets them are not set: the phone is told, not shown them as changed.
+    #[test]
+    fn lights_taken_by_none_are_not_set() {
+        assert!(super::lights_taken(true, false, false, Ok(0)).is_err());
+        assert!(super::lights_taken(true, false, false, Ok(3)).is_ok());
+        assert!(super::lights_taken(false, true, false, Ok(0)).is_ok());
+        assert!(super::lights_taken(true, false, true, Err("no server".into())).is_ok());
+        assert_eq!(super::lights_taken(true, false, false, Err("no server".into())), Err("no server".into()));
+    }
+
     #[test]
     fn text_goes_through_a_link_and_back() {
         for text in ["DESKTOP-9950X", "书房 的电脑", "SM-F971U1", "100%"] {
