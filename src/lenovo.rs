@@ -61,6 +61,11 @@ const KINDS: [Kind; 6] = [
 /// graphics' (fans 1 and 2).
 const TESTED: Kind = Kind { pairs: &[], method: &FEATURE, fans: &[CPU, GPU] };
 
+/// A laptop of a kind neither its table nor its test data tells: its firmware asked by each method in turn, the
+/// newer first, for the processor's fan and the graphics', and taken to be of the first whose method is there and
+/// answers for a fan.
+const ASKED: [Kind; 2] = [TESTED, Kind { pairs: &[], method: &FAN, fans: &[(0, "cpu_fan"), (1, "gpu_fan")] }];
+
 pub struct LenovoFans {
     services: IWbemServices,
     method: &'static Method,
@@ -85,12 +90,25 @@ impl LenovoFans {
         let services = services(r"root\wmi").ok_or_else(|| Some("Lenovo firmware: its WMI could not be reached".to_string()))?;
         let table = table(&services);
         let tested = tested(&services);
-        let (kind, told) = match KINDS.iter().find(|kind| kind.pairs.iter().all(|pair| table.contains(pair))) {
-            Some(kind) => (kind, format!("fan table {}", shown(kind.pairs))),
-            None if tested.iter().any(|fan| [1, 2].contains(fan)) => (&TESTED, format!("fan test data, fans {tested:?}")),
-            None => return Err(Some(format!("Lenovo firmware: no kind known (fan table {}; fan test data: fans {tested:?})", shown(&table)))),
+        let found: Vec<(&Kind, String)> = match KINDS.iter().find(|kind| kind.pairs.iter().all(|pair| table.contains(pair))) {
+            Some(kind) => vec![(kind, format!("fan table {}", shown(kind.pairs)))],
+            None if tested.iter().any(|fan| [1, 2].contains(fan)) => vec![(&TESTED, format!("fan test data, fans {tested:?}"))],
+            None => ASKED.iter().map(|kind| (kind, format!("{} (fan table {}; fan test data: fans {tested:?})", kind.method.method, shown(&table)))).collect(),
         };
-        let found = |what: &str| Some(format!("Lenovo firmware, by its {told}: {what}"));
+        let mut said = Vec::new();
+        for (kind, told) in found {
+            match Self::asked(&services, kind, told) {
+                Ok(fans) => return Ok(fans),
+                Err(why) => said.push(why),
+            }
+        }
+        Err(Some(said.join("; ")))
+    }
+
+    /// The laptop's fans, taken to be of `kind` (told so by `told`): those that answer its method. Else what was
+    /// found of them, for a report.
+    fn asked(services: &IWbemServices, kind: &Kind, told: String) -> Result<Self, String> {
+        let found = |what: &str| format!("Lenovo firmware, by its {told}: {what}");
         let class = BSTR::from(kind.method.class);
         // The object the method is asked of: the class's one instance.
         let objects = unsafe { services.CreateInstanceEnum(&class, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_WBEM_COMPLETE, None) }.map_err(|_| found("no LENOVO method class"))?;
@@ -106,7 +124,7 @@ impl LenovoFans {
         let method: Vec<u16> = kind.method.method.encode_utf16().chain([0]).collect();
         unsafe { definition.ok_or_else(|| found("its method class undefined"))?.GetMethod(PCWSTR(method.as_ptr()), 0, &mut input, &mut output) }.map_err(|_| found("no such method"))?;
         let input = input.ok_or_else(|| found("no input to its method"))?;
-        let mut fans = LenovoFans { services, method: kind.method, told: told.clone(), path, input, fans: Vec::new() };
+        let mut fans = LenovoFans { services: services.clone(), method: kind.method, told: told.clone(), path, input, fans: Vec::new() };
         fans.fans = kind.fans.iter().copied().filter(|(asked, _)| fans.ask(*asked).is_some_and(|speed| speed >= 0)).collect();
         if fans.fans.is_empty() {
             return Err(found("no fan answered"));
