@@ -797,6 +797,21 @@ enum Target {
     /// Sends the diagnostics to Glance's site, shown first in a window of
     /// their own to be read and agreed to.
     SendReport,
+    /// Installs NetEase Cloud Music's lyrics plugin (asked first), takes it back (asked first), or starts NetEase
+    /// again to load it.
+    NetEase(NetEaseWork),
+    NetEaseRestart,
+}
+
+/// How what was done to NetEase Cloud Music's lyrics plugin went: done, with whether the loader is Glance's now
+/// and whether NetEase must start again to load the plugin.
+type NetEaseDone = Result<(bool, bool), crate::netease::Failed>;
+
+/// What is done to NetEase Cloud Music's lyrics plugin (see `netease`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NetEaseWork {
+    Install,
+    Remove,
 }
 
 /// Modules for developers: listed under "More" while off, out of the way.
@@ -841,6 +856,8 @@ enum Row {
     Phone(String, String),
     /// What the rows under it are, said small above them: a group of their own.
     Group(&'static str),
+    /// NetEase Cloud Music's lyrics plugin (InfLink-rs): how it is, and installing or taking it back.
+    NetEase,
 }
 
 /// How tall a group's name is, above its rows.
@@ -1013,6 +1030,14 @@ struct Ui {
     /// The diagnostics being put together (on another thread: the sensors' part is asked of their process), and
     /// what for.
     reporting: Option<(ReportFor, std::thread::JoinHandle<String>)>,
+    /// NetEase Cloud Music as found (None: not installed), whether its lyrics plugin is on it, and whether it must be
+    /// started again to load the plugin just installed; the plugin being installed or taken back (on another thread:
+    /// it is downloaded, and NetEase is closed), and how that last went.
+    netease: Option<crate::netease::NetEase>,
+    netease_has: bool,
+    netease_restart: bool,
+    netease_work: Option<(NetEaseWork, std::thread::JoinHandle<NetEaseDone>)>,
+    netease_failed: Option<(NetEaseWork, crate::netease::Failed)>,
     code: Option<(crate::phone::Code, CodeFor)>,
     phones: Vec<crate::phone::Phone>,
     /// When the remote had last written the phones, as they were last read.
@@ -1202,6 +1227,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
         // (Taken out first: locked twice in the one statement below, it waited on itself.)
         let switches_read = SWITCHES_READ.lock().unwrap().unwrap_or((false, false));
+        let netease = crate::netease::found(false);
         let mut ui = Ui {
             hwnd,
             gfx,
@@ -1230,6 +1256,11 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             fetch_failed: false,
             switching: None,
             reporting: None,
+            netease_has: netease.as_ref().is_some_and(crate::netease::installed),
+            netease,
+            netease_restart: false,
+            netease_work: None,
+            netease_failed: None,
             code: None,
             phones_written: crate::phone::phones_written(),
             phones: crate::phone::phones(),
@@ -1598,10 +1629,14 @@ impl Ui {
             (Page::Music, _) => {
                 rows.push(Row::Choice(Field::MusicSource));
                 rows.extend(super::prefs::items("lyrics").iter().map(|item| Row::Element(item.name)));
+                // (Only where NetEase is installed.)
+                if self.netease.is_some() {
+                    rows.push(Row::NetEase);
+                }
                 rows.push(Row::Note(pick(
                     self.lang,
-                    "在线查找歌词时，会将歌名发送至网易云音乐、QQ 音乐、酷狗或 LRCLIB。本地歌曲优先使用文件内嵌的歌词。同步歌词需要播放器提供播放进度，网易云音乐需安装 InfLink-rs 插件。",
-                    "To find lyrics online, the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A local track uses the lyrics in its file first. Synced lyrics need the player to report its position. NetEase Cloud Music needs the InfLink-rs plugin for that.",
+                    "在线查找歌词时，会将歌名发送至网易云音乐、QQ 音乐、酷狗或 LRCLIB。本地歌曲优先使用文件内嵌的歌词。同步歌词需要播放器提供播放进度。",
+                    "To find lyrics online, the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A local track uses the lyrics in its file first. Synced lyrics need the player to report its position.",
                 )));
             }
             (Page::Phone, _) => self.remote_rows(&mut rows),
@@ -2140,6 +2175,33 @@ impl Ui {
                 };
                 (p("诊断信息", "Diagnostics"), detail, vec![(action, Target::Diagnostics, Button::Plain), send])
             }
+            Row::NetEase => {
+                let netease = self.netease.as_ref()?;
+                let install = |text| (text, Target::NetEase(NetEaseWork::Install), Button::Accent);
+                let remove = (p("移除", "Remove"), Target::NetEase(NetEaseWork::Remove), Button::Plain);
+                let (detail, buttons) = match (self.netease_work.as_ref().map(|(work, _)| *work), self.netease_failed) {
+                    (Some(NetEaseWork::Install), _) => (p("正在下载并安装…", "Downloading and installing…"), vec![(p("安装中", "Installing"), Target::NetEase(NetEaseWork::Install), Button::Quiet)]),
+                    (Some(NetEaseWork::Remove), _) => (p("正在移除…", "Removing…"), vec![(p("移除中", "Removing"), Target::NetEase(NetEaseWork::Remove), Button::Quiet)]),
+                    (None, Some((NetEaseWork::Install, crate::netease::Failed::Taken))) => (p("下载失败或文件未通过校验，请稍后重试", "The download failed or did not pass its check. Try again later"), vec![install(p("重试", "Retry"))]),
+                    (None, Some((NetEaseWork::Install, crate::netease::Failed::Put))) => (p("未能写入插件文件，安装未完成", "The plugin's files could not be written. It was not installed"), vec![install(p("重试", "Retry"))]),
+                    (None, Some((NetEaseWork::Remove, _))) => (p("未能移除，请关闭网易云音乐后重试", "It could not be removed. Close NetEase Cloud Music and try again"), vec![remove]),
+                    (None, None) if self.netease_has && self.netease_restart => (
+                        p("已安装，重新启动网易云音乐后生效", "Installed. It works once NetEase Cloud Music starts again"),
+                        vec![(p("重启网易云音乐", "Restart NetEase"), Target::NetEaseRestart, Button::Accent), remove],
+                    ),
+                    (None, None) if self.netease_has => (p("已安装，网易云音乐可提供播放进度以显示同步歌词", "Installed. NetEase Cloud Music says how far into a track it is, for synced lyrics"), vec![remove]),
+                    (None, None) => {
+                        let detail = match (lang, netease.tested()) {
+                            (Lang::Zh, true) => "安装 InfLink-rs 插件后，网易云音乐可提供播放进度以显示同步歌词".to_string(),
+                            (Lang::En, true) => "With the InfLink-rs plugin, NetEase Cloud Music says how far into a track it is, for synced lyrics".to_string(),
+                            (Lang::Zh, false) => format!("安装 InfLink-rs 插件后可显示同步歌词。当前版本 {} 未经该插件测试", netease.version()),
+                            (Lang::En, false) => format!("With the InfLink-rs plugin, lyrics are synced. It was not tested on version {}", netease.version()),
+                        };
+                        (detail, vec![install(p("安装", "Install"))])
+                    }
+                };
+                (p("网易云音乐歌词插件", "NetEase Cloud Music lyrics plugin"), detail, buttons)
+            }
             Row::Uninstall => (
                 p("卸载 Glance", "Uninstall Glance"),
                 p("卸载程序并删除设置，执行前会再次确认", "Removes Glance and its settings, after asking"),
@@ -2631,6 +2693,69 @@ impl Ui {
             self.sent = None;
             self.sending = Some(std::thread::spawn(move || crate::diagnostics::send(&report, &said.pictures)));
         }
+    }
+
+    /// Installs NetEase Cloud Music's lyrics plugin, or takes it back (`work`), once the user agrees to what it does,
+    /// on another thread (see `paint_list`).
+    fn netease_asked(&mut self, work: NetEaseWork) {
+        let Some(netease) = self.netease.clone() else { return };
+        let lang = self.lang;
+        let folder = netease.folder.display().to_string();
+        let plugins = crate::netease::plugin_folder().display().to_string();
+        let ours = self.settings.netease_loader;
+        let (title, intro, yes) = match (work, lang) {
+            (NetEaseWork::Install, Lang::Zh) => {
+                let mut intro = format!("将安装以下开源项目（GPL-3.0 许可），文件取自 Glance 网站的副本或该项目在 GitHub 发布的版本，安装前核对 SHA-256 校验值。\n\nInfLink-rs 3.4.0：使网易云音乐提供播放进度的插件，放入 {plugins}。");
+                if !netease.has_loader() {
+                    intro += &format!("\nBetterNCM 1.3.4：网易云音乐的插件加载器，以 msimg32.dll 为名放入网易云音乐的安装目录 {folder}。该目录需要管理员权限时，Windows 会请求确认。");
+                }
+                if !netease.tested() {
+                    intro += &format!("\n\n当前网易云音乐版本 {} 未经 InfLink-rs 测试，插件可能无法正常工作。", netease.version());
+                }
+                intro += "\n\n安装后可随时在此处移除。";
+                ("安装网易云音乐歌词插件？", intro, "安装")
+            }
+            (NetEaseWork::Install, Lang::En) => {
+                let mut intro = format!("These open-source projects (GPL-3.0) are installed, taken from Glance's site or from where each project publishes it on GitHub, and checked by SHA-256 first.\n\nInfLink-rs 3.4.0, the plugin that has NetEase Cloud Music say how far into a track it is, put in {plugins}.");
+                if !netease.has_loader() {
+                    intro += &format!("\nBetterNCM 1.3.4, NetEase Cloud Music's plugin loader, put in its folder {folder} as msimg32.dll. Where that folder needs an administrator's rights, Windows asks first.");
+                }
+                if !netease.tested() {
+                    intro += &format!("\n\nInfLink-rs was not tested on this NetEase Cloud Music, version {}. It may not work.", netease.version());
+                }
+                intro += "\n\nIt can be removed here at any time.";
+                ("Install the NetEase Cloud Music lyrics plugin?", intro, "Install")
+            }
+            (NetEaseWork::Remove, Lang::Zh) => {
+                let mut intro = format!("将删除 {plugins} 中的 InfLink-rs 插件。");
+                if ours {
+                    intro += &format!("\nGlance 放入 {folder} 的 BetterNCM 加载器（msimg32.dll）也将删除。该目录需要管理员权限时，Windows 会请求确认。");
+                }
+                intro += "\n\n网易云音乐正在运行时，将先关闭，移除后重新打开。";
+                ("移除网易云音乐歌词插件？", intro, "移除")
+            }
+            (NetEaseWork::Remove, Lang::En) => {
+                let mut intro = format!("The InfLink-rs plugin is deleted from {plugins}.");
+                if ours {
+                    intro += &format!("\nThe BetterNCM loader (msimg32.dll) Glance put in {folder} is deleted too. Where that folder needs an administrator's rights, Windows asks first.");
+                }
+                intro += "\n\nNetEase Cloud Music, if running, is closed first and opened again after.";
+                ("Remove the NetEase Cloud Music lyrics plugin?", intro, "Remove")
+            }
+        };
+        let asked = super::ask::Asked { title, intro: &intro, own: None, sent: None, yes, no: pick(lang, "取消", "Cancel"), dark: self.dark };
+        if super::ask::show(self.hwnd, &asked).is_none() {
+            return;
+        }
+        self.netease_failed = None;
+        self.netease_work = Some((
+            work,
+            std::thread::spawn(move || match work {
+                NetEaseWork::Install => crate::netease::install(&netease).map(|ours| (ours, crate::netease::running(&netease))),
+                NetEaseWork::Remove => crate::netease::remove(&netease, ours).map(|()| (false, false)),
+            }),
+        ));
+        self.next_frame = Instant::now();
     }
 
     /// A module's title and what it describes on this machine.
@@ -3135,6 +3260,14 @@ impl Ui {
                 }
             }
             Target::Update => update::install(),
+            Target::NetEase(work) if self.netease_work.is_none() => self.netease_asked(work),
+            Target::NetEase(_) => {}
+            Target::NetEaseRestart => {
+                if let Some(netease) = self.netease.clone() {
+                    self.netease_restart = false;
+                    std::thread::spawn(move || crate::netease::restart(&netease));
+                }
+            }
             Target::Diagnostics if self.reporting.is_none() => self.reporting = Some((ReportFor::Copy, std::thread::spawn(crate::diagnostics::report))),
             Target::Diagnostics => {}
             Target::Quit => crate::quit(),
@@ -3206,6 +3339,9 @@ impl Ui {
                 Row::Update => vec![Target::Update],
                 Row::Diagnostics => vec![Target::SendReport, Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
+                Row::NetEase if self.netease_work.is_some() => vec![],
+                Row::NetEase if self.netease_has && self.netease_restart && self.netease_failed.is_none() => vec![Target::NetEaseRestart, Target::NetEase(NetEaseWork::Remove)],
+                Row::NetEase => vec![Target::NetEase(if self.netease_has && self.netease_failed.is_none_or(|(work, _)| work == NetEaseWork::Remove) { NetEaseWork::Remove } else { NetEaseWork::Install })],
                 Row::Quit => vec![Target::Quit],
                 Row::Pair => vec![Target::Pair(false), Target::Pair(true), Target::GetApp],
                 Row::WebPage => vec![Target::OpenPage],
@@ -3347,6 +3483,7 @@ impl Ui {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
             (Row::Pair, Target::Pair(_) | Target::GetApp) | (Row::WebPage, Target::OpenPage) => true,
+            (Row::NetEase, Target::NetEase(_) | Target::NetEaseRestart) => true,
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
@@ -3740,6 +3877,25 @@ impl Ui {
         if self.fetching.is_some() {
             self.next_frame = now + Duration::from_millis(300);
         }
+        if self.netease_work.as_ref().is_some_and(|(_, work)| work.is_finished()) {
+            let (work, handle) = self.netease_work.take().unwrap();
+            match handle.join().unwrap_or(Err(crate::netease::Failed::Put)) {
+                Ok((ours, restart)) => {
+                    // Whose the loader is now: Glance's only as it put it in (taken back, no longer).
+                    if work == NetEaseWork::Remove || ours {
+                        self.settings.netease_loader = work == NetEaseWork::Install;
+                        self.save();
+                    }
+                    self.netease_restart = restart;
+                    self.netease_failed = None;
+                }
+                Err(failed) => self.netease_failed = Some((work, failed)),
+            }
+            self.netease_has = self.netease.as_ref().is_some_and(crate::netease::installed);
+        }
+        if self.netease_work.is_some() {
+            self.next_frame = now + Duration::from_millis(300);
+        }
         // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered appears, and its code goes.
         // (Read only once the remote has written them since: looked at, not read, every second.)
         if self.page == Page::Phone && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
@@ -4004,7 +4160,7 @@ impl Ui {
 
                     }
                 }
-                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) => {
+                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;

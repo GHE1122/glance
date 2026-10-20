@@ -459,7 +459,7 @@ fn moment() -> Moment {
             moment.now = now;
             moment.since = Some(since);
         }
-        Some(Sung::Untimed { netease: true }) => moment.said = Some(lang.pick("网易云音乐没有提供播放进度，安装 InfLink-rs 插件后可以显示歌词", "NetEase Cloud Music does not say how far in it is. With the InfLink-rs plugin it does").into()),
+        Some(Sung::Untimed { netease: true }) => moment.said = Some(lang.pick("网易云音乐没有提供播放进度，可在设置的“音乐”页安装 InfLink-rs 插件以显示歌词", "NetEase Cloud Music does not say how far in it is. Install the InfLink-rs plugin on the Music page of Settings to show lyrics").into()),
         Some(Sung::Untimed { netease: false }) => moment.said = Some(lang.pick("此播放器没有提供播放进度", "This player does not say how far into the track it is").into()),
         Some(Sung::Asking) => moment.said = Some(lang.pick("正在查找歌词…", "Finding the lyrics…").into()),
         Some(Sung::Unknown) => moment.said = Some(lang.pick("没有找到这首歌的歌词", "No lyrics were found for this track").into()),

@@ -1,0 +1,451 @@
+//! InfLink-rs for NetEase Cloud Music, installed on the user's word: the plugin that has NetEase say how far into a
+//! track it is, which its lyrics are timed by. NetEase takes plugins only through BetterNCM: its loader, put in
+//! NetEase's folder as `msimg32.dll` (which NetEase loads from there), loads the plugins in BetterNCM's own data
+//! folder. Both are other projects' (GPL-3.0, their sources served beside them: see `scripts\site.ps1`): taken from a
+//! copy on Glance's site, which is reached where GitHub is not, then from where each project publishes it, as it built
+//! it, and checked by digest. A BetterNCM already there is left as it is; the loader is taken back only if Glance put
+//! it there (see `settings::Settings::netease_loader`).
+//!
+//! NetEase installed where this user may not write (Program Files), its loader is put there by Glance run elevated,
+//! the user asked to let it (`ASKED`): that run finds NetEase from what the machine lists alone, and takes and checks
+//! the loader itself, trusting nothing this user could have written.
+
+use std::path::{Path, PathBuf};
+
+use windows::core::{w, HSTRING, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+
+/// A file of another project's: where it is taken from (Glance's copy first), and its SHA-256.
+pub struct Payload {
+    sources: [&'static str; 2],
+    digest: &'static str,
+}
+
+/// BetterNCM 1.3.4's loader, for 64-bit NetEase (3.x) and for 32-bit (2.x).
+const LOADER_64: Payload = Payload {
+    sources: ["https://glancepc.com/dl/BetterNCMII-1.3.4.dll", "https://github.com/std-microblock/BetterNCM/releases/download/1.3.4/BetterNCMII.dll"],
+    digest: "a7c77af418d7940e63faa58ea036fba1f4baad497947109ea52ed78c8e86608f",
+};
+const LOADER_32: Payload = Payload {
+    sources: ["https://glancepc.com/dl/BetterNCMII86-1.3.4.dll", "https://github.com/std-microblock/BetterNCM/releases/download/1.3.4/BetterNCMII86.dll"],
+    digest: "b7be606f353c5ca36235ff1f4dfccde62dc459a4b07a506698d663a1953864f2",
+};
+/// InfLink-rs 3.4.0.
+const PLUGIN: Payload = Payload {
+    sources: ["https://glancepc.com/dl/InfLink-rs-3.4.0.plugin", "https://github.com/apoint123/inflink-rs/releases/download/v3.4.0/InfLink-rs.plugin"],
+    digest: "7d0b7b863b072a99b88eb614c788099315e690920889aaca22685d3663661468",
+};
+/// What the loader and the plugin are called where they are put.
+const LOADER_FILE: &str = "msimg32.dll";
+const PLUGIN_FILE: &str = "InfLink-rs.plugin";
+/// The versions of NetEase InfLink-rs was tested on, as its project says: 3.1.20 to 3.1.41, and of the 2s, 2.10.13.
+const TESTED: [([u32; 3], [u32; 3]); 2] = [([3, 1, 20], [3, 1, 41]), ([2, 10, 13], [2, 10, 13])];
+/// What Glance is run elevated with to put the loader in NetEase's folder, or take it back (see `run_asked`).
+pub const ASKED: &str = "--netease-loader";
+/// The most that is taken of what a place serves (each file is a megabyte or two).
+const MOST: usize = 8 << 20;
+
+/// NetEase Cloud Music as it is installed: its folder, its version, and whether it is a 64-bit program.
+#[derive(Clone)]
+pub struct NetEase {
+    pub folder: PathBuf,
+    pub version: [u32; 3],
+    wide: bool,
+}
+
+impl NetEase {
+    /// Whether InfLink-rs was tested on this version.
+    pub fn tested(&self) -> bool {
+        tested(self.version)
+    }
+
+    /// Its version as it is written ("3.1.41").
+    pub fn version(&self) -> String {
+        self.version.map(|part| part.to_string()).join(".")
+    }
+
+    fn loader(&self) -> &'static Payload {
+        if self.wide { &LOADER_64 } else { &LOADER_32 }
+    }
+
+    fn program(&self) -> PathBuf {
+        self.folder.join("cloudmusic.exe")
+    }
+
+    /// Whether a plugin loader is in its folder (BetterNCM's, put there by Glance or not).
+    pub fn has_loader(&self) -> bool {
+        self.folder.join(LOADER_FILE).is_file()
+    }
+}
+
+/// Whether InfLink-rs was tested on NetEase `version` (see `TESTED`).
+fn tested(version: [u32; 3]) -> bool {
+    TESTED.iter().any(|(low, high)| (*low..=*high).contains(&version))
+}
+
+/// NetEase as Windows lists it among what is installed (its entry's icon is its program): the machine's entries,
+/// then (unless `machine_only`) this user's. None where it is not installed, or its program is not where it says.
+pub fn found(machine_only: bool) -> Option<NetEase> {
+    const ENTRIES: [PCWSTR; 2] = [w!(r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\网易云音乐"), w!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\网易云音乐")];
+    let roots: &[HKEY] = if machine_only { &[HKEY_LOCAL_MACHINE] } else { &[HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] };
+    let program = roots.iter().flat_map(|&root| ENTRIES.map(|entry| (root, entry))).find_map(|(root, entry)| {
+        let icon = registry_string(root, entry, w!("DisplayIcon"))?;
+        // ("D:\App\CloudMusic\cloudmusic.exe", maybe quoted, maybe with ",0" after it.)
+        let path = PathBuf::from(icon.split(',').next()?.trim().trim_matches('"'));
+        path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("cloudmusic.exe")).then_some(path).filter(|path| path.is_file())
+    })?;
+    // (Its header is in its first few kilobytes.)
+    let mut header = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(std::fs::File::open(&program).ok()?, 4096), &mut header).ok()?;
+    let wide = machine(&header)? == MACHINE_AMD64;
+    Some(NetEase { folder: program.parent()?.to_path_buf(), version: file_version(&program)?, wide })
+}
+
+/// The 64-bit x86 machine, as a program's header names it.
+const MACHINE_AMD64: u16 = 0x8664;
+
+/// The machine a Windows program `bytes` is made for, as its header says.
+fn machine(bytes: &[u8]) -> Option<u16> {
+    // ("MZ", and at 0x3C where the PE header is: "PE\0\0" and the machine after it.)
+    if bytes.get(..2)? != b"MZ" {
+        return None;
+    }
+    let header = u32::from_le_bytes(bytes.get(0x3C..0x40)?.try_into().ok()?) as usize;
+    if bytes.get(header..header.checked_add(4)?)? != b"PE\0\0" {
+        return None;
+    }
+    Some(u16::from_le_bytes(bytes.get(header + 4..header + 6)?.try_into().ok()?))
+}
+
+fn registry_string(root: HKEY, key: PCWSTR, value: PCWSTR) -> Option<String> {
+    let mut data = [0u16; 1024];
+    let mut size = size_of_val(&data) as u32;
+    unsafe { RegGetValueW(root, key, value, RRF_RT_REG_SZ, None, Some(data.as_mut_ptr().cast()), Some(&mut size)) }.ok().ok()?;
+    let length = data.iter().position(|&c| c == 0).unwrap_or(data.len());
+    Some(String::from_utf16_lossy(&data[..length]))
+}
+
+/// The version `file`'s version resource says (its first three numbers).
+fn file_version(file: &Path) -> Option<[u32; 3]> {
+    use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO};
+    let path = HSTRING::from(file.as_os_str());
+    let size = unsafe { GetFileVersionInfoSizeW(&path, None) };
+    if size == 0 {
+        return None;
+    }
+    let mut data = vec![0u8; size as usize];
+    unsafe { GetFileVersionInfoW(&path, None, size, data.as_mut_ptr().cast()) }.ok()?;
+    let (mut fixed, mut length) = (std::ptr::null_mut(), 0u32);
+    if !unsafe { VerQueryValueW(data.as_ptr().cast(), w!("\\"), &mut fixed, &mut length) }.as_bool() || (length as usize) < size_of::<VS_FIXEDFILEINFO>() {
+        return None;
+    }
+    let fixed = unsafe { &*(fixed as *const VS_FIXEDFILEINFO) };
+    Some([fixed.dwFileVersionMS >> 16, fixed.dwFileVersionMS & 0xFFFF, fixed.dwFileVersionLS >> 16])
+}
+
+/// BetterNCM's data folder, as BetterNCM picks it: where `BETTERNCM_PROFILE` says, else `C:\betterncm`.
+fn data_folder(profile: Option<std::ffi::OsString>) -> PathBuf {
+    profile.filter(|profile| !profile.is_empty()).map_or_else(|| PathBuf::from(r"C:\betterncm"), PathBuf::from)
+}
+
+/// Where BetterNCM's plugins are.
+pub fn plugin_folder() -> PathBuf {
+    data_folder(std::env::var_os("BETTERNCM_PROFILE")).join("plugins")
+}
+
+fn plugin_path() -> PathBuf {
+    plugin_folder().join(PLUGIN_FILE)
+}
+
+/// Whether InfLink-rs is installed for `netease`: a loader in its folder (BetterNCM's, Glance's or not) and the
+/// plugin in BetterNCM's.
+pub fn installed(netease: &NetEase) -> bool {
+    netease.has_loader() && plugin_path().is_file()
+}
+
+/// Why installing or taking back did not go through.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Failed {
+    /// What was taken was not reached, or was not what it should be.
+    Taken,
+    /// It could not be put where it goes (the user refused to let Glance do it elevated, or it was not let).
+    Put,
+}
+
+/// Installs InfLink-rs for `netease`: the plugin in BetterNCM's folder, and BetterNCM's loader in NetEase's folder
+/// where none is (elevated, the user asked, where this user may not write there). Whether Glance put the loader.
+pub fn install(netease: &NetEase) -> Result<bool, Failed> {
+    let plugin = taken(&PLUGIN).ok_or(Failed::Taken)?;
+    let path = plugin_path();
+    std::fs::create_dir_all(path.parent().ok_or(Failed::Put)?).map_err(|_| Failed::Put)?;
+    std::fs::write(&path, plugin).map_err(|_| Failed::Put)?;
+    let loader = netease.folder.join(LOADER_FILE);
+    if loader.is_file() {
+        crate::journal::note("netease: the plugin put in; a loader was there already");
+        return Ok(false);
+    }
+    let bytes = taken(netease.loader()).ok_or(Failed::Taken)?;
+    match put_new(&loader, &bytes) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => elevated("put")?,
+        Err(_) => return Err(Failed::Put),
+    }
+    crate::journal::note("netease: the plugin and the loader put in");
+    Ok(true)
+}
+
+/// Takes InfLink-rs back from `netease`: the plugin, and the loader if Glance put it (`loader_ours`) and it is still
+/// the one Glance put. NetEase is closed first (a loader it holds cannot be taken), and started again after if it ran.
+pub fn remove(netease: &NetEase, loader_ours: bool) -> Result<(), Failed> {
+    let ran = close(netease);
+    let path = plugin_path();
+    if path.is_file() {
+        std::fs::remove_file(&path).map_err(|_| Failed::Put)?;
+    }
+    let loader = netease.folder.join(LOADER_FILE);
+    let result = if loader_ours && std::fs::read(&loader).is_ok_and(|bytes| is(&bytes, netease.loader())) {
+        match std::fs::remove_file(&loader) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => elevated("take"),
+            Err(_) => Err(Failed::Put),
+        }
+    } else {
+        Ok(())
+    };
+    if ran {
+        start(netease);
+    }
+    crate::journal::note(format!("netease: taken back ({result:?})"));
+    result
+}
+
+/// Writes `bytes` as `path`, a file there is not yet (none there is written through).
+fn put_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes).inspect_err(|_| {
+        let _ = std::fs::remove_file(path);
+    })
+}
+
+/// What `payload` is, from the first of its places that serves it as it should be.
+fn taken(payload: &Payload) -> Option<Vec<u8>> {
+    payload.sources.iter().find_map(|url| crate::update::get(url).filter(|bytes| bytes.len() <= MOST && is(bytes, payload)))
+}
+
+/// Whether `bytes` are `payload`: its digest.
+fn is(bytes: &[u8], payload: &Payload) -> bool {
+    use windows::Win32::Security::Cryptography::{BCryptHash, BCRYPT_SHA256_ALG_HANDLE};
+    let mut digest = [0u8; 32];
+    unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, bytes, &mut digest) }.is_ok() && digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>() == payload.digest
+}
+
+/// Runs this program elevated (`ASKED`) to `what` ("put" or "take") the loader, the user asked to let it.
+fn elevated(what: &str) -> Result<(), Failed> {
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    let exe = std::env::current_exe().map_err(|_| Failed::Put)?;
+    let (file, arguments) = (HSTRING::from(exe.as_os_str()), HSTRING::from(format!("{ASKED} {what}")));
+    let mut started = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: w!("runas"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(arguments.as_ptr()),
+        nShow: windows::Win32::UI::WindowsAndMessaging::SW_HIDE.0,
+        ..Default::default()
+    };
+    if unsafe { ShellExecuteExW(&mut started) }.is_err() || started.hProcess.is_invalid() {
+        return Err(Failed::Put);
+    }
+    let mut code = 1u32;
+    unsafe {
+        WaitForSingleObject(started.hProcess, INFINITE);
+        let _ = GetExitCodeProcess(started.hProcess, &mut code);
+        let _ = CloseHandle(started.hProcess);
+    }
+    match code {
+        0 => Ok(()),
+        2 => Err(Failed::Taken),
+        _ => Err(Failed::Put),
+    }
+}
+
+/// Run as `ASKED` (elevated, see `elevated`): puts the loader in NetEase's folder ("put", where none is) or takes the
+/// one Glance put back ("take", only if it is that one), NetEase found from what the machine lists alone; ends saying
+/// how that went (0 done, 2 the loader not had as it should be, 1 not done). None: not so run.
+pub fn run_asked(arguments: &[String]) -> Option<i32> {
+    let [flag, what] = arguments else { return None };
+    if flag != ASKED || !crate::elevation::is_elevated() {
+        return None;
+    }
+    let Some(netease) = found(true) else { return Some(1) };
+    let loader = netease.folder.join(LOADER_FILE);
+    Some(match what.as_str() {
+        "put" if loader.exists() => 0,
+        "put" => match taken(netease.loader()) {
+            Some(bytes) => i32::from(put_new(&loader, &bytes).is_err()),
+            None => 2,
+        },
+        "take" if std::fs::read(&loader).is_ok_and(|bytes| is(&bytes, netease.loader())) => i32::from(std::fs::remove_file(&loader).is_err()),
+        "take" => 0,
+        _ => 1,
+    })
+}
+
+/// Whether NetEase runs (from `netease`'s folder).
+pub fn running(netease: &NetEase) -> bool {
+    let processes = processes(netease);
+    let any = !processes.is_empty();
+    for process in processes {
+        let _ = unsafe { CloseHandle(process) };
+    }
+    any
+}
+
+/// Starts NetEase again: closes it (every process of it), then starts it as this user. A plugin newly put in is
+/// loaded as it starts.
+pub fn restart(netease: &NetEase) {
+    close(netease);
+    start(netease);
+}
+
+/// Ends NetEase's processes and waits for them to be gone; whether it ran.
+fn close(netease: &NetEase) -> bool {
+    use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+    let processes = processes(netease);
+    let ran = !processes.is_empty();
+    for process in processes {
+        unsafe {
+            let _ = TerminateProcess(process, 0);
+            WaitForSingleObject(process, 5000);
+            let _ = CloseHandle(process);
+        }
+    }
+    ran
+}
+
+fn start(netease: &NetEase) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    let program = HSTRING::from(netease.program().as_os_str());
+    let folder = HSTRING::from(netease.folder.as_os_str());
+    unsafe { ShellExecuteW(None, w!("open"), &program, PCWSTR::null(), &folder, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL) };
+}
+
+/// NetEase's processes (`cloudmusic.exe` from its folder), opened to be ended and waited for.
+fn processes(netease: &NetEase) -> Vec<HANDLE> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+    let mut found = Vec::new();
+    let Ok(folder) = std::fs::canonicalize(&netease.folder) else { return found };
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return found };
+        let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+        while more {
+            let length = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            if String::from_utf16_lossy(&entry.szExeFile[..length]).eq_ignore_ascii_case("cloudmusic.exe") {
+                if let Ok(process) = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, entry.th32ProcessID) {
+                    let mut path = vec![0u16; 1024];
+                    let mut size = path.len() as u32;
+                    let named = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(path.as_mut_ptr()), &mut size).is_ok();
+                    let file = PathBuf::from(String::from_utf16_lossy(&path[..size as usize]));
+                    if named && file.parent().and_then(|parent| std::fs::canonicalize(parent).ok()).is_some_and(|parent| parent == folder) {
+                        found.push(process);
+                    } else {
+                        let _ = CloseHandle(process);
+                    }
+                }
+            }
+            more = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tested are the versions InfLink-rs says it was tested on, ends included, and no other.
+    #[test]
+    fn tested_as_inflink_says() {
+        assert!(tested([3, 1, 20]) && tested([3, 1, 33]) && tested([3, 1, 41]) && tested([2, 10, 13]));
+        assert!(!tested([3, 1, 19]) && !tested([3, 1, 42]) && !tested([3, 2, 0]) && !tested([2, 10, 12]) && !tested([2, 9, 13]));
+    }
+
+    /// A program's machine is read from its header, where the header says it is; not from what is no program.
+    #[test]
+    fn reads_a_programs_machine() {
+        let mut program = vec![0u8; 0x100];
+        program[..2].copy_from_slice(b"MZ");
+        program[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        program[0x80..0x84].copy_from_slice(b"PE\0\0");
+        program[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        assert_eq!(machine(&program), Some(MACHINE_AMD64));
+        program[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes());
+        assert_eq!(machine(&program), Some(0x014C));
+        // (Its header said to be past its end, or not a program's.)
+        program[0x3C..0x40].copy_from_slice(&0xFFF0u32.to_le_bytes());
+        assert_eq!(machine(&program), None);
+        program[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        program[0x80] = b'X';
+        assert_eq!(machine(&program), None);
+        assert_eq!(machine(b"MZ"), None);
+        assert_eq!(machine(b""), None);
+    }
+
+    /// BetterNCM's folder is where its variable says, else `C:\betterncm`; an empty variable says nothing.
+    #[test]
+    fn finds_betterncms_folder_as_it_does() {
+        assert_eq!(data_folder(None), PathBuf::from(r"C:\betterncm"));
+        assert_eq!(data_folder(Some(r"D:\ncm".into())), PathBuf::from(r"D:\ncm"));
+        assert_eq!(data_folder(Some("".into())), PathBuf::from(r"C:\betterncm"));
+    }
+
+    /// The digests are of what each payload is.
+    #[test]
+    fn checks_by_digest() {
+        let empty = Payload { sources: ["", ""], digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" };
+        assert!(is(b"", &empty));
+        assert!(!is(b"a", &empty));
+    }
+
+    /// Installed into a NetEase and a BetterNCM folder of the test's own, from where the files are published: the
+    /// plugin and the loader put in, each as it should be, and taken back; a loader that was there already is kept,
+    /// whatever is asked.
+    #[test]
+    #[ignore = "downloads the plugin and its loader"]
+    fn installs_and_takes_back() {
+        let scratch = std::env::temp_dir().join(format!("glance-test-{}-netease", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(scratch.join("netease")).unwrap();
+        // (Only this test reads the variable.)
+        std::env::set_var("BETTERNCM_PROFILE", scratch.join("betterncm"));
+        let netease = NetEase { folder: scratch.join("netease"), version: [3, 1, 41], wide: true };
+        assert!(!installed(&netease));
+        assert_eq!(install(&netease), Ok(true));
+        assert!(installed(&netease));
+        assert!(is(&std::fs::read(netease.folder.join(LOADER_FILE)).unwrap(), &LOADER_64));
+        assert!(is(&std::fs::read(scratch.join(r"betterncm\plugins").join(PLUGIN_FILE)).unwrap(), &PLUGIN));
+        assert_eq!(remove(&netease, true), Ok(()));
+        assert!(!netease.has_loader() && !plugin_path().exists());
+
+        std::fs::write(netease.folder.join(LOADER_FILE), b"another's").unwrap();
+        assert_eq!(install(&netease), Ok(false));
+        assert_eq!(std::fs::read(netease.folder.join(LOADER_FILE)).unwrap(), b"another's");
+        assert_eq!(remove(&netease, true), Ok(()));
+        assert!(netease.has_loader() && !plugin_path().exists());
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    /// NetEase on this PC, as it is found, and InfLink-rs on it (read only).
+    #[test]
+    #[ignore = "reads this PC's NetEase"]
+    fn finds_netease_here() {
+        let netease = found(false).expect("NetEase");
+        println!("{:?} {} wide {} tested {} installed {} running {}", netease.folder, netease.version(), netease.wide, netease.tested(), installed(&netease), running(&netease));
+    }
+}

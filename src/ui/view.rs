@@ -92,7 +92,7 @@ fn sung_now(heard: Option<&crate::playing::Now>, lang: Lang, translated: bool) -
         return said(lang.pick("没有正在播放的歌曲", "Nothing is playing"), "");
     };
     match sung {
-        Sung::Untimed { netease: true } => said(lang.pick("网易云音乐没有提供播放进度", "NetEase Cloud Music does not say how far in it is"), lang.pick("安装 InfLink-rs 插件后可以显示歌词", "With the InfLink-rs plugin, it does")),
+        Sung::Untimed { netease: true } => said(lang.pick("网易云音乐没有提供播放进度", "NetEase Cloud Music does not say how far in it is"), lang.pick("可在设置的“音乐”页安装 InfLink-rs 插件以显示歌词", "Install the InfLink-rs plugin on the Music page of Settings to show lyrics")),
         Sung::Untimed { netease: false } => said(lang.pick("这个播放器没有提供播放进度", "This player does not say how far in it is"), lang.pick("无法跟着播放显示歌词", "so no line can be shown as it is sung")),
         Sung::Asking => said(lang.pick("正在查找歌词…", "Finding the lyrics…"), ""),
         Sung::Unknown => None,

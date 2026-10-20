@@ -66,6 +66,33 @@ if (-not (Test-Path (Join-Path $served 'NotoSerifSC-OFL.txt'))) {
     Invoke-WebRequest "$noto/LICENSE" -OutFile (Join-Path $served 'NotoSerifSC-OFL.txt')
 }
 
+# NetEase Cloud Music's lyrics plugin (InfLink-rs) and the loader it needs (BetterNCM's), as their projects published
+# them: Glance takes them from here first when the user installs the plugin (GitHub is not reached from everywhere),
+# and checks them by their digests. Their names, where their projects publish them and their digests are read from
+# src\netease.rs, as the app has them. Both are under the GPL: each is served beside its source code.
+$netease = Get-Content -Raw src\netease.rs
+$payloads = [regex]::Matches($netease, 'sources: \["https://glancepc\.com/dl/([^"]+)", "([^"]+)"\],\s*digest: "([0-9a-f]{64})"')
+if ($payloads.Count -ne 3) { throw 'the plugin and its loaders are not named in src\netease.rs' }
+foreach ($payload in $payloads) {
+    $file = Join-Path $served $payload.Groups[1].Value
+    if (-not (Test-Path $file)) {
+        Invoke-WebRequest $payload.Groups[2].Value -OutFile $file
+    }
+    if ((Get-FileHash $file -Algorithm SHA256).Hash -ne $payload.Groups[3].Value) {
+        Remove-Item -LiteralPath $file
+        throw "$($payload.Groups[1].Value) is not the file Glance checks for"
+    }
+}
+$sources = @{
+    'BetterNCM-1.3.4-source.zip' = 'https://github.com/std-microblock/BetterNCM/archive/refs/tags/1.3.4.zip'
+    'InfLink-rs-3.4.0-source.zip' = 'https://github.com/apoint123/inflink-rs/archive/refs/tags/v3.4.0.zip'
+}
+foreach ($kept in $sources.Keys) {
+    if (-not (Test-Path (Join-Path $served $kept))) {
+        Invoke-WebRequest $sources[$kept] -OutFile (Join-Path $served $kept)
+    }
+}
+
 # The latest release, as GitHub has it: its installer served from here too (Glance asks this site first for a
 # newer version, and takes the installer from it: see /api/latest in website\_worker.js), and what Glance is
 # told of it, in the terms GitHub and Gitee answer in. Only an installer signed as the releases are goes up.

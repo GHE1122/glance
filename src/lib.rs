@@ -79,6 +79,8 @@ mod cover;
 mod fullscreen;
 #[cfg(windows)]
 mod serif;
+#[cfg(windows)]
+mod netease;
 #[cfg(all(test, windows))]
 mod test_crashes;
 // What plays and how loud, read and changed as the phone remote does: its own code for it.
@@ -369,6 +371,8 @@ pub fn run() {
         [_, flag, folder] if flag == "--uninstall-from" => done(elevation::uninstall_from(std::path::Path::new(folder))),
         // An update taken elevated for a Glance without its sensors (see `update`).
         [_, flag, ..] if flag == "--update" => std::process::exit(if elevation::is_elevated() { update::run_asked(&args[1..]).unwrap_or(1) } else { 1 }),
+        // NetEase's plugin loader put in its folder or taken back, elevated (see `netease`).
+        [_, flag, _] if flag == netease::ASKED => std::process::exit(netease::run_asked(&args[1..]).unwrap_or(1)),
         [_, flag, folder] if flag == "--remove-settings" => {
             // (First what the phone remote fetched: by the remote, while its configuration is still there.)
             phone::forget_fetched(std::path::Path::new(folder));

@@ -706,6 +706,9 @@ pub struct Settings {
     /// Tell from the tray when the CPU or a graphics card stays at or above
     /// the temperature alert.
     pub heat_alert: bool,
+    /// Whether the plugin loader in NetEase Cloud Music's folder is the one Glance put there (installing InfLink-rs
+    /// for it): only then is it taken back with the plugin.
+    pub netease_loader: bool,
     /// The version that last ran: a newer one starting says it was updated.
     pub last_version: Option<String>,
     /// The day Glance first ran here (days since 1970), where it has been
@@ -857,6 +860,7 @@ impl Default for Settings {
             hotkey: None,
             over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
+            netease_loader: false,
             last_version: None,
             began: None,
             asked_as: None,
