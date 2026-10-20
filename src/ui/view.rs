@@ -931,6 +931,72 @@ fn note_card_fill(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colou
     }
 }
 
+/// A note's ground (as its card's: see `note_card_fill`) over as much of the rounded box `lane` as lies `across` (from
+/// left to right): a page of it sliding through it, the lane's own corners its, no edge of its own where it is cut.
+fn note_page_slice(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, lane: (f32, f32, f32, f32), radius: f32, across: (f32, f32)) {
+    let (x, y, w, h) = lane;
+    let slice = |top: f32, bottom: f32| rounded_within((x, y, w, h), radius, (across.0, top, across.1, bottom));
+    let fill = |color: Color, points: &[Point]| {
+        if points.len() >= 3 {
+            frame.fill_shape(points, Fill::Solid(color));
+        }
+    };
+    let whole = slice(y, y + h);
+    match theme.skin {
+        Skin::Glass => {
+            if let Some(light) = note_light(theme.dark) {
+                fill(light, &whole);
+            }
+            fill(note_glass(colour).0.alpha(glass_tint(theme.dark)), &whole);
+        }
+        Skin::Fluent => {
+            fill(fluent_note_ground(theme, colour), &whole);
+            fill(note_colour(colour), &slice(y, y + 4.0));
+        }
+        Skin::Paper => fill(over(theme.paper, theme.track), &whole),
+    }
+}
+
+/// The outline of the rounded box `(x, y, w, h)` (corners `radius`), as much of it as lies within the box `(left,
+/// top, right, bottom)`: a shape of points round it (its corners' curves in short straight steps, finer than a pixel
+/// shows).
+fn rounded_within((x, y, w, h): (f32, f32, f32, f32), radius: f32, (left, top, right, bottom): (f32, f32, f32, f32)) -> Vec<Point> {
+    let radius = radius.max(0.0).min(w / 2.0).min(h / 2.0);
+    const STEPS: usize = 12;
+    let mut outline = Vec::with_capacity(4 * (STEPS + 1));
+    // Each corner's centre, and the angle its curve starts at (clockwise from the top left's).
+    let corners = [(x + radius, y + radius, std::f32::consts::PI), (x + w - radius, y + radius, 1.5 * std::f32::consts::PI), (x + w - radius, y + h - radius, 0.0), (x + radius, y + h - radius, 0.5 * std::f32::consts::PI)];
+    for (cx, cy, from) in corners {
+        for step in 0..=STEPS {
+            let angle = from + std::f32::consts::FRAC_PI_2 * step as f32 / STEPS as f32;
+            outline.push(Point { x: cx + radius * angle.cos(), y: cy + radius * angle.sin() });
+        }
+    }
+    // Cut to the box, a side at a time (the outline is convex: what is cut stays one shape).
+    let cut = |points: Vec<Point>, inside: &dyn Fn(Point) -> bool, cross: &dyn Fn(Point, Point) -> Point| {
+        let mut kept = Vec::with_capacity(points.len() + 2);
+        for (at, &p) in points.iter().enumerate() {
+            let q = points[(at + 1) % points.len()];
+            match (inside(p), inside(q)) {
+                (true, true) => kept.push(q),
+                (true, false) => kept.push(cross(p, q)),
+                (false, true) => {
+                    kept.push(cross(p, q));
+                    kept.push(q);
+                }
+                (false, false) => {}
+            }
+        }
+        kept
+    };
+    let at_x = |edge: f32| move |p: Point, q: Point| Point { x: edge, y: p.y + (q.y - p.y) * (edge - p.x) / (q.x - p.x) };
+    let at_y = |edge: f32| move |p: Point, q: Point| Point { x: p.x + (q.x - p.x) * (edge - p.y) / (q.y - p.y), y: edge };
+    let outline = cut(outline, &|p| p.x >= left, &at_x(left));
+    let outline = cut(outline, &|p| p.x <= right, &at_x(right));
+    let outline = cut(outline, &|p| p.y >= top, &at_y(top));
+    cut(outline, &|p| p.y <= bottom, &at_y(bottom))
+}
+
 /// A note's card's rim: glass's soft white, brighter under the pointer; Windows 11's a rule, the note's colour under
 /// the pointer; chart paper's ruled round in the sheet's ink, as chart paper's rules are (and lit all over).
 fn note_card_rim(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (x, y, w, h): (f32, f32, f32, f32), radius: f32, lit: bool) {
@@ -4955,14 +5021,14 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             // (All of it named as the note shown, its clip with it: drawn again as the widget is sized, the clip is
             // where what is in it is.)
             frame.key(&format!("note.{}", note.at));
-            frame.clip_rounded(lane.x, lane.y, lane.w, lane.h, radius);
+            frame.clip(lane.x, lane.y, lane.w, lane.h);
             for (page, each) in notes.iter().enumerate() {
                 let off = page as f32 - turned;
                 if off.abs() >= 1.0 {
                     continue;
                 }
                 let dx = off * lane.w;
-                note_card_fill(frame, theme, each.colour, (lane.x + dx, lane.y, lane.w, lane.h), 0.0, None);
+                note_page_slice(frame, theme, each.colour, (lane.x, lane.y, lane.w, lane.h), radius, (lane.x + dx, lane.x + dx + lane.w));
                 words_of(each, dx);
             }
             frame.unclip();
@@ -5229,30 +5295,39 @@ otepad.exe", "Notepad"),
                     let history: &'static [Sample] = Box::leak(Box::new([sample(Some(4200.0), None, None)]));
                     let seen = Seen::of(history);
                     let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
-                    // Each widget: its lanes, its shape, its size, where it is.
-                    type Widget<'a> = (Vec<&'a str>, Shape, (f32, f32), (f32, f32));
+                    // Each widget: its lanes, its shape, its size, where it is, and whether its pages are part way turned.
+                    type Widget<'a> = (Vec<&'a str>, Shape, (f32, f32), (f32, f32), bool);
                     let mut widgets: Vec<Widget> = Vec::new();
                     for (at, id) in ids.iter().enumerate() {
                         let x = 30.0 + at as f32 * 90.0;
-                        widgets.push((vec![id], Shape::Down, (70.0, 300.0), (x, 30.0)));
-                        widgets.push((vec![id], Shape::Least, (70.0, 70.0), (x, 360.0)));
-                        widgets.push((vec![id], Shape::Least, (44.0, 44.0), (x + 12.0, 450.0)));
-                        widgets.push((vec![id], Shape::Across, (330.0, 64.0), (420.0, 30.0 + at as f32 * 84.0)));
+                        widgets.push((vec![id], Shape::Down, (70.0, 300.0), (x, 30.0), false));
+                        widgets.push((vec![id], Shape::Least, (70.0, 70.0), (x, 360.0), false));
+                        widgets.push((vec![id], Shape::Least, (44.0, 44.0), (x + 12.0, 450.0), false));
+                        widgets.push((vec![id], Shape::Across, (330.0, 64.0), (420.0, 30.0 + at as f32 * 84.0), false));
                     }
-                    widgets.push((ids.to_vec(), Shape::Across, (640.0, 70.0), (420.0, 380.0)));
-                    widgets.push((ids.to_vec(), Shape::Down, (80.0, 220.0), (790.0, 30.0)));
-                    widgets.push((ids.to_vec(), Shape::Least, (120.0, 120.0), (900.0, 30.0)));
+                    widgets.push((ids.to_vec(), Shape::Across, (640.0, 70.0), (420.0, 380.0), false));
+                    widgets.push((ids.to_vec(), Shape::Down, (80.0, 220.0), (790.0, 30.0), false));
+                    widgets.push((ids.to_vec(), Shape::Least, (120.0, 120.0), (900.0, 30.0), false));
+                    // The notes part way to their next page: the two in the one rounded edge.
+                    widgets.push((vec!["notes"], Shape::Least, (150.0, 150.0), (1100.0, 30.0), true));
+                    widgets.push((vec!["notes"], Shape::Down, (70.0, 300.0), (1300.0, 30.0), true));
+                    widgets.push((vec!["notes"], Shape::Across, (330.0, 64.0), (1100.0, 360.0), true));
                     // Squares, as a phone's large folders: two by two, three by three.
                     for (at, id) in ids[..3].iter().enumerate() {
-                        widgets.push((vec![id], Shape::Least, (150.0, 150.0), (30.0 + at as f32 * 170.0, 540.0)));
-                        widgets.push((vec![id], Shape::Least, (300.0, 330.0), (560.0 + at as f32 * 330.0, 540.0)));
+                        widgets.push((vec![id], Shape::Least, (150.0, 150.0), (30.0 + at as f32 * 170.0, 540.0), false));
+                        widgets.push((vec![id], Shape::Least, (300.0, 330.0), (560.0 + at as f32 * 330.0, 540.0), false));
                     }
                     let pixels = gfx.draw_offscreen(((width as f32 * px) as u32, (height as f32 * px) as u32), px, |frame| {
                         if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
                             unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
                         }
                         let behind = desktop.bitmap(&frame.dc, px).ok();
-                        for (lane_ids, shape, size, at) in &widgets {
+                        for (lane_ids, shape, size, at, sliding) in &widgets {
+                            let mut scrolls = Scrolls::default();
+                            if *sliding {
+                                scrolls.hold_pages(List::Notes, 0.4 * PAGE, 2.0 * PAGE);
+                            }
+                            let scene = Scene { scrolls, ..scene };
                             let lanes: Vec<Lane> = lane_ids.iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Shape(*shape))?, ink: theme.ink(id) })).collect();
                             let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
                             let layout = Layout::with_columns(heights, shape.columns(lanes.len()), &theme).fitted(*size);
@@ -5686,7 +5761,6 @@ six".into()));
             (font.size * 0.2, font.size)
         }
         fn clip(&self, _: f32, _: f32, _: f32, _: f32) {}
-        fn clip_rounded(&self, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn unclip(&self) {}
         fn fill(&self, _: Color, _: f32, _: f32, _: f32, _: f32) {}
         fn fill_rounded(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32) {}
@@ -5755,10 +5829,6 @@ six".into()));
             Nothing.ink(text, font)
         }
         fn clip(&self, x: f32, y: f32, w: f32, h: f32) {
-            self.clips.borrow_mut().push((x, y, w, h));
-        }
-        // (Its box: what is kept to the rounded box reaches no further than that.)
-        fn clip_rounded(&self, x: f32, y: f32, w: f32, h: f32, _: f32) {
             self.clips.borrow_mut().push((x, y, w, h));
         }
         fn unclip(&self) {
@@ -6034,6 +6104,29 @@ six".into()));
         scrolls.ease(10.0, 0.1);
         keep_note(&mut scrolls, &mut shown, &order(&["b", "c", "a"]), None);
         assert_eq!(shows(&scrolls).1, 0.0);
+    }
+
+    /// A rounded box cut to a box: whole where the box holds it all, the part in it where it lies across (its corners
+    /// round where they are its, straight where it is cut), nothing where it misses it.
+    #[test]
+    fn a_rounded_box_is_cut_to_a_box() {
+        let bounds = |points: &[Point]| points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |(l, t, r, b), p| (l.min(p.x), t.min(p.y), r.max(p.x), b.max(p.y)));
+        let near = |a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)| (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3 && (a.2 - b.2).abs() < 1e-3 && (a.3 - b.3).abs() < 1e-3;
+        let lane = (10.0, 20.0, 100.0, 60.0);
+        let whole = rounded_within(lane, 16.0, (0.0, 0.0, 200.0, 200.0));
+        assert!(near(bounds(&whole), (10.0, 20.0, 110.0, 80.0)));
+        // Its top left corner round: no point of it nearer that corner of the box than the curve.
+        assert!(whole.iter().all(|p| p.x >= 26.0 - 1e-3 || p.y >= 36.0 - 1e-3 || (p.x - 26.0).hypot(p.y - 36.0) >= 16.0 - 1e-2));
+        // Its right half: from the middle, straight there, to its right edge.
+        let half = rounded_within(lane, 16.0, (60.0, 0.0, 200.0, 200.0));
+        assert!(near(bounds(&half), (60.0, 20.0, 110.0, 80.0)));
+        assert!(half.iter().any(|p| (p.x - 60.0).abs() < 1e-3 && (p.y - 20.0).abs() < 1e-3) && half.iter().any(|p| (p.x - 60.0).abs() < 1e-3 && (p.y - 80.0).abs() < 1e-3));
+        // Its top band, four high.
+        let band = rounded_within(lane, 16.0, (0.0, 20.0, 200.0, 24.0));
+        let (_, top, _, bottom) = bounds(&band);
+        assert!((top - 20.0).abs() < 1e-3 && (bottom - 24.0).abs() < 1e-3);
+        // Missed: nothing.
+        assert!(rounded_within(lane, 16.0, (120.0, 0.0, 200.0, 200.0)).is_empty());
     }
 
     /// Pages' dots too many for their room: which of them it is said instead, within it.
