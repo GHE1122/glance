@@ -2216,6 +2216,39 @@ mod tests {
         assert!(after <= before + 4, "{before} -> {after}");
     }
 
+    /// The graphics card's memory this process uses now (bytes), as the driver counts it.
+    fn card_memory(gfx: &super::Gfx) -> u64 {
+        use windows::core::Interface;
+        use windows::Win32::Graphics::Dxgi::{IDXGIAdapter3, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO};
+        let dxgi: windows::Win32::Graphics::Dxgi::IDXGIDevice = gfx.d3d().unwrap().cast().unwrap();
+        let adapter: IDXGIAdapter3 = unsafe { dxgi.GetAdapter() }.unwrap().cast().unwrap();
+        let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        unsafe { adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }.unwrap();
+        info.CurrentUsage
+    }
+
+    /// Windows drawn whole screens large and let go of, again and again, on one device (widgets torn off and closed,
+    /// the settings opened and closed): the card's memory held after each is the same, not more each time.
+    #[test]
+    #[ignore = "makes windows, and reads the graphics card's memory: alone in its process"]
+    fn windows_let_go_of_take_no_more_each_time() {
+        use super::Canvas;
+        let gfx = super::Gfx::new().expect("graphics");
+        let mut held = Vec::new();
+        for _ in 0..6 {
+            let window = crate::ui::window::Window::new().expect("a window");
+            let mut surface = super::Surface::new(&gfx, window.hwnd).expect("a surface");
+            surface.draw(&gfx, (3000, 3000), 1.0, |frame| frame.fill_rounded(super::Color::hex(0xFF0000, 1.0), 0.0, 0.0, 3000.0, 3000.0, 4.0)).expect("drawn");
+            drop(surface);
+            drop(window);
+            gfx.trim();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            held.push(card_memory(&gfx) >> 20);
+        }
+        println!("card memory after each (MB): {held:?}");
+        assert!(held[5] <= held[1] + 4, "{held:?}");
+    }
+
     /// A report says what Glance draws on: the adapter by name, and its driver's version.
     #[test]
     fn says_what_it_draws_on() {
