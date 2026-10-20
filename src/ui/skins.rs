@@ -562,7 +562,7 @@ fn glass(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
     if part == Part::Under {
         return shadows_outside(frame, &pieces, &theme.shadows);
     }
-    let tint = theme.glass.alpha(theme.glass_clear + theme.glass_frosted * ground.frost);
+    let tint = glass_tint(&theme, ground.frost, ground.backdrop.is_some());
     for (piece, radius) in &pieces {
         if part == Part::Desktop {
             if let Some(backdrop) = ground.backdrop {
@@ -582,6 +582,14 @@ fn glass(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
         rim(frame, *piece, *radius)?;
     }
     Ok(())
+}
+
+/// The glass's tint, `frost` asked for (as the desktop behind needs it: see `frost`), and whether a picture of the
+/// desktop is had to frost.
+fn glass_tint(theme: &Theme, frost: f32, behind: bool) -> Color {
+    // With none, as at its most frosted: the desktop shows through sharp, and how busy it is is not known.
+    let frost = if behind { frost } else { 1.0 };
+    theme.glass.alpha(theme.glass_clear + theme.glass_frosted * frost)
 }
 
 /// The desktop behind a piece as its glass shows it: frosted by `blur`, bent
@@ -691,4 +699,23 @@ fn rim(frame: &Frame, piece: Rect, radius: f32) -> Result<()> {
         frame.dc.FillGeometry(&ring, &brush, None);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Glass with no picture of the desktop to frost (none taken yet, or taken on a device since lost) is tinted as
+    /// at its most frosted: the desktop shows through it sharp, and how busy it is is not known; tinted as the
+    /// picture last had it, a busy desktop came through all but clear, and the readings over it were lost.
+    #[test]
+    fn glass_without_a_picture_is_tinted_as_most_frosted() {
+        for dark in [false, true] {
+            let theme = Theme::new(Skin::Glass, dark);
+            let most = glass_tint(&theme, 1.0, true);
+            assert_eq!(glass_tint(&theme, 0.0, false).a, most.a);
+            assert_eq!(glass_tint(&theme, 0.4, false).a, most.a);
+            assert!(glass_tint(&theme, 0.0, true).a < most.a);
+        }
+    }
 }

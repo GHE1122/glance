@@ -4645,7 +4645,11 @@ impl Ui {
         let overlay = &self.settings.overlay;
         let readings = {
             let history = crate::app().controller.history.read().unwrap();
-            let Some(sample) = history.back() else { return };
+            let Some(sample) = history.back() else {
+                fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
+                stroke_inside(frame, area, 8.0, self.palette.card_stroke);
+                return;
+            };
             super::overlay::preview(sample, &overlay.chosen(), self.lang)
         };
         let frames = super::overlay::preview_frames();
@@ -4675,6 +4679,10 @@ impl Ui {
         let view = |at: f32, length: f32, room: f32, extent: f32| (at + length / 2.0 - room / 2.0 / k).clamp(0.0, (extent - room / k).max(0.0));
         let (vx, vy) = (view(x, w, area.w, sw), view(y, h, area.h, sh));
         let (ox, oy) = (area.x - vx * k + ((area.w - sw * k) / 2.0).max(0.0), area.y - vy * k + ((area.h - sh * k) / 2.0).max(0.0));
+        // Framed round what of the screen shows, as the panel's preview is (see `shown_of`): a screen drawn smaller
+        // than the room left no plain card round it, its corners square inside the card's rounded ones.
+        let area = self.shown_of(area, k, ox - area.x, oy - area.y);
+        fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
         // (Inside the preview's rounded corners.)
         let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, 8.0)) }) else { return };
         let layer = D2D1_LAYER_PARAMETERS1 {
@@ -4712,6 +4720,7 @@ impl Ui {
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+        stroke_inside(frame, area, 8.0, self.palette.card_stroke);
     }
 
     /// What plays, with the elements chosen, slid out from the edge that opens it on the screen the window opened on
@@ -4779,7 +4788,7 @@ impl Ui {
         }
         // (The panel's and the music's previews frame what of the screen they show: see `shown_of`.)
         let overlay = self.page == Page::Monitor && self.tab == Tab::Overlay;
-        if overlay || matches!(self.page, Page::Layout | Page::Phone) {
+        if matches!(self.page, Page::Layout | Page::Phone) {
             fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
             stroke_inside(frame, area, 8.0, palette.card_stroke);
         }
