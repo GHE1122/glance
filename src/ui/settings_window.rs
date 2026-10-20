@@ -1694,7 +1694,9 @@ impl Ui {
                     rows.push(Row::Choice(Field::OverlayRows));
                 }
                 // What it shows, group by group, as the panel's modules are.
-                for entry in &self.settings.overlay.groups {
+                // (A battery's only on a machine that has shown one.)
+                let battery = crate::app().controller.seen.lock().unwrap().battery;
+                for entry in self.settings.overlay.groups.iter().filter(|entry| battery || entry.id != "battery") {
                     let id = format!("{OVERLAY}{}", entry.id);
                     rows.push(Row::Module(id.clone()));
                     if self.opened(&id) > 0.0 {
@@ -2771,6 +2773,7 @@ impl Ui {
                 "vram" => (p("显存", "Video memory"), None),
                 "network" => (p("网速", "Network"), None),
                 "clock" => (p("时间", "Time"), None),
+                "battery" => (p("电池", "Battery"), None),
                 _ => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音", "Whether the default microphone is muted"))),
             };
         }
@@ -2984,6 +2987,8 @@ impl Ui {
             ("overlay", "cpu" | "gpu") => (p("占用", "Use"), None),
             ("overlay", "down") => (p("下载", "Download"), None),
             ("overlay", "up") => (p("上传", "Upload"), None),
+            ("overlay", "battery") => (p("电量", "Charge"), None),
+            ("overlay", "battery_power") => (p("功率", "Power"), Some(p("充电或放电的功率", "Watts going in or out"))),
             ("overlay", _) if name.ends_with("_temp") => (p("温度", "Temperature"), None),
             ("overlay", _) if name.ends_with("_power") => (p("功耗", "Power"), None),
             ("network" | "disk", "chart") => (p("速率图表", "Rate chart"), None),

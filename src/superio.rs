@@ -225,8 +225,13 @@ impl SuperIo {
             format!("{from:03X}: {}", bytes.join(" "))
         };
         // The temperatures by fixed input and the fans' speeds (as read here); the temperatures the chip itself
-        // monitors, by source, with which source each is of; the fans' counts; and whether monitoring runs.
-        Some([run(0x490, 7), run(0x4C0, 16), run(0x027, 1), run(0x073, 12), run(0x100, 8), run(0x150, 2), run(0x4B0, 14), run(0x040, 1)].join(" | "))
+        // monitors, by source, with which source each is of; the fans' counts; and whether monitoring runs. Then
+        // what tells how the board wires its inputs: each input's kind (a diode, a thermistor: 0x05D, 0x05E), the
+        // sources the fans are run by (0x200, 0x300, 0x800, 0x900, 0xA00) and the inputs' own selects (0x621, 0x622).
+        Some(
+            [run(0x490, 7), run(0x4C0, 16), run(0x027, 1), run(0x073, 12), run(0x100, 8), run(0x150, 2), run(0x4B0, 14), run(0x040, 1), run(0x05D, 2), run(0x200, 1), run(0x300, 1), run(0x800, 1), run(0x900, 1), run(0xA00, 1), run(0x621, 2)]
+                .join(" | "),
+        )
     }
 
     /// Finds a supported chip at either configuration port; or says what

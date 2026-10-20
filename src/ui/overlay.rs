@@ -16,13 +16,14 @@ use crate::reading::{GameSample, Sample};
 /// tile on the card), in the order it shows them unless they are moved: a
 /// group's id, and its items, each with whether it is shown by default. The
 /// first item chosen of a group is its main figure; the rest follow it.
-pub const GROUPS: [(&str, &[(&str, bool)]); 8] = [
+pub const GROUPS: [(&str, &[(&str, bool)]); 9] = [
     ("frames", &[("fps", true), ("low", true), ("frametime", false)]),
     ("cpu", &[("cpu", true), ("cpu_temp", true), ("cpu_power", false)]),
     ("gpu", &[("gpu", true), ("gpu_temp", true), ("gpu_power", false)]),
     ("memory", &[("memory", true)]),
     ("vram", &[("vram", true)]),
     ("network", &[("down", true), ("up", true)]),
+    ("battery", &[("battery", true), ("battery_power", true)]),
     ("mic", &[("mic", true)]),
     ("clock", &[("time", true)]),
 ];
@@ -174,7 +175,7 @@ struct Palette {
     /// blur, drop).
     shadows: [(Color, f32, f32); 2],
     /// What each kind of reading is marked with.
-    marks: [Color; 7],
+    marks: [Color; 8],
 }
 
 const DARK: Palette = Palette {
@@ -193,6 +194,7 @@ const DARK: Palette = Palette {
         Color::hex(0x6FE0D2, 1.0),
         Color::hex(0xC8CDD5, 1.0),
         Color::hex(0xF2D478, 1.0),
+        Color::hex(0xB5E853, 1.0),
     ],
 };
 
@@ -212,6 +214,7 @@ const LIGHT: Palette = Palette {
         Color::hex(0x0F8577, 1.0),
         Color::hex(0x5A6270, 1.0),
         Color::hex(0x8F6B00, 1.0),
+        Color::hex(0x4F7F00, 1.0),
     ],
 };
 
@@ -253,6 +256,7 @@ enum Kind {
     Network,
     Mic,
     Clock,
+    Battery,
 }
 
 impl Kind {
@@ -394,6 +398,12 @@ pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&
                 reading(Kind::Network, lang.pick("下载", "Down"), vec![chosen("down", rate(s.net_down), &RATE)]),
                 reading(Kind::Network, lang.pick("上传", "Up"), vec![chosen("up", rate(s.net_up), &RATE)]),
             ],
+            // The battery's charge, then what goes into it (marked so) or out of it: on battery power, what the
+            // whole machine draws.
+            "battery" => vec![s.battery.as_ref().and_then(|battery| {
+                let power = battery.watts.map(|w| if w >= 0.5 { format!("+{w:.0} W") } else { format!("{:.0} W", w.abs()) });
+                reading(Kind::Battery, lang.pick("电池", "Battery"), vec![chosen("battery", Some(battery.percent.to_string() + "%"), &PERCENT), chosen("battery_power", power, &WATTS)])
+            })],
             // The time of day, as the sample has it: a game played over the whole screen hides the taskbar's.
             "clock" => {
                 let twelve = text::twelve_hours();
@@ -1077,6 +1087,16 @@ mod tests {
             plain(readings(&s, None, false, &items(&["fps", "low", "cpu"]), Lang::En)),
             [s4("FPS", "—", "", "1% —"), s4("CPU", "40", "%", "")]
         );
+        // The battery: its charge, then what goes in (marked so) or out.
+        let mut s = sample(false);
+        s.battery = Some(crate::reading::BatterySample { percent: 76, charging: false, plugged: false, seconds_left: None, watts: Some(-14.6), health: None });
+        assert_eq!(plain(readings(&s, None, false, &items(&["battery", "battery_power"]), Lang::Zh)), [s4("电池", "76", "%", "15 W")]);
+        s.battery = Some(crate::reading::BatterySample { percent: 40, charging: true, plugged: true, seconds_left: None, watts: Some(30.2), health: None });
+        assert_eq!(plain(readings(&s, None, false, &items(&["battery", "battery_power"]), Lang::En)), [s4("Battery", "40", "%", "+30 W")]);
+        // None, nothing of it.
+        s.battery = None;
+        assert!(readings(&s, None, false, &items(&["battery", "battery_power"]), Lang::En).is_empty());
+        let s = sample(false);
         // A muted microphone, to be heeded.
         let mic = readings(&s, None, false, &items(&["mic"]), Lang::En);
         assert_eq!((mic[0].figure.as_str(), mic[0].hot), ("Muted", true));
