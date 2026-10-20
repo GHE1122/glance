@@ -1057,12 +1057,24 @@ impl Content {
 
     /// `theme` as it is drawn in: the workbench's with no bar under its lanes (its buttons are over it, as every
     /// widget's are; the bar held only how long the PC has been up, which none of them is about).
+    ///
+    /// A note stuck on the desktop alone: its card the whole of it, with no room round it (on no ground of its own:
+    /// see `bare`; the card in the skin's sheet read as a note in a frame).
     fn dressed(&self, mut theme: Theme) -> Theme {
         if self.workbench() {
             theme.bar_gap = 0.0;
             theme.bar_height = 0.0;
         }
+        if self.bare() {
+            (theme.pad_x, theme.pad_top, theme.pad_bottom) = (0.0, 0.0, 0.0);
+            theme.outer = (0.0, 0.0, 0.0);
+        }
         theme
+    }
+
+    /// Whether it is a note stuck on the desktop alone: its card drawn on no ground of the skin's.
+    fn bare(&self) -> bool {
+        matches!(self, Content::Readings(readings) if readings.only.as_deref().is_some_and(|only| only.starts_with(view::STUCK_NOTE)))
     }
 
     /// The preferences its readings are drawn by, where they are not the panel's (`prefs`): without the music lane
@@ -3435,7 +3447,9 @@ impl Widget {
                     });
                     let at = (if keeps_to.0 { size.0 - shown.size.0 } else { 0.0 }, if keeps_to.1 { size.1 - shown.size.1 } else { 0.0 });
                     let picture = render::Picture { scene, lanes: &lanes, layout: &shown.layout, small: shown.small.map(|small| (small, shown.size)), size, at, edge: None, backdrop, frost, rough };
-                    let (hits, drawn_whole) = paint_readings(frame, readings, scene, &picture, &placed, local, px, halo, Some(&[]), now);
+                    // (A note stuck alone: its card on no ground, see `Content::bare`.)
+                    let ground = (!readings.only.as_deref().is_some_and(|only| only.starts_with(view::STUCK_NOTE))).then_some(&[][..]);
+                    let (hits, drawn_whole) = paint_readings(frame, readings, scene, &picture, &placed, local, px, halo, ground, now);
                     whole &= drawn_whole;
                     pressed = hits.map(|hits| (hits, at)).or(pressed.take());
                 }

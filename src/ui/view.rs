@@ -793,6 +793,8 @@ fn note_card_ground(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Col
             frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, rim)), x, y, w, h, radius, 1.5);
         }
         Skin::Fluent => {
+            // (A soft shadow under it, as Windows 11's cards on a sheet have, and as it needs stuck on the desktop.)
+            frame.shadow(Color::hex(0, if theme.dark { 0.3 } else { 0.08 }), x, y, w, h, radius, 4.0, 2.0);
             frame.fill_rounded(fluent_note_ground(theme, colour), x, y, w, h, radius);
             frame.stroke_rounded(Fill::Solid(if lit { note_colour(colour).alpha(0.8) } else { theme.rule }), x, y, w, h, radius, if lit { 1.5 } else { 1.0 });
             frame.clip(x, y, w, 4.0);
