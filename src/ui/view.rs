@@ -4965,21 +4965,23 @@ six".into()));
         within(&hits, top, APP_ROWS as f32 * APP_CELL_H + (APP_ROWS - 1) as f32 * APP_GAP, "apps");
     }
 
-    /// At a workbench lane's least width, the station's pages' names show whole (a size smaller), in every skin.
+    /// The station's pages: side by side where they fit; where they do not (a narrow widget), one with its menu of
+    /// them all, not each cut to a letter.
     #[test]
-    fn the_station_s_pages_show_whole_at_the_least_width() {
-        struct Measured(crate::ui::gfx::Gfx);
+    fn the_station_s_pages_are_one_menu_where_they_do_not_fit() {
         for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
             let theme = Theme::new(skin, false);
-            let _ = Measured;
-            let small = Font { size: theme.title.size - 2.0, ..theme.title };
-            // (Characters as wide as their size, as Chinese ones are: the widest the names come to.)
-            let measure = |text: &str, font: Font| text.chars().count() as f32 * font.size;
-            let pad = if skin == Skin::Paper { 0.0 } else { TAB_PAD };
-            let gap = if skin == Skin::Paper { 16.0 } else { 2.0 };
-            let names = 2.0 * pad * 3.0 + measure("中转站", small) + 5.0 + measure("99", theme.small) * 0.6 + measure("最近复制", small) + measure("最近文件", small) + 2.0 * gap;
-            let room = LANE_LEAST - 2.0 * theme.pad_x - (MEDIA_ROW + 12.0 + 6.0);
-            assert!(names <= room, "{skin:?}: {names} in {room}");
+            let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let seen = Seen::of(history);
+            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Copies, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+            let (mut wide, mut narrow) = (Vec::new(), Vec::new());
+            paint_tabs(&Nothing, &scene, (0.0, 0.0, COLUMN_WIDTH - 2.0 * theme.pad_x), Tab::Copies, 3, true, true, ShelfView::List, &mut wide);
+            // (Measured here as so many DIPs a character, narrower than Chinese is: narrower than the least, for that.)
+            paint_tabs(&Nothing, &scene, (0.0, 0.0, 130.0), Tab::Copies, 3, true, true, ShelfView::List, &mut narrow);
+            assert_eq!(wide.iter().filter(|hit| matches!(hit.4, Hit::Tab(_))).count(), 3, "{skin:?}");
+            assert!(narrow.iter().any(|hit| hit.4 == Hit::StationPages) && !narrow.iter().any(|hit| matches!(hit.4, Hit::Tab(_))), "{skin:?}");
+            assert!(narrow.iter().any(|hit| hit.4 == Hit::StationView), "{skin:?}");
         }
     }
 
