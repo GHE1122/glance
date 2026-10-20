@@ -1,7 +1,6 @@
 fn main() {
-    // Each program's icon, the manifest that declares it aware of each
-    // monitor's scale, and its name and version as Windows shows them (file
-    // properties, Task Manager): Windows resources, for a Windows build.
+    // Each program's icon, the manifest that declares it aware of each monitor's scale (see below), and its name and
+    // version as Windows shows them (file properties, Task Manager): Windows resources, for a Windows build.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rerun-if-changed=icons/icon.ico");
         println!("cargo:rerun-if-changed=glance.manifest");
@@ -9,6 +8,12 @@ fn main() {
         // language.)
         resources("glance", "Glance");
         resources("glance-sensors", "Glance Sensors");
+        // The manifest, the same for every program, the tests' too: what they draw and read of the screens is as
+        // Glance has it (aware of each monitor's scale).
+        let root = std::env::var("CARGO_MANIFEST_DIR").unwrap().replace('\\', "/");
+        let path = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("manifest.rc");
+        std::fs::write(&path, format!("#pragma code_page(65001)\n#define RT_MANIFEST 24\n1 RT_MANIFEST \"{root}/glance.manifest\"\n")).unwrap();
+        embed_resource::compile_for_everything(&path, embed_resource::NONE).manifest_required().unwrap();
     }
 }
 
@@ -25,9 +30,7 @@ fn resources(bin: &str, description: &str) {
         // The script is UTF-8: so are the paths in it, whatever language the
         // checkout's folders are named in.
         r#"#pragma code_page(65001)
-#define RT_MANIFEST 24
 1 ICON "{root}/icons/icon.ico"
-1 RT_MANIFEST "{root}/glance.manifest"
 
 1 VERSIONINFO
 FILEVERSION {numbers}
@@ -58,5 +61,5 @@ END
     );
     let path = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join(format!("{bin}.rc"));
     std::fs::write(&path, script).unwrap();
-    embed_resource::compile_for(&path, [bin], embed_resource::NONE).manifest_required().unwrap();
+    embed_resource::compile_for(&path, [bin], embed_resource::NONE).manifest_optional().unwrap();
 }
