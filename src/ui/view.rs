@@ -478,7 +478,8 @@ enum Block {
     Copies { rows: Vec<Tile>, view: ShelfView, tall: f32 },
     /// The notes, the last written first, as `view` shows them, in room `tall` high (scrolled through past it); in a
     /// small lane, the last written alone.
-    Notes { notes: Vec<NoteCard>, view: crate::settings::NotesView, tall: f32 },
+    /// (`alone`: a note stuck on the desktop, its card all its lane is: no gap over it, as there is under a head.)
+    Notes { notes: Vec<NoteCard>, view: crate::settings::NotesView, tall: f32, alone: bool },
     /// What is kept at hand (quick launch's), each by its name and what opens it, in `rows` rows (named, as a whole
     /// lane shows them; else one row of their pictures alone), and the place to add more.
     /// (`over`: something dragged over it from elsewhere, to be kept at hand as it is let go.)
@@ -486,6 +487,33 @@ enum Block {
     /// The files come lately that `filter` takes, the newest first, as `view` shows them (a list under the day each
     /// came), in room `tall` high under the filter's choices, scrolled through past it.
     Recent { rows: Vec<Lately>, filter: crate::station::recent::Filter, view: ShelfView, tall: f32 },
+    /// A workbench lane in a shape of its own: what it holds, drawn in all the room it is given, in the shape that room
+    /// is (see `bench_shape`).
+    Bench(Bench),
+}
+
+/// What a workbench lane holds, drawn in a shape (see `Block::Bench`).
+#[derive(Clone, PartialEq, Hash, Debug)]
+pub enum Bench {
+    /// The station's page shown: its things (each with what a press on it finds), how many, which page.
+    Station { tiles: Vec<(Tile, Hit)>, tab: Tab },
+    /// The notes, the last written first.
+    Notes(Vec<NoteCard>),
+    /// What is kept at hand.
+    Apps(Vec<(String, String)>),
+    /// The time, and the day.
+    Time { figure: String, unit: String, date: String },
+}
+
+/// How tall a workbench lane in a shape is laid out (it is drawn in all the room it is given).
+const BENCH: f32 = 36.0;
+
+/// The most a workbench lane in a shape is padded by (DIPs): small, it is mostly its things.
+const BENCH_PAD: f32 = 8.0;
+
+/// How a workbench lane in a shape is padded (across, over, under): as `theme`'s lanes, at most `BENCH_PAD`.
+fn bench_pads(theme: &Theme) -> (f32, f32, f32) {
+    (theme.pad_x.min(BENCH_PAD), theme.pad_top.min(BENCH_PAD), theme.pad_bottom.min(BENCH_PAD))
 }
 
 /// A note as its card shows it: its title, its first lines, how long ago it was written, its colour.
@@ -647,9 +675,9 @@ fn notes_lane(full: bool, lang: Lang) -> Vec<Block> {
     };
     let view = crate::notes::view();
     if full {
-        vec![head(lang.pick("便签", "Notes"), count, "", false), Block::Notes { notes, view, tall: NOTES_TALL }]
+        vec![head(lang.pick("便签", "Notes"), count, "", false), Block::Notes { notes, view, tall: NOTES_TALL, alone: false }]
     } else {
-        vec![head(lang.pick("便签", "Notes"), count, "", false), Block::Notes { notes: notes.into_iter().take(1).collect(), view: crate::settings::NotesView::Deck, tall: NOTE_SMALL }]
+        vec![head(lang.pick("便签", "Notes"), count, "", false), Block::Notes { notes: notes.into_iter().take(1).collect(), view: crate::settings::NotesView::Deck, tall: NOTE_SMALL, alone: false }]
     }
 }
 
@@ -677,7 +705,7 @@ fn stuck_note_lane(name: &str, lang: Lang) -> Option<Vec<Block>> {
     let (at, note) = shown.iter().enumerate().find(|(_, note)| note.name == name)?;
     let card = note_card(at, note, lang, now, 14);
     let tall = (60.0 + card.lines.len() as f32 * (LINE + 3.0) + 12.0).max(NOTE_CARD);
-    Some(vec![Block::Notes { notes: vec![card], view: crate::settings::NotesView::Deck, tall }])
+    Some(vec![Block::Notes { notes: vec![card], view: crate::settings::NotesView::Deck, tall, alone: true }])
 }
 
 /// A line of Markdown as plain words: its marks taken off (a heading's, a list's, a to-do's box, emphasis, code).
@@ -953,7 +981,10 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 if theme.skin == Skin::Glass {
                     frame.clip(left - side, top - 2.0, width + 2.0 * side, covered - (top - 2.0));
                 }
+                // (Each named, that it moves from where it was as the notes are laid out anew: see `morph`.)
+                frame.key(&format!("note.{}", notes[at].at));
                 strip(frame, at, false);
+                frame.key("");
                 if theme.skin == Skin::Glass {
                     frame.unclip();
                 }
@@ -975,7 +1006,9 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 frame.unclip();
             };
             let front_top = top + room;
+            frame.key(&format!("note.{}", notes[0].at));
             paint_front_note(frame, scene, &notes[0], (left, front_top, width, tall - room), lit(0), (others > 0).then_some(&under as Under), hits);
+            frame.key("");
         }
         NotesView::Cards => {
             let across = 2;
@@ -989,6 +1022,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 if y + NOTE_CARD < top || y > top + tall {
                     continue;
                 }
+                frame.key(&format!("note.{}", note.at));
                 note_card_ground(frame, theme, note.colour, (x, y, card_w, NOTE_CARD), radius, lit(at), false, None);
                 let (title_ink, words, faint) = note_inks(theme, note.colour);
                 let inner = if theme.skin == Skin::Glass { 13.0 } else { 11.0 };
@@ -1000,6 +1034,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                     frame.text(&fitted(frame, line, theme.small, card_w - inner - 10.0), theme.small, words, x + inner, head + LINE + 6.0 + line_at as f32 * (LINE + 1.0), card_w - inner - 10.0, Align::Start);
                 }
                 frame.text(&note.when, theme.small, faint, x + inner, y + NOTE_CARD - LINE - 8.0, card_w - inner - 10.0, Align::Start);
+                frame.key("");
                 hits.extend(shown_in((x, y, card_w, NOTE_CARD, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, tall)));
             }
             if most > 0.0 {
@@ -1015,6 +1050,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 if y + NOTE_ROW < top || y > top + tall {
                     continue;
                 }
+                frame.key(&format!("note.{}", note.at));
                 if lit(at) {
                     frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, NOTE_ROW - 2.0, plate_round(theme, GLASS_ROW_ROUND - 4.0, 4.0));
                 }
@@ -1037,6 +1073,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                     frame.text(&fitted(frame, first, theme.small, width - 24.0 - when_w), theme.small, theme.text3, x, y + 4.0 + LINE, width - 24.0 - when_w, Align::Start);
                 }
                 frame.text(&note.when, theme.small, theme.text3, left, y + (NOTE_ROW - LINE) / 2.0, width, Align::End);
+                frame.key("");
                 hits.extend(shown_in((left, y, width, NOTE_ROW, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, tall)));
             }
             if most > 0.0 {
@@ -1515,6 +1552,8 @@ impl Block {
             Block::Table { visible, .. } => *visible as f32 * TABLE_ROW,
             Block::Room(tall) => *tall,
             Block::Tabs { .. } => HEAD + HEAD_GAP,
+            Block::Notes { tall, alone: true, .. } => *tall,
+            Block::Bench(_) => BENCH,
             Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } => SHELF_GAP + tall,
             Block::Apps { rows, named, .. } => SHELF_GAP + *rows as f32 * if *named { APP_CELL_H } else { APP_SIDE } + rows.saturating_sub(1) as f32 * APP_GAP,
         }
@@ -1544,7 +1583,8 @@ impl Hash for Block {
                 (sort.map(|sort| sort as u8), rows, visible, scrolls, widths.map(f32::to_bits)).hash(state);
             }
             Block::Tabs { tab, count, copies, recent, view } => (tab, count, copies, recent, view).hash(state),
-            Block::Notes { notes, view, tall } => (notes, view, tall.to_bits()).hash(state),
+            Block::Bench(what) => what.hash(state),
+            Block::Notes { notes, view, tall, alone } => (notes, view, tall.to_bits(), alone).hash(state),
             Block::Apps { apps, rows, named, over } => {
                 (apps, rows, named, over).hash(state);
                 apps.iter().for_each(|(_, target)| face_key(std::path::Path::new(target), APP_PIXELS).hash(state));
@@ -1581,6 +1621,51 @@ pub enum Detail {
     /// Its figure and chart, and what belongs with them (a card's video
     /// memory, its volumes, a few processes); none of the rows below.
     Compact,
+    /// A workbench lane in a widget too small for it all: its things in a shape of their own (see `Shape`).
+    Shape(Shape),
+}
+
+/// What a workbench lane is drawn as in a widget too small for all of it: a strip across (a row of its things), a
+/// strip down (a column of them), or the least (one, and how many there are).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Shape {
+    Across,
+    Down,
+    Least,
+}
+
+impl Shape {
+    /// How a widget of `lanes` workbench lanes in shape `self` sets them (how many columns): across, side by side,
+    /// down, one over another, the least, as near a square as they go.
+    pub fn columns(self, lanes: usize) -> usize {
+        match self {
+            Shape::Across => lanes.max(1),
+            Shape::Down => 1,
+            Shape::Least => ((lanes as f32).sqrt().ceil() as usize).max(1),
+        }
+    }
+
+    /// Its name, as a form is saved by (see `arrange::Form::key`).
+    pub fn key(self) -> &'static str {
+        match self {
+            Shape::Across => "across",
+            Shape::Down => "down",
+            Shape::Least => "least",
+        }
+    }
+
+    /// The shape a workbench lane takes in a widget `size` (DIPs) too small for all of it: a strip down where it is
+    /// clearly taller than wide, across where clearly wider than tall, else the least.
+    pub fn of(size: (f32, f32)) -> Shape {
+        let (w, h) = size;
+        if h >= w * 1.3 && h >= 90.0 {
+            Shape::Down
+        } else if w >= h * 1.6 && w >= 120.0 {
+            Shape::Across
+        } else {
+            Shape::Least
+        }
+    }
 }
 
 pub struct Lane {
@@ -1758,6 +1843,11 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         hot: value.is_some_and(|value| value > hot_load),
         plot: chart.then(|| Plot::new(scene, vec![read], Some(100.0), Some(hot_load as f64))),
     };
+    // A workbench lane in a shape of its own (see `Shape`).
+    // (A note stuck on the desktop alone is its card whatever its size: it has none.)
+    if let (Detail::Shape(_), Some(what)) = (detail, bench(scene, id)) {
+        return Some(vec![Block::Bench(what)]);
+    }
     Some(match id {
         "cpu" => {
             let sensors = s.cpu_sensors.as_ref();
@@ -2635,6 +2725,17 @@ impl Layout {
         self
     }
 
+    /// The shape each workbench lane in a shape is drawn in (see `paint_bench`), as the room it is given is; in order of
+    /// the lanes.
+    pub fn shapes(&self, theme: &Theme) -> Vec<Shape> {
+        let (pad_x, pad_top, pad_bottom) = bench_pads(theme);
+        let mut lanes = self.lanes();
+        if let Some((at, _)) = self.rail {
+            lanes.remove(at.min(lanes.len() - 1));
+        }
+        lanes.iter().map(|lane| Shape::of((lane.w - 2.0 * pad_x, lane.h - pad_top - pad_bottom))).collect()
+    }
+
     /// How what it shows flows in its columns: how many of the station's cards, and of quick launch's things, go
     /// across one (as it is laid out again for another width, these change by steps: see `widget`'s turns).
     pub fn flow(&self, theme: &Theme) -> (usize, usize) {
@@ -2781,16 +2882,18 @@ pub fn music_room(layout: &Layout, ids: &[String], theme: &Theme) -> Option<Rect
 fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: f32, pass: Pass, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let ink = lane.ink;
-    let left = area.x + theme.pad_x;
-    let width = area.w - 2.0 * theme.pad_x;
+    // (A workbench lane in a shape, padded less: see `BENCH_PAD`.)
+    let (pad_x, pad_top, pad_bottom) = if matches!(lane.blocks.as_slice(), [Block::Bench(_)]) { bench_pads(theme) } else { (theme.pad_x, theme.pad_top, theme.pad_bottom) };
+    let left = area.x + pad_x;
+    let width = area.w - 2.0 * pad_x;
     let plot_left = left + LABEL + LABEL_GAP;
     let plot_width = left + width - plot_left;
-    let mut y = area.y + theme.pad_top;
+    let mut y = area.y + pad_top;
     let charts = lane.blocks.iter().filter(|block| matches!(block, Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. })).count();
     let taller = if charts > 0 { (grow / charts as f32).min(RATE_PLOT) } else { 0.0 };
     // The room the lane is given past what its blocks take (a column's lanes share what is left over): a list at its
     // foot takes it, its things down to the lane's foot, not stopping part way.
-    let natural = theme.pad_top + theme.pad_bottom + lane.blocks.iter().map(Block::height).sum::<f32>() + taller * charts as f32;
+    let natural = pad_top + pad_bottom + lane.blocks.iter().map(Block::height).sum::<f32>() + taller * charts as f32;
     // (Given less, as a workbench widget is sized down, it gives way down to `LIST_LEAST`.)
     let spare = match lane.blocks.last().and_then(Block::list_tall) {
         Some(tall) => (area.h - natural).max(LIST_LEAST.min(tall) - tall),
@@ -2822,6 +2925,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Recent { .. } => "recent",
             Block::Apps { .. } => "apps",
             Block::Notes { .. } => "notes",
+            Block::Bench(_) => "bench",
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
         kinds.push(kind);
@@ -3144,8 +3248,12 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (Block::Tabs { tab, count, copies, recent, view }, Pass::Content) => {
                 paint_tabs(frame, scene, (left, y, width), *tab, *count, *copies, *recent, *view, hits);
             }
-            (Block::Notes { notes, view, tall }, Pass::Content) => {
-                paint_notes(frame, scene, (left, y + SHELF_GAP, width), notes, *view, *tall + spare, hits);
+            (Block::Bench(what), Pass::Content) => {
+                let room = (left, y, width, (area.y + area.h - pad_bottom - y).max(0.0));
+                paint_bench(frame, scene, ink, room, what, Shape::of((room.2, room.3)), hits);
+            }
+            (Block::Notes { notes, view, tall, alone }, Pass::Content) => {
+                paint_notes(frame, scene, (left, y + if *alone { 0.0 } else { SHELF_GAP }, width), notes, *view, *tall + spare, hits);
             }
             (Block::Apps { apps, rows, named, over }, Pass::Content) => {
                 paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, *rows, *named, *over, hits);
@@ -4270,6 +4378,314 @@ fn panel_button(frame: &dyn Canvas, scene: &Scene, hit: Hit, left: f32, top: f32
     (left, top, BUTTON, BUTTON, hit)
 }
 
+/// What workbench lane `id` holds, for a shape of it (see `Bench`): none for another.
+fn bench(scene: &Scene, id: &str) -> Option<Bench> {
+    let lang = scene.lang;
+    let now = crate::station::now_ms();
+    Some(match id {
+        "station" => {
+            let shown = crate::station::run::shown();
+            let folder = crate::station::folder::Folder::own();
+            let tab = match scene.tab {
+                Tab::Copies if !shown.history => Tab::Shelf,
+                Tab::Recent(_) if !crate::station::recent::on() => Tab::Shelf,
+                tab => tab,
+            };
+            let tiles: Vec<(Tile, Hit)> = match tab {
+                Tab::Shelf => shown.items.iter().rev().filter(|item| !item.copied).map(|item| (Tile::of(item, &folder, lang, now), Hit::Shelf(item.id))).collect(),
+                Tab::Copies => shown.items.iter().rev().filter(|item| item.copied).map(|item| (Tile::of(item, &folder, lang, now), Hit::Copied(item.id))).collect(),
+                Tab::Recent(filter) => crate::station::recent::shown()
+                    .iter()
+                    .filter(|came| filter.takes(came))
+                    .map(|came| {
+                        let row = Lately::of(came, lang, now);
+                        (Tile { id: 0, label: row.label.clone(), about: row.when.clone(), face: Face::Picture { path: row.path.clone(), more: 0 }, pinned: false }, Hit::Recent(row.file))
+                    })
+                    .collect(),
+            };
+            Bench::Station { tiles, tab }
+        }
+        "notes" => Bench::Notes(crate::notes::shown().iter().enumerate().map(|(at, note)| note_card(at, note, lang, now, 1)).collect()),
+        "apps" => Bench::Apps(crate::station::apps::shown().iter().map(|app| (app.name.clone(), app.target.clone())).collect()),
+        "time" => {
+            let now = text::Local::at(scene.latest().t);
+            let (figure, unit) = now.time(scene.prefs.shows("time", "twelve"), lang);
+            Bench::Time { figure, unit: unit.to_string(), date: now.date(lang) }
+        }
+        _ => return None,
+    })
+}
+
+/// `text` written down, a character under another, each in the middle of `x`, from `top` down as far as `tall` (the
+/// rest left off): words in a strip down.
+fn text_down(frame: &dyn Canvas, text: &str, font: Font, color: Color, x: f32, top: f32, tall: f32) {
+    let step = font.size * 1.18;
+    let fits = ((tall / step).floor() as usize).max(1);
+    let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    for (at, c) in chars.iter().take(fits).enumerate() {
+        let one = c.to_string();
+        let w = frame.measure(&one, font);
+        frame.text(&one, font, color, x - w / 2.0, top + at as f32 * step, w + 1.0, Align::Start);
+    }
+}
+
+/// The button that writes a new note, `side` square at (`left`, `top`).
+fn paint_add(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, left: f32, top: f32, side: f32) {
+    let theme = scene.theme;
+    let lit = scene.hover == Some(Hit::NewNote);
+    if lit {
+        frame.fill_rounded(theme.hover, left, top, side, side, theme.control_radius.min(side / 2.0));
+    }
+    frame.icon(Icon::Add, Point { x: left + side / 2.0, y: top + side / 2.0 }, (side * 0.62).min(15.0), if lit { theme.text } else { theme.text2 });
+    hits.push((left, top, side, side, Hit::NewNote));
+}
+
+/// A workbench lane drawn as `shape` in `area` (x, y, width, height: all of it, its padding in): its things in a row
+/// or a column, as many as fit (how many more, after them), each named as in its whole lane (they move between the
+/// two as the widget is sized: see `morph`); or the least, one and how many.
+#[allow(clippy::too_many_arguments)]
+fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y, w, h): (f32, f32, f32, f32), what: &Bench, shape: Shape, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    let gap = 6.0;
+    // Places along it for `count` things `side` square, after `lead` of it: as many as fit (the last marked with how many
+    // more there are, where they do not all fit).
+    let places = |count: usize, side: f32, lead: f32| -> (Vec<(f32, f32)>, usize) {
+        let room = if shape == Shape::Down { h - lead } else { w - lead };
+        let fit = if side > 0.0 { ((room + gap) / (side + gap)).floor().max(0.0) as usize } else { 0 };
+        let shown = count.min(fit);
+        let at = |n: usize| {
+            let along = lead + n as f32 * (side + gap);
+            if shape == Shape::Down { (x + (w - side) / 2.0, y + along) } else { (x + along, y + (h - side) / 2.0) }
+        };
+        ((0..shown).map(at).collect(), count - shown)
+    };
+    let more = |frame: &dyn Canvas, n: usize, (px, py): (f32, f32), side: f32| {
+        if n > 0 && side >= BADGE {
+            let badge = format!("+{n}");
+            paint_badge(frame, theme, &badge, theme.text2, px + side - badge_width(frame, theme, &badge), py + side - BADGE / 2.0);
+        }
+    };
+    let lit = |hit: Hit| scene.hover == Some(hit);
+    match what {
+        Bench::Station { tiles, tab } => {
+            // Its page's name and how many, its menu of the pages; across, before them, down, over them.
+            let count = tiles.len().to_string();
+            let name = match tab {
+                Tab::Shelf => scene.lang.pick("中转站", "Station"),
+                Tab::Copies => scene.lang.pick("最近复制", "Copied"),
+                Tab::Recent(_) => scene.lang.pick("最近文件", "Recent"),
+            };
+            let label = if shape == Shape::Across { format!("{name} {count}") } else { count.clone() };
+            let label_w = frame.measure(&label, theme.title) + 18.0;
+            let chip = match shape {
+                Shape::Across => (x, y + (h - TAB_H) / 2.0, label_w, TAB_H),
+                _ => (x + (w - label_w) / 2.0, y, label_w, TAB_H),
+            };
+            // (Where it has the room: across, half of it at most, down, its width and a tile under it.)
+            let with_chip = match shape {
+                Shape::Across => h >= TAB_H && label_w <= w / 2.0,
+                Shape::Down => w >= label_w && h >= 2.0 * TAB_H,
+                Shape::Least => false,
+            };
+            if with_chip {
+                if lit(Hit::StationPages) {
+                    frame.fill_rounded(theme.hover, chip.0, chip.1, chip.2, chip.3, TAB_H / 2.0);
+                }
+                frame.text(&label, theme.title, theme.text, chip.0 + 4.0, chip.1 + (TAB_H - theme.title.size * 1.3) / 2.0, label_w, Align::Start);
+                frame.icon(Icon::ChevronDown, Point { x: chip.0 + chip.2 - 7.0, y: chip.1 + TAB_H / 2.0 + 0.5 }, 9.0, theme.text2);
+                hits.push((chip.0, chip.1, chip.2, chip.3, Hit::StationPages));
+            }
+            let side = match shape {
+                Shape::Across => (h - 4.0).min(64.0),
+                Shape::Down => (w - 4.0).min(64.0),
+                Shape::Least => w.min(h) - 8.0,
+            }
+            .max(0.0);
+            let lead = match shape {
+                Shape::Across if with_chip => label_w + gap,
+                Shape::Down if with_chip => TAB_H + gap,
+                _ => 0.0,
+            };
+            if shape == Shape::Least {
+                let (px, py) = (x + (w - side) / 2.0, y + (h - side) / 2.0);
+                if let Some((tile, hit)) = tiles.first() {
+                    frame.key(&format!("tile.{hit:?}"));
+                    paint_face(frame, theme, ink, tile, px, py, side, side, pixels_for(ShelfView::Cards));
+                    frame.key("");
+                    hits.push((px, py, side, side, *hit));
+                }
+                if side >= 2.0 * BADGE {
+                    paint_badge(frame, theme, &count, theme.text2, px + side - badge_width(frame, theme, &count) + 4.0, py + 4.0);
+                }
+                hits.push((x, y, w, h, Hit::StationPages));
+                return;
+            }
+            let (spots, rest) = places(tiles.len(), side, lead);
+            for (at, ((tile, hit), spot)) in tiles.iter().zip(&spots).enumerate() {
+                frame.key(&format!("tile.{hit:?}"));
+                if lit(*hit) {
+                    frame.fill_rounded(theme.hover, spot.0 - 2.0, spot.1 - 2.0, side + 4.0, side + 4.0, 10.0);
+                }
+                paint_face(frame, theme, ink, tile, spot.0, spot.1, side, side, pixels_for(ShelfView::Cards));
+                frame.key("");
+                if at + 1 == spots.len() {
+                    more(frame, rest, *spot, side);
+                }
+                hits.push((spot.0, spot.1, side, side, *hit));
+            }
+        }
+        Bench::Apps(apps) => {
+            if shape == Shape::Least {
+                // Four, two by two, the rest by its count.
+                let side = ((w.min(h) - 12.0) / 2.0).max(0.0);
+                let (left, top) = (x + (w - 2.0 * side - 4.0) / 2.0, y + (h - 2.0 * side - 4.0) / 2.0);
+                for (at, (name, target)) in apps.iter().take(4).enumerate() {
+                    let (px, py) = (left + (at % 2) as f32 * (side + 4.0), top + (at / 2) as f32 * (side + 4.0));
+                    frame.key(&format!("app.{target}"));
+                    paint_app(frame, theme, name, target, px, py, side);
+                    frame.key("");
+                    hits.push((px, py, side, side, Hit::App(at as u16)));
+                }
+                return;
+            }
+            let side = match shape {
+                Shape::Across => (h - 8.0).min(APP_SIDE),
+                _ => (w - 8.0).min(APP_SIDE),
+            }
+            .max(0.0);
+            let (spots, rest) = places(apps.len(), side, 0.0);
+            for (at, ((name, target), spot)) in apps.iter().zip(&spots).enumerate() {
+                let hit = Hit::App(at as u16);
+                if lit(hit) {
+                    frame.fill_rounded(theme.hover, spot.0 - 3.0, spot.1 - 3.0, side + 6.0, side + 6.0, plate_round(theme, GLASS_ROW_ROUND, 3.0));
+                }
+                frame.key(&format!("app.{target}"));
+                paint_app(frame, theme, name, target, spot.0, spot.1, side);
+                frame.key("");
+                if at + 1 == spots.len() {
+                    more(frame, rest, *spot, side);
+                }
+                hits.push((spot.0, spot.1, side, side, hit));
+            }
+            hits.push((x, y, w, h, Hit::AppsArea));
+        }
+        Bench::Notes(notes) => {
+            let Some(front) = notes.first() else {
+                let side = MEDIA_ROW.min(w).min(h);
+                paint_add(frame, scene, hits, x + (w - side) / 2.0, y + (h - side) / 2.0, side);
+                return;
+            };
+            let radius = note_radius(theme, true).min(w.min(h) / 3.0);
+            let (title_ink, words, _) = note_inks(theme, front.colour);
+            let others = &notes[1..];
+            let dot = 10.0;
+            match shape {
+                Shape::Least => {
+                    frame.key(&format!("note.{}", front.at));
+                    note_card_ground(frame, theme, front.colour, (x, y, w, h), radius, lit(Hit::Note(front.at)), false, None);
+                    let figure = notes.len().to_string();
+                    centred(frame, &figure, theme.title, title_ink, x, y + (h - theme.title.size * 1.3) / 2.0, w);
+                    frame.key("");
+                    hits.push((x, y, w, h, Hit::Note(front.at)));
+                }
+                Shape::Across => {
+                    // The last written on its card, the others' colours after it, a new one last (where the card is
+                    // left room).
+                    let tail = others.len().min(4) as f32 * (dot + 6.0) + MEDIA_ROW + 6.0;
+                    let tail = if w - tail >= 60.0 && h >= MEDIA_ROW { tail } else { 0.0 };
+                    let card = (x, y, w - tail, h);
+                    frame.key(&format!("note.{}", front.at));
+                    note_card_ground(frame, theme, front.colour, card, radius, lit(Hit::Note(front.at)), false, None);
+                    let room = (card.2 - 20.0).max(0.0);
+                    let title = Font { weight: 650.0, ..theme.body };
+                    let middle = y + h / 2.0;
+                    let first = front.lines.first();
+                    let title_y = if first.is_some() && h >= 2.0 * LINE + 8.0 { middle - LINE } else { middle - LINE / 2.0 };
+                    frame.text(&fitted(frame, &front.title, title, room), title, title_ink, x + 10.0, title_y, room, Align::Start);
+                    if let (Some(first), true) = (first, h >= 2.0 * LINE + 8.0) {
+                        frame.text(&fitted(frame, first, theme.small, room), theme.small, words, x + 10.0, middle, room, Align::Start);
+                    }
+                    frame.key("");
+                    hits.push((card.0, card.1, card.2, card.3, Hit::Note(front.at)));
+                    if tail > 0.0 {
+                        let mut dx = card.0 + card.2 + 8.0;
+                        for note in others.iter().take(4) {
+                            frame.key(&format!("note.{}", note.at));
+                            frame.fill_circle(note_colour(note.colour), Point { x: dx + dot / 2.0, y: middle }, dot / 2.0);
+                            frame.key("");
+                            hits.push((dx - 3.0, middle - dot, dot + 6.0, 2.0 * dot, Hit::Note(note.at)));
+                            dx += dot + 6.0;
+                        }
+                        paint_add(frame, scene, hits, x + w - MEDIA_ROW, middle - MEDIA_ROW / 2.0, MEDIA_ROW);
+                    }
+                }
+                Shape::Down => {
+                    // How many over the last written on its card, its title down it; the others' colours under it, a
+                    // new one last.
+                    // (Each where the card is left room.)
+                    let tail = others.len().min(4) as f32 * (dot + 6.0) + MEDIA_ROW + 6.0;
+                    let head = LINE + 6.0;
+                    let head = if h - head >= 90.0 { head } else { 0.0 };
+                    let tail = if h - head - tail >= 60.0 && w >= MEDIA_ROW { tail } else { 0.0 };
+                    if head > 0.0 {
+                        centred(frame, &notes.len().to_string(), theme.title, theme.text, x, y, w);
+                    }
+                    let card = (x, y + head, w, h - head - tail);
+                    frame.key(&format!("note.{}", front.at));
+                    note_card_ground(frame, theme, front.colour, card, radius, lit(Hit::Note(front.at)), false, None);
+                    text_down(frame, &front.title, Font { weight: 650.0, ..theme.body }, title_ink, x + w / 2.0, card.1 + 10.0, card.3 - 20.0);
+                    frame.key("");
+                    hits.push((card.0, card.1, card.2, card.3, Hit::Note(front.at)));
+                    if tail > 0.0 {
+                        let mut dy = card.1 + card.3 + 8.0;
+                        for note in others.iter().take(4) {
+                            frame.key(&format!("note.{}", note.at));
+                            frame.fill_circle(note_colour(note.colour), Point { x: x + w / 2.0, y: dy + dot / 2.0 }, dot / 2.0);
+                            frame.key("");
+                            hits.push((x, dy - 3.0, w, dot + 6.0, Hit::Note(note.at)));
+                            dy += dot + 6.0;
+                        }
+                        paint_add(frame, scene, hits, x + (w - MEDIA_ROW) / 2.0, y + h - MEDIA_ROW, MEDIA_ROW);
+                    }
+                }
+            }
+        }
+        Bench::Time { figure, unit, date } => {
+            let big = Font { size: theme.figure.size.min(h * 0.6).min(w / 3.2), ..theme.figure };
+            match shape {
+                Shape::Down => {
+                    // Its hours over its minutes.
+                    let (hours, minutes) = figure.split_once(':').unwrap_or((figure.as_str(), ""));
+                    let big = Font { size: theme.figure.size.min(w * 0.55), ..theme.figure };
+                    // (Named as its whole lane names them, that they move between the two: see `morph`.)
+                    frame.key("time.value");
+                    centred(frame, hours, big, theme.text, x, y + h / 2.0 - big.size * 1.1, w);
+                    centred(frame, minutes, big, theme.text, x, y + h / 2.0, w);
+                    if !unit.is_empty() {
+                        frame.key("time.unit");
+                        centred(frame, unit, theme.small, theme.text3, x, y + h / 2.0 + big.size * 1.15, w);
+                    }
+                    frame.key("");
+                }
+                _ => {
+                    let shown = if unit.is_empty() { figure.clone() } else { format!("{figure} {unit}") };
+                    let fig_w = frame.measure(&shown, big);
+                    let date_w = frame.measure(date, theme.small);
+                    let with_date = shape == Shape::Across && fig_w + 12.0 + date_w <= w;
+                    let start = x + (w - fig_w - if with_date { 12.0 + date_w } else { 0.0 }) / 2.0;
+                    frame.key("time.value");
+                    frame.text(&shown, big, theme.text, start, y + (h - big.size * 1.2) / 2.0, fig_w + 1.0, Align::Start);
+                    if with_date {
+                        frame.key("time.detail");
+                        frame.text(date, theme.small, theme.text3, start + fig_w + 12.0, y + (h - LINE) / 2.0, date_w + 1.0, Align::Start);
+                    }
+                    frame.key("");
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -4367,33 +4783,11 @@ otepad.exe", "Notepad"),
     #[cfg(feature = "studio")]
     fn workbench_looks() {
         use super::*;
-        use crate::notes::{Colour, Note};
-        use crate::station::shelf::{Item, What};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         crate::station::thumbs::start(|| {});
-        let now = crate::station::now_ms();
-        let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
-        let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0 };
-        crate::station::run::pretend(vec![
-            item(1, What::Files { paths: vec![file("website/apple-touch-icon.png")], kept: Vec::new() }, 400),
-            item(2, What::Text { text: "会议改到周四下午三点\n地点：二楼小会议室".into() }, 180),
-            item(3, What::Files { paths: vec![file("docs")], kept: Vec::new() }, 60),
-            item(4, What::Files { paths: vec![file("Cargo.toml")], kept: Vec::new() }, 20),
-        ], ShelfView::Cards);
-        let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into() };
-        crate::station::apps::pretend(vec![
-            app(r"C:\Windows\explorer.exe", "Explorer"),
-            app(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "Calculator"),
-            app(r"C:\Windows\System32\cmd.exe", "Command"),
-        ]);
-        let note = |name: &str, text: &str, colour: Colour, ago_min: u64| Note { name: name.into(), text: text.into(), colour, stamp: crate::notes::store::Stamp { bytes: 0, written_ms: now - ago_min * 60_000, digest: 0 } };
-        crate::notes::pretend(vec![
-            note("a.md", "# 本周要做的事\n- [x] 发布 0.3.13\n- [ ] 中转站三种视图\n周五前合并", Colour::Blue, 3),
-            note("b.md", "显卡价格记录\n5070 Ti 京东 6299", Colour::Yellow, 60 * 20),
-            note("c.md", "周末开车听的歌\n- 敢爱敢做", Colour::Green, 60 * 50),
-        ]);
+        pretend_workbench();
         let (width, height, px) = (900u32, 760u32, 1.5f32);
         let desktop = crate::ui::wallpaper::picture(r"C:\Windows\Web\Wallpaper\Windows\img19.jpg", (width as f32 * px) as u32, (height as f32 * px) as u32).expect("wallpaper");
         let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
@@ -4421,6 +4815,101 @@ otepad.exe", "Notepad"),
                         for (lanes, layout, at) in [(&bench, &bench_layout, (30.0f32, 30.0f32)), (&readings, &readings_layout, (40.0 + bench_layout.width() + 30.0, 30.0))] {
                             let backdrop = behind.as_ref().map(|bitmap| (bitmap, windows_numerics::Vector2 { X: at.0, Y: at.1 }, desktop.digest, px));
                             let picture = crate::ui::render::Picture { scene: &scene, lanes, layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: None, backdrop, frost: 0.4, rough: false };
+                            let mut layers = crate::ui::render::PanelLayers::default();
+                            let _ = layers.draw(frame, &picture, windows_numerics::Matrix3x2::translation(at.0, at.1), px);
+                        }
+                    }).expect("drawn");
+                    if pass == 1 {
+                        let name = format!("{}-{}.png", match skin { Skin::Glass => "glass", Skin::Fluent => "fluent", Skin::Paper => "paper" }, if dark { "dark" } else { "light" });
+                        crate::studio::save_png(&out.join(name), (width as f32 * px) as u32, (height as f32 * px) as u32, &pixels).unwrap();
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    }
+
+    /// For pictures: a station of four things, three kept at hand, three notes.
+    #[cfg(feature = "studio")]
+    fn pretend_workbench() {
+        use super::*;
+        use crate::notes::{Colour, Note};
+        use crate::station::shelf::{Item, What};
+        let now = crate::station::now_ms();
+        let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
+        let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0 };
+        crate::station::run::pretend(vec![
+            item(1, What::Files { paths: vec![file("website/apple-touch-icon.png")], kept: Vec::new() }, 400),
+            item(2, What::Text { text: "会议改到周四下午三点\n地点：二楼小会议室".into() }, 180),
+            item(3, What::Files { paths: vec![file("docs")], kept: Vec::new() }, 60),
+            item(4, What::Files { paths: vec![file("Cargo.toml")], kept: Vec::new() }, 20),
+        ], ShelfView::Cards);
+        let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into() };
+        crate::station::apps::pretend(vec![
+            app(r"C:\Windows\explorer.exe", "Explorer"),
+            app(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "Calculator"),
+            app(r"C:\Windows\System32\cmd.exe", "Command"),
+        ]);
+        let note = |name: &str, text: &str, colour: Colour, ago_min: u64| Note { name: name.into(), text: text.into(), colour, stamp: crate::notes::store::Stamp { bytes: 0, written_ms: now - ago_min * 60_000, digest: 0 } };
+        crate::notes::pretend(vec![
+            note("a.md", "# 本周要做的事\n- [x] 发布 0.3.13\n- [ ] 中转站三种视图\n周五前合并", Colour::Blue, 3),
+            note("b.md", "显卡价格记录\n5070 Ti 京东 6299", Colour::Yellow, 60 * 20),
+            note("c.md", "周末开车听的歌\n- 敢爱敢做", Colour::Green, 60 * 50),
+        ]);
+    }
+
+    /// The workbench's lanes each a widget of its own in every shape (a strip down, one across, the least), and all
+    /// four as one in each, in each skin, light and dark (`cargo test --features studio --lib -- --ignored
+    /// workbench_shapes` writes `target/shapes/<skin>-<light|dark>.png`).
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn workbench_shapes() {
+        use super::*;
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        crate::station::thumbs::start(|| {});
+        pretend_workbench();
+        let (width, height, px) = (1100u32, 760u32, 1.5f32);
+        let desktop = crate::ui::wallpaper::picture(r"C:\Windows\Web\Wallpaper\Windows\img19.jpg", (width as f32 * px) as u32, (height as f32 * px) as u32).expect("wallpaper");
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{}/target/shapes", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let ids = ["station", "notes", "apps", "time"];
+        for pass in 0..2 {
+            for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+                for dark in [false, true] {
+                    let mut theme = Theme::new(skin, dark);
+                    (theme.bar_gap, theme.bar_height) = (0.0, 0.0);
+                    let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+                    let history: &'static [Sample] = Box::leak(Box::new([sample(Some(4200.0), None, None)]));
+                    let seen = Seen::of(history);
+                    let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+                    // Each widget: its lanes, its shape, its size, where it is.
+                    type Widget<'a> = (Vec<&'a str>, Shape, (f32, f32), (f32, f32));
+                    let mut widgets: Vec<Widget> = Vec::new();
+                    for (at, id) in ids.iter().enumerate() {
+                        let x = 30.0 + at as f32 * 90.0;
+                        widgets.push((vec![id], Shape::Down, (70.0, 300.0), (x, 30.0)));
+                        widgets.push((vec![id], Shape::Least, (70.0, 70.0), (x, 360.0)));
+                        widgets.push((vec![id], Shape::Least, (44.0, 44.0), (x + 12.0, 450.0)));
+                        widgets.push((vec![id], Shape::Across, (330.0, 64.0), (420.0, 30.0 + at as f32 * 84.0)));
+                    }
+                    widgets.push((ids.to_vec(), Shape::Across, (640.0, 70.0), (420.0, 380.0)));
+                    widgets.push((ids.to_vec(), Shape::Down, (80.0, 220.0), (790.0, 30.0)));
+                    widgets.push((ids.to_vec(), Shape::Least, (120.0, 120.0), (900.0, 30.0)));
+                    let pixels = gfx.draw_offscreen(((width as f32 * px) as u32, (height as f32 * px) as u32), px, |frame| {
+                        if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
+                            unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+                        }
+                        let behind = desktop.bitmap(&frame.dc, px).ok();
+                        for (lane_ids, shape, size, at) in &widgets {
+                            let lanes: Vec<Lane> = lane_ids.iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Shape(*shape))?, ink: theme.ink(id) })).collect();
+                            let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
+                            let layout = Layout::with_columns(heights, shape.columns(lanes.len()), &theme).fitted(*size);
+                            let backdrop = behind.as_ref().map(|bitmap| (bitmap, windows_numerics::Vector2 { X: at.0, Y: at.1 }, desktop.digest, px));
+                            let picture = crate::ui::render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: None, backdrop, frost: 0.4, rough: false };
                             let mut layers = crate::ui::render::PanelLayers::default();
                             let _ = layers.draw(frame, &picture, windows_numerics::Matrix3x2::translation(at.0, at.1), px);
                         }
@@ -5008,6 +5497,39 @@ six".into()));
         assert!(narrow.flow(&theme).0 < wide.flow(&theme).0, "{:?} {:?}", narrow.flow(&theme), wide.flow(&theme));
     }
 
+    /// A workbench widget made smaller than all of it fits in, at any size down to the least, in every skin: what it
+    /// shows (each lane in the shape its room is) all within it, and a form of its own saved and read back alike.
+    #[test]
+    #[cfg(feature = "studio")]
+    fn a_workbench_in_a_shape_keeps_within_it() {
+        pretend_workbench();
+        let ids = ["station", "notes", "apps", "time"];
+        for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+            let mut theme = Theme::new(skin, false);
+            (theme.bar_gap, theme.bar_height) = (0.0, 0.0);
+            let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let seen = Seen::of(history);
+            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+            for held in [&ids[..1], &ids[1..2], &ids[2..3], &ids[3..], &ids[..]] {
+                for w in [40.0, 56.0, 80.0, 130.0, 200.0, 420.0] {
+                    for h in [40.0, 56.0, 80.0, 130.0, 260.0, 500.0] {
+                        let shape = Shape::of((w, h));
+                        assert_eq!(crate::ui::arrange::Form::from_key(&crate::ui::arrange::Form::Lanes { detail: Detail::Shape(shape), columns: 2 }.key()), Some(crate::ui::arrange::Form::Lanes { detail: Detail::Shape(shape), columns: 2 }));
+                        let lanes: Vec<Lane> = held.iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Shape(shape))?, ink: theme.ink(id) })).collect();
+                        assert_eq!(lanes.len(), held.len());
+                        let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
+                        let layout = Layout::with_columns(heights, shape.columns(lanes.len()), &theme).fitted((w, h));
+                        assert!((layout.width() - w).abs() < 0.01 && (layout.height() - h).abs() < 0.01);
+                        for (x, y, hw, hh, hit) in paint(&Nothing, &scene, &lanes, &layout, Pass::Content) {
+                            assert!(x >= -0.01 && y >= -0.01 && x + hw <= w + 0.01 && y + hh <= h + 0.01, "{skin:?} {held:?} {w}×{h}: {hit:?} at {x},{y} {hw}×{hh}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// The station's head's menu button, on each page, found first by a press on it (a menu opens), in every skin.
     #[test]
     fn the_station_s_menu_button_is_found_first() {
@@ -5126,7 +5648,7 @@ six".into()));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let notes: Vec<NoteCard> = (0..30).map(|at| NoteCard { at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default() }).collect();
-        let lane = Lane { id: "notes".into(), blocks: vec![head("Notes", String::from("15"), "", false), Block::Notes { notes, view: crate::settings::NotesView::List, tall: NOTES_TALL }], ink: theme.ink("notes") };
+        let lane = Lane { id: "notes".into(), blocks: vec![head("Notes", String::from("15"), "", false), Block::Notes { notes, view: crate::settings::NotesView::List, tall: NOTES_TALL, alone: false }], ink: theme.ink("notes") };
         let area = Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 700.0 };
         let mut hits = Vec::new();
         paint_lane(&Nothing, &scene, &lane, area, 0.0, Pass::Content, &mut hits);

@@ -5,7 +5,7 @@ use super::seen::Seen;
 use super::theme::Theme;
 use super::forms::Small;
 use super::view::{RailSide, RAIL_ROW, RAIL_W};
-use super::view::{Detail, Layout, COLUMN_WIDTH};
+use super::view::{Detail, Layout, Shape, COLUMN_WIDTH};
 use crate::reading::StaticInfo;
 use crate::settings::Edge;
 
@@ -119,7 +119,7 @@ pub type Heights = [f32; 2];
 fn at(heights: &Heights, detail: Detail) -> f32 {
     match detail {
         Detail::Full => heights[0],
-        Detail::Compact => heights[1],
+        Detail::Compact | Detail::Shape(_) => heights[1],
     }
 }
 
@@ -138,7 +138,7 @@ impl Form {
     pub fn level(self) -> u8 {
         match self {
             Form::Lanes { detail: Detail::Full, .. } => 0,
-            Form::Lanes { detail: Detail::Compact, .. } => 1,
+            Form::Lanes { detail: Detail::Compact | Detail::Shape(_), .. } => 1,
             Form::Small(Small::Tiles { .. }) => 2,
             Form::Small(Small::Corner | Small::Tall) => 3,
             Form::Small(Small::Strip { rich: true } | Small::Rail) => 4,
@@ -152,6 +152,7 @@ impl Form {
         match self {
             Form::Lanes { detail: Detail::Full, columns } => format!("full-{columns}"),
             Form::Lanes { detail: Detail::Compact, columns } => format!("compact-{columns}"),
+            Form::Lanes { detail: Detail::Shape(shape), columns } => format!("{}-{columns}", shape.key()),
             Form::Small(small) => small.key(),
         }
     }
@@ -163,6 +164,11 @@ impl Form {
         }
         if let Some(columns) = key.strip_prefix("compact-") {
             return lanes(Detail::Compact, columns);
+        }
+        for shape in [Shape::Across, Shape::Down, Shape::Least] {
+            if let Some(columns) = key.strip_prefix(shape.key()).and_then(|rest| rest.strip_prefix('-')) {
+                return lanes(Detail::Shape(shape), columns);
+            }
         }
         Small::from_key(key).map(Form::Small)
     }

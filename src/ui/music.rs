@@ -39,6 +39,9 @@ pub enum Layout {
     /// Wide and tall: the cover on a record turning as it plays at the start, what plays and the lines beside it, and
     /// along the bottom the spectrum and the controls (kept showing, the spectrum over them; else coming over it).
     Stage,
+    /// A strip down, narrow: the cover at its top, the line sung now under it written down (and what is under it beside
+    /// it, where there is room for two), what plays or pauses at its foot.
+    Column,
 }
 
 impl Layout {
@@ -48,7 +51,9 @@ impl Layout {
         // Controls kept showing over the spectrum take a row more.
         let more = if shows.controls && shows.spectrum { SPECTRUM_ROW + ROW_GAP } else { 0.0 };
         let pick = |slack: f32| {
-            if h < strip_under(more) + slack || w < STRIP_UNDER + slack {
+            if w < COLUMN_UNDER + slack && h >= w {
+                Layout::Column
+            } else if h < strip_under(more) + slack || w < STRIP_UNDER + slack {
                 Layout::Strip
             } else if h < CARD_FROM + more + slack {
                 Layout::Player
@@ -75,6 +80,7 @@ impl Layout {
             Layout::Card => "card",
             Layout::Tall => "tall",
             Layout::Stage => "stage",
+            Layout::Column => "column",
         }
     }
 }
@@ -89,6 +95,8 @@ const CARD_FROM: f32 = 250.0;
 const TALL_UNDER: f32 = 360.0;
 /// The stage from this wide (and as tall as a card).
 const STAGE_FROM: f32 = 520.0;
+/// A strip down below this wide, as tall as it is wide or taller (narrower and short, a strip across).
+const COLUMN_UNDER: f32 = 200.0;
 /// How far past where the next layout begins a room keeps the one it has (DIPs).
 const HOLD: f32 = 12.0;
 /// Below how tall it is a strip (DIPs; `more` as in `Layout::for_room`): half way from the tallest the strip is at
@@ -110,8 +118,10 @@ fn zoom_at(layout: Layout, size: (f32, f32), shows: &Shows) -> f32 {
     if layout == Layout::Player { player_zoom(size.1, more) } else { 1.0 }
 }
 
-/// The least a music widget is (DIPs).
-pub const LEAST: (f32, f32) = (240.0, 56.0);
+/// The least a music widget is (DIPs): as small as its cover and its key to play or pause (see `Layout::Column`).
+pub const LEAST: (f32, f32) = (56.0, 56.0);
+/// The least what plays is, merged with another widget (DIPs): a strip across.
+pub const MERGED_LEAST: (f32, f32) = (240.0, 56.0);
 /// What plays as a panel slides it out (DIPs, at the panel's size 1): from a side edge as a card, from the top as a
 /// player across.
 pub const PANEL_SIDE: (f32, f32) = (380.0, 400.0);
@@ -129,7 +139,7 @@ pub fn rests_at(room: (f32, f32), shows: &Shows) -> (f32, f32) {
     match Layout::for_room(room, shows, None) {
         Layout::Strip => (room.0, room.1.min(STRIP_MOST)),
         Layout::Player => (room.0, room.1.clamp(PLAYER_FROM + more, PLAYER_MOST + more)),
-        Layout::Card | Layout::Tall | Layout::Stage => room,
+        Layout::Card | Layout::Tall | Layout::Stage | Layout::Column => room,
     }
 }
 
@@ -775,6 +785,7 @@ impl Music {
             Layout::Player => drawing.player(),
             Layout::Card | Layout::Tall => drawing.card(layout),
             Layout::Stage => drawing.stage(),
+            Layout::Column => drawing.column(),
         }
         if turn.is_some() {
             unsafe { frame.dc.PopLayer() };
@@ -908,7 +919,7 @@ fn pad_of(layout: Layout, shows: &Shows) -> f32 {
 /// Each layout's room inside its edge, and the corners of its ground (DIPs).
 fn pad(layout: Layout) -> f32 {
     match layout {
-        Layout::Strip => 10.0,
+        Layout::Strip | Layout::Column => 10.0,
         Layout::Player => 18.0,
         Layout::Card | Layout::Tall => 22.0,
         Layout::Stage => 30.0,
@@ -1002,6 +1013,14 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
             // (As large as its lines are, of theirs at the least: see `stage`.)
             let title_zoom = stage_line(h) / 18.0;
             Placed { cover, round: 1.0, record: 1.0, title, title_zoom, below: top + if shows.title { 58.0 * title_zoom } else { 0.0 }, left, width }
+        }
+        // The cover at the top, as wide as it is, no taller than two fifths of it.
+        Layout::Column => {
+            let wide = (w - 2.0 * pad).max(0.0);
+            let side = wide.min(h * 0.4).max(0.0);
+            let cover = shows.cover.then_some(((w - side) / 2.0, pad, side));
+            let below = pad + if shows.cover { side + 10.0 } else { 0.0 };
+            Placed { cover, round: 0.0, record: 0.0, title: None, title_zoom: 1.0, below, left: pad, width: wide }
         }
         Layout::Tall => {
             let wide = (w - 2.0 * pad).max(0.0);
@@ -1208,26 +1227,37 @@ impl Drawing<'_> {
     /// What goes back, pauses or plays, and skips, their boxes in a row from `x`, `gap` apart, at `row`, `fade` of
     /// them shown (each lit under the pointer, pressed only once they are half come); where the row ends.
     fn keys(&mut self, mut x: f32, gap: f32, row: f32, fade: f32) -> f32 {
-        let frame = self.frame;
-        for (key, icon) in [(Key::Previous, Icon::SkipBack), (Key::Toggle, if self.moment.playing { Icon::Pause } else { Icon::Play }), (Key::Next, Icon::SkipForward)] {
-            let on = self.pointer.is_some_and(|(px, py)| px >= x && px < x + CONTROL && py >= row && py < row + CONTROL);
-            if on {
-                frame.fill_rounded(Color::hex(self.ink, 0.14 * fade), x, row, CONTROL, CONTROL, CONTROL / 2.0);
-            }
-            let side = if key == Key::Toggle { TOGGLE_ICON } else { KEY_ICON };
-            let colour = Color::hex(self.ink, (if on { 1.0 } else { 0.85 }) * fade);
-            let centre = Point { x: x + CONTROL / 2.0, y: row + CONTROL / 2.0 };
-            // (With no ground, a dark edge under it, as its words have.)
-            if self.edged {
-                frame.icon(icon, Point { x: centre.x + 0.6, y: centre.y + 1.0 }, side, Color::hex(0x000000, 0.45 * colour.a));
-            }
-            frame.icon(icon, centre, side, colour);
-            if self.music.controls_in >= 0.5 {
-                self.hits.push((x, row, CONTROL, CONTROL, Hit::Media(key, crate::playing::Follow::Music)));
-            }
+        for key in [Key::Previous, Key::Toggle, Key::Next] {
+            self.key(key, x, row, fade);
             x += CONTROL + gap;
         }
         x - gap
+    }
+
+    /// The key `key`, its box at (`x`, `row`), `fade` of it shown (lit under the pointer, pressed only once it is half
+    /// come).
+    fn key(&mut self, key: Key, x: f32, row: f32, fade: f32) {
+        let frame = self.frame;
+        let icon = match key {
+            Key::Previous => Icon::SkipBack,
+            Key::Next => Icon::SkipForward,
+            _ => if self.moment.playing { Icon::Pause } else { Icon::Play },
+        };
+        let on = self.pointer.is_some_and(|(px, py)| px >= x && px < x + CONTROL && py >= row && py < row + CONTROL);
+        if on {
+            frame.fill_rounded(Color::hex(self.ink, 0.14 * fade), x, row, CONTROL, CONTROL, CONTROL / 2.0);
+        }
+        let side = if key == Key::Toggle { TOGGLE_ICON } else { KEY_ICON };
+        let colour = Color::hex(self.ink, (if on { 1.0 } else { 0.85 }) * fade);
+        let centre = Point { x: x + CONTROL / 2.0, y: row + CONTROL / 2.0 };
+        // (With no ground, a dark edge under it, as its words have.)
+        if self.edged {
+            frame.icon(icon, Point { x: centre.x + 0.6, y: centre.y + 1.0 }, side, Color::hex(0x000000, 0.45 * colour.a));
+        }
+        frame.icon(icon, centre, side, colour);
+        if self.music.controls_in >= 0.5 {
+            self.hits.push((x, row, CONTROL, CONTROL, Hit::Media(key, crate::playing::Follow::Music)));
+        }
     }
 
     /// What plays's track, from `from` to `to` on `row`, with how long is left at its end, `fade` of it shown (thicker
@@ -1463,6 +1493,102 @@ impl Drawing<'_> {
             }
         }
         self.unclip();
+    }
+
+    /// The strip down: the cover at its top (see `placed`), the line sung now under it written down (and what is under
+    /// it beside it, where two go across), the key to play or pause at its foot where there is room (kept showing, or
+    /// as the pointer comes).
+    fn column(&mut self) {
+        let (w, h) = self.size;
+        let pad = pad_of(Layout::Column, self.shows);
+        let at = self.placed(Layout::Column);
+        let fade = if self.shows.controls { 1.0 } else { self.music.controls_shown() };
+        // (The key under the words, where they keep a little room; else none.)
+        let keyed = h - pad - at.below >= CONTROL + 8.0 + 2.0 * STRIP_LEAST;
+        let foot = if keyed { h - pad - CONTROL } else { h - pad };
+        if keyed && fade > 0.0 {
+            self.key(Key::Toggle, (w - CONTROL) / 2.0, foot, fade);
+        }
+        let room = (foot - 8.0 - at.below).max(0.0);
+        if room < STRIP_LEAST || at.width < STRIP_LEAST {
+            return;
+        }
+        let frame = self.frame;
+        let (left, top, width) = (at.left, at.below, at.width);
+        // Written down where the room for the words is taller than wide; else across, what is under it below.
+        let down = room > width * 1.2;
+        let lines = self.moment.lines.clone();
+        match (&lines, self.moment.now) {
+            (Some(lines), Some(now)) => {
+                let line = &lines[now];
+                let next = lines.get(now + 1).map(|line| line.at);
+                let (text, parts) = parts(line, next);
+                let eased = self.came();
+                let _moving = frame.moving_while(eased < 1.0);
+                let (dim, bright) = self.line_colours(eased);
+                let under = self.under(lines, now);
+                if text.trim().is_empty() {
+                    let size = self.fonts.strip.size.min(width / INTERLUDE_WIDE);
+                    interlude(frame, left + (width - size * INTERLUDE_WIDE) / 2.0, top + (1.0 - eased) * 8.0, size, between(line, next, self.moment.position), dim, bright);
+                    return;
+                }
+                // Down, what is under it beside it where both go in half the width unbroken; else the line alone.
+                let gap = 6.0;
+                let half = (width - gap) / 2.0;
+                let least = Font { size: STRIP_LEAST, ..self.fonts.strip };
+                let two = down && !under.is_empty() && unbroken(frame, &text, least, half, down) && unbroken(frame, &under, least, half, down);
+                let column = if two { half } else { width };
+                let font = sized_down(frame, &text, self.fonts.strip, column, room, down);
+                let wrap = down_wrap(&text, font, column, down);
+                // (Right to left, as words written down are read: the line sung now first.)
+                let x = if two { left + width - column + (column - wrap) / 2.0 } else { left + (width - wrap) / 2.0 };
+                let y = top + (1.0 - eased) * 8.0;
+                let row = row_of(frame, &text, font, wrap);
+                let tall = frame.gfx.wrapped_height(&text, font, wrap);
+                // (Cut where a row ends, as many whole rows as there is room for.)
+                self.clip(left - 2.0, top, width + 4.0, tall.min((room / row).floor() * row) + 2.0);
+                let layout = frame.gfx.wrapped(&text, font, wrap);
+                let sung = sung_to(&parts, self.moment.position);
+                self.filled(&layout, &text, font, x, y, wrap, sung, dim, bright, 6.0);
+                self.unclip();
+                let small = Font { size: (font.size * 0.82).max(STRIP_LEAST.min(font.size)), weight: 500.0, ..font };
+                let colour = Color::hex(self.ink, 0.6 * eased);
+                if two {
+                    let wrap = down_wrap(&under, small, column, down);
+                    let row = row_of(frame, &under, small, wrap);
+                    self.clip(left - 2.0, top, column + 4.0, (room / row).floor() * row + 2.0);
+                    words_down(frame, &under, small, colour, left + (column - wrap) / 2.0, y, wrap, self.edged);
+                    self.unclip();
+                } else if !down && !under.is_empty() {
+                    // Across: under it, where a whole row of it has room.
+                    let below = y + tall + 4.0;
+                    let row = row_of(frame, &under, small, width);
+                    let rows = ((top + room - below) / row).floor();
+                    if rows >= 1.0 {
+                        self.clip(left - 2.0, below, width + 4.0, rows * row + 2.0);
+                        words_down(frame, &under, small, colour, left, below, width, self.edged);
+                        self.unclip();
+                    }
+                }
+            }
+            (Some(lines), None) => {
+                let first = lines.first().map_or(0.0, |line| line.at);
+                let done = if first > 0.0 { (self.moment.position / first).clamp(0.0, 1.0) as f32 } else { 0.0 };
+                let (dim, bright) = self.line_colours(1.0);
+                let size = self.fonts.strip.size.min(width / INTERLUDE_WIDE);
+                interlude(frame, left + (width - size * INTERLUDE_WIDE) / 2.0, top, size, done, dim, bright);
+            }
+            (None, _) => {
+                // What plays, written as the lines are.
+                let said = if self.moment.title.is_empty() { self.moment.said.clone().unwrap_or_default() } else { self.moment.title.clone() };
+                let font = sized_down(frame, &said, self.fonts.about, width, room, down);
+                let wrap = down_wrap(&said, font, width, down);
+                let row = row_of(frame, &said, font, wrap);
+                self.clip(left - 2.0, top, width + 4.0, (room / row).floor() * row + 2.0);
+                words_down(frame, &said, font, Color::hex(self.ink, 0.8), left + (width - wrap) / 2.0, top, wrap, self.edged);
+                self.unclip();
+            }
+        }
     }
 
     /// The line sung now large in the middle between `from` and `to` (floating lyrics), what is under it below where
@@ -2315,6 +2441,57 @@ fn interlude(frame: &Frame, x: f32, y: f32, size: f32, done: f32, dim: Color, br
     }
 }
 
+/// How tall a row of words written down is, of their size.
+const DOWN_ROW: f32 = 1.2;
+
+/// Whether `text` is in a script written down a character under another (Chinese, Japanese, Korean): others are set
+/// in rows across, as narrow as the strip, as they are never written down.
+fn written_down(text: &str) -> bool {
+    text.chars().any(|c| matches!(c as u32, 0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF))
+}
+
+/// How wide `text` in `font` is set in a column `column` wide: `down`, a character to a row where its script is
+/// written so (see `written_down`); else rows as wide as the column.
+fn down_wrap(text: &str, font: Font, column: f32, down: bool) -> f32 {
+    if down && written_down(text) { (font.size * DOWN_ROW).min(column) } else { column }
+}
+
+/// How tall a row of `text` in `font` is, set `wrap` wide: its rows' height shared among them (a script's own, the
+/// rows of Chinese taller than of Latin letters).
+fn row_of(frame: &Frame, text: &str, font: Font, wrap: f32) -> f32 {
+    let mut metrics = windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS::default();
+    let _ = unsafe { frame.gfx.wrapped(text, font, wrap).GetMetrics(&mut metrics) };
+    metrics.height / metrics.lineCount.max(1) as f32
+}
+
+/// Whether `text` in `font` goes in a column `column` wide (`down` as in `down_wrap`) with no word broken: written a
+/// character to a row, always; else its widest word no wider than the column.
+fn unbroken(frame: &Frame, text: &str, font: Font, column: f32, down: bool) -> bool {
+    (down && written_down(text)) || text.split_whitespace().all(|word| frame.measure(word, font) <= column)
+}
+
+/// The size `text` is set at in a column `column` wide and `room` tall (`down` as in `down_wrap`): `font`'s, no wider
+/// than the column, smaller till it all fits with no word broken, down to the least (`STRIP_LEAST`; longer still,
+/// what is past the room is not shown).
+fn sized_down(frame: &Frame, text: &str, font: Font, column: f32, room: f32, down: bool) -> Font {
+    let widest = Font { size: if down && written_down(text) { font.size.min(column / DOWN_ROW) } else { font.size }.max(1.0), ..font };
+    (0..)
+        .map(|step| widest.size - step as f32)
+        .take_while(|size| *size >= STRIP_LEAST.min(widest.size))
+        .map(|size| Font { size, ..font })
+        .find(|font| unbroken(frame, text, *font, column, down) && frame.gfx.wrapped_height(text, *font, down_wrap(text, *font, column, down)) <= room)
+        .unwrap_or(Font { size: STRIP_LEAST.min(widest.size), ..font })
+}
+
+/// `text` written down (see `down_wrap`) from (`x`, `y`), `wrap` wide, in `colour`; edged, with no ground.
+#[allow(clippy::too_many_arguments)]
+fn words_down(frame: &Frame, text: &str, font: Font, colour: Color, x: f32, y: f32, wrap: f32, clear: bool) {
+    if clear {
+        edge(frame, colour.a, |frame| frame.text_wrapped(text, font, Color::hex(0xFFFFFF, 1.0), x, y, wrap));
+    }
+    frame.text_wrapped(text, font, colour, x, y, wrap);
+}
+
 /// A line drawn in `dim`, and over it in `bright` as far as it is sung (see `sung_part`).
 #[allow(clippy::too_many_arguments)]
 fn filled(frame: &Frame, layout: &IDWriteTextLayout, text: &str, font: Font, x: f32, y: f32, width: f32, sung: Filling, dim: Color, bright: Color, soft: f32) {
@@ -2654,6 +2831,11 @@ mod tests {
         assert_eq!(Layout::for_room((290.0, 470.0), &all, None), Layout::Tall);
         assert_eq!(Layout::for_room((900.0, 470.0), &all, None), Layout::Stage);
         assert_eq!(Layout::for_room((900.0, 470.0), &Shows { cover: false, ..all }, None), Layout::Card);
+        // Narrow: a strip down, as tall as it is wide or taller; short, a strip across.
+        assert_eq!(Layout::for_room((80.0, 300.0), &all, None), Layout::Column);
+        assert_eq!(Layout::for_room((150.0, 150.0), &all, None), Layout::Column);
+        assert_eq!(Layout::for_room((56.0, 56.0), &all, None), Layout::Column);
+        assert_eq!(Layout::for_room((150.0, 60.0), &all, None), Layout::Strip);
         // Without the lines, a player however tall.
                 // Controls kept over the spectrum: a row more before the player.
         assert_eq!(Layout::for_room((470.0, 130.0), &Shows { controls: true, ..all }, None), Layout::Strip);
@@ -2679,7 +2861,10 @@ mod tests {
         // Within the range: where it was let go; the card, however tall; never under the least.
         assert_eq!(rests_at((420.0, 180.0), &all), (420.0, 180.0));
         assert_eq!(rests_at((470.0, 520.0), &all), (470.0, 520.0));
-        assert_eq!(rests_at((100.0, 20.0), &all), LEAST);
+        assert_eq!(rests_at((20.0, 10.0), &all), LEAST);
+        assert_eq!(rests_at((100.0, 20.0), &all), (100.0, LEAST.1));
+        // A strip down, where it was let go.
+        assert_eq!(rests_at((80.0, 300.0), &all), (80.0, 300.0));
     }
 }
 
@@ -2865,6 +3050,51 @@ mod pictures {
             })
             .unwrap();
         crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/sized-into-a-strip.png")), size.0, size.1, &pixels).unwrap();
+    }
+
+    /// The strip down at a few sizes, on its own ground and on none, a line sung in Chinese and one in English
+    /// (`cargo test --features studio --lib -- --ignored draws_a_column` writes `target/music/column.png`): the line
+    /// sung now written down, what is under it beside it where two go across, the key at the foot where it has room.
+    #[test]
+    #[ignore = "draws on this PC's graphics card"]
+    fn draws_a_column() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, clear: false, inset: None };
+        let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(&out).unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
+        let sizes = [(56.0f32, 56.0f32), (64.0, 320.0), (96.0, 380.0), (130.0, 420.0), (170.0, 200.0)];
+        let margin = 14.0f32;
+        let wide: f32 = sizes.iter().map(|(w, _)| w + margin).sum::<f32>() + margin;
+        let row = 420.0 + margin;
+        let tall = 4.0 * row + margin;
+        let size = ((wide * 1.5) as u32, (tall * 1.5) as u32);
+        let now = Instant::now();
+        let pixels = gfx
+            .draw_offscreen(size, 1.5, |frame| {
+                frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, wide, tall);
+                for (at, (ground, english)) in [(Ground::Own, false), (Ground::Own, true), (Ground::Clear, false), (Ground::Own, false)].into_iter().enumerate() {
+                    let mut x = margin;
+                    for (w, h) in sizes {
+                        let mut music = Music { last_frame: now, ..Music::default() };
+                        let mut moment = playing(at == 3);
+                        if english {
+                            moment.now = Some(0);
+                            moment.position = moment.lines.as_ref().unwrap()[0].words[2].at + 0.2;
+                        }
+                        music.bands = moment.sound.bands;
+                        music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                        frame.origin(x, margin + at as f32 * row);
+                        let shows = Shows { clear: ground == Ground::Clear, ..all };
+                        music.paint_moment(frame, (w, h), &shows, ground, 1.5, None, now, moment);
+                        x += w + margin;
+                    }
+                }
+            })
+            .unwrap();
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/column.png")), size.0, size.1, &pixels).unwrap();
     }
 
     /// A player drawn smaller (sized toward the strip) turning into the strip begins from where its cover is drawn at

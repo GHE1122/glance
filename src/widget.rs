@@ -129,6 +129,10 @@ const FLING_SPAN: Duration = Duration::from_millis(80);
 const FRICTION: f32 = 0.997;
 /// How near the edge of its screen's work area a widget let go sticks to
 /// it (DIPs), and how far from it, pulled, it comes away.
+/// The least a workbench widget is made (DIPs): smaller than all its lanes fit in, they take shapes of their own (see
+/// `view::Shape`) down to this.
+const SHAPE_LEAST: (f32, f32) = (40.0, 40.0);
+
 const STICK: f32 = 36.0;
 const UNSTICK: f32 = 52.0;
 /// A frame that takes longer than this is noted in the journal, its parts'
@@ -681,12 +685,12 @@ impl Merged {
                     self.size = size;
                 }
                 // Short and wide: one row, the readings' strip and what plays after it, as tall.
-                _ if { self.in_lane = false; h < ONE_ROW } && readings_for(scene, theme, work, seen, (1.0, h), false).is_some_and(|least| w - on_screen(&least).0 >= music::LEAST.0) => {
-                    let Some(opening) = readings_for(scene, theme, work, seen, (w - music::LEAST.0, h), false) else { return false };
+                _ if { self.in_lane = false; h < ONE_ROW } && readings_for(scene, theme, work, seen, (1.0, h), false).is_some_and(|least| w - on_screen(&least).0 >= music::MERGED_LEAST.0) => {
+                    let Some(opening) = readings_for(scene, theme, work, seen, (w - music::MERGED_LEAST.0, h), false) else { return false };
                     let size = on_screen(&opening);
                     self.show_readings(&opening, now);
                     rects[readings] = (0.0, 0.0, size.0, h);
-                    rects[music] = (size.0, 0.0, (w - size.0).max(music::LEAST.0), h);
+                    rects[music] = (size.0, 0.0, (w - size.0).max(music::MERGED_LEAST.0), h);
                     touch[music] = rects[music];
                     self.size = (size.0 + rects[music].2, h);
                 }
@@ -703,7 +707,7 @@ impl Merged {
                 }
             }
             let least = least.map_or((0.0, 0.0), |least| on_screen(&least));
-            self.least = (least.0.max(music::LEAST.0), least.1 + MUSIC_ROW);
+            self.least = (least.0.max(music::MERGED_LEAST.0), least.1 + MUSIC_ROW);
         } else {
             // Readings as a band along what plays' bottom (or its side), as large as they are at their least without
             // being made smaller, larger as what plays grows (`READINGS_BAND` of it).
@@ -714,17 +718,17 @@ impl Merged {
             let size = on_screen(&opening);
             self.show_readings(&opening, now);
             if self.beside {
-                let rest = (w - size.0).max(music::LEAST.0);
+                let rest = (w - size.0).max(music::MERGED_LEAST.0);
                 rects[music] = (0.0, 0.0, rest, h.max(size.1));
                 rects[readings] = (rest, 0.0, size.0, h.max(size.1));
                 self.size = (rest + size.0, h.max(size.1));
-                self.least = (music::LEAST.0 + natural.0, music::LEAST.1.max(natural.1));
+                self.least = (music::MERGED_LEAST.0 + natural.0, music::MERGED_LEAST.1.max(natural.1));
             } else {
-                let rest = (h - size.1).max(music::LEAST.1);
+                let rest = (h - size.1).max(music::MERGED_LEAST.1);
                 rects[music] = (0.0, 0.0, w.max(size.0), rest);
                 rects[readings] = (0.0, rest, w.max(size.0), size.1);
                 self.size = (w.max(size.0), rest + size.1);
-                self.least = (music::LEAST.0.max(natural.0), music::LEAST.1 + natural.1);
+                self.least = (music::MERGED_LEAST.0.max(natural.0), music::MERGED_LEAST.1 + natural.1);
             }
             touch = rects.clone();
         }
@@ -3059,11 +3063,23 @@ impl Widget {
                         let least = view::Layout::with_columns(view::least_heights(&scene), columns, &theme);
                         let least = (designed.width() - columns as f32 * (view::COLUMN_WIDTH - view::LANE_LEAST), least.height().min(designed.height()));
                         let wanted = sized_to.unwrap_or((designed.width() + readings.choice.extra.0, designed.height() + readings.choice.extra.1));
-                        let size = within(wanted, least);
-                        let form = Form::Lanes { detail: view::Detail::Full, columns };
-                        readings.choice = Choice { form, scale: 1.0, extra: (size.0 - designed.width(), size.1 - designed.height()) };
-                        let layout = designed.fitted(size);
-                        Shown { form, zoom: 1.0, size: (layout.width(), layout.height()), layout, small: None, detail: view::Detail::Full }
+                        let size = within(wanted, SHAPE_LEAST);
+                        let extra = (size.0 - designed.width(), size.1 - designed.height());
+                        // Smaller than all of it fits in: each lane in a shape of its own (see `view::Shape`), across
+                        // side by side, else one over another.
+                        let (detail, layout) = if size.0 >= least.0 && size.1 >= least.1 {
+                            (view::Detail::Full, designed.fitted(size))
+                        } else {
+                            let shape = view::Shape::of(size);
+                            let detail = view::Detail::Shape(shape);
+                            let shaped: Vec<f32> = heights.iter().filter_map(|(id, _)| view::lane_height(&scene, id, scene.seen, detail)).collect();
+                            let columns = shape.columns(shaped.len());
+                            (detail, view::Layout::with_columns(shaped, columns, &theme).fitted(size))
+                        };
+                        // (Its columns kept as chosen, whatever its shape: sized up again, it is laid out as it was.)
+                        let form = Form::Lanes { detail, columns };
+                        readings.choice = Choice { form, scale: 1.0, extra };
+                        Shown { form, zoom: 1.0, size: (layout.width(), layout.height()), layout, small: None, detail }
                     }
                     None => {
                         let heights = view::heights(&scene);
@@ -3088,7 +3104,8 @@ impl Widget {
                 // it was still turning.
                 // (The workbench's: as its things flow anew across its columns too, cards and quick launch's things a
                 // row more or less.)
-                let flowed = |last: &Shown| readings.workbench && last.layout.flow(&theme) != shown.layout.flow(&theme);
+                // (And as its lanes take other shapes, sized smaller: see `view::Shape`.)
+                let flowed = |last: &Shown| readings.workbench && (last.layout.flow(&theme) != shown.layout.flow(&theme) || last.layout.shapes(&theme) != shown.layout.shapes(&theme));
                 if let Some(last) = readings.last.take().filter(|last| last.form != shown.form || last.layout.heights.len() != shown.layout.heights.len() || flowed(last)) {
                     note(format!("widget: {} -> {}", last.form.key(), shown.form.key()));
                     let before = if readings.morph.is_some() { Before::Drawn(std::mem::take(&mut readings.drawn)) } else { Before::Shown(last) };
