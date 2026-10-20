@@ -217,6 +217,8 @@ pub fn app_chose(app: apps::App, choice: AppChoice) {
 /// it or of what was copied lately; keeps no more of what is copied; opens the settings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HeadChoice {
+    /// One of its pages shown (from the menu of them all, where their names do not fit side by side).
+    Page(crate::ui::view::Tab),
     View(crate::settings::StationPage, crate::settings::ShelfView),
     Clear,
     ClearCopies,
@@ -234,6 +236,21 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
     use crate::ui::view::{Hit, Tab};
     let lang = crate::update::language();
     let view = run::shown().view;
+    // Its pages, as one: each, the one shown ticked.
+    if hit == Hit::StationPages {
+        let shown = run::shown();
+        let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), Icon::Inbox)];
+        if shown.history {
+            pages.push((Tab::Copies, lang.pick("最近复制", "Copied"), Icon::Clipboard));
+        }
+        if recent::on() {
+            let filter = if let Tab::Recent(filter) = tab { filter } else { Default::default() };
+            pages.push((Tab::Recent(filter), lang.pick("最近文件", "Recent"), Icon::File));
+        }
+        let items = pages.iter().map(|(page, label, icon)| Item { label, icon: Some(*icon), checked: page.page() == tab.page(), rule_before: false }).collect();
+        let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
+        return Some((menu, pages.into_iter().map(|(page, ..)| HeadChoice::Page(page)).collect()));
+    }
     if hit != Hit::StationView {
         return None;
     }
@@ -284,6 +301,8 @@ pub fn head_chose(choice: HeadChoice) {
             std::thread::spawn(|| crate::app().change(|settings| settings.station.recent = false));
         }
         HeadChoice::Settings => crate::show_workbench_settings(),
+        // (Shown by what it was chosen on: see the panel's `end_menu`.)
+        HeadChoice::Page(_) => {}
     }
 }
 

@@ -194,6 +194,8 @@ pub enum Hit {
     /// One of the station's pages chosen (see `Tab`; Recent files', with which of them it shows); its menu (how what is
     /// on the page shows, and the rest).
     Tab(Tab),
+    /// The station's pages as one, where their names do not fit side by side: its menu of them.
+    StationPages,
     StationView,
     /// Where a station is: what is dragged there may be dropped on it (see `station::run::shows_at`).
     Station,
@@ -240,7 +242,7 @@ impl Hit {
 
     /// Whether a press on it opens a menu (the station's head's buttons: see `station::head_menu`).
     pub fn opens_menu(self) -> bool {
-        matches!(self, Hit::StationView)
+        matches!(self, Hit::StationView | Hit::StationPages)
     }
 
     /// Whether it is the sound's: its key, or its slider (the wheel over it turns the sound).
@@ -854,7 +856,7 @@ fn note_dot(frame: &dyn Canvas, colour: crate::notes::Colour, x: f32, middle: f3
 
 /// How round a note's card's corners are in `theme`: glass's round (its panes'), Windows 11's a little, chart paper's
 /// a little more (the owner's: its square ones too stark).
-fn note_radius(theme: &Theme, small: bool) -> f32 {
+pub(crate) fn note_radius(theme: &Theme, small: bool) -> f32 {
     match theme.skin {
         // (Concentric with the lane's corners near them, as the lane's padding leaves them, a little rounder for the
         // deck's large card; see `plate_round`.)
@@ -1484,7 +1486,7 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
 const LIST_LEAST: f32 = 96.0;
 
 /// The least a workbench lane is drawn across (DIPs, its padding in): its things laid out again for the width it has
-/// down to this.
+/// down to this (the station's pages, where their names do not fit side by side, one menu: see `paint_tabs`).
 pub const LANE_LEAST: f32 = 220.0;
 
 impl Block {
@@ -3169,15 +3171,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
 fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), tab: Tab, count: usize, copies: bool, recent: bool, view: ShelfView, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let lang = scene.lang;
-    let font = theme.title;
     let small = theme.small;
-    // The names on the head's line as the other lanes' titles are; their plates and the buttons about the middle of
-    // the names' ink (not of their line box: a plate round it stood higher than the words in it), the chosen one's
-    // mark so far under it (under the line box's foot, it met the words).
-    let name_top = top + (HEAD - font.size) / 2.0 - 1.0;
-    let (ink_top, ink_bottom) = frame.ink(lang.pick("中转站最近复制最近文件", "StationCopiedRecent"), font);
-    let middle = name_top + (ink_top + ink_bottom) / 2.0;
-    let row = middle - TAB_H / 2.0;
     // (Paper underlines the one chosen under its name, as its rules are drawn: no room round it.)
     let glass = theme.skin == Skin::Glass;
     let pad = if theme.skin == Skin::Paper { 0.0 } else { TAB_PAD };
@@ -3191,10 +3185,44 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         let filter = if let Tab::Recent(filter) = tab { filter } else { Default::default() };
         pages.push((Tab::Recent(filter), lang.pick("最近文件", "Recent"), String::new()));
     }
-    // (In the room the buttons at the end leave, whichever page shows: names that do not fit there shortened, each
-    // to a like share of it. A tab's room never reaches a button's.)
+    // (In the room the buttons at the end leave, whichever page shows: names that do not fit there set a size smaller,
+    // and shortened, each to a like share of it, only where they still do not. A tab's room never reaches a button's.)
     let gap = if theme.skin == Skin::Paper { 16.0 } else { 2.0 };
     let room = left + width - (MEDIA_ROW + 12.0 + 6.0) - start;
+    let whole_in = |font: Font| -> f32 {
+        pages.iter().map(|(_, name, aside)| 2.0 * pad + frame.measure(name, font) + if aside.is_empty() { 0.0 } else { 5.0 + frame.measure(aside, small) }).sum::<f32>() + gap * (pages.len() - 1) as f32
+    };
+    let smaller = Font { size: theme.title.size - 2.0, ..theme.title };
+    let font = if whole_in(theme.title) <= room { theme.title } else { smaller };
+    // Not side by side even so: the one shown alone, a chevron after it, its menu of them all (cut to a letter each,
+    // they said nothing).
+    if whole_in(smaller) > room {
+        let row = top + (HEAD - TAB_H) / 2.0;
+        let (name, aside) = pages.iter().find(|(page, ..)| page.page() == tab.page()).map(|(_, name, aside)| (*name, aside.clone())).unwrap_or_default();
+        let name_w = frame.measure(name, theme.title);
+        let aside_w = if aside.is_empty() { 0.0 } else { frame.measure(&aside, small) + 5.0 };
+        let wide = (pad + name_w + aside_w + 6.0 + 10.0 + pad).min(room);
+        let lit = scene.hover == Some(Hit::StationPages);
+        if lit {
+            frame.fill_rounded(theme.hover, start, row, wide, TAB_H, if glass { TAB_H / 2.0 } else { theme.control_radius.min(TAB_H / 2.0) });
+        }
+        let name_top = top + (HEAD - theme.title.size) / 2.0 - 1.0;
+        frame.text(&fitted(frame, name, theme.title, wide - 2.0 * pad - aside_w - 16.0), theme.title, theme.text, start + pad, name_top, name_w + 1.0, Align::Start);
+        if !aside.is_empty() {
+            frame.text(&aside, small, theme.text3, start + pad + name_w + 5.0, name_top + 2.0, aside_w, Align::Start);
+        }
+        frame.icon(Icon::ChevronDown, Point { x: start + wide - pad - 5.0, y: row + TAB_H / 2.0 + 0.5 }, 10.0, if lit { theme.text } else { theme.text2 });
+        hits.push((start, row, wide, TAB_H, Hit::StationPages));
+        paint_view_button(frame, scene, (left, top, width), view, hits);
+        return;
+    }
+    // The names on the head's line as the other lanes' titles are; their plates and the buttons about the middle of
+    // the names' ink (not of their line box: a plate round it stood higher than the words in it), the chosen one's
+    // mark so far under it (under the line box's foot, it met the words).
+    let name_top = top + (HEAD - font.size) / 2.0 - 1.0;
+    let (ink_top, ink_bottom) = frame.ink(lang.pick("中转站最近复制最近文件", "StationCopiedRecent"), font);
+    let middle = name_top + (ink_top + ink_bottom) / 2.0;
+    let row = middle - TAB_H / 2.0;
     let measured: Vec<(f32, f32)> = pages.iter().map(|(_, name, aside)| (frame.measure(name, font), if aside.is_empty() { 0.0 } else { frame.measure(aside, small) })).collect();
     let whole: f32 = measured.iter().map(|(name_w, aside_w)| 2.0 * pad + name_w + if *aside_w > 0.0 { 5.0 + aside_w } else { 0.0 }).sum::<f32>() + gap * (pages.len() - 1) as f32;
     let share = (room - gap * (pages.len() - 1) as f32) / pages.len() as f32;
@@ -3252,7 +3280,17 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         }
         hits.push((x, row, wide, TAB_H, Hit::Tab(page)));
     }
-    // At the end, its menu: how what is on the page shows (its view's mark, and a chevron), and the rest.
+    paint_view_button(frame, scene, (left, top, width), view, hits);
+}
+
+/// The station's head's menu button at its end (on the head row at `top`, from `left`, `width` across): how what is on
+/// the page shows (its view's mark, and a chevron), and the rest.
+fn paint_view_button(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), view: ShelfView, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    let font = theme.title;
+    let name_top = top + (HEAD - font.size) / 2.0 - 1.0;
+    let (ink_top, ink_bottom) = frame.ink(scene.lang.pick("中转站最近复制最近文件", "StationCopiedRecent"), font);
+    let middle = name_top + (ink_top + ink_bottom) / 2.0;
     let row = middle - MEDIA_ROW / 2.0;
     {
         let wide = MEDIA_ROW + 12.0;
@@ -4925,6 +4963,24 @@ six".into()));
         let mut hits = Vec::new();
         paint_apps(&Nothing, &scene, (0.0, top, width), &apps, APP_ROWS, true, false, &mut hits);
         within(&hits, top, APP_ROWS as f32 * APP_CELL_H + (APP_ROWS - 1) as f32 * APP_GAP, "apps");
+    }
+
+    /// At a workbench lane's least width, the station's pages' names show whole (a size smaller), in every skin.
+    #[test]
+    fn the_station_s_pages_show_whole_at_the_least_width() {
+        struct Measured(crate::ui::gfx::Gfx);
+        for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+            let theme = Theme::new(skin, false);
+            let _ = Measured;
+            let small = Font { size: theme.title.size - 2.0, ..theme.title };
+            // (Characters as wide as their size, as Chinese ones are: the widest the names come to.)
+            let measure = |text: &str, font: Font| text.chars().count() as f32 * font.size;
+            let pad = if skin == Skin::Paper { 0.0 } else { TAB_PAD };
+            let gap = if skin == Skin::Paper { 16.0 } else { 2.0 };
+            let names = 2.0 * pad * 3.0 + measure("中转站", small) + 5.0 + measure("99", theme.small) * 0.6 + measure("最近复制", small) + measure("最近文件", small) + 2.0 * gap;
+            let room = LANE_LEAST - 2.0 * theme.pad_x - (MEDIA_ROW + 12.0 + 6.0);
+            assert!(names <= room, "{skin:?}: {names} in {room}");
+        }
     }
 
     /// A workbench laid out again for a size (a widget sized): as large as that, narrower and shorter than designed

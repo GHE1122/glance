@@ -1092,7 +1092,7 @@ impl Controller {
                     // A button of its station's head: its menu.
                     if let Some((hit, tab)) = widgets.take_menu_asked() {
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
-                        menu = cursor_position().and_then(|at| crate::station::head_menu(hit, tab, at, panels.iter().any(Panel::is_shown), widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
+                        menu = cursor_position().and_then(|at| crate::station::head_menu(hit, tab, at, panels.iter().any(Panel::is_shown), widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::StationHead(choices, Some(msg.hwnd))));
                         keep_menu_above(&menu, &mut overlay);
                     }
                 }
@@ -1212,7 +1212,7 @@ impl Controller {
                     let hit = panels[at].hit_at(lparam_point(msg.lParam)).unwrap();
                     panels[at].click(lparam_point(msg.lParam));
                     self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
-                    menu = cursor_position().and_then(|point| crate::station::head_menu(hit, panels[at].tab, point, true, panels[at].menu_look())).map(|(open, choices)| (open, MenuFor::StationHead(choices)));
+                    menu = cursor_position().and_then(|point| crate::station::head_menu(hit, panels[at].tab, point, true, panels[at].menu_look())).map(|(open, choices)| (open, MenuFor::StationHead(choices, None)));
                     menu_of = Some(at);
                     keep_menu_above(&menu, &mut overlay);
                 }
@@ -1386,7 +1386,8 @@ enum MenuFor {
     /// A thing on the station, by its number, what each row does, and the widget it was opened on (none: the panel).
     Station(u64, Vec<crate::station::Choice>, Option<HWND>),
     /// The station's head's (see `station::head_menu`).
-    StationHead(Vec<crate::station::HeadChoice>),
+    /// (And the widget it was opened on: none, the panel.)
+    StationHead(Vec<crate::station::HeadChoice>, Option<HWND>),
     /// A file come lately, by its number, and what each row does (see `station::recent_menu`).
     Recent(crate::station::recent::Key, Vec<crate::station::RecentChoice>),
     /// A thing kept at hand, as its menu was opened on it, and what each row does (see `station::app_menu`).
@@ -1472,11 +1473,21 @@ impl Controller {
                     crate::station::recent_chose(file, *choice);
                 }
             }
-            MenuFor::StationHead(choices) => {
-                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
-                    crate::station::head_chose(*choice);
-                }
-            }
+            MenuFor::StationHead(choices, widget) => match choice.and_then(|row| choices.get(row)) {
+                // A page chosen: shown on what the menu was opened on.
+                Some(crate::station::HeadChoice::Page(page)) => match (widget, menu_panel) {
+                    (Some(hwnd), _) => widgets.show_page(hwnd, *page),
+                    (None, Some(at)) => {
+                        if let Some(panel) = panels.get_mut(at) {
+                            panel.tab = *page;
+                            panel.next_frame = Instant::now();
+                        }
+                    }
+                    (None, None) => {}
+                },
+                Some(choice) => crate::station::head_chose(*choice),
+                None => {}
+            },
         }
     }
 
