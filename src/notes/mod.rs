@@ -12,12 +12,24 @@ use std::time::Duration;
 
 pub use store::{Colour, Folder, Note, Written};
 
-/// How often the folder is looked at for what changed in it.
-const EVERY: Duration = Duration::from_secs(1);
+/// How often the folder is looked for while neither it nor any folder above it is there (its drive gone): nothing
+/// to be told of by then.
+const LOOKED_FOR_EVERY: Duration = Duration::from_secs(5);
 
 static SHOWN: Mutex<Option<Arc<Vec<Note>>>> = Mutex::new(None);
 static TOLD: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
-static AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What the thread that follows the folder waits on besides the folder: set, it reads it again (see `read_again`).
+static AGAIN: OnceLock<Event> = OnceLock::new();
+
+/// An event the system keeps (set by one thread, waited on by another).
+struct Event(windows::Win32::Foundation::HANDLE);
+// (A handle names it: set and waited on from any thread.)
+unsafe impl Send for Event {}
+unsafe impl Sync for Event {}
+
+fn again() -> &'static Event {
+    AGAIN.get_or_init(|| Event(unsafe { windows::Win32::System::Threading::CreateEventW(None, false, false, None) }.expect("an event")))
+}
 
 /// The notes, the last written first (none till first read).
 pub fn shown() -> Arc<Vec<Note>> {
@@ -72,16 +84,26 @@ pub fn view() -> crate::settings::NotesView {
     *VIEW.lock().unwrap()
 }
 
-/// How the notes show, taken from the settings as they change.
+/// How the notes show, taken from the settings as they change; the folder they are in followed as it changes.
 pub fn follow_settings(settings: &crate::settings::Settings) {
     *VIEW.lock().unwrap() = settings.notes_view;
+    let mut chosen = CHOSEN.lock().unwrap();
+    if *chosen != settings.notes_folder {
+        chosen.clone_from(&settings.notes_folder);
+        read_again();
+    }
 }
+
+/// The notes' folder as the settings last had it (see `follow_settings`).
+static CHOSEN: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 static VIEW: Mutex<crate::settings::NotesView> = Mutex::new(crate::settings::NotesView::Deck);
 
-/// The folder looked at again soon (written here: what shows of it follows at once).
+/// The folder read again at once (written here, or another chosen: what shows of it follows at once).
 pub fn read_again() {
-    AGAIN.store(true, std::sync::atomic::Ordering::Release);
+    unsafe {
+        let _ = windows::Win32::System::Threading::SetEvent(again().0);
+    }
 }
 
 /// Starts following the folder on a thread of its own; `told` is called whenever the notes changed.
@@ -104,9 +126,16 @@ fn follow() {
     }
     // What the folder held as last read: each note's name and file.
     let mut held: Vec<(String, store::Stamp, Colour)> = Vec::new();
-    let mut looked = std::time::Instant::now();
+    // The folder followed (or, while it is not there, the nearest above it that is, for it to come).
+    let mut watched: Option<Watch> = None;
     loop {
-        let notes = folder().notes();
+        let folder = folder();
+        // Followed before it is read: what changes while it is read is told after.
+        let nearest = folder.path.ancestors().find(|path| path.is_dir()).map(std::path::Path::to_path_buf);
+        if watched.as_ref().map(|watch| &watch.path) != nearest.as_ref() {
+            watched = nearest.and_then(|path| Watch::start(path, &folder.path));
+        }
+        let notes = folder.notes();
         let now: Vec<(String, store::Stamp, Colour)> = notes.iter().map(|note| (note.name.clone(), note.stamp, note.colour)).collect();
         if now != held || SHOWN.lock().unwrap().is_none() {
             held = now;
@@ -115,17 +144,91 @@ fn follow() {
                 told();
             }
         }
-        // (Asked to read again: at once; else after a while.)
-        while looked.elapsed() < EVERY && !AGAIN.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            std::thread::sleep(Duration::from_millis(50));
+        // Read again as the folder changes (by Glance, another program, a sync), or as Glance asks.
+        if let Some(watch) = &watched {
+            if !watch.wait() {
+                watched = None;
+            }
+        } else {
+            unsafe {
+                let _ = windows::Win32::System::Threading::WaitForSingleObject(again().0, LOOKED_FOR_EVERY.as_millis() as u32);
+            }
         }
-        looked = std::time::Instant::now();
+    }
+}
+
+/// What the system tells of a folder's changes: the notes' folder's (a note come, gone, renamed or written), or one
+/// above it while it is not there (a folder come in it, which may be it, or on the way to it).
+struct Watch {
+    path: PathBuf,
+    changed: windows::Win32::Foundation::HANDLE,
+}
+
+impl Watch {
+    /// `path` followed, as the notes' folder `notes` (or, another, as one above it).
+    fn start(path: PathBuf, notes: &std::path::Path) -> Option<Watch> {
+        use windows::Win32::Storage::FileSystem::{FindFirstChangeNotificationW, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE};
+        let what = if path == notes { FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_DIR_NAME } else { FILE_NOTIFY_CHANGE_DIR_NAME };
+        let wide = windows::core::HSTRING::from(path.as_os_str());
+        let changed = unsafe { FindFirstChangeNotificationW(&wide, false, what) }.ok()?;
+        Some(Watch { path, changed })
+    }
+
+    /// Till the folder changes, or Glance asks for it to be read again; whether it is still followed (followed again
+    /// before it is read, see `follow`: one gone, even if another is made in its place, is not).
+    fn wait(&self) -> bool {
+        use windows::Win32::Foundation::WAIT_OBJECT_0;
+        use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
+        let came = unsafe { WaitForMultipleObjects(&[again().0, self.changed], false, INFINITE) };
+        came.0 != WAIT_OBJECT_0.0 + 1 || unsafe { windows::Win32::Storage::FileSystem::FindNextChangeNotification(self.changed) }.is_ok()
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Storage::FileSystem::FindCloseChangeNotification(self.changed) };
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A note written into the folder followed, and a folder come where none was (the notes' folder made, followed
+    /// meanwhile through the one above it), are told of as they come, not looked for every so often (the folder was
+    /// read whole every second, its thread woken twenty times a second).
+    #[test]
+    fn the_folder_tells_of_what_changes_in_it() {
+        let root = std::env::temp_dir().join(format!("glance-notes-watch-{}", std::process::id()));
+        let notes = root.join("Glance Notes");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let told_within = |watch: &Watch, change: Box<dyn FnOnce() + Send>| {
+            let changing = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                change();
+            });
+            let began = std::time::Instant::now();
+            assert!(watch.wait(), "followed still");
+            changing.join().unwrap();
+            began.elapsed()
+        };
+        // Not there: the folder above it followed, for it to come.
+        let above = Watch::start(root.clone(), &notes).expect("followed");
+        let made = told_within(&above, Box::new({
+            let notes = notes.clone();
+            move || std::fs::create_dir(&notes).unwrap()
+        }));
+        // Come: followed itself, a note written into it told of.
+        let watch = Watch::start(notes.clone(), &notes).expect("followed");
+        let written = told_within(&watch, Box::new({
+            let notes = notes.clone();
+            move || std::fs::write(notes.join("a.md"), "a note").unwrap()
+        }));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(made >= Duration::from_millis(100) && made < Duration::from_secs(2), "{made:?}");
+        assert!(written >= Duration::from_millis(100) && written < Duration::from_secs(2), "{written:?}");
+    }
 
     /// A conflict's copy known by its name, in either language, a second one numbered; a note merely about conflicts
     /// not.
