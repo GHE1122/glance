@@ -641,7 +641,7 @@ impl Overlay {
                 let half = (buttons::SIZE / 2.0 * self.dpi).round() as i32;
                 let middle = self.bar_middles()[buttons::ALL.iter().position(|one| *one == button).unwrap()];
                 let about = RECT { left: middle.x - half, top: middle.y - half, right: middle.x + half, bottom: middle.y + half };
-                crate::ui::tip::show(button.says(lit, self.lang, true), about, crate::os::apps_dark());
+                crate::ui::tip::show(self.window.hwnd, button.says(lit, self.lang, true), about, crate::os::apps_dark());
             }
             None => crate::ui::tip::hide(),
         }

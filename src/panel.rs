@@ -3696,7 +3696,7 @@ impl<'a> Panel<'a> {
                     if let Some(&(x, y, w, h, _)) = self.hits.iter().find(|one| one.4 == hit) {
                         let on_screen = |dx: f32, dy: f32| ((placement.window.left as f32 + (self.corner.0 + dx) * placement.px).round() as i32, (placement.window.top as f32 + (self.corner.1 + dy) * placement.px).round() as i32);
                         let ((left, top), (right, bottom)) = (on_screen(x, y), on_screen(x + w, y + h));
-                        crate::ui::tip::show(&said, RECT { left, top, right, bottom }, crate::os::apps_dark());
+                        crate::ui::tip::show(self.window.hwnd, &said, RECT { left, top, right, bottom }, crate::os::apps_dark());
                         self.saying = true;
                     }
                 }

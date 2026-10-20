@@ -1572,7 +1572,7 @@ impl Widgets {
                         Button::Game => crate::ui::view::game_shown(crate::app().controller.history.read().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
                         _ => false,
                     };
-                    crate::ui::tip::show(button.says(lit, lang, false), at, crate::os::apps_dark());
+                    crate::ui::tip::show(widget.window.hwnd, button.says(lit, lang, false), at, crate::os::apps_dark());
                     widget.saying = false;
                 }
                 _ => crate::ui::tip::hide(),
@@ -1592,7 +1592,7 @@ impl Widgets {
                             ((widget.at.x as f32 + (widget.hits_from.0 + dx) * px).round() as i32, (widget.at.y as f32 + (widget.hits_from.1 + dy) * px).round() as i32)
                         };
                         let ((left, top), (right, bottom)) = (on_screen(hx, hy), on_screen(hx + hw, hy + hh));
-                        crate::ui::tip::show(&said, RECT { left, top, right, bottom }, crate::os::apps_dark());
+                        crate::ui::tip::show(widget.window.hwnd, &said, RECT { left, top, right, bottom }, crate::os::apps_dark());
                         widget.saying = true;
                     }
                 }
