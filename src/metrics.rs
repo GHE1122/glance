@@ -295,15 +295,9 @@ impl Sampler {
         // Its memory on the card it uses most (or on every card, while it
         // uses none); unread where an instance of it is.
         let card = self.adapter_by_pid.get(&pid).copied();
-        let vram = self.gpu_process_memory.filter(|_| collected).and_then(|counter| {
-            let mut total = Some(0u64);
-            for (name, value) in read_array(counter, &mut self.buf)? {
-                if parse_pid(&name) == Some(pid) && card.is_none_or(|card| parse_luid(&name) == Some(card)) {
-                    total = total.zip(value).map(|(total, value)| total + value as u64);
-                }
-            }
-            total
-        });
+        // (No more than the card has, or the cards together: past that, the counter says nothing.)
+        let most = self.adapters.iter().zip(&self.info.gpus).filter(|(adapter, _)| card.is_none_or(|card| adapter.luid == card)).map(|(_, gpu)| gpu.mem_total).sum();
+        let vram = self.gpu_process_memory.filter(|_| collected).and_then(|counter| process_vram(read_array(counter, &mut self.buf)?, pid, card, most));
         Some(GameSample {
             name: if presenting.title.is_empty() { program.clone() } else { presenting.title.clone() },
             program: program.clone(),
@@ -1079,6 +1073,19 @@ fn parse_luid(instance: &str) -> Option<(u32, i32)> {
     Some((low, high))
 }
 
+/// A process's memory on its card (`card`, or every card while it uses none), from the instances of the counter of
+/// each process's memory on each card: unread where an instance of it is, or where it comes to more than the card
+/// has (`most`; as one laptop's driver counted, a game at 7 TB on an 8 GB card).
+fn process_vram(instances: Vec<(String, Option<f64>)>, pid: usize, card: Option<(u32, i32)>, most: u64) -> Option<u64> {
+    let mut total = Some(0u64);
+    for (name, value) in instances {
+        if parse_pid(&name) == Some(pid) && card.is_none_or(|card| parse_luid(&name) == Some(card)) {
+            total = total.zip(value).map(|(total, value)| total + value as u64);
+        }
+    }
+    total.filter(|&total| total <= most)
+}
+
 /// `pid_12016_luid_...` → 12016
 fn parse_pid(instance: &str) -> Option<usize> {
     let rest = instance.strip_prefix("pid_")?;
@@ -1531,6 +1538,18 @@ mod tests {
     #[test]
     fn parses_gpu_instance_names() {
         let engine = "pid_12016_luid_0x00000000_0x00011D2B_phys_0_eng_3_engtype_VideoDecode";
+        {
+            // A process's memory on its card, summed; none past what the card has.
+            let gb = 1u64 << 30;
+            let card = Some((0x11D2B, 0));
+            let instances = |a: f64, b: f64| vec![
+                ("pid_7_luid_0x00000000_0x00011D2B_phys_0".to_string(), Some(a)),
+                ("pid_7_luid_0x00000000_0x00022222_phys_0".to_string(), Some(b)),
+                ("pid_8_luid_0x00000000_0x00011D2B_phys_0".to_string(), Some(5.0 * gb as f64)),
+            ];
+            assert_eq!(process_vram(instances(2.0 * gb as f64, 1.0), 7, card, 8 * gb), Some(2 * gb));
+            assert_eq!(process_vram(instances(7223.0 * gb as f64, 1.0), 7, card, 8 * gb), None);
+        }
         assert_eq!(parse_luid(engine), Some((0x11D2B, 0)));
         assert_eq!(parse_engine(engine), Some(3));
         assert_eq!(parse_kind(engine).as_deref(), Some("VideoDecode"));

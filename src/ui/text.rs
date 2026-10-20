@@ -118,7 +118,13 @@ pub fn size(value: u64) -> String {
     if value >= GIB { format!("{:.1} GB", value / GIB) } else { format!("{:.0} MB", value / 1024.0 / 1024.0) }
 }
 
+/// How much of `total` is used, both in the whole's unit: MB for a whole under a GB (an integrated card's own
+/// memory, which tenths of a GB told as 0.0 / 0.1), else GB.
 pub fn usage(used: u64, total: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    if (total as f64) < GIB {
+        return format!("{:.0} / {:.0} MB", used as f64 / MIB, total as f64 / MIB);
+    }
     let decimals = if total as f64 >= 100.0 * GIB { 0 } else { 1 };
     format!("{:.decimals$} / {:.decimals$} GB", used as f64 / GIB, total as f64 / GIB)
 }
@@ -311,6 +317,10 @@ mod tests {
         assert_eq!(percent(4.26), "4.3%");
         assert_eq!(percent(42.6), "43%");
         assert_eq!(usage(30 * 1024 * 1024 * 1024, 64 * 1024 * 1024 * 1024), "30.0 / 64.0 GB");
+        // A whole under a GB (an integrated card's own memory) in MB, as no tenths of a GB tell it.
+        assert_eq!(usage(40 * 1024 * 1024, 128 * 1024 * 1024), "40 / 128 MB");
+        assert_eq!(usage(0, 512 * 1024 * 1024), "0 / 512 MB");
+        assert_eq!(usage(1024 * 1024 * 1024, 1024 * 1024 * 1024), "1.0 / 1.0 GB");
         assert_eq!(link_speed(2_402_000_000), "2.4 Gbps");
         assert_eq!(Lang::Zh.duration(3 * 3600 + 5 * 60), "3 小时 5 分");
         let noon = Local { hour: 9, minute: 5, month: 10, day: 11, weekday: 0 };
