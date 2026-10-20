@@ -148,6 +148,41 @@ pub struct Local {
     pub weekday: u32,
 }
 
+/// Whether the system writes the time with a twelve-hour clock, as its user has it (Windows: the short time's format;
+/// macOS: the locale's own hours, as its user has set them).
+#[cfg(windows)]
+pub fn twelve_hours() -> bool {
+    use windows::Win32::Globalization::{GetLocaleInfoEx, LOCALE_SSHORTTIME};
+    let mut format = [0u16; 80];
+    let written = unsafe { GetLocaleInfoEx(windows::core::PCWSTR::null(), LOCALE_SSHORTTIME, Some(&mut format)) };
+    // (Its length with the null that ends it: none written, nothing read.)
+    written > 1 && hours_of_twelve(&String::from_utf16_lossy(&format[..written as usize - 1]))
+}
+
+#[cfg(target_os = "macos")]
+pub fn twelve_hours() -> bool {
+    use objc2_core_foundation::{CFDateFormatter, CFLocale, CFString};
+    let locale = CFLocale::current();
+    // ("j": the hours as the locale writes them.)
+    let format = unsafe { CFDateFormatter::new_date_format_from_template(None, Some(&CFString::from_str("j")), 0, locale.as_deref()) };
+    format.is_some_and(|format| hours_of_twelve(&format.to_string()))
+}
+
+/// Whether the time's format `format` writes the hours of a twelve-hour clock ("h", "hh", or "K"), not of a
+/// twenty-four-hour one ("H", "k"): what is quoted in it (as 'h') is words, not a field.
+fn hours_of_twelve(format: &str) -> bool {
+    let mut quoted = false;
+    for c in format.chars() {
+        match c {
+            '\'' => quoted = !quoted,
+            'h' | 'K' if !quoted => return true,
+            'H' | 'k' if !quoted => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 impl Local {
     /// The moment `t` (milliseconds since the Unix epoch).
     #[cfg(windows)]
@@ -255,6 +290,18 @@ pub fn day_of(then: u64, now: u64, lang: Lang) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hours of a time's format: a twelve-hour clock's or a twenty-four-hour one's, as Windows' and the
+    /// locales' formats write them, quoted words not taken for them.
+    #[test]
+    fn a_format_says_its_clock() {
+        for twelve in ["h:mm tt", "hh:mm", "tt h:mm", "h 'h' mm", "K:mm a", "ah:mm"] {
+            assert!(hours_of_twelve(twelve), "{twelve}");
+        }
+        for twenty_four in ["H:mm", "HH:mm", "'h' H:mm", "k:mm", "HH 'h' mm", ""] {
+            assert!(!hours_of_twelve(twenty_four), "{twenty_four}");
+        }
+    }
 
     #[test]
     fn writes_readings() {

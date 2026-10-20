@@ -532,7 +532,34 @@ pub struct OverlaySettings {
     pub offered: bool,
 }
 
+/// When the overlay shows, as its settings offer it: never, while a game is played, or all the time.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OverlayShown {
+    Off,
+    InGame,
+    Always,
+}
+
 impl OverlaySettings {
+    /// When it shows: all the time over while a game is played (which it is then too).
+    pub fn shown(&self) -> OverlayShown {
+        match (self.on, self.in_game) {
+            (true, _) => OverlayShown::Always,
+            (false, true) => OverlayShown::InGame,
+            (false, false) => OverlayShown::Off,
+        }
+    }
+
+    /// Shows it `when`: all the time leaves while a game is played as it was (the overlay shows then either way, and
+    /// turned back from all the time it is what it was).
+    pub fn show(&mut self, when: OverlayShown) {
+        self.on = when == OverlayShown::Always;
+        if when != OverlayShown::Always {
+            self.in_game = when == OverlayShown::InGame;
+        }
+        self.offered = true;
+    }
+
     /// What it shows, by item, group by group.
     pub fn chosen(&self) -> Vec<&'static str> {
         crate::ui::overlay::chosen(&self.groups)
@@ -786,8 +813,6 @@ pub struct StationSettings {
     pub recent_view: ShelfView,
     /// How many days what is not pinned stays.
     pub keep_days: u32,
-    /// The most the station keeps of its own (GB).
-    pub most_gb: u32,
     /// Files put on it kept as a copy too (else only where they are).
     pub always_copy: bool,
     /// What is dragged off it taken off it.
@@ -796,14 +821,17 @@ pub struct StationSettings {
 
 impl Default for StationSettings {
     fn default() -> Self {
-        StationSettings { history: true, recent: true, view: ShelfView::Cards, copies_view: ShelfView::List, recent_view: ShelfView::List, keep_days: 7, most_gb: 2, always_copy: false, remove_after_drag: false }
+        StationSettings { history: true, recent: true, view: ShelfView::Cards, copies_view: ShelfView::List, recent_view: ShelfView::List, keep_days: 7, always_copy: false, remove_after_drag: false }
     }
 }
+
+/// The most the station keeps of its own (GB): past it, what is oldest and not pinned goes first.
+const STATION_MOST_GB: u64 = 2;
 
 impl StationSettings {
     /// What the shelf keeps to (see `station::shelf::Rules`).
     pub fn rules(&self) -> crate::station::shelf::Rules {
-        crate::station::shelf::Rules { keep_days: self.keep_days, most_bytes: u64::from(self.most_gb) << 30 }
+        crate::station::shelf::Rules { keep_days: self.keep_days, most_bytes: STATION_MOST_GB << 30 }
     }
 }
 
@@ -933,7 +961,6 @@ impl Settings {
         settings.close_delay_ms = settings.close_delay_ms.min(10_000);
         settings.overlay.clear = settings.overlay.clear.clamp(0.0, 1.0);
         settings.station.keep_days = settings.station.keep_days.clamp(1, 365);
-        settings.station.most_gb = settings.station.most_gb.clamp(1, 100);
         settings.carry_over();
         settings
     }
@@ -1057,6 +1084,23 @@ pub fn merged(held: &Settings, base: &Settings, mine: &Settings) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The overlay shows when it is asked to, each way read back as it was set, and offered once it was.
+    #[test]
+    fn the_overlay_shows_when_asked() {
+        for (on, in_game) in [(false, false), (false, true), (true, false), (true, true)] {
+            for when in [OverlayShown::Off, OverlayShown::InGame, OverlayShown::Always] {
+                let mut overlay = OverlaySettings { on, in_game, ..OverlaySettings::default() };
+                overlay.show(when);
+                assert_eq!(overlay.shown(), when, "from {on} {in_game}");
+                assert!(overlay.offered);
+                assert_eq!(overlay.on, when == OverlayShown::Always);
+                if when != OverlayShown::Always {
+                    assert_eq!(overlay.in_game, when == OverlayShown::InGame);
+                }
+            }
+        }
+    }
 
     /// Each edge's panel is pinned or not on its own: pinned at the left and the top at once, the left unpinned, the
     /// top stays; pinned again along its edge elsewhere, the one before is replaced; another screen's left is its own.

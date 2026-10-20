@@ -24,7 +24,7 @@ pub const GROUPS: [(&str, &[(&str, bool)]); 8] = [
     ("vram", &[("vram", true)]),
     ("network", &[("down", true), ("up", true)]),
     ("mic", &[("mic", true)]),
-    ("clock", &[("time", true), ("twelve", false)]),
+    ("clock", &[("time", true)]),
 ];
 
 /// The groups shown at first.
@@ -395,11 +395,11 @@ pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&
                 reading(Kind::Network, lang.pick("上传", "Up"), vec![chosen("up", rate(s.net_up), &RATE)]),
             ],
             // The time of day, as the sample has it: a game played over the whole screen hides the taskbar's.
-            // ("twelve" is not a reading of its own: it is how the time is written.)
             "clock" => {
-                let (figure, half) = text::Local::at(s.t).time(on("twelve"), lang);
+                let twelve = text::twelve_hours();
+                let (figure, half) = text::Local::at(s.t).time(twelve, lang);
                 let written = if half.is_empty() { figure } else { format!("{figure} {half}") };
-                vec![reading(Kind::Clock, lang.pick("时间", "Time"), vec![chosen("time", Some(written), if on("twelve") { &TIME_OF_TWELVE } else { &TIME })])]
+                vec![reading(Kind::Clock, lang.pick("时间", "Time"), vec![chosen("time", Some(written), if twelve { &TIME_OF_TWELVE } else { &TIME })])]
             }
             _ => vec![s.mic_muted.filter(|_| on("mic")).and_then(|muted| {
                 let value = if muted { lang.pick("已静音", "Muted") } else { lang.pick("开启", "On") };

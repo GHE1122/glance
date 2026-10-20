@@ -526,7 +526,8 @@ enum Block {
     Head { title: String, device: String, aside: String, aside_hot: bool },
     /// A figure, and its chart unless the module's chart is switched off.
     Readout { figure: String, unit: &'static str, hot: bool, plot: Option<Plot> },
-    Rates { rows: Vec<(String, String)>, plot: Option<Plot> },
+    /// Two rates by name, and their chart unless the module's chart is switched off, with what its top stands for.
+    Rates { rows: Vec<(String, String)>, plot: Option<Plot>, scale: String },
     /// A second chart below a readout's, aligned with it, `gap` below it:
     /// what it charts named over its value.
     Trace { label: String, value: String, hot: bool, plot: Plot, gap: f32 },
@@ -1705,7 +1706,7 @@ impl Hash for Block {
             Block::Head { title, device, aside, aside_hot } => (title, device, aside, aside_hot).hash(state),
             Block::Room(tall) => tall.to_bits().hash(state),
             Block::Readout { figure, unit, hot, .. } => (figure, unit, hot).hash(state),
-            Block::Rates { rows, plot } => (rows, plot.as_ref().map(|plot| plot.max.to_bits())).hash(state),
+            Block::Rates { rows, plot, scale } => (rows, plot.as_ref().map(|plot| plot.max.to_bits()), scale).hash(state),
             Block::Trace { label, value, hot, plot, gap } => (label, value, hot, plot.max.to_bits(), gap.to_bits()).hash(state),
             Block::Threads(cells) => cells.iter().for_each(|(load, hot, tag)| (load.map(f32::to_bits), hot, tag).hash(state)),
             Block::Meter { label, fraction, value, hot, gap, opens } => (label, fraction.to_bits(), value, hot, gap.to_bits(), opens).hash(state),
@@ -1967,7 +1968,7 @@ pub fn board_sensor(name: &str, group: &str, lang: Lang) -> String {
 /// rows below its figure and chart.
 fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
     let (s, prefs, lang, info) = (scene.latest(), scene.prefs, scene.lang, scene.info);
-    let hot_load = prefs.hot_load;
+    let hot_load = super::prefs::HOT_LOAD;
     let hot_temp = prefs.hot_temp;
     let full = detail == Detail::Full;
     // Whether the module's item is switched on.
@@ -2183,9 +2184,6 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 let total = if lang == Lang::Zh { format!("下载 {down}，上传 {up}") } else { format!("{down} down, {up} up") };
                 facts.push((lang.pick("开机以来", "Since boot").into(), total, false));
             }
-            if on("scale") && chart {
-                facts.push((lang.pick("满刻度", "Scale").into(), text::rate(scale, bits), false));
-            }
             if !full {
                 facts.clear();
             }
@@ -2199,6 +2197,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                         (lang.pick("上传", "Up").into(), shown(s.net_up, |rate| text::rate(rate, bits))),
                     ],
                     plot: chart.then_some(plot),
+                    scale: if chart { text::rate(scale, bits) } else { String::new() },
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
@@ -2209,8 +2208,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let drives: &[(u32, String)] = if on("drives") { &scene.seen.drives } else { &[] };
             let temp = |id: u32| s.drive_temps.iter().find(|d| d.id == id).map(|d| d.celsius);
             let hottest = drives.iter().filter_map(|(id, _)| temp(*id)).fold(None, |max: Option<f32>, t| Some(max.map_or(t, |m| m.max(t))));
-            // A drive's temperature takes the corner, as a GPU's does, and the
-            // chart's scale moves below.
+            // A drive's temperature takes the corner, as a GPU's does.
             let mut facts: Vec<(String, String, bool)> = Vec::new();
             // More than one drive: each on a line of its own, by name, with
             // its temperature (unread, for one that gives none).
@@ -2228,10 +2226,6 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if on("active") {
                 facts.push((lang.pick("活动时间", "Active time").into(), shown(s.disk_active, text::percent), false));
             }
-            // The chart's scale, where it is asked for, among the details.
-            if on("scale") && chart {
-                facts.push((lang.pick("满刻度", "Scale").into(), text::rate(scale, false), false));
-            }
             // (Its drives' hottest at the corner, where they are shown.)
             let aside = if drives.is_empty() { String::new() } else { shown(hottest, celsius) };
             if !full {
@@ -2246,6 +2240,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                         (lang.pick("写入", "Write").into(), shown(s.disk_write, |rate| text::rate(rate, false))),
                     ],
                     plot: chart.then_some(plot),
+                    scale: if chart { text::rate(scale, false) } else { String::new() },
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
@@ -2561,7 +2556,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         // looked at: see `playing`).
         "time" => {
             let now = text::Local::at(s.t);
-            let (figure, unit) = now.time(on("twelve"), lang);
+            let (figure, unit) = now.time(text::twelve_hours(), lang);
             let mut blocks = vec![head(lang.pick("时间", "Time"), now.date(lang), "", false), Block::Readout { figure, unit, hot: false, plot: None }];
             // Each of what plays as the panel was laid out for it (see `Seen::note_playing`): not there yet, nothing
             // (drawn as it came, it was drawn over the lane under, the panel laid out before it was known); there and
@@ -3154,7 +3149,12 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 name("unit");
                 text_on_line(frame, unit, theme.unit, theme.text2, left + figure_width + 3.0, bottom, theme.unit.size, (room - figure_width - 3.0).max(30.0));
             }
-            (Block::Rates { rows, .. }, Pass::Content) => {
+            (Block::Rates { rows, scale, .. }, Pass::Content) => {
+                // What the chart's top stands for, small in its corner.
+                if !scale.is_empty() {
+                    name("scale");
+                    frame.text(scale, theme.small, theme.text3, plot_left + RATE_INDENT, y, plot_width - RATE_INDENT, Align::End);
+                }
                 for (i, (label, value)) in rows.iter().enumerate() {
                     let row_y = y + height - (rows.len() - i) as f32 * (LINE + 2.0) + 1.0;
                     // A stroke sample in front of each label says which trace it names.
@@ -4545,7 +4545,7 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
         "apps" => Bench::Apps(crate::station::apps::shown().iter().map(|app| (app.name.clone(), app.target.clone())).collect()),
         "time" => {
             let now = text::Local::at(scene.latest().t);
-            let (figure, unit) = now.time(scene.prefs.shows("time", "twelve"), lang);
+            let (figure, unit) = now.time(text::twelve_hours(), lang);
             Bench::Time { figure, unit: unit.to_string(), date: now.date(lang) }
         }
         _ => return None,

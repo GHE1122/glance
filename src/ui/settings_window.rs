@@ -54,7 +54,7 @@ use super::gfx::{self, rect, Frame, Gfx, Surface};
 use super::icons::Icon;
 use super::motion::{Easing, Transition};
 use super::overlay::{Layout, ROWS};
-use super::prefs::{self, LanguagePref, Prefs, ProcessSort, ThemePref};
+use super::prefs::{self, LanguagePref, Prefs, ThemePref};
 use super::arrange::{self, GAP};
 use super::life::Lives;
 use super::render::{self, PanelLayers};
@@ -65,7 +65,7 @@ use super::view::{self, Rect, Scene};
 use super::wallpaper;
 use crate::elevation;
 use crate::metrics;
-use crate::settings::{Anchor, Edge, OverFullscreen, Part, Sensitivity, Settings, Shortcut, EDGES};
+use crate::settings::{Anchor, Edge, OverFullscreen, OverlayShown, Part, Sensitivity, Settings, Shortcut, EDGES};
 
 mod layout_page;
 use layout_page::{Carry, Zone};
@@ -78,23 +78,31 @@ const MIN_SIZE: (f32, f32) = (1080.0, 560.0);
 /// The first Windows 11 build that lets a window ask for Mica.
 pub(crate) const FIRST_MICA_BUILD: u32 = 22621;
 
-/// The list of choices: its width, its padding (top, sides, bottom), and
-/// the thin scroll bar's gutter.
-const PANE: f32 = 480.0;
+/// The list of choices: how wide its cards are (the least, in the narrowest window, and the most), how much wider
+/// they grow for each DIP the window is wider than its narrowest, and the room past them to the preview (its scroll
+/// bar in it). See `Ui::cards`.
+const CARDS: (f32, f32) = (400.0, 520.0);
+const CARDS_GROW: f32 = 40.0 / 220.0;
+const LIST_GAP: f32 = 48.0;
 /// The pages' list, left of the page.
 const NAV: f32 = 200.0;
 const NAV_ITEM: f32 = 40.0;
-/// How far in the components' own pages are set, under their heading.
-const NAV_INDENT: f32 = 20.0;
+/// The room the components' heading takes in the pages' list, and the gap that sets it (and the rule after its
+/// pages) apart.
+const NAV_HEADING: f32 = 28.0;
+const NAV_GAP: f32 = 12.0;
 const PAD_TOP: f32 = 28.0;
 const PAD_SIDE: f32 = 36.0;
 const PAD_BOTTOM: f32 = 48.0;
-const GUTTER: f32 = 8.0;
 /// Rows: their least height, sides, the space between rows of a group, and
 /// before a group's heading.
-const ROW: f32 = 56.0;
+const ROW: f32 = 60.0;
 const ROW_SIDE: f32 = 20.0;
-const ROW_GAP: f32 = 4.0;
+/// How round a card's corners are.
+const CARD_RADIUS: f32 = 8.0;
+/// The size of what is said under a row's name (and of notes).
+const HINT: f32 = 13.0;
+const ROW_GAP: f32 = 8.0;
 /// The line of its own a row of choices with a word on it takes below.
 const CHOICE_LINE: f32 = 40.0;
 /// A slider's track, the room for its value, and its thumb's radius.
@@ -556,63 +564,66 @@ impl Palette {
 fn module_fields(id: &str) -> &'static [Field] {
     match id {
         "network" => &[Field::RateUnit],
-        "processes" => &[Field::ProcessCount, Field::ProcessSort],
-        "station" => &[Field::StationHistory, Field::StationRecent, Field::StationHidden, Field::StationKeep, Field::StationMost, Field::StationCopy, Field::StationAfterDrag],
+        "processes" => &[Field::ProcessCount],
+        "station" => &[Field::StationHidden, Field::StationKeep, Field::StationCopy, Field::StationAfterDrag],
         _ => &[],
     }
 }
 
-/// The days the station keeps what is not pinned, and the most it keeps of its own (GB), as its settings offer them.
-const STATION_DAYS: [u32; 3] = [1, 7, 30];
-const STATION_GB: [u32; 4] = [1, 2, 5, 10];
+/// When the overlay shows, as its choices offer it.
+const OVERLAY_SHOWN: [OverlayShown; 3] = [OverlayShown::Off, OverlayShown::InGame, OverlayShown::Always];
 
-/// The settings, a group to a page: what each screen edge opens and how; each component's own (the monitor's, on
-/// tabs of their own, and what plays); and Glance's as a whole.
+/// The days the station keeps what is not pinned, as its settings offer them.
+const STATION_DAYS: [u32; 3] = [1, 7, 30];
+
+/// The settings, a group to a page: what each screen edge opens and how; how every component looks; each component's
+/// own (the monitor's on tabs of their own, the workbench's, what plays); the phone; and Glance's as a whole.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Page {
     Layout,
+    Look,
     Monitor,
     Workbench,
     Music,
+    Phone,
     General,
 }
 
-/// The monitor's settings, a group to a tab: how it looks, what it shows, how it reads, and its overlay.
+/// The monitor's settings, a group to a tab: what it shows, how it reads and warns, and its overlay.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tab {
-    Look,
     Shown,
     Data,
     Overlay,
 }
 
-const TABS: [Tab; 4] = [Tab::Look, Tab::Shown, Tab::Data, Tab::Overlay];
+const TABS: [Tab; 3] = [Tab::Shown, Tab::Data, Tab::Overlay];
 
 impl Tab {
     fn name(self, lang: Lang) -> &'static str {
         match self {
-            Tab::Look => pick(lang, "外观", "Look"),
-            Tab::Shown => pick(lang, "显示内容", "Shown"),
-            Tab::Data => pick(lang, "数据", "Data"),
-            Tab::Overlay => pick(lang, "游戏悬浮窗", "Game overlay"),
+            Tab::Shown => pick(lang, "显示内容", "Content"),
+            Tab::Data => pick(lang, "数据与提醒", "Data and alerts"),
+            Tab::Overlay => pick(lang, "悬浮窗", "Overlay"),
         }
     }
 }
 
-/// The pages' list as it reads: each page, and the components' heading the monitor's and what plays come under
-/// (pressed, it shows the first of them).
+/// The pages' list as it reads: each page, and over the components' own pages their heading (a name, not a page).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum NavItem {
     Page(Page),
     Components,
 }
 
-const NAV_ITEMS: [NavItem; 6] = [
+const NAV_ITEMS: [NavItem; 8] = [
     NavItem::Page(Page::Layout),
+    NavItem::Page(Page::Look),
     NavItem::Components,
     NavItem::Page(Page::Monitor),
     NavItem::Page(Page::Workbench),
     NavItem::Page(Page::Music),
+    NavItem::Page(Page::Phone),
     NavItem::Page(Page::General),
 ];
 
@@ -620,40 +631,31 @@ impl NavItem {
     fn name(self, lang: Lang) -> &'static str {
         match self {
             NavItem::Page(Page::Layout) => pick(lang, "布局", "Layout"),
+            NavItem::Page(Page::Look) => pick(lang, "外观", "Appearance"),
             NavItem::Components => pick(lang, "组件", "Components"),
             NavItem::Page(Page::Monitor) => pick(lang, "监控", "Monitor"),
             NavItem::Page(Page::Workbench) => pick(lang, "工作台", "Workbench"),
             NavItem::Page(Page::Music) => pick(lang, "音乐", "Music"),
+            NavItem::Page(Page::Phone) => pick(lang, "手机互联", "Phone"),
             NavItem::Page(Page::General) => pick(lang, "通用", "General"),
         }
     }
 
-    fn icon(self) -> Icon {
-        match self {
-            NavItem::Page(Page::Layout) => Icon::LayoutGrid,
-            NavItem::Components => Icon::Layers,
-            NavItem::Page(Page::Monitor) => Icon::Gauge,
-            NavItem::Page(Page::Workbench) => Icon::Briefcase,
-            NavItem::Page(Page::Music) => Icon::Music,
-            NavItem::Page(Page::General) => Icon::Settings,
-        }
-    }
-
-    /// Whether it is listed under the components' heading, set in.
-    fn under(self) -> bool {
-        matches!(self, NavItem::Page(Page::Monitor | Page::Workbench | Page::Music))
-    }
-
-    /// The page it shows.
-    fn page(self) -> Page {
-        match self {
-            NavItem::Page(page) => page,
-            NavItem::Components => Page::Monitor,
-        }
-    }
 }
 
 impl Page {
+    fn icon(self) -> Icon {
+        match self {
+            Page::Layout => Icon::LayoutGrid,
+            Page::Look => Icon::Palette,
+            Page::Monitor => Icon::Gauge,
+            Page::Workbench => Icon::Briefcase,
+            Page::Music => Icon::Music,
+            Page::Phone => Icon::Smartphone,
+            Page::General => Icon::Settings,
+        }
+    }
+
     fn name(self, lang: Lang) -> &'static str {
         NavItem::Page(self).name(lang)
     }
@@ -671,10 +673,8 @@ enum Field {
     CloseDelay,
     RateUnit,
     ProcessCount,
-    ProcessSort,
     Interval,
     Span,
-    LoadAlert,
     TempAlert,
     /// Set on a slider (see `slider`).
     OverlaySize,
@@ -682,16 +682,15 @@ enum Field {
     PanelSize,
     OverlayLayout,
     OverlayRows,
+    /// When the overlay shows: never, while a game plays, or always.
+    OverlayShow,
     /// The player music is followed from (see `Ui::sources`).
     MusicSource,
-    /// The station's (see `settings::StationSettings`): what is copied kept, how long what is not pinned stays, the
-    /// most it keeps of its own, files kept as a copy too, and what is dragged off it taken off; the files come lately
-    /// listed, and the folders they are not listed from (all listed again).
-    StationHistory,
-    StationRecent,
+    /// The station's (see `settings::StationSettings`): the folders the files come lately are not listed from (all
+    /// listed again), how long what is not pinned stays, files kept as a copy too, and what is dragged off it taken off.
+    /// (What is copied kept, and the files come lately listed, are its items: see `Ui::items_here`.)
     StationHidden,
     StationKeep,
-    StationMost,
     StationCopy,
     StationAfterDrag,
 }
@@ -719,9 +718,6 @@ enum Switch {
     Startup,
     Updates,
     HeatAlert,
-    Overlay,
-    OverlayInGame,
-    /// Whether the overlay's glass blurs what is behind it.
     /// The phone remote.
     Remote,
     /// Whether the remote sets the lights: the program that does, fetched or not.
@@ -775,8 +771,8 @@ enum Target {
     View(Option<String>),
     /// Every screen alike, or each set apart.
     Same,
-    /// A page (or the components' heading), in the pages' list.
-    Nav(NavItem),
+    /// A page, in the pages' list.
+    Nav(Page),
     /// One of the monitor's tabs.
     Tab(Tab),
     /// One of what plays shows (see `Row::Element`).
@@ -835,10 +831,8 @@ enum Row {
     Update,
     Uninstall,
     Quit,
-    /// The phone remote's: where the app is to be had, pairing a phone,
-    /// the code last asked for, and each phone paired (its place in the
-    /// remote's list, and its name).
-    GetApp,
+    /// The phone remote's: pairing a phone (and where the app is to be had), the code last asked for, and each phone
+    /// paired (its place in the remote's list, and its name).
     Pair,
     Code,
     /// Where the remote's page for a phone's browser is.
@@ -850,13 +844,11 @@ enum Row {
 }
 
 /// How tall a group's name is, above its rows.
-const GROUP: f32 = 24.0;
+const GROUP: f32 = 28.0;
 /// How tall the monitor's tabs are, and how far below their names their marker is.
 const TABS_ROW: f32 = 48.0;
 /// How tall the code's own square is, in its row.
 const CODE: f32 = 176.0;
-/// The room for the words beside it: what the row has left.
-const CODE_WORDS: f32 = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE - CODE - 20.0;
 
 /// A module row being dragged: by how far below the row's top it was
 /// taken, and where the pointer is (document DIPs).
@@ -1223,7 +1215,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             settings,
             prefs,
             page: Page::Layout,
-            tab: Tab::Look,
+            tab: Tab::Shown,
             sources: Vec::new(),
             music: super::music::Music::default(),
             example_from: Instant::now(),
@@ -1582,6 +1574,13 @@ impl Ui {
                 Row::Choice(Field::OverFullscreen),
                 Row::Switch(Switch::TearOff),
             ]),
+            (Page::Look, _) => {
+                rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme)]);
+                // (Only a skin that shows what is behind it has it to show live.)
+                if Skin::named(&self.settings.skin).sees_backdrop() {
+                    rows.push(Row::Switch(Switch::Live));
+                }
+            }
             (Page::Monitor, tab) => {
                 rows.push(Row::Tabs);
                 self.monitor_rows(&mut rows, tab);
@@ -1592,28 +1591,22 @@ impl Ui {
                     rows.push(Row::Module(id.clone()));
                     if self.opened(&id) > 0.0 {
                         rows.extend(self.items_here(&id).into_iter().map(|name| Row::Item(id.clone(), name)));
-                        rows.extend(module_fields(&entry.id).iter().map(|field| Row::ModuleChoice(id.clone(), *field)));
+                        rows.extend(self.fields_here(&entry.id).map(|field| Row::ModuleChoice(id.clone(), field)));
                     }
                 }
-                rows.push(Row::Note(pick(
-                    self.lang,
-                    "工作台放手头常用的东西。时间与媒体在监控和工作台里各有一份，分别开关",
-                    "The workbench holds what is at hand. The time and media are in the monitor and in the workbench alike, each switched on its own",
-                )));
             }
             (Page::Music, _) => {
                 rows.push(Row::Choice(Field::MusicSource));
                 rows.extend(super::prefs::items("lyrics").iter().map(|item| Row::Element(item.name)));
                 rows.push(Row::Note(pick(
                     self.lang,
-                    "查找歌词时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
-                    "To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
+                    "在线查找歌词时，会将歌名发送至网易云音乐、QQ 音乐、酷狗或 LRCLIB。本地歌曲优先使用文件内嵌的歌词。同步歌词需要播放器提供播放进度，网易云音乐需安装 InfLink-rs 插件。",
+                    "To find lyrics online, the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A local track uses the lyrics in its file first. Synced lyrics need the player to report its position. NetEase Cloud Music needs the InfLink-rs plugin for that.",
                 )));
             }
+            (Page::Phone, _) => self.remote_rows(&mut rows),
             (Page::General, _) => {
                 rows.push(Row::Choice(Field::Language));
-                rows.push(Row::Group(pick(self.lang, "手机互联", "Phone")));
-                self.remote_rows(&mut rows);
                 rows.push(Row::Group(pick(self.lang, "系统", "System")));
                 // The switches together, then the buttons.
                 rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::Updates), Row::Version]);
@@ -1633,14 +1626,14 @@ impl Ui {
     /// The rows of the monitor's tab `tab`, after the tabs.
     fn monitor_rows(&self, rows: &mut Vec<Row>, tab: Tab) {
         match tab {
-            Tab::Look => rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Columns)]),
             Tab::Shown => {
+                rows.push(Row::Choice(Field::Columns));
                 let module = |rows: &mut Vec<Row>, id: &str| {
                     rows.push(Row::Module(id.to_string()));
                     // A card's rows, while it is open or still closing.
                     if self.opened(id) > 0.0 {
                         rows.extend(self.items_here(id).into_iter().map(|name| Row::Item(id.to_string(), name)));
-                        rows.extend(module_fields(id).iter().map(|field| Row::ModuleChoice(id.to_string(), *field)));
+                        rows.extend(self.fields_here(id).map(|field| Row::ModuleChoice(id.to_string(), field)));
                     }
                 };
                 let (folded, listed): (Vec<&prefs::ModuleEntry>, Vec<&prefs::ModuleEntry>) =
@@ -1659,8 +1652,7 @@ impl Ui {
             }
             Tab::Overlay => {
                 rows.extend([
-                    Row::Switch(Switch::Overlay),
-                    Row::Switch(Switch::OverlayInGame),
+                    Row::Choice(Field::OverlayShow),
                     Row::Slider(Field::OverlaySize),
                     Row::Slider(Field::OverlayClear),
                     Row::Choice(Field::OverlayLayout),
@@ -1678,13 +1670,7 @@ impl Ui {
                     }
                 }
             }
-            Tab::Data => rows.extend([
-                Row::Choice(Field::Interval),
-                Row::Choice(Field::Span),
-                Row::Choice(Field::LoadAlert),
-                Row::Choice(Field::TempAlert),
-                Row::Switch(Switch::HeatAlert),
-            ]),
+            Tab::Data => rows.extend([Row::Choice(Field::Interval), Row::Choice(Field::Span), Row::Choice(Field::TempAlert), Row::Switch(Switch::HeatAlert)]),
         }
     }
 
@@ -1696,12 +1682,8 @@ impl Ui {
             rows.push(Row::Switch(Switch::RemoteScreens));
             // A code shows under the row that asked for it.
             let shown = self.code.as_ref().map(|(_, what)| *what);
-            rows.push(Row::GetApp);
-            if shown == Some(CodeFor::App) {
-                rows.push(Row::Code);
-            }
             rows.push(Row::Pair);
-            if matches!(shown, Some(CodeFor::Pairing | CodeFor::WebPairing)) {
+            if matches!(shown, Some(CodeFor::App | CodeFor::Pairing | CodeFor::WebPairing)) {
                 rows.push(Row::Code);
             }
             if self.web_address.is_some() {
@@ -1777,7 +1759,7 @@ impl Ui {
             let (before, height) = match &row {
                 Row::Title => (0.0, TITLE),
                 Row::Tabs => (0.0, TABS_ROW),
-                Row::Note(words) => (12.0, self.gfx.wrapped_height(words, Font::new(Family::Segoe, 12.0, 400.0), PANE - 2.0 * PAD_SIDE - GUTTER - 8.0) + 8.0),
+                Row::Note(words) => (12.0, self.gfx.wrapped_height(words, Font::new(Family::Segoe, HINT, 400.0), self.cards() - 8.0) + 8.0),
                 Row::Slider(_) => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
                 Row::Library => (if after_heading { 8.0 } else { ROW_GAP }, self.library_height()),
@@ -1786,7 +1768,7 @@ impl Ui {
                 Row::Choice(field) if self.choice_hint(*field).is_some() => {
                     let options = self.choices(*field).1;
                     let words = self.words_height(&row).max(ROW);
-                    let lines = self.choice_lines(&options, Self::choices_room()).len() as f32;
+                    let lines = self.choice_lines(&options, self.choices_room()).len() as f32;
                     (if after_heading { 8.0 } else { ROW_GAP }, if self.stacked(&options) { words + CHOICE_LINE * lines } else { words })
                 }
                 // Inside its module's card, right under the row above.
@@ -1794,17 +1776,17 @@ impl Ui {
                 // Its choices under its name where they do not fit beside it.
                 Row::ModuleChoice(_, field) => {
                     let (name, options, _) = self.choices(*field);
-                    let room = Self::module_choices_room();
+                    let room = self.module_choices_room();
                     let under = if self.beside_name(name, &options, room) { 0.0 } else { CHOICE_LINE * self.choice_lines(&options, room).len() as f32 };
                     (0.0, ITEM_ROW + under)
                 }
-                Row::Choice(field) if self.choice_hint(*field).is_none() && !self.beside_name(self.choices(*field).0, &self.choices(*field).1, Self::choices_room()) => {
-                    let lines = self.choice_lines(&self.choices(*field).1, Self::choices_room()).len() as f32;
+                Row::Choice(field) if self.choice_hint(*field).is_none() && !self.beside_name(self.choices(*field).0, &self.choices(*field).1, self.choices_room()) => {
+                    let lines = self.choice_lines(&self.choices(*field).1, self.choices_room()).len() as f32;
                     (if after_heading { 8.0 } else { ROW_GAP }, ROW + CHOICE_LINE * lines)
                 }
                 // As tall as the code, or as the words beside it where those are taller.
                 Row::Code => {
-                    let words = self.code.as_ref().map_or(0.0, |(_, what)| 22.0 + self.gfx.wrapped_height(&code_words(self.lang, *what, self.web_address.as_deref()).1, Font::new(Family::Segoe, 12.0, 400.0), CODE_WORDS));
+                    let words = self.code.as_ref().map_or(0.0, |(_, what)| 22.0 + self.gfx.wrapped_height(&code_words(self.lang, *what, self.web_address.as_deref()).1, Font::new(Family::Segoe, HINT, 400.0), self.code_words_room()));
                     (ROW_GAP, CODE.max(words) + 2.0 * ROW_SIDE)
                 }
                 Row::Group(_) => (20.0, GROUP),
@@ -1980,7 +1962,7 @@ impl Ui {
     /// into lines in the room it has beside the row's controls; none taller
     /// than a row for a row without a word.
     fn words_height(&self, row: &Row) -> f32 {
-        let width = PANE - 2.0 * PAD_SIDE - GUTTER;
+        let width = self.cards();
         let font = Font::new(Family::Segoe, 14.0, 400.0);
         let button = |text: &str| self.gfx.measure(text, font) + 32.0;
         let (word, room): (Cow<'static, str>, f32) = match row {
@@ -2002,6 +1984,11 @@ impl Ui {
                 Some(word) => (Cow::Borrowed(word), width - ROW_SIDE - CHEVRON_ROOM - 40.0 - 12.0 - ITEM_INSET),
                 None => return 0.0,
             },
+            // (Its word beside the grip, left of its switch and chevron: see `module_row`.)
+            Row::Module(id) => match self.module(id).1 {
+                Some(word) => (Cow::Owned(word), width - ROW_SIDE - CHEVRON_ROOM - 40.0 - 12.0 - ITEM_INSET),
+                None => return 0.0,
+            },
             _ => match self.button_row(row, Instant::now()) {
                 Some((_, word, buttons)) => {
                     let taken: f32 = buttons.iter().map(|(text, ..)| button(text) + 8.0).sum();
@@ -2012,7 +1999,7 @@ impl Ui {
         };
         // A 20 DIP line for the name, 2 apart, the word's lines, and room
         // above and below.
-        22.0 + self.gfx.wrapped_height(&word, Font::new(Family::Segoe, 12.0, 400.0), room.max(40.0)) + 18.0
+        22.0 + self.gfx.wrapped_height(&word, Font::new(Family::Segoe, HINT, 400.0), room.max(40.0)) + 18.0
     }
 
     /// How wide each of a row's choices is.
@@ -2033,15 +2020,30 @@ impl Ui {
     }
 
     /// The room a row's choices have on a line of their own in their card.
-    fn choices_room() -> f32 {
-        PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE
+    fn choices_room(&self) -> f32 {
+        self.cards() - 2.0 * ROW_SIDE
+    }
+
+    /// How wide the list's cards are: wider as the window is (see `CARDS`).
+    fn cards(&self) -> f32 {
+        (CARDS.0 + (self.client().0 - MIN_SIZE.0) * CARDS_GROW).clamp(CARDS.0, CARDS.1)
+    }
+
+    /// The list's column: its side's padding, its cards, and the room past them to the preview.
+    fn pane(&self) -> f32 {
+        PAD_SIDE + self.cards() + LIST_GAP
+    }
+
+    /// The room for the words beside a code: what its row has left.
+    fn code_words_room(&self) -> f32 {
+        self.cards() - 2.0 * ROW_SIDE - CODE - 20.0
     }
 
     /// Whether a row of choices with a word goes on a line of its own under
     /// its name: when beside it, it would leave the word too narrow a column
     /// to read (a few characters to a line).
     fn stacked(&self, options: &[String]) -> bool {
-        Self::choices_room() - self.segmented_width(options) - 16.0 < MIN_WORDS
+        self.choices_room() - self.segmented_width(options) - 16.0 < MIN_WORDS
     }
 
     /// Whether a row of choices named `name` (with no word under it) has them beside its name, `room` across from
@@ -2052,8 +2054,8 @@ impl Ui {
     }
 
     /// The room a row of choices has in a module's card, from where its name begins to where they end.
-    fn module_choices_room() -> f32 {
-        Self::choices_room() + 2.0 * ROW_SIDE - ITEM_INSET - ROW_SIDE - CHEVRON_ROOM
+    fn module_choices_room(&self) -> f32 {
+        self.choices_room() + 2.0 * ROW_SIDE - ITEM_INSET - ROW_SIDE - CHEVRON_ROOM
     }
 
     /// What a row of buttons says, its word, and its buttons, right to left:
@@ -2070,10 +2072,10 @@ impl Ui {
                     Lang::En => format!("Glance {version} is available"),
                 };
                 let (detail, action) = match state {
-                    update::State::Ready => (p("下载并运行已签名的安装程序", "Downloads and runs the signed installer"), p("更新", "Update")),
-                    update::State::Downloading => (p("正在下载安装程序", "Downloading the installer"), p("下载中", "Downloading")),
-                    update::State::Failed => (p("下载失败，请稍后重试", "Download failed; try again later"), p("重试", "Retry")),
-                    update::State::Rejected => (p("签名或版本不符，未运行；请手动下载", "Signature or version did not match; not run. Download it yourself"), p("重试", "Retry")),
+                    update::State::Ready => (p("下载并运行安装程序", "Downloads and runs the installer"), p("更新", "Update")),
+                    update::State::Downloading => (p("正在下载安装程序…", "Downloading the installer…"), p("下载中", "Downloading")),
+                    update::State::Failed => (p("下载失败，请稍后重试", "The download failed. Try again later"), p("重试", "Retry")),
+                    update::State::Rejected => (p("安装程序未通过验证，未运行", "The installer did not pass its check and was not run"), p("重试", "Retry")),
                 };
                 let kind = if state == update::State::Downloading { Button::Quiet } else { Button::Accent };
                 (name, detail, vec![(action, Target::Update, kind)])
@@ -2086,10 +2088,10 @@ impl Ui {
                 };
                 let detail = match update::check() {
                     update::Check::Checking => p("正在检查…", "Checking…"),
-                    update::Check::Answered if update::available().is_some() => p("有新版本，见下方", "A newer one is out; see below"),
-                    update::Check::Answered => p("已是最新", "The latest"),
-                    update::Check::Unanswered => p("没能连上 GitHub 和 Gitee，稍后再试", "GitHub and Gitee did not answer; try later"),
-                    update::Check::Idle => p("还没有检查过", "Not checked yet"),
+                    update::Check::Answered if update::available().is_some() => p("发现新版本", "A newer version is available"),
+                    update::Check::Answered => p("已是最新版本", "Up to date"),
+                    update::Check::Unanswered => p("无法连接更新服务器，请稍后重试", "The update server could not be reached. Try again later"),
+                    update::Check::Idle => p("尚未检查", "Not checked yet"),
                 };
                 let button = if update::check() == update::Check::Checking {
                     (p("检查中", "Checking"), Target::CheckNow, Button::Quiet)
@@ -2100,10 +2102,10 @@ impl Ui {
             }
             Row::Shortcut => {
                 let detail = match (self.recording, self.needs_modifier, self.settings.shortcut) {
-                    (true, true, _) => p("要配合 Ctrl、Alt 或 Win 一起按", "Hold Ctrl, Alt or Win with it"),
-                    (true, false, _) => p("按下新的组合键，Esc 取消", "Press the new keys; Esc to cancel"),
-                    (false, _, None) => p("未设置，点右边的按钮设置", "None; click the button to set one"),
-                    (false, _, Some(_)) if crate::tray::hotkey_taken() => p("已被其他程序占用，请换一个", "Another program is using it; choose another"),
+                    (true, true, _) => p("组合键须包含 Ctrl、Alt 或 Win", "Include Ctrl, Alt or Win"),
+                    (true, false, _) => p("请按下组合键，按 Esc 取消", "Press the keys. Esc cancels"),
+                    (false, _, None) => p("打开或收起面板", "Opens and closes the panel"),
+                    (false, _, Some(_)) if crate::tray::hotkey_taken() => p("该组合键已被其他程序占用，请重新设置", "Another program uses these keys. Choose others"),
                     (false, _, Some(_)) => p("打开或收起面板", "Opens and closes the panel"),
                 };
                 let keys = match (self.recording, self.settings.shortcut) {
@@ -2128,44 +2130,43 @@ impl Ui {
                     (Some(_), _) => (p("正在发送…", "Sending…"), (p("发送中", "Sending"), Target::SendReport, Button::Quiet)),
                     (None, Some(Some(id))) => (
                         match lang {
-                            Lang::Zh => format!("已发送，编号 {id}。向我们提问时请附上这个编号"),
-                            Lang::En => format!("Sent, as {id}. Please quote it when asking us about it"),
+                            Lang::Zh => format!("已发送，编号 {id}。反馈问题时请附上此编号"),
+                            Lang::En => format!("Sent as {id}. Quote it when reporting the problem"),
                         },
                         (p("再发一次", "Send again"), Target::SendReport, Button::Plain),
                     ),
-                    (None, Some(None)) => (p("没有发出去，可以先复制", "It did not get there; copy it instead"), (p("重试", "Retry"), Target::SendReport, Button::Plain)),
-                    (None, None) => (p("硬件识别不对、灯光或显示器控制不了时，发给我们或复制附上", "When hardware is read wrongly or lights or monitors cannot be set: send it to us, or copy it into a report"), (p("发送", "Send"), Target::SendReport, Button::Plain)),
+                    (None, Some(None)) => (p("发送失败，可复制后附在反馈中", "Sending failed. Copy it into a report instead"), (p("重试", "Retry"), Target::SendReport, Button::Plain)),
+                    (None, None) => (p("硬件识别有误，或灯光、显示器无法控制时，可发送或复制诊断信息", "When hardware is read wrongly, or lights or monitors cannot be controlled, send or copy these"), (p("发送", "Send"), Target::SendReport, Button::Plain)),
                 };
                 (p("诊断信息", "Diagnostics"), detail, vec![(action, Target::Diagnostics, Button::Plain), send])
             }
             Row::Uninstall => (
                 p("卸载 Glance", "Uninstall Glance"),
-                p("连同设置一起删除，会先确认", "Removes it and its settings; asks first"),
+                p("卸载程序并删除设置，执行前会再次确认", "Removes Glance and its settings, after asking"),
                 vec![(p("卸载", "Uninstall"), Target::Uninstall, Button::Plain)],
-            ),
-            Row::GetApp => (
-                p("下载手机 APP", "Get the phone app"),
-                p("安卓手机扫码下载；iPhone 暂请使用下方的网页遥控", "Scan with an Android phone to download it; on an iPhone, use the web page below for now"),
-                vec![(if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) { p("收起", "Hide") } else { p("显示二维码", "Show the code") }, Target::GetApp, Button::Plain)],
             ),
             Row::Pair => (
                 p("配对手机", "Pair a phone"),
-                p("每个配对码仅供一部手机使用，10 分钟内有效", "Each code is for one phone, and lasts ten minutes"),
-                vec![(p("用 APP", "For the app"), Target::Pair(false), Button::Accent), (p("用网页", "For the web page"), Target::Pair(true), Button::Plain)],
+                p("安卓手机请先安装 Glance APP，iPhone 请使用网页配对", "On Android, install the Glance app first. On iPhone, pair with the web page"),
+                vec![
+                    (p("用 APP", "With the app"), Target::Pair(false), Button::Accent),
+                    (p("用网页", "With the web"), Target::Pair(true), Button::Plain),
+                    (if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) { p("收起", "Hide") } else { p("下载 APP", "Get the app") }, Target::GetApp, Button::Plain),
+                ],
             ),
             Row::WebPage => (
-                p("重新打开网页遥控", "Open the web page again"),
-                p("已通过网页配对的手机，扫码即可再次打开", "A phone paired by the web page scans this to open it again"),
+                p("网页遥控", "Web remote"),
+                p("已通过网页配对的手机，扫码即可再次打开", "A phone paired with the web page scans this to open it again"),
                 vec![(if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::WebPage) { p("收起", "Hide") } else { p("显示二维码", "Show the code") }, Target::OpenPage, Button::Plain)],
             ),
             Row::Phone(at, name) => (
-                if name.is_empty() { p("一部手机", "A phone") } else { name.clone() },
+                if name.is_empty() { p("未命名的手机", "Unnamed phone") } else { name.clone() },
                 p("已配对", "Paired"),
-                vec![(p("移除", "Remove"), Target::Unpair(at.clone()), Button::Plain)],
+                vec![(p("取消配对", "Unpair"), Target::Unpair(at.clone()), Button::Plain)],
             ),
             Row::Quit => (
                 p("退出 Glance", "Quit Glance"),
-                p("面板和托盘图标都会关闭", "Closes the panel and the tray icon"),
+                p("面板与托盘图标将一并关闭", "Closes the panels and the tray icon"),
                 vec![(p("退出", "Quit"), Target::Quit, Button::Plain)],
             ),
             _ => return None,
@@ -2205,7 +2206,7 @@ impl Ui {
         match field {
             Field::Theme => (
                 pick(lang, "明暗", "Theme"),
-                vec![s("跟随系统", "System"), s("浅色", "Light"), s("深色", "Dark"), s("跟随背景", "Backdrop")],
+                vec![s("跟随系统", "System"), s("浅色", "Light"), s("深色", "Dark"), s("跟随背景", "Match background")],
                 [ThemePref::System, ThemePref::Light, ThemePref::Dark, ThemePref::Backdrop].iter().position(|&t| t == prefs.theme),
             ),
             Field::Language => (
@@ -2227,6 +2228,11 @@ impl Ui {
                 };
                 (pick(lang, "音乐来源", "Music from"), options, chosen)
             }
+            Field::OverlayShow => (
+                pick(lang, "显示悬浮窗", "Show the overlay"),
+                vec![s("关闭", "Off"), s("游戏时", "While playing"), s("始终", "Always")],
+                OVERLAY_SHOWN.iter().position(|&when| when == settings.overlay.shown()),
+            ),
             Field::OverlayRows => (
                 pick(lang, "行数", "Rows"),
                 ROWS.iter().map(|rows| rows.to_string()).collect(),
@@ -2234,16 +2240,16 @@ impl Ui {
             ),
             Field::Anchor => (
                 pick(lang, "面板位置", "Position"),
-                vec![s("鼠标处", "By the mouse"), s("边缘正中", "Centred")],
+                vec![s("鼠标处", "At the pointer"), s("边缘居中", "Centred")],
                 [Anchor::Pointer, Anchor::Center].iter().position(|&a| a == settings.anchor),
             ),
             Field::OverFullscreen => (
                 pick(lang, "全屏游戏中呼出", "Over fullscreen games"),
-                vec![s("不呼出", "Never"), s("仅快捷键", "Shortcut"), s("快捷键和推边缘", "Shortcut and edge")],
+                vec![s("不呼出", "Never"), s("仅快捷键", "Shortcut"), s("快捷键与边缘", "Shortcut and edge")],
                 [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both].iter().position(|&o| o == settings.over_fullscreen),
             ),
             Field::Columns => (
-                pick(lang, "面板栏数", "Columns"),
+                pick(lang, "面板列数", "Columns"),
                 vec![s("自动", "Auto"), "1".into(), "2".into(), "3".into(), "4".into()],
                 [None, Some(1), Some(2), Some(3), Some(4)].iter().position(|&c| c == settings.columns),
             ),
@@ -2257,43 +2263,35 @@ impl Ui {
                 vec![s("立即", "At once"), seconds("0.5"), seconds("1")],
                 at(&[200, 500, 1000], settings.close_delay_ms),
             ),
-            Field::RateUnit => (pick(lang, "网速单位", "Network unit"), vec!["MB/s".into(), "Mbps".into()], Some(prefs.network.bits as usize)),
+            Field::RateUnit => (pick(lang, "网速单位", "Speed unit"), vec!["MB/s".into(), "Mbps".into()], Some(prefs.network.bits as usize)),
             Field::ProcessCount => (
-                pick(lang, "进程显示行数", "Rows of processes"),
+                pick(lang, "显示进程数", "Processes shown"),
                 vec!["5".into(), "8".into(), "12".into()],
                 at(&[5, 8, 12], prefs.processes.count as u64),
             ),
-            Field::ProcessSort => (
-                pick(lang, "进程排序", "Sort processes by"),
-                vec!["CPU".into(), s("内存", "Memory"), s("读写", "I/O"), "GPU".into()],
-                [ProcessSort::Cpu, ProcessSort::Memory, ProcessSort::Io, ProcessSort::Gpu].iter().position(|&p| p == prefs.processes.sort),
-            ),
             Field::Interval => (
-                pick(lang, "刷新间隔", "Refresh every"),
+                pick(lang, "刷新间隔", "Refresh interval"),
                 vec![seconds("0.5"), seconds("1"), seconds("2")],
                 at(&[500, 1000, 2000], settings.interval_ms),
             ),
             Field::Span => (
-                pick(lang, "曲线时长", "Graph spans"),
+                pick(lang, "曲线时长", "Chart span"),
                 vec![seconds("30"), minutes("1"), minutes("2"), minutes("5")],
                 at(&[30, 60, 120, 300], prefs.chart_seconds as u64),
             ),
             Field::OverlaySize | Field::OverlayClear | Field::PanelSize => (self.slider(field).0, Vec::new(), None),
-            Field::LoadAlert => (pick(lang, "负载警示", "Load alert"), vec!["70%".into(), "85%".into(), "95%".into()], at(&[70, 85, 95], prefs.hot_load as u64)),
-            Field::StationHistory => (pick(lang, "最近复制", "Recently copied"), vec![s("记录", "Kept"), s("不记录", "Not kept")], Some(usize::from(!settings.station.history))),
-            Field::StationRecent => (pick(lang, "最近文件", "Recent files"), vec![s("列出", "Listed"), s("不列出", "Not listed")], Some(usize::from(!settings.station.recent))),
-            Field::StationHidden => match settings.recent_hidden.len() {
-                0 => (pick(lang, "不列出的文件夹", "Folders not listed"), vec![s("没有", "None")], Some(0)),
-                n => (pick(lang, "不列出的文件夹", "Folders not listed"), vec![if lang == Lang::Zh { format!("{n} 个") } else { format!("{n}") }, s("全部恢复列出", "List them all again")], Some(0)),
-            },
+            // (Shown only while there are any: see `rows`.)
+            Field::StationHidden => {
+                let n = settings.recent_hidden.len();
+                (pick(lang, "不列出的文件夹", "Folders not listed"), vec![if lang == Lang::Zh { format!("{n} 个") } else { format!("{n}") }, s("全部恢复", "List all again")], Some(0))
+            }
             Field::StationKeep => (
-                pick(lang, "未固定的项目保留", "Unpinned things stay"),
+                pick(lang, "未固定项目保留", "Unpinned items kept"),
                 vec![s("1 天", "1 day"), s("7 天", "7 days"), s("30 天", "30 days")],
                 at(&STATION_DAYS.map(u64::from), u64::from(settings.station.keep_days)),
             ),
-            Field::StationMost => (pick(lang, "副本最多占用", "Copies take at most"), STATION_GB.iter().map(|gb| format!("{gb} GB")).collect(), at(&STATION_GB.map(u64::from), u64::from(settings.station.most_gb))),
-            Field::StationCopy => (pick(lang, "拖进来的文件", "Files dragged in"), vec![s("只记位置", "Where they are"), s("保留副本", "Kept as a copy")], Some(usize::from(settings.station.always_copy))),
-            Field::StationAfterDrag => (pick(lang, "拖出去以后", "Once dragged off"), vec![s("留在中转站", "Kept on it"), s("从中转站移除", "Taken off it")], Some(usize::from(settings.station.remove_after_drag))),
+            Field::StationCopy => (pick(lang, "拖入的文件", "Files dropped in"), vec![s("仅记位置", "Linked"), s("保留副本", "Copied")], Some(usize::from(settings.station.always_copy))),
+            Field::StationAfterDrag => (pick(lang, "拖出以后", "Once dragged out"), vec![s("保留", "Kept"), s("移除", "Removed")], Some(usize::from(settings.station.remove_after_drag))),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
                 vec!["75 °C".into(), "85 °C".into(), "95 °C".into()],
@@ -2310,6 +2308,7 @@ impl Ui {
             Field::Anchor => settings.anchor = [Anchor::Pointer, Anchor::Center][index],
             Field::OverlayLayout => settings.overlay.layout = [Layout::Card, Layout::Strip][index],
             Field::OverlayRows => settings.overlay.rows = ROWS[index],
+            Field::OverlayShow => settings.overlay.show(OVERLAY_SHOWN[index]),
             Field::MusicSource => {
                 settings.music_source = index.checked_sub(1).and_then(|at| self.sources.get(at)).map(|(id, name)| crate::settings::MusicSource { id: id.clone(), name: name.clone() });
             }
@@ -2319,18 +2318,13 @@ impl Ui {
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
             Field::RateUnit => prefs.network.bits = index == 1,
             Field::ProcessCount => prefs.processes.count = [5, 8, 12][index],
-            Field::ProcessSort => prefs.processes.sort = [ProcessSort::Cpu, ProcessSort::Memory, ProcessSort::Io, ProcessSort::Gpu][index],
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
-            Field::LoadAlert => prefs.hot_load = [70.0, 85.0, 95.0][index],
             Field::OverlaySize | Field::OverlayClear | Field::PanelSize => {}
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
-            Field::StationHistory => settings.station.history = index == 0,
-            Field::StationRecent => settings.station.recent = index == 0,
             Field::StationHidden if index == 1 => settings.recent_hidden.clear(),
             Field::StationHidden => {}
             Field::StationKeep => settings.station.keep_days = STATION_DAYS[index],
-            Field::StationMost => settings.station.most_gb = STATION_GB[index],
             Field::StationCopy => settings.station.always_copy = index == 1,
             Field::StationAfterDrag => settings.station.remove_after_drag = index == 1,
         }
@@ -2454,19 +2448,14 @@ impl Ui {
         match field {
             Field::MusicSource => Some(pick(
                 self.lang,
-                "自动时，音乐组件只跟随音乐播放器，视频不算。浏览器无法区分音乐和视频，在网页上听歌时请在这里选择浏览器。时间与媒体仍然跟随任何正在播放的内容",
-                "Automatic, the music component follows music players, not videos. A browser does not tell music from video: to follow music in a web page, choose the browser here. The time and media still follow whatever plays",
+                "自动时仅跟随音乐播放器。在网页中听歌时，请选择所用的浏览器。时间与媒体不受此项影响",
+                "Automatic follows music players only. For music in a web page, choose the browser. The time and media are not affected",
             )),
-            Field::Anchor => Some(pick(self.lang, "面板沿屏幕边缘弹出，出现在鼠标所在的位置，或边缘正中", "Along the edge: where the mouse is, or in the middle")),
-            Field::Push => Some(pick(
-                self.lang,
-                "鼠标移到实线边后再往外推一下就会打开；力度越重越不容易误触",
-                "Move the mouse to a solid edge and push on: the panel opens. Firmer is harder to set off by accident",
-            )),
+            Field::Push => Some(pick(self.lang, "鼠标抵住屏幕边缘后再向外推，即可呼出面板。力度越重，越不易误触", "Push the pointer on past the screen's edge to open the panel. Firmer is harder to set off by accident")),
             Field::OverFullscreen => Some(pick(
                 self.lang,
-                "全屏和无边框全屏的游戏都算。全屏模式的游戏会暂时切出，收起面板后自动回来",
-                "Fullscreen and borderless games alike. A game in exclusive fullscreen steps out until the panel closes",
+                "包括独占全屏与无边框全屏的游戏。独占全屏的游戏会暂时切出，收起面板后自动恢复",
+                "Exclusive and borderless fullscreen games alike. An exclusive one steps out until the panel closes",
             )),
             _ => None,
         }
@@ -2478,13 +2467,13 @@ impl Ui {
         let p = |zh, en| pick(lang, zh, en);
         let (name, hint, on) = match switch {
             Switch::Live => (
-                p("背景实时刷新", "Live backdrop"),
-                Some(p("玻璃与亚克力材质背后的画面将实时更新；背景变化时，会占用一定的处理器与显卡资源", "What shows behind glass and acrylic is updated in real time; while the background changes, some processor and graphics resources are used")),
+                p("背景实时刷新", "Live background"),
+                Some(p("玻璃背后的画面随桌面实时更新，背景变化时会占用一定的处理器与显卡资源", "What shows through the glass follows the desktop as it changes, at some cost in processor and graphics time")),
                 self.settings.live_backdrop,
             ),
             Switch::TearOff => (
                 p("拖出面板成为小组件", "Drag the panel off as a widget"),
-                Some(p("按住面板拖离屏幕边缘，即可将其转为桌面小组件；关闭后，拖动面板将不再生效", "Drag the panel away from the screen edge to turn it into a desktop widget; when off, dragging the panel has no effect")),
+                Some(p("按住面板拖离屏幕边缘，即可将其放在桌面上", "Drag the panel away from the screen's edge to keep it on the desktop")),
                 self.settings.tear_off,
             ),
             // Only a copy no ordinary program can replace (one the installer
@@ -2492,57 +2481,44 @@ impl Ui {
             Switch::Startup => (
                 p("开机时启动", "Start with Windows"),
                 (!self.may_autostart).then(|| {
-                    p("当前安装位置不受保护，无法启用；点击查看原因", "Unavailable in this location; click for details")
+                    p("当前安装位置不受保护，无法启用。点击查看原因", "Unavailable in this location. Click for details")
                 }),
                 self.autostart,
             ),
-            Switch::Overlay => (
-                p("悬浮窗", "Overlay"),
-                Some(p("始终显示在屏幕上。可拖动调整位置，滚轮调透明度；鼠标移到它上面会出现按钮：锁定位置、鼠标穿透、关闭和设置", "Always on screen. Drag to move; the wheel sets how clear it is; the pointer over it brings its buttons: lock, click-through, close and settings")),
-                self.settings.overlay.on,
-            ),
-            Switch::OverlayInGame => (
-                p("游戏时自动显示", "Show while playing"),
-                Some(p(
-                    "全屏游戏运行期间显示，游戏结束后隐藏。帧率、1% low 与帧时间仅在游戏期间显示",
-                    "Shown while a fullscreen game runs, hidden when it ends. Frame rate, 1% low and frame time show only during a game",
-                )),
-                self.settings.overlay.in_game,
-            ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
-                Some(p("达到温度警示值 30 秒后从托盘提醒", "A tray warning after 30 s at the alert")),
+                Some(p("CPU 或 GPU 温度持续 30 秒达到警示值时，通过托盘通知", "A tray notice once the CPU or a GPU has been at the alert for 30 seconds")),
                 self.settings.heat_alert,
             ),
             Switch::RemoteLights => {
                 let hint = if self.fetching.is_some() {
-                    p("正在处理，下载需要一些时间…", "Working; the download takes a moment…")
+                    p("正在下载，请稍候…", "Downloading…")
                 } else if self.fetch_failed {
-                    p("下载未成功，请稍后重试", "The download did not succeed; try again later")
+                    p("下载失败，请稍后重试", "The download failed. Try again later")
                 } else {
-                    p("主板、显卡等的灯光由开源软件 OpenRGB 控制。首次开启时将从其官方地址下载（约 22 MB）；关闭后不再控制灯光，并删除已下载的 OpenRGB", "A board's and a card's lights are set through OpenRGB, an open-source program. Turned on first, it is downloaded from its own project (about 22 MB); turned off, those lights are left alone and the download is removed")
+                    p("主板、显卡等的 RGB 灯光通过开源软件 OpenRGB 控制。开启时从其官方地址下载（约 22 MB），关闭时删除", "Board and card RGB lights are set through OpenRGB, an open-source program. Turned on, it is downloaded from its project (about 22 MB). Turned off, it is removed")
                 };
-                return (p("控制灯光", "Control the lights"), Some(Cow::Borrowed(hint)), self.remote_lights);
+                return (p("RGB 灯光控制", "RGB lighting"), Some(Cow::Borrowed(hint)), self.remote_lights);
             }
             Switch::RemoteScreens => (
                 p("关屏时保持显示器连接", "Keep monitors connected while off"),
                 Some(p(
-                    "适用于显示器同时连接其他电脑、鼠标键盘接在显示器上，或长时间关屏后窗口移至其他屏幕的情况。可单独关闭的显示器照常关闭，其余显示器以黑色画面覆盖并调至最暗，背光保持开启",
-                    "For a monitor that has another computer plugged in too, a mouse or keyboard plugged into a monitor, or windows that move to other screens after a long while dark. A monitor that can be turned off by itself still is; the others are covered in black and made as dim as they go, their backlight still on",
+                    "避免关屏后显示器切换输入源，或窗口移到其他屏幕。可单独关闭的显示器照常关闭，其余显示器改为黑屏并调至最暗，背光保持开启",
+                    "Keeps a monitor from switching its input, or windows from moving to other screens, while it is off. A monitor that can be turned off alone still is. The others go black and as dim as they go, their backlight on",
                 )),
                 self.remote_screens,
             ),
             Switch::Remote => {
                 let hint = if self.remote_there {
-                    p("通过手机关闭屏幕与灯光、调节音量和亮度。开启后将运行一个不提权的辅助程序，仅对本地网络开放", "Screens, lights, volume and brightness from a phone. On, a small program runs (never elevated), open to the local network only")
+                    p("通过手机关闭屏幕与灯光，调节音量与亮度。仅在本地网络中可用", "Screens, lights, volume and brightness from a phone, over the local network only")
                 } else {
-                    p("此版本的 Glance 未附带遥控程序", "This copy of Glance came without the remote")
+                    p("此版本的 Glance 未包含手机互联程序", "This copy of Glance came without the phone remote")
                 };
-                return (p("开启手机互联", "Use the phone"), Some(Cow::Borrowed(hint)), self.remote);
+                return (p("开启手机互联", "Phone remote"), Some(Cow::Borrowed(hint)), self.remote);
             }
             // The version this is, where the user looks for a newer one.
             Switch::Updates => {
-                return (p("自动检查更新", "Check for updates by itself"), Some(Cow::Borrowed(p("每天检查一次，同时向 Glance 的网站告知当前版本，用于统计使用情况；不含任何可识别这台电脑的信息", "Once a day; Glance's site is told this version, for its count of how many run. Nothing that tells this PC from another"))), self.settings.check_updates);
+                return (p("自动检查更新", "Check for updates"), Some(Cow::Borrowed(p("每天检查一次，并向 Glance 网站告知当前版本，用于统计使用情况。不包含可识别这台电脑的信息", "Once a day. Glance's site is told this version, to count how many run it. Nothing that tells this PC from another"))), self.settings.check_updates);
             }
         };
         (name, hint.map(Cow::Borrowed), on)
@@ -2575,14 +2551,6 @@ impl Ui {
             Switch::TearOff => settings.tear_off ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
-            Switch::Overlay => {
-                settings.overlay.on ^= true;
-                settings.overlay.offered = true;
-            }
-            Switch::OverlayInGame => {
-                settings.overlay.in_game ^= true;
-                settings.overlay.offered = true;
-            }
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;
@@ -2637,17 +2605,17 @@ impl Ui {
             title: pick(lang, "发送诊断信息", "Send diagnostics"),
             intro: pick(
                 lang,
-                "下面是将要发送给 Glance（glancepc.com）的全部内容：你写的话、你添加的截图，和最下面的诊断信息（这台电脑的硬件、Glance 读到的数值和它最近的日志）。不包含你的文件、账号或网络地址。",
+                "以下是将发送至 Glance（glancepc.com）的全部内容：问题描述、所添加的截图，以及底部的诊断信息（本机硬件、Glance 读取的数值及近期日志）。不包含任何文件、账号或网络地址。",
                 "Below is all that would be sent to Glance (glancepc.com): what you write, the pictures you add, and the diagnostics at the bottom (this PC's hardware, what Glance reads of it, and Glance's recent log). Nothing of your files, accounts or network address.",
             ),
             own: Some(super::ask::Own {
-                words: pick(lang, "你想说的话（可不填）", "Your own words (may be left empty)"),
-                hint: pick(lang, "比如：主板温度没有显示；风扇转速和别的软件里看到的不一样", "For instance: the board's temperature is missing; a fan's speed is not what another program shows"),
-                pictures: pick(lang, "截图（可不添，最多 3 张）", "Pictures (if you like, up to 3)"),
+                words: pick(lang, "问题描述（选填）", "Your own words (may be left empty)"),
+                hint: pick(lang, "例如：主板温度未显示，或风扇转速与其他软件不一致", "For instance: the board's temperature is missing, or a fan's speed differs from another program's"),
+                pictures: pick(lang, "截图（选填，最多 3 张）", "Pictures (if you like, up to 3)"),
                 add: pick(lang, "添加截图", "Add a picture"),
-                ways: pick(lang, "点击选择、拖进窗口，或按 Ctrl+V 粘贴", "Click to choose one, drop it here, or paste it with Ctrl+V"),
-                paste: pick(lang, "粘贴剪贴板里的截图", "Paste the clipboard's"),
-                waiting: pick(lang, "剪贴板里有截图，按 Ctrl+V 即可粘贴", "There is a picture on the clipboard: Ctrl+V pastes it"),
+                ways: pick(lang, "点击选择、拖入窗口，或按 Ctrl+V 粘贴", "Click to choose one, drop it here, or paste it with Ctrl+V"),
+                paste: pick(lang, "粘贴剪贴板中的截图", "Paste the clipboard's"),
+                waiting: pick(lang, "剪贴板中有截图，按 Ctrl+V 即可粘贴", "There is a picture on the clipboard: Ctrl+V pastes it"),
                 kinds: pick(lang, "图片", "Pictures"),
             }),
             sent: Some((pick(lang, "诊断信息", "Diagnostics"), &report)),
@@ -2674,37 +2642,37 @@ impl Ui {
         let p = |zh, en| pick(lang, zh, en).to_string();
         if let Some(group) = id.strip_prefix(OVERLAY) {
             return match group {
-                "frames" => (p("帧率", "Frame rate"), Some(p("游戏时显示，其余时候显示“—”", "While a game plays; “—” otherwise"))),
+                "frames" => (p("帧率", "Frame rate"), Some(p("没有游戏运行时显示“—”", "“—” while no game runs"))),
                 "cpu" => ("CPU".into(), None),
                 "gpu" => ("GPU".into(), None),
                 "memory" => (p("内存", "Memory"), None),
                 "vram" => (p("显存", "Video memory"), None),
                 "network" => (p("网速", "Network"), None),
-                "clock" => (p("时间", "Time"), Some(p("现在几点", "The time of day"))),
-                _ => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音，静音时标红", "Whether the default microphone is muted: red while it is"))),
+                "clock" => (p("时间", "Time"), None),
+                _ => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音", "Whether the default microphone is muted"))),
             };
         }
         match id {
             "cpu" => ("CPU".into(), Some(info.cpu_name.clone())),
             _ if id.starts_with("gpu:") => ("GPU".into(), info.gpu_of(id).map(|i| info.gpus[i].name.clone())),
             "memory" => (p("内存", "Memory"), info.memory_modules.clone()),
-            "network" => (p("网络", "Network"), Some(info.network_adapter.clone().unwrap_or_else(|| p("所有物理网卡的上下行速度", "Traffic over every physical adapter")))),
+            "network" => (p("网络", "Network"), Some(info.network_adapter.clone().unwrap_or_else(|| p("所有物理网卡的上传与下载速度", "Upload and download over every physical adapter")))),
             "disk" => (p("磁盘", "Disk"), (!info.drives.is_empty()).then(|| info.drives.join(", "))),
-            "processes" => (p("进程", "Processes"), Some(p("占用最多的程序，点表头排序", "The busiest programs; click a heading to sort"))),
-            "storage" => (p("存储", "Storage"), Some(p("各分区的空间", "Space on each drive"))),
+            "processes" => (p("进程", "Processes"), Some(p("占用最多的程序，在面板上点击表头即可排序", "The busiest programs. Click a heading on the panel to sort them"))),
+            "storage" => (p("存储", "Storage"), Some(p("各分区的剩余空间", "Space left on each drive"))),
             // A board whose sensors are not read says so, rather than
             // looking like a switch that does nothing.
             "board" if crate::app().controller.seen.lock().unwrap().board.is_none() => (
                 p("主板", "Motherboard"),
-                Some(p("没有读到这块主板的传感器，原因见“通用”页的诊断信息", "This board's sensors were not read; the diagnostics on the General page say why")),
+                Some(p("未能读取主板传感器，原因见“通用”页中的诊断信息", "This board's sensors could not be read. The diagnostics on the General page say why")),
             ),
             "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
-            "battery" => (p("电池", "Battery"), Some(p("笔记本电脑", "Laptops"))),
-            "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间和它占用的资源", "A fullscreen game's frame rate, frame times and what it uses"))),
-            "docker" => ("Docker".into(), Some(p("运行中的容器各占多少处理器、内存、网络和磁盘，问的是 Docker 当前连接的引擎", "What each container running uses, as the engine Docker's current context points at says"))),
-            "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器和内存占用，只从 Windows 读取，不会启动或唤醒发行版", "WSL 2's processors and memory, read from Windows alone: no distribution is started or kept up"))),
-            "time" => (p("时间与媒体", "Time and media"), Some(p("时间和日期，以及音量和正在播放的内容", "The time and the date, the sound's level and what is playing"))),
-            "station" => (p("中转站", "Station"), Some(p("临时放东西的地方：拖进来的文件、图片和文字，以及最近复制的内容。拖进来的文件只记位置，不复制", "A place to put things for a while: files, pictures and text dragged onto it, and what was copied lately. Files dragged onto it stay where they are"))),
+            "battery" => (p("电池", "Battery"), Some(p("电量、充放电功率与健康度", "Charge, power and health"))),
+            "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间与资源占用", "A fullscreen game's frame rate, frame times and use"))),
+            "docker" => ("Docker".into(), Some(p("运行中容器的处理器、内存、网络与磁盘占用", "What each running container uses of the processor, memory, network and disk"))),
+            "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器与内存占用，不会启动或唤醒发行版", "WSL 2's processor and memory use, without starting or waking a distribution"))),
+            "time" => (p("时间与媒体", "Time and media"), Some(p("时间、日期、音量与正在播放的内容", "The time, the date, the volume and what is playing"))),
+            "station" => (p("中转站", "Station"), Some(p("临时存放拖入的文件、图片、文字，以及最近复制的内容", "Files, pictures and text dropped in for a while, and what was copied lately"))),
             "lyrics" => (
                 p("音乐", "Music"),
                 Some(p(
@@ -2712,9 +2680,9 @@ impl Ui {
                     "What plays: its cover, its track, its controls, how loud, and its lyrics as it plays. To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
                 )),
             ),
-            "notes" => (p("便签", "Notes"), Some(p("随手记下的想法和待办，每条是“文档”中的一个 Markdown 文件，可以贴到桌面", "Thoughts and to-dos noted down, each a Markdown file in Documents, which can be stuck on the desktop"))),
-            "apps" => (p("快捷 App", "Quick launch"), Some(p("常用的程序、文件、文件夹和网址，点击即可打开", "Programs, files, folders and web addresses used often, opened with a click"))),
-            _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
+            "notes" => (p("便签", "Notes"), Some(p("想法与待办，每条保存为一个 Markdown 文件，可放在桌面上", "Thoughts and to-dos, each kept as a Markdown file, which can be put on the desktop"))),
+            "apps" => (p("快捷启动", "Quick launch"), Some(p("常用的程序、文件、文件夹与网址", "Programs, files, folders and web addresses used often"))),
+            _ => (p("系统", "System"), Some(p("开机时长、进程数、线程数与句柄数", "Uptime, processes, threads and handles"))),
         }
     }
 
@@ -2742,6 +2710,9 @@ impl Ui {
 
     /// Whether item `name` of a row's module `id` is chosen.
     fn item_on(&self, id: &str, name: &str) -> bool {
+        if let Some(on) = self.station_item(id, name) {
+            return on;
+        }
         if let Some(bare) = id.strip_prefix(WORKBENCH) {
             return prefs::shows_in(&self.prefs.workbench, bare, name);
         }
@@ -2751,11 +2722,30 @@ impl Ui {
         }
     }
 
+    /// The settings of module `id` (bare) its card lists: the folders not listed only while there are any.
+    fn fields_here(&self, id: &str) -> impl Iterator<Item = Field> + '_ {
+        module_fields(id).iter().copied().filter(|field| *field != Field::StationHidden || !self.settings.recent_hidden.is_empty())
+    }
+
+    /// The station's items (`id` its module, and the workbench's): what is copied kept, and the files come lately
+    /// listed. Of the station's settings, not of what the panel shows (see `settings::StationSettings`).
+    fn station_item(&self, id: &str, name: &str) -> Option<bool> {
+        (id.trim_start_matches(WORKBENCH) == "station").then_some(())?;
+        match name {
+            "history" => Some(self.settings.station.history),
+            "recent" => Some(self.settings.station.recent),
+            _ => None,
+        }
+    }
+
     /// The items of module `id` this machine has shown it can read: only
     /// those are listed.
     fn items_here(&self, id: &str) -> Vec<String> {
         if let Some(bare) = id.strip_prefix(WORKBENCH) {
             return self.items_here(bare);
+        }
+        if id == "station" {
+            return ["history", "recent"].map(String::from).to_vec();
         }
         // An overlay's group of one item has no card: its switch is the item's.
         if let Some(group) = id.strip_prefix(OVERLAY) {
@@ -2856,18 +2846,19 @@ impl Ui {
         match (id.split(':').next().unwrap_or(id), name) {
             ("overlay", "fps") => (p("帧率", "Frame rate"), None),
             ("overlay", "time") => (p("时间", "Time"), None),
-            ("overlay" | "time", "twelve") => (p("12 小时制", "12-hour clock"), Some(p("关闭时为 24 小时制", "Off, a 24-hour clock"))),
-            ("time", "sound") => (p("音量", "Volume"), Some(p("拖动调节音量，可静音", "Dragged to set how loud the sound is; muted too"))),
-            ("time", "media") => (p("正在播放", "Now playing"), Some(p("可暂停、播放和切换曲目", "Paused, played and skipped"))),
-            ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在唱的这一句和下一句。查找时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB", "The line sung now and the next. To find them the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB"))),
-            ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在正在唱的这一句下面", "Under the line sung now, where there is one"))),
-            ("lyrics", "cover") => (p("封面", "Cover"), Some(p("音乐组件显示专辑封面", "The music widget shows the album cover"))),
+            ("station", "history") => (p("记录最近复制", "Keep what is copied"), Some(p("关闭后不再记录，已有记录保留", "Off, nothing more is kept. What was is still there"))),
+            ("station", "recent") => (p("列出最近文件", "List recent files"), None),
+            ("time", "sound") => (p("音量", "Volume"), None),
+            ("time", "media") => (p("正在播放", "Now playing"), None),
+            ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在演唱的一句与下一句", "The line sung now and the next"))),
+            ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在当前歌词下方，否则显示下一句", "Under the line sung now where there is one, else the next line"))),
+            ("lyrics", "cover") => (p("封面", "Cover"), None),
             ("lyrics", "title") => (p("歌名与歌手", "Title and artist"), None),
-            ("lyrics", "spectrum") => (p("律动条", "Spectrum"), Some(p("随音乐跳动的频谱", "Bars moving with the music"))),
-            ("lyrics", "controls") => (p("常驻播放控件", "Controls always shown"), Some(p("关闭时，播放控件在鼠标移入后出现", "Off, the controls show as the pointer comes over the widget"))),
-            ("lyrics", "clear") => (p("无背景", "No background"), Some(p("去掉音乐组件的底色，文字加描边，在任何桌面上都能看清", "The music widget without its ground, its words edged to be read on any desktop"))),
-            ("overlay", "low") => (p("1% low", "1% low"), Some(p("最慢 1% 的帧换算成的帧率", "The slowest 1% of frames, as frames a second"))),
-            ("overlay", "frametime") => (p("帧时间", "Frame time"), Some(p("最近一秒里最慢的一帧", "The slowest frame of the last second"))),
+            ("lyrics", "spectrum") => (p("律动条", "Spectrum"), None),
+            ("lyrics", "controls") => (p("常驻播放控件", "Controls always shown"), Some(p("关闭时，播放控件在鼠标移入后出现", "Off, they show as the pointer comes over it"))),
+            ("lyrics", "clear") => (p("透明背景", "Clear background"), Some(p("去掉底色，文字加描边", "No ground under it, its words edged"))),
+            ("overlay", "low") => (p("1% low", "1% low"), Some(p("最近 10 秒内最慢 1% 的帧换算成的帧率", "The slowest 1% of frames of the last 10 seconds, as frames a second"))),
+            ("overlay", "frametime") => (p("帧时间", "Frame time"), Some(p("最近 1 秒内最长一帧的耗时", "The longest frame of the last second"))),
             ("overlay", "cpu" | "gpu") => (p("占用", "Use"), None),
             ("overlay", "down") => (p("下载", "Download"), None),
             ("overlay", "up") => (p("上传", "Upload"), None),
@@ -2875,24 +2866,21 @@ impl Ui {
             ("overlay", _) if name.ends_with("_power") => (p("功耗", "Power"), None),
             ("network" | "disk", "chart") => (p("速率图表", "Rate chart"), None),
             ("battery", "chart") => (p("电量图表", "Charge chart"), None),
-            ("battery", "power") => (p("功率", "Power"), Some(p("充电或放电的功率；拔掉电源时就是整台电脑的耗电", "Watts going in or out: on battery, what the whole machine draws"))),
-            ("battery", "health") => (p("健康度", "Health"), Some(p("充满时的容量占出厂设计容量的比例", "What it holds when full, against what it was made to hold"))),
+            ("battery", "power") => (p("功率", "Power"), Some(p("充电或放电的功率，使用电池时即为整机功耗", "Watts going in or out. On battery, what the whole machine draws"))),
+            ("battery", "health") => (p("健康度", "Health"), Some(p("满电容量与设计容量之比", "Full charge against the design capacity"))),
             ("game", "chart") => (p("帧率图表", "Frame rate chart"), None),
-            ("game", "low") => (p("1% low", "1% low"), Some(p("最慢 1% 的帧换算成的帧率", "The slowest 1% of frames, as frames a second"))),
-            ("game", "longest") => (p("最长一帧", "Longest frame"), Some(p("最近一秒里最慢的一帧，卡顿时会变大", "The slowest frame of the last second: a stutter shows here"))),
-            ("game", "frametimes") => (
-                p("帧时间图表", "Frame time chart"),
-                Some(p("每秒最长一帧的走势，卡顿是一根尖刺；开着时最长一帧显示在图旁", "The longest frame of each second: a stutter is a spike. With it on, the longest frame shows beside it")),
-            ),
-            ("game", "usage") => (p("游戏占用", "Game's use"), Some(p("这个游戏自己用了多少 CPU 和 GPU", "How much of the CPU and the GPU the game itself uses"))),
-            ("game", "memory") => (p("游戏内存", "Game's memory"), Some(p("这个游戏自己占的内存和显存", "The memory and video memory the game itself holds"))),
-            ("game", "limit") => (p("显卡限制", "GPU limit"), Some(p("显卡是否被功耗墙或温度墙压住了频率（N 卡）", "Whether the GPU's clock is held back by its power or temperature limit (NVIDIA)"))),
-            ("game", "mic") => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音，静音时标红", "Whether the default microphone is muted: red while it is"))),
-            ("game", "time") => (p("游玩时长", "Time played"), Some(p("这次玩了多久，离开不到 5 分钟不重新计时", "How long this session has run; away for under 5 minutes, it carries on"))),
-            ("wsl", "memory") => (p("内存", "Memory"), Some(p("WSL 占用的内存和它最多能用的内存；开着占用图表时画出走势", "What WSL holds of the memory, and the most it may; charted with the usage chart on"))),
+            ("game", "low") => (p("1% low", "1% low"), Some(p("最近 10 秒内最慢 1% 的帧换算成的帧率", "The slowest 1% of frames of the last 10 seconds, as frames a second"))),
+            ("game", "longest") => (p("最长一帧", "Longest frame"), Some(p("最近 1 秒内最长一帧的耗时，卡顿时数值变大", "The longest frame of the last second. A stutter raises it"))),
+            ("game", "frametimes") => (p("帧时间图表", "Frame time chart"), Some(p("每秒最长一帧的走势，卡顿显示为尖峰", "The longest frame of each second. A stutter shows as a spike"))),
+            ("game", "usage") => (p("游戏占用", "Game's use"), Some(p("游戏进程自身的 CPU 与 GPU 占用", "The CPU and GPU the game itself uses"))),
+            ("game", "memory") => (p("游戏内存", "Game's memory"), Some(p("游戏进程自身占用的内存与显存", "The memory and video memory the game itself holds"))),
+            ("game", "limit") => (p("显卡限制", "GPU limit"), Some(p("NVIDIA 显卡的频率是否受功耗或温度限制", "Whether an NVIDIA GPU's clock is held back by its power or temperature limit"))),
+            ("game", "mic") => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音", "Whether the default microphone is muted"))),
+            ("game", "time") => (p("游玩时长", "Time played"), Some(p("本次游戏的时长，中断不足 5 分钟时继续计时", "This session's length. A break under 5 minutes carries on"))),
+            ("wsl", "memory") => (p("内存", "Memory"), Some(p("已用内存与内存上限", "Memory used, and the most it may use"))),
             ("wsl", "distros") => (p("运行中的发行版", "Distributions running"), None),
-            ("wsl", "gpu") => ("GPU", Some(p("WSL 里的程序（CUDA、图形界面等）占用的 GPU", "The GPU that programs in WSL use (CUDA, their windows)"))),
-            (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后只显示数字，面板更紧凑", "Off, the figures alone: a more compact panel"))),
+            ("wsl", "gpu") => ("GPU", Some(p("WSL 中的程序占用的 GPU", "The GPU programs in WSL use"))),
+            (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后仅显示数值", "Off, the figures alone"))),
             ("system", "uptime") => (p("开机时长", "Uptime"), None),
             ("system", "processes") => (p("进程数", "Processes"), None),
             ("system", "threads") => (p("线程数", "Threads"), None),
@@ -2901,24 +2889,23 @@ impl Ui {
             (_, "clock") => (p("频率", "Clock"), None),
             (_, "power") => (p("功耗", "Power"), None),
             (_, "ccds") => (p("各 CCD 温度", "Each CCD's temperature"), None),
-            (_, "threads") => (p("线程", "Threads"), Some(p("每个线程的占用", "Each thread's load"))),
+            (_, "threads") => (p("各线程占用", "Each thread"), None),
             (_, "vram") => (p("显存", "Video memory"), None),
             (_, "fan") => (p("风扇", "Fan"), None),
-            (_, "hotspot") => (p("热点温度", "Hot spot"), Some(p("芯片上最热一点的温度；只有驱动单独提供它的显卡才有", "The warmest point of the chip, on the cards whose driver says it apart"))),
-            (_, "shared") => (p("共享显存", "Shared memory"), Some(p("从内存借用的部分", "Borrowed from system memory"))),
-            (_, "engines") => (p("各引擎", "Engines"), Some(p("3D、复制、视频编解码", "3D, copy, video"))),
+            (_, "hotspot") => (p("热点温度", "Hot spot"), Some(p("芯片上最高一点的温度", "The warmest point of the chip"))),
+            (_, "shared") => (p("共享显存", "Shared memory"), Some(p("显卡占用的系统内存", "System memory the GPU uses"))),
+            (_, "engines") => (p("各引擎", "Engines"), Some(p("3D、复制与视频编解码", "3D, copy and video"))),
             (_, "dimms") => (p("内存条温度", "Module temperatures"), None),
-            ("memory", "speed") => (p("内存频率", "Memory speed"), Some(p("内存当前的运行频率；低于内存条的额定频率时一并显示，多半是 XMP 或 EXPO 没打开", "What the memory runs at; below what the modules are rated for, that too (XMP or EXPO off, often)"))),
+            ("memory", "speed") => (p("内存速率", "Memory speed"), Some(p("低于额定速率时一并显示额定值", "With the rated speed too, where it runs below it"))),
             (_, "committed") => (p("已提交", "Committed"), None),
             (_, "cached") => (p("缓存", "Cached"), None),
             (_, "adapter") => (p("网卡型号", "Adapter"), None),
-            (_, "wifi") => (p("Wi-Fi 名称", "Wi-Fi name"), Some(p("连接的无线网络；Windows 要求打开“定位服务”才提供", "The wireless network it is on; Windows tells it only with its location service on"))),
-            (_, "address") => (p("地址", "Address"), None),
+            (_, "wifi") => (p("Wi-Fi 名称", "Wi-Fi name"), Some(p("需要开启 Windows 定位服务", "Needs Windows' location service on"))),
+            (_, "address") => (p("IP 地址", "IP address"), None),
             (_, "link") => (p("链路速度", "Link speed"), None),
             (_, "totals") => (p("开机以来的流量", "Traffic since boot"), None),
             (_, "drives") => (p("各硬盘温度", "Drive temperatures"), None),
             (_, "active") => (p("活动时间", "Active time"), None),
-            (_, "scale") => (p("满刻度", "Chart scale"), Some(p("曲线图顶端代表的速度", "The rate the top of the chart stands for"))),
             _ => (p("其他", "Other"), None),
         }
     }
@@ -2961,7 +2948,7 @@ impl Ui {
 
     fn press(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
-        if self.page == Page::General && self.press_phone(x, y) {
+        if self.page == Page::Phone && self.press_phone(x, y) {
             return;
         }
         self.pressed = self.hovered();
@@ -3101,7 +3088,7 @@ impl Ui {
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
             Target::ClearShortcut => self.clear_shortcut(),
-            Target::Nav(item) => self.turn_to(item.page()),
+            Target::Nav(page) => self.turn_to(page),
             Target::Tab(tab) => self.turn_tab(tab),
             Target::Element(name) => {
                 let on = self.item_on("lyrics", name);
@@ -3128,6 +3115,10 @@ impl Ui {
             Target::Item(id, name) if self.module_on(&id) => {
                 let on = self.item_on(&id, &name);
                 match (id.strip_prefix(OVERLAY), id.strip_prefix(WORKBENCH)) {
+                    _ if self.station_item(&id, &name).is_some() => match name.as_str() {
+                        "history" => self.settings.station.history = !on,
+                        _ => self.settings.station.recent = !on,
+                    },
                     (Some(group), _) => super::overlay::set_item(&mut self.settings.overlay.groups, group, &name, !on),
                     (None, Some(bare)) => prefs::set_item_in(&mut self.prefs.workbench, bare, &name, !on),
                     (None, None) => self.prefs.set_item(&id, &name, !on),
@@ -3186,7 +3177,10 @@ impl Ui {
     /// Every focus stop, in the order the list shows them (scrolled out of
     /// view or not).
     fn stops(&self) -> Vec<Target> {
-        let pages = NAV_ITEMS.iter().filter(|item| **item != NavItem::Components).map(|item| Target::Nav(*item));
+        let pages = NAV_ITEMS.iter().filter_map(|item| match item {
+            NavItem::Page(page) => Some(Target::Nav(*page)),
+            NavItem::Components => None,
+        });
         let editor = if self.page == Page::Layout { self.editor_stops() } else { Vec::new() };
         pages.chain(self.layout().into_iter()
             .flat_map(|(row, ..)| match row {
@@ -3213,8 +3207,7 @@ impl Ui {
                 Row::Diagnostics => vec![Target::SendReport, Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
-                Row::GetApp => vec![Target::GetApp],
-                Row::Pair => vec![Target::Pair(false), Target::Pair(true)],
+                Row::Pair => vec![Target::Pair(false), Target::Pair(true), Target::GetApp],
                 Row::WebPage => vec![Target::OpenPage],
                 Row::Phone(id, _) => vec![Target::Unpair(id)],
                 Row::Code | Row::Group(_) => vec![],
@@ -3353,7 +3346,7 @@ impl Ui {
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
-            (Row::GetApp, Target::GetApp) | (Row::Pair, Target::Pair(_)) | (Row::WebPage, Target::OpenPage) => true,
+            (Row::Pair, Target::Pair(_) | Target::GetApp) | (Row::WebPage, Target::OpenPage) => true,
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
@@ -3379,12 +3372,12 @@ impl Ui {
     fn wheel(&mut self, delta: i16) {
         let Some((x, y)) = self.pointer else { return };
         // Over the phone's screen, its page is what moves.
-        if let Some((_, k)) = self.phone.at.filter(|(at, _)| self.page == Page::General && x >= at.x && x < at.x + at.w && y >= at.y && y < at.y + at.h) {
+        if let Some((_, k)) = self.phone.at.filter(|(at, _)| self.page == Page::Phone && x >= at.x && x < at.x + at.w && y >= at.y && y < at.y + at.h) {
             self.phone.scroll = (self.phone.scroll - delta as f32 / 120.0 * WHEEL / k).clamp(0.0, self.phone.most);
             self.next_frame = Instant::now();
             return;
         }
-        if !(NAV..NAV + PANE).contains(&x) {
+        if !(NAV..NAV + self.pane()).contains(&x) {
             return;
         }
         let height = self.client().1;
@@ -3603,14 +3596,15 @@ impl Ui {
         // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
         // largest there is, and its knob jumped as the window first showed).
         let creep = self.paint_preview(frame, &palette, width, height);
-        unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, PANE, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, self.pane(), height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         self.paint_list(frame, &palette, now, height);
         unsafe { frame.dc.PopAxisAlignedClip() };
         creep
     }
 
-    /// The pages' list: the window's name, then each page, the one shown lit
-    /// and marked in the accent.
+    /// The pages' list: the window's name, then each page, the one shown lit and marked in the accent. The components'
+    /// own pages come under their heading (a name, not a page), and a rule sets them apart from the phone's and
+    /// Glance's own after them.
     fn paint_nav(&mut self, frame: &Frame, palette: &Palette) {
         let lang = self.lang;
         let hovered = self.hovered_now.clone();
@@ -3619,12 +3613,27 @@ impl Ui {
         let title = Font::new(Family::SegoeDisplay, 20.0, 600.0);
         text_centred(frame, pick(lang, "设置", "Settings"), title, palette.text, left + 8.0, PAD_TOP + 18.0, width, Align::Start);
         let label = Font::new(Family::Segoe, 14.0, 400.0);
-        for (i, item) in NAV_ITEMS.into_iter().enumerate() {
-            // The components' own pages set in under their heading.
-            let indent = if item.under() { NAV_INDENT } else { 0.0 };
-            let r = Rect { x: left + indent, y: PAD_TOP + 52.0 + i as f32 * (NAV_ITEM + 4.0), w: width - indent, h: NAV_ITEM };
-            let target = Target::Nav(item);
-            let (shown, hover) = (item == NavItem::Page(self.page), hovered.as_ref() == Some(&target));
+        let heading = Font::new(Family::Segoe, 12.0, 600.0);
+        let mut y = PAD_TOP + 52.0;
+        for item in NAV_ITEMS {
+            let page = match item {
+                NavItem::Components => {
+                    y += NAV_GAP;
+                    text_centred(frame, item.name(lang), heading, palette.text3, left + 12.0, y + NAV_HEADING / 2.0, width, Align::Start);
+                    y += NAV_HEADING;
+                    continue;
+                }
+                NavItem::Page(page) => page,
+            };
+            if page == Page::Phone {
+                y += NAV_GAP / 2.0;
+                fill(frame, palette.rule, left + 12.0, y - 0.5, width - 24.0, 1.0, 0.0);
+                y += NAV_GAP / 2.0;
+            }
+            let r = Rect { x: left, y, w: width, h: NAV_ITEM };
+            y += NAV_ITEM + 4.0;
+            let target = Target::Nav(page);
+            let (shown, hover) = (page == self.page, hovered.as_ref() == Some(&target));
             if shown || hover {
                 fill(frame, if shown { palette.control } else { palette.hover }, r.x, r.y, r.w, r.h, 6.0);
             }
@@ -3632,10 +3641,10 @@ impl Ui {
                 fill(frame, palette.selection, r.x, r.y + 12.0, 3.0, r.h - 24.0, 1.5);
             }
             let cy = r.y + r.h / 2.0;
-            frame.icon(item.icon(), Point { x: r.x + 22.0, y: cy }, 16.0, palette.text);
+            frame.icon(page.icon(), Point { x: r.x + 22.0, y: cy }, 16.0, palette.text);
             text_centred(frame, item.name(lang), label, palette.text, r.x + 46.0, cy, r.w - 50.0, Align::Start);
             // A newer Glance is out: a dot on the page it is taken from.
-            if item == NavItem::Page(Page::General) && update::available().is_some() {
+            if page == Page::General && update::available().is_some() {
                 fill(frame, palette.selection, r.x + r.w - 20.0, cy - 3.0, 6.0, 6.0, 3.0);
             }
             self.targets.push((r, target));
@@ -3645,7 +3654,7 @@ impl Ui {
     fn paint_list(&mut self, frame: &Frame, palette: &Palette, now: Instant, height: f32) {
         let lang = self.lang;
         let left = NAV + PAD_SIDE;
-        let width = PANE - 2.0 * PAD_SIDE - GUTTER;
+        let width = self.cards();
         let scroll = self.scroll;
         let hovered = self.hovered_now.clone();
         let over = match hovered {
@@ -3654,7 +3663,7 @@ impl Ui {
         };
         self.dots_moving = self.slider_dots.step(now, over, self.sliding.map(|(field, _)| field));
         let label = Font::new(Family::Segoe, 14.0, 400.0);
-        let hint = Font::new(Family::Segoe, 12.0, 400.0);
+        let hint = Font::new(Family::Segoe, HINT, 400.0);
         let mut dragged = None;
         // The diagnostics sent: how that went, once it is over.
         if self.sending.as_ref().is_some_and(|sending| sending.is_finished()) {
@@ -3730,7 +3739,7 @@ impl Ui {
         }
         // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered appears, and its code goes.
         // (Read only once the remote has written them since: looked at, not read, every second.)
-        if self.page == Page::General && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
+        if self.page == Page::Phone && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
             let written = crate::phone::phones_written();
             if written != self.phones_written {
                 let phones = crate::phone::phones();
@@ -3792,25 +3801,25 @@ impl Ui {
                 // Each tab's name, the one shown marked under it in the accent, over a hairline the width of the list.
                 Row::Tabs => {
                     let font = |shown: bool| Font::new(Family::Segoe, 14.0, if shown { 600.0 } else { 400.0 });
+                    // The first tab's name flush with the cards under it, the shown one underlined, no rule across.
                     let base = y + row_height - 8.0;
-                    fill(frame, palette.rule, left, base, width, 1.0, 0.0);
                     let mut x = left;
                     for tab in TABS {
                         let name = tab.name(lang);
                         let shown = tab == self.tab;
-                        let w = frame.gfx.measure(name, font(true)) + 24.0;
+                        let w = frame.gfx.measure(name, font(true));
                         let target = Target::Tab(tab);
                         let hover = hovered.as_ref() == Some(&target);
-                        let r = Rect { x, y, w, h: row_height - 8.0 };
+                        let r = Rect { x: x - 12.0, y, w: w + 24.0, h: row_height - 8.0 };
                         if hover && !shown {
                             fill(frame, palette.hover, r.x, r.y + 4.0, r.w, r.h - 8.0, 6.0);
                         }
-                        text_centred(frame, name, font(shown), if shown { palette.text } else { palette.text2 }, x + 12.0, y + (row_height - 8.0) / 2.0, w - 12.0, Align::Start);
+                        text_centred(frame, name, font(shown), if shown { palette.text } else { palette.text2 }, x, y + (row_height - 8.0) / 2.0, w + 12.0, Align::Start);
                         if shown {
-                            fill(frame, palette.selection, x + 12.0, base - 2.0, w - 24.0, 3.0, 1.5);
+                            fill(frame, palette.selection, x, base - 2.0, w, 3.0, 1.5);
                         }
                         self.targets.push((r, target));
-                        x += w;
+                        x += w + 28.0;
                     }
                 }
                 Row::Element(name) => {
@@ -3879,26 +3888,26 @@ impl Ui {
                     let right = left + width - ROW_SIDE;
                     match self.choice_hint(field) {
                         Some(word) if self.stacked(&options) => {
-                            let lines = self.choice_lines(&options, Self::choices_room()).len() as f32;
+                            let lines = self.choice_lines(&options, self.choices_room()).len() as f32;
                             let words = row_height - CHOICE_LINE * lines;
                             field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + words / 2.0, width - 2.0 * ROW_SIDE);
-                            self.segmented(frame, palette, field, &options, chosen, true, right, y + words + CHOICE_LINE / 2.0 - 8.0, Self::choices_room(), now, &hovered);
+                            self.segmented(frame, palette, field, &options, chosen, true, right, y + words + CHOICE_LINE / 2.0 - 8.0, self.choices_room(), now, &hovered);
                         }
                         Some(word) => {
                             let room = width - 2.0 * ROW_SIDE - self.segmented_width(&options) - 16.0;
                             field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + row_height / 2.0, room);
                             self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
                         }
-                        None if self.beside_name(name, &options, Self::choices_room()) => {
+                        None if self.beside_name(name, &options, self.choices_room()) => {
                             text_centred(frame, name, label, palette.text, left + ROW_SIDE, y + row_height / 2.0, width / 2.0, Align::Start);
                             self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
                         }
                         // (Not beside its name: on lines of their own under it.)
                         None => {
-                            let lines = self.choice_lines(&options, Self::choices_room()).len() as f32;
+                            let lines = self.choice_lines(&options, self.choices_room()).len() as f32;
                             let words = row_height - CHOICE_LINE * lines;
                             text_centred(frame, name, label, palette.text, left + ROW_SIDE, y + words / 2.0, width - 2.0 * ROW_SIDE, Align::Start);
-                            self.segmented(frame, palette, field, &options, chosen, true, right, y + words + CHOICE_LINE / 2.0 - 8.0, Self::choices_room(), now, &hovered);
+                            self.segmented(frame, palette, field, &options, chosen, true, right, y + words + CHOICE_LINE / 2.0 - 8.0, self.choices_room(), now, &hovered);
                         }
                     }
                 }
@@ -3947,7 +3956,7 @@ impl Ui {
                     let color = if active { palette.text } else { palette.text3 };
                     let right = left + width - ROW_SIDE - CHEVRON_ROOM;
                     let targets = self.targets.len();
-                    let room = Self::module_choices_room();
+                    let room = self.module_choices_room();
                     if self.beside_name(name, &options, room) {
                         text_centred(frame, name, label, color, left + ITEM_INSET, y + row_height / 2.0, width / 2.0 - ITEM_INSET, Align::Start);
                         self.segmented(frame, palette, field, &options, chosen, active, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
@@ -3985,11 +3994,11 @@ impl Ui {
                         let (title, word) = code_words(lang, *what, self.web_address.as_deref());
                         let word = word.as_ref();
                         let text_left = x0 + CODE + 20.0;
-                        field_label(frame, palette, title, Some(word), label, hint, text_left, y + row_height / 2.0, CODE_WORDS);
+                        field_label(frame, palette, title, Some(word), label, hint, text_left, y + row_height / 2.0, self.code_words_room());
 
                     }
                 }
-                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit | Row::GetApp | Row::Pair | Row::WebPage | Row::Phone(..) => {
+                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;
@@ -4022,12 +4031,16 @@ impl Ui {
                 }
             }
         }
-        // A thin thumb shows where in the list the view is.
+        // A hairline of a thumb beside the cards shows where in the list the view is, a little wider with the pointer
+        // over the list.
         let content = self.content_height();
         if content > height {
-            let thumb = (height * height / content).max(24.0);
-            let at = (height - thumb) * self.scroll / (content - height);
-            fill(frame, palette.text3.alpha(0.6), NAV + PANE - GUTTER + 2.0, at + 2.0, 3.0, thumb - 4.0, 1.5);
+            let (top, room) = (PAD_TOP, height - 2.0 * PAD_TOP);
+            let thumb = (room * height / content).max(24.0);
+            let at = top + (room - thumb) * self.scroll / (content - height);
+            let over = self.pointer.is_some_and(|(x, _)| (NAV..NAV + self.pane()).contains(&x));
+            let w = if over { 4.0 } else { 2.0 };
+            fill(frame, palette.text3.alpha(if over { 0.7 } else { 0.45 }), NAV + PAD_SIDE + self.cards() + LIST_GAP / 3.0 - w / 2.0, at, w, thumb, w / 2.0);
         }
     }
 
@@ -4038,7 +4051,7 @@ impl Ui {
     #[allow(clippy::too_many_arguments)]
     fn more_row(&mut self, frame: &Frame, palette: &Palette, count: usize, left: f32, y: f32, width: f32, height: f32, now: Instant) {
         let label = Font::new(Family::Segoe, 14.0, 400.0);
-        let hint = Font::new(Family::Segoe, 12.0, 400.0);
+        let hint = Font::new(Family::Segoe, HINT, 400.0);
         card(frame, palette, left, y, width, height, palette.card);
         let cy = y + height / 2.0;
         let turn = self.animate("chevron:more".into(), if self.more_open { 180.0 } else { 0.0 }, SLIDE, now, false);
@@ -4047,7 +4060,7 @@ impl Ui {
         frame.icon(Icon::ChevronDown, Point { x: cx, y: cy }, CHEVRON, palette.text2);
         frame.origin(0.0, 0.0);
         let names: Vec<String> = self.prefs.modules.iter().filter(|entry| self.folded(&entry.id) && prefs::offered(&entry.id)).map(|entry| self.module(&entry.id).0).collect();
-        let title = if self.lang == Lang::Zh { format!("更多模块（{count}）") } else { format!("More modules ({count})") };
+        let title = if self.lang == Lang::Zh { format!("开发工具（{count}）") } else { format!("Developer tools ({count})") };
         let text_left = left + ITEM_INSET;
         field_label_line(frame, palette, &title, Some(&names.join(pick(self.lang, "、", ", "))), label, hint, text_left, cy, cx - 24.0 - text_left);
         self.targets.push((Rect { x: left, y, w: width, h: height }, Target::More));
@@ -4056,14 +4069,14 @@ impl Ui {
     #[allow(clippy::too_many_arguments)]
     fn module_row(&mut self, frame: &Frame, palette: &Palette, id: &str, left: f32, y: f32, width: f32, height: f32, reach: f32, now: Instant, hovered: &Option<Target>, held: bool) {
         let label = Font::new(Family::Segoe, 14.0, 400.0);
-        let hint = Font::new(Family::Segoe, 12.0, 400.0);
+        let hint = Font::new(Family::Segoe, HINT, 400.0);
         if held {
             let shape = Rect { x: left, y, w: width, h: height };
-            let _ = skins::shadows(frame, &[(shape, 6.0)], &[Shadow { y: 4.0, blur: 16.0, spread: 0.0, color: Color::hex(0, 0.12) }]);
+            let _ = skins::shadows(frame, &[(shape, CARD_RADIUS)], &[Shadow { y: 4.0, blur: 16.0, spread: 0.0, color: Color::hex(0, 0.12) }]);
             // Opaque while it passes over the other rows.
-            fill(frame, palette.window, left, y, width, height, 6.0);
+            fill(frame, palette.window, left, y, width, height, CARD_RADIUS);
             card(frame, palette, left, y, width, height, palette.card);
-            stroke_inside(frame, shape, 6.0, palette.selection);
+            stroke_inside(frame, shape, CARD_RADIUS, palette.selection);
         } else {
             // The whole card, its rows inside it in the same shade, as
             // Windows' own settings draw an open one.
@@ -4095,7 +4108,7 @@ impl Ui {
             frame.icon(Icon::ChevronDown, Point { x: cx, y: cy }, CHEVRON, palette.text2);
             frame.origin(0.0, 0.0);
         }
-        field_label_line(frame, palette, &title, detail.as_deref(), label, hint, text_left, cy, switch_left - 12.0 - text_left);
+        field_label(frame, palette, &title, detail.as_deref(), label, hint, text_left, cy, switch_left - 12.0 - text_left);
         let pressed = self.pressed == Some(Target::Module(id.to_string()));
         self.toggle(frame, palette, format!("module:{id}"), on, true, switch_left, cy, now, pressed);
         if !held {
@@ -4560,6 +4573,9 @@ impl Ui {
         };
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, false);
         let (ox, oy) = (area.x + stage_x, area.y + stage_y);
+        let area = self.shown_of(area, k, stage_x, stage_y);
+        let palette = self.palette.clone();
+        fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
         self.stage_picture(frame, area, (ox, oy), k, zoom);
         unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         let (at, scale) = ((ox + pos.0 * k, oy + pos.1 * k), zoom * k);
@@ -4575,34 +4591,39 @@ impl Ui {
         };
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };
+        stroke_inside(frame, area, 8.0, palette.card_stroke);
         (painted.busy || !super::music::heard()).then_some(MUSIC_PREVIEW_PACE)
     }
 
     /// The preview: the panel as it will look over the desktop, running live.
     fn paint_preview(&mut self, frame: &Frame, palette: &Palette, width: f32, height: f32) -> Option<f32> {
         let lang = self.lang;
-        let x0 = NAV + PANE + PAD_SIDE;
+        let x0 = NAV + self.pane();
         let head = Font::new(Family::SegoeDisplay, 20.0, 600.0);
         let title = if self.page == Page::Layout { pick(lang, "屏幕", "Screens") } else { pick(lang, "预览", "Preview") };
         text_centred(frame, title, head, palette.text, x0, PAD_TOP + 18.0, 200.0, Align::Start);
         let detail = match self.page {
             Page::Layout => pick(lang, "屏幕的排列与 Windows 设置一致，桌面为当前壁纸", "The screens as Windows arranges them, over your wallpaper"),
-            Page::General => pick(lang, "手机上的 Glance", "Glance on the phone"),
-            Page::Music => pick(lang, "正在播放的内容，桌面为当前壁纸", "What plays now, over your wallpaper"),
-            _ => pick(lang, "实时数据，桌面为当前壁纸", "Live readings over your wallpaper"),
+            Page::Phone => pick(lang, "手机上的 Glance", "Glance on the phone"),
+            Page::Music => pick(lang, "正在播放的内容", "What plays now"),
+            _ => pick(lang, "实时数据", "Live readings"),
         };
         let title_w = frame.gfx.measure(title, head);
-        let area = Rect { x: x0, y: PAD_TOP + 40.0, w: width - NAV - PANE - 2.0 * PAD_SIDE, h: height - PAD_TOP - 40.0 - PAD_TOP };
+        let area = Rect { x: x0, y: PAD_TOP + 40.0, w: width - x0 - PAD_SIDE, h: height - PAD_TOP - 40.0 - PAD_TOP };
         // (No wider than the preview under it: where it is narrow, cut short with an ellipsis.)
         let detail_x = x0 + title_w + 12.0;
         text_centred(frame, detail, Font::new(Family::Segoe, 12.0, 400.0), palette.text2, detail_x, PAD_TOP + 20.0, (area.x + area.w - detail_x).max(0.0), Align::Start);
         if area.w <= 0.0 || area.h <= 0.0 {
             return None;
         }
-        fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
-        stroke_inside(frame, area, 8.0, palette.card_stroke);
+        // (The panel's and the music's previews frame what of the screen they show: see `shown_of`.)
+        let overlay = self.page == Page::Monitor && self.tab == Tab::Overlay;
+        if overlay || matches!(self.page, Page::Layout | Page::Phone) {
+            fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
+            stroke_inside(frame, area, 8.0, palette.card_stroke);
+        }
 
-        if self.page == Page::Monitor && self.tab == Tab::Overlay {
+        if overlay {
             self.paint_overlay_preview(frame, area);
             return None;
         }
@@ -4612,8 +4633,8 @@ impl Ui {
         if self.page == Page::Layout {
             return self.paint_layout(frame, palette, area, Instant::now());
         }
-        // The general page: the phone app as a phone shows it, in a phone's outline.
-        if self.page == Page::General {
+        // The phone's page: the phone app as a phone shows it, in a phone's outline.
+        if self.page == Page::Phone {
             // (Its fans turn: drawn again some thirty times a second while they do.)
             return self.paint_phone(frame, area).then_some(7.5);
         }
@@ -4635,25 +4656,27 @@ impl Ui {
             (true, _) => (fit, (area.w - sw * fit) / 2.0, (area.h - sh * fit) / 2.0),
             (false, Edge::Left | Edge::Right) => {
                 let k = (area.h / sh).min(area.w / (pw + PREVIEW_MARGIN).min(sw)).min(1.0);
-                // A screen that fits whole, in the middle; one that does
-                // not, its side the panel is on.
-                let x = if sw * k <= area.w {
-                    (area.w - sw * k) / 2.0
-                } else if edge == Edge::Left {
-                    0.0
-                } else {
-                    area.w - sw * k
-                };
-                (k, x, (area.h - sh * k) / 2.0)
+                // A screen that fits whole, at the area's left; one that does not, its side the panel is on.
+                let x = if sw * k <= area.w || edge == Edge::Left { 0.0 } else { area.w - sw * k };
+                (k, x, 0.0)
             }
             // The panel in the middle of the top, with as much desktop either side of it as the sides' previews have
             // beside theirs, and the whole height of the screen under it. (Its whole width shown, a wide screen made
             // the panel small.)
             (false, Edge::Top) => {
                 let k = (area.h / sh).min(area.w / (pw + 2.0 * PREVIEW_MARGIN).min(sw)).min(1.0);
-                (k, (area.w - sw * k) / 2.0, (area.h - sh * k) / 2.0)
+                (k, if sw * k <= area.w { 0.0 } else { (area.w - sw * k) / 2.0 }, 0.0)
             }
         }
+    }
+
+    /// What of the stage shows in `area`, drawn `k` DIPs to one of its own with its corner at `(x, y)` in the area
+    /// (as `staged` places it): the preview's frame is drawn round that, with no empty room in it.
+    fn shown_of(&self, area: Rect, k: f32, x: f32, y: f32) -> Rect {
+        let (sw, sh) = self.stage.size;
+        let (left, top) = (area.x + x.max(0.0), area.y + y.max(0.0));
+        let (right, bottom) = ((area.x + x + sw * k).min(area.x + area.w), (area.y + y + sh * k).min(area.y + area.h));
+        Rect { x: left, y: top, w: right - left, h: bottom - top }
     }
 
     /// The stage's desktop in `area` and, where `edge` is one, the panel showing `prefs` slid out from it, running
@@ -4676,6 +4699,10 @@ impl Ui {
         let history = app.controller.history.read().unwrap();
         let samples = crate::panel::contiguous(&history);
         if samples.is_empty() {
+            if !whole {
+                fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
+                stroke_inside(frame, area, 8.0, self.palette.card_stroke);
+            }
             return (None, Rect { x: area.x, y: area.y, w: area.w, h: area.h });
         }
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
@@ -4711,6 +4738,10 @@ impl Ui {
 
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);
         let (ox, oy) = (area.x + stage_x, area.y + stage_y);
+        let area = if whole { area } else { self.shown_of(area, k, stage_x, stage_y) };
+        if !whole {
+            fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
+        }
         let mask = unsafe {
             frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(area.x, area.y, area.w, area.h), radiusX: 8.0, radiusY: 8.0 })
         };
@@ -4732,6 +4763,9 @@ impl Ui {
         let drawn = self.layers.draw(frame, &picture, local, self.scale * zoom * k);
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+        if !whole {
+            stroke_inside(frame, area, 8.0, self.palette.card_stroke);
+        }
         match drawn {
             Ok(drawn) if drawn.grounded => self.gfx.clear_caches(),
             Ok(_) => {}
@@ -4816,8 +4850,8 @@ fn stroke_outside(frame: &Frame, r: Rect, radius: f32, color: Color, width: f32)
 
 /// A row's card: filled, with a hairline border.
 fn card(frame: &Frame, palette: &Palette, x: f32, y: f32, w: f32, h: f32, color: Color) {
-    fill(frame, color, x, y, w, h, 6.0);
-    stroke_inside(frame, Rect { x, y, w, h }, 6.0, palette.card_stroke);
+    fill(frame, color, x, y, w, h, CARD_RADIUS);
+    stroke_inside(frame, Rect { x, y, w, h }, CARD_RADIUS, palette.card_stroke);
 }
 
 /// One line of text centred on `cy`.
@@ -4875,11 +4909,11 @@ fn code_words(lang: Lang, what: CodeFor, page: Option<&str>) -> (&'static str, C
         CodeFor::Pairing => (pick(lang, "用 Glance APP 扫描", "Scan with the Glance app"), pick(lang, "打开手机上的 Glance，扫描此配对码。10 分钟内有效，仅供一部手机使用", "Open Glance on the phone and scan this code. Good for ten minutes, for one phone")),
         // (The address itself too, to be typed where the code cannot be scanned.)
         CodeFor::WebPage => {
-            let words = pick(lang, "在此前配对时使用的浏览器中打开。电脑的网络地址变更后，原配对随之失效，请通过“用网页”重新配对", "Open it in the browser the phone was paired with. Once this PC's address on the network has changed, that pairing no longer holds: pair again with “For the web page”");
+            let words = pick(lang, "请在此前配对时使用的浏览器中打开。电脑的网络地址变更后，原配对随之失效，请通过“用网页”重新配对", "Open it in the browser the phone was paired with. Once this PC's address on the network changes, that pairing no longer holds. Pair again with “With the web”");
             return (pick(lang, "用手机相机扫描", "Scan with the camera"), Cow::Owned(format!("{}
 {words}", page.unwrap_or_default())));
         }
-        CodeFor::WebPairing => (pick(lang, "用手机相机扫描", "Scan with the camera"), pick(lang, "扫码后将在浏览器中打开，之后可添加到主屏幕。网页未加密，请仅在可信任的网络（如家庭网络）中使用。10 分钟内有效，仅供一部手机使用", "It opens in the browser, and can then be added to the home screen. The page is not encrypted: use it only on a network you trust, such as your home's. Good for ten minutes, for one phone")),
+        CodeFor::WebPairing => (pick(lang, "用手机相机扫描", "Scan with the camera"), pick(lang, "扫码后将在浏览器中打开，之后可添加到主屏幕。网页未加密，请仅在可信任的网络（如家庭网络）中使用。10 分钟内有效，仅供一部手机使用", "It opens in the browser, and can then be added to the home screen. The page is not encrypted. Use it only on a network you trust, such as your home's. Good for ten minutes, for one phone")),
     };
     (title, Cow::Borrowed(words))
 }
@@ -4901,53 +4935,53 @@ fn field_label_line(frame: &Frame, palette: &Palette, label: &str, hint: Option<
 /// A miniature of each skin, drawn the same whichever is active.
 fn skin_miniature(frame: &Frame, skin: Skin, r: Rect) {
     let dc = &frame.dc;
-    let inner = (r.x + 10.0, r.w - 20.0);
-    let cy = r.y + r.h / 2.0;
-    match skin {
-        Skin::Paper => {
-            fill(frame, Color::hex(0xEEF2EC, 1.0), r.x, r.y, r.w, r.h, 6.0);
-            // Three ruled lines, the middle one in the signal colour.
-            for (i, color) in [0x16221E, 0xD23F1C, 0x16221E].into_iter().enumerate() {
-                let y = cy + (i as f32 - 1.0) * 13.5;
-                fill(frame, Color::hex(color, 1.0), inner.0, y - 0.75, inner.1, 1.5, 0.0);
+    // The same desktop under each: a soft gradient, corner to corner.
+    let stops = [
+        D2D1_GRADIENT_STOP { position: 0.0, color: Color::hex(0x7AA7FF, 1.0).d2d() },
+        D2D1_GRADIENT_STOP { position: 0.55, color: Color::hex(0xC79BFF, 1.0).d2d() },
+        D2D1_GRADIENT_STOP { position: 1.0, color: Color::hex(0xFFB38A, 1.0).d2d() },
+    ];
+    let span = (r.w + r.h) * std::f32::consts::FRAC_1_SQRT_2 / 2.0 * std::f32::consts::FRAC_1_SQRT_2;
+    let (cx, my) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+    unsafe {
+        if let Ok(stops) = ID2D1RenderTarget::CreateGradientStopCollection(dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) {
+            let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: cx - span, Y: my - span }, endPoint: Vector2 { X: cx + span, Y: my + span } };
+            if let Ok(brush) = dc.CreateLinearGradientBrush(&line, None, &stops) {
+                let (x, y, w, h) = frame.on_pixels(r.x, r.y, r.w, r.h);
+                dc.FillRoundedRectangle(&rounded(Rect { x, y, w, h }, 6.0), &brush);
             }
+        }
+    }
+    // The same small panel on it, in the skin's own ground, edge and colours: a heading, a reading, and a chart.
+    let panel = Rect { x: r.x + 14.0, y: r.y + 12.0, w: r.w - 28.0, h: r.h - 24.0 };
+    let (text, signal, faint) = match skin {
+        Skin::Paper => {
+            fill(frame, Color::hex(0xEEF2EC, 1.0), panel.x, panel.y, panel.w, panel.h, 2.0);
+            fill(frame, Color::hex(0x16221E, 1.0), panel.x, panel.y, panel.w, 1.5, 0.0);
+            (Color::hex(0x16221E, 1.0), Color::hex(0xD23F1C, 1.0), Color::hex(0x16221E, 0.25))
         }
         Skin::Glass => {
-            let stops = [
-                D2D1_GRADIENT_STOP { position: 0.0, color: Color::hex(0x7AA7FF, 1.0).d2d() },
-                D2D1_GRADIENT_STOP { position: 0.55, color: Color::hex(0xC79BFF, 1.0).d2d() },
-                D2D1_GRADIENT_STOP { position: 1.0, color: Color::hex(0xFFB38A, 1.0).d2d() },
-            ];
-            let span = (r.w + r.h) * std::f32::consts::FRAC_1_SQRT_2 / 2.0 * std::f32::consts::FRAC_1_SQRT_2;
-            let (cx, my) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-            unsafe {
-                if let Ok(stops) = ID2D1RenderTarget::CreateGradientStopCollection(dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) {
-                    let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                        startPoint: Vector2 { X: cx - span, Y: my - span },
-                        endPoint: Vector2 { X: cx + span, Y: my + span },
-                    };
-                    if let Ok(brush) = dc.CreateLinearGradientBrush(&line, None, &stops) {
-                        let (x, y, w, h) = frame.on_pixels(r.x, r.y, r.w, r.h);
-                        dc.FillRoundedRectangle(&rounded(Rect { x, y, w, h }, 6.0), &brush);
-                    }
-                }
-            }
-            for i in 0..3 {
-                let y = cy - 19.0 + i as f32 * 14.0;
-                let pill = Rect { x: inner.0, y, w: inner.1, h: 10.0 };
-                fill(frame, Color::hex(0xFFFFFF, 0.35), pill.x, pill.y, pill.w, pill.h, 5.0);
-                stroke_inside(frame, pill, 5.0, Color::hex(0xFFFFFF, 0.4));
-                fill(frame, Color::hex(0xFFFFFF, 0.9), pill.x + 4.0, pill.y, pill.w - 8.0, 1.0, 0.0);
-            }
+            fill(frame, Color::hex(0xFFFFFF, 0.35), panel.x, panel.y, panel.w, panel.h, 8.0);
+            stroke_inside(frame, panel, 8.0, Color::hex(0xFFFFFF, 0.55));
+            fill(frame, Color::hex(0xFFFFFF, 0.9), panel.x + 8.0, panel.y, panel.w - 16.0, 1.0, 0.0);
+            (Color::hex(0xFFFFFF, 0.95), Color::hex(0xFFFFFF, 0.95), Color::hex(0xFFFFFF, 0.45))
         }
         Skin::Fluent => {
-            fill(frame, Color::hex(0xECEEF2, 1.0), r.x, r.y, r.w, r.h, 6.0);
-            for i in 0..3 {
-                let y = cy - 8.5 + i as f32 * 7.0;
-                let (w, color) = if i == 0 { (inner.1 * 0.6, theme::accent(false)) } else { (inner.1, Color::hex(0xC8CCD2, 1.0)) };
-                fill(frame, color, inner.0, y, w, 3.0, 1.5);
-            }
+            fill(frame, Color::hex(0xF7F7F8, 1.0), panel.x, panel.y, panel.w, panel.h, 6.0);
+            stroke_inside(frame, panel, 6.0, Color::hex(0x000000, 0.08));
+            (Color::hex(0x1A1A1A, 0.8), theme::accent(false), Color::hex(0x1A1A1A, 0.18))
         }
+    };
+    let (x, w) = (panel.x + 8.0, panel.w - 16.0);
+    fill(frame, signal, x, panel.y + 8.0, w * 0.32, 3.0, 1.5);
+    fill(frame, text, x, panel.y + 16.0, w * 0.18, 8.0, 1.5);
+    // The chart: bars rising and falling along its foot.
+    let foot = panel.y + panel.h - 7.0;
+    fill(frame, faint, x, foot, w, 1.0, 0.0);
+    let heights = [4.0, 7.0, 5.0, 9.0, 6.0, 11.0, 8.0, 12.0, 7.0, 10.0];
+    let step = w / heights.len() as f32;
+    for (i, h) in heights.into_iter().enumerate() {
+        fill(frame, signal, x + i as f32 * step + step * 0.25, foot - h, step * 0.5, h, 1.0);
     }
 }
 
@@ -4992,14 +5026,15 @@ mod pictures {
         let out = std::path::PathBuf::from(format!("{}/target/settings", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         let shown = [
-            (Page::Layout, Tab::Look, "layout"),
-            (Page::Monitor, Tab::Look, "monitor-look"),
+            (Page::Layout, Tab::Shown, "layout"),
+            (Page::Look, Tab::Shown, "look"),
             (Page::Monitor, Tab::Shown, "monitor-shown"),
             (Page::Monitor, Tab::Data, "monitor-data"),
             (Page::Monitor, Tab::Overlay, "monitor-overlay"),
-            (Page::Workbench, Tab::Look, "workbench"),
-            (Page::Music, Tab::Look, "music"),
-            (Page::General, Tab::Look, "general"),
+            (Page::Workbench, Tab::Shown, "workbench"),
+            (Page::Music, Tab::Shown, "music"),
+            (Page::Phone, Tab::Shown, "phone"),
+            (Page::General, Tab::Shown, "general"),
         ];
         let scale = with_ui(|ui| ui.scale).unwrap();
         for (w, h) in [MIN_SIZE, SIZE, (1700.0, 900.0)] {

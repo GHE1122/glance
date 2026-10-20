@@ -13,10 +13,11 @@ use crate::settings::{Part, Places, PARTS};
 
 /// The library: a tile for each component, side by side, how tall each is and the room between them; the picture of
 /// the component at its top, how tall, and the room round it.
-const TILE: f32 = 148.0;
-const TILE_GAP: f32 = 8.0;
+/// (The picture, its name and word under it, and its padding above and below.)
+const TILE: f32 = TILE_PAD + TILE_PICTURE + 8.0 + 40.0 + TILE_PAD;
+const TILE_GAP: f32 = 12.0;
 const TILE_PICTURE: f32 = 88.0;
-const TILE_PAD: f32 = 8.0;
+const TILE_PAD: f32 = 12.0;
 /// What plays, drawn as its strip at the least a music widget is wide, made smaller into its picture; the room round
 /// each component in its picture.
 const TILE_MUSIC: (f32, f32) = (240.0, 72.0);
@@ -83,8 +84,8 @@ impl Ui {
     /// The library row's height: its words, then the components' tiles side by side.
     pub(super) fn library_height(&self) -> f32 {
         let (_, word) = self.library_words();
-        let room = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
-        22.0 + self.gfx.wrapped_height(word, Font::new(Family::Segoe, 12.0, 400.0), room) + 14.0 + TILE + ROW_SIDE
+        let room = self.cards() - 2.0 * ROW_SIDE;
+        22.0 + self.gfx.wrapped_height(word, Font::new(Family::Segoe, HINT, 400.0), room) + 14.0 + TILE + ROW_SIDE
     }
 
     fn library_words(&self) -> (&'static str, &'static str) {
@@ -92,8 +93,8 @@ impl Ui {
             pick(self.lang, "组件", "Components"),
             pick(
                 self.lang,
-                "把组件拖到右边屏幕的边上，这条边就能呼出它。每条边放一个组件，同一个组件可以放在好几条边上。拖到已有组件的边上会替换它，从另一条边拖来则两边互换。没有组件的边不呼出",
-                "Drag a component onto an edge of a screen on the right, and that edge opens it. An edge holds one, and a component can be on several edges. Dropped on an edge that holds one, it takes its place; brought from another edge, the two change places. An edge holding none opens nothing",
+                "将组件拖到右侧屏幕的边缘，即可从该边缘呼出。每条边缘放置一个组件，同一组件可放在多条边缘。拖到已有组件的边缘将替换原组件，在两条边缘之间拖动则互换位置",
+                "Drag a component onto a screen's edge on the right to open it from there. Each edge holds one, and a component can be on several. Dropped on an edge that holds one, it replaces it. Dragged between two edges, the two change places",
             ),
         )
     }
@@ -104,7 +105,7 @@ impl Ui {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_library(&mut self, frame: &Frame, palette: &Palette, left: f32, y: f32, width: f32, height: f32, hovered: &Option<Target>) {
         card(frame, palette, left, y, width, height, palette.card);
-        let (label, hint) = (Font::new(Family::Segoe, 14.0, 400.0), Font::new(Family::Segoe, 12.0, 400.0));
+        let (label, hint) = (Font::new(Family::Segoe, 14.0, 400.0), Font::new(Family::Segoe, HINT, 400.0));
         let (name, word) = self.library_words();
         let room = width - 2.0 * ROW_SIDE;
         let head = 22.0 + self.gfx.wrapped_height(word, hint, room) + 14.0;
@@ -251,8 +252,8 @@ impl Ui {
         }
         // The words under the screens: how each kind of edge opens (a line each, side by side where they fit), and
         // under that what a press does, in as many lines as it takes. Measured first: the screens have the rest.
-        let small = Font::new(Family::Segoe, 12.0, 400.0);
-        let legends = [(false, pick(lang, "外边缘：推进去呼出", "Outer edge: push into it")), (true, pick(lang, "两块屏幕相接处：停一下呼出", "Where screens meet: rest on it"))];
+        let small = Font::new(Family::Segoe, HINT, 400.0);
+        let legends = [(false, pick(lang, "外边缘：向外推动呼出", "Outer edge: push past it")), (true, pick(lang, "屏幕相接处：停留片刻呼出", "Where screens meet: rest on it"))];
         let mark = 18.0 + 6.0;
         let mut placed = Vec::new();
         let (mut x, mut row) = (0.0, 0usize);
@@ -265,9 +266,9 @@ impl Ui {
             x += w + 20.0;
         }
         let rest = if shown.is_some() {
-            pick(lang, "点一条边，可以试看它呼出的面板，再点一次收起。底边是任务栏，不放组件", "Press an edge to try the panel it opens, and again to put it away. The bottom is the taskbar's")
+            pick(lang, "点击边缘可预览其面板，再次点击收起。底边为任务栏，不放置组件", "Click an edge to preview its panel, and again to close it. The bottom edge is the taskbar's")
         } else {
-            pick(lang, "点一块屏幕，放大查看。底边是任务栏，不放组件", "Press a screen to see it large. The bottom is the taskbar's")
+            pick(lang, "点击屏幕可放大查看。底边为任务栏，不放置组件", "Click a screen to enlarge it. The bottom edge is the taskbar's")
         };
         let rest_h = frame.gfx.wrapped_height(rest, small, width);
         let foot_h = 12.0 + (row + 1) as f32 * LEGEND_ROW + 4.0 + rest_h + 14.0;

@@ -27,13 +27,14 @@ pub struct Prefs {
     pub processes: ProcessPrefs,
     #[serde(rename = "chartSeconds")]
     pub chart_seconds: f64,
-    #[serde(rename = "hotLoad")]
-    pub hot_load: f32,
     #[serde(rename = "hotTemp")]
     pub hot_temp: f32,
     pub theme: ThemePref,
     pub language: LanguagePref,
 }
+
+/// The load (percent) past which a reading is marked as high: its figure in the signal colour, its chart's line drawn.
+pub const HOT_LOAD: f32 = 85.0;
 
 #[derive(Clone, PartialEq, Debug, Hash, Deserialize, Serialize)]
 pub struct ModuleEntry {
@@ -75,14 +76,14 @@ const GPU: [Item; 9] = [
     item("engines", false),
 ];
 const MEMORY: [Item; 5] = [item("chart", true), item("speed", true), item("dimms", true), item("committed", false), item("cached", false)];
-const NETWORK: [Item; 7] = [item("chart", true), item("adapter", false), item("wifi", false), item("address", false), item("link", false), item("totals", false), item("scale", false)];
-const DISK: [Item; 4] = [item("chart", true), item("drives", true), item("active", false), item("scale", false)];
+const NETWORK: [Item; 6] = [item("chart", true), item("adapter", false), item("wifi", false), item("address", false), item("link", false), item("totals", false)];
+const DISK: [Item; 3] = [item("chart", true), item("drives", true), item("active", false)];
 const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 /// Each drive the machine has, by its letter ("volumes:C:"), as the group.
 const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const WSL: [Item; 4] = [item("chart", true), item("memory", true), item("gpu", true), item("distros", true)];
-const TIME: [Item; 4] = [item("twelve", false), item("sound", true), item("media", true), item("lyrics", false)];
+const TIME: [Item; 3] = [item("sound", true), item("media", true), item("lyrics", false)];
 /// What plays, as the music widgets show it (see `music::Shows`): the translation under the line sung now, else the
 /// next line; the cover, what plays, the lines round the one sung now, the spectrum, the controls kept showing, no
 /// ground.
@@ -227,7 +228,6 @@ impl Default for Prefs {
             network: NetworkPrefs::default(),
             processes: ProcessPrefs::default(),
             chart_seconds: 60.0,
-            hot_load: 85.0,
             hot_temp: 85.0,
             theme: ThemePref::System,
             language: LanguagePref::System,
@@ -362,7 +362,7 @@ impl Prefs {
     pub fn hash_drawn(&self, key: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
         self.modules.hash(key);
-        (self.hot_load.to_bits(), self.hot_temp.to_bits(), self.chart_seconds.to_bits()).hash(key);
+        (self.hot_temp.to_bits(), self.chart_seconds.to_bits()).hash(key);
     }
 
     /// The stored preferences, completed with defaults, with the module list
@@ -372,7 +372,6 @@ impl Prefs {
         let mut prefs: Prefs = serde_json::from_value(stored.clone()).unwrap_or_default();
         // A hand-edited file may hold numbers the settings never offer.
         prefs.chart_seconds = prefs.chart_seconds.clamp(10.0, 300.0);
-        prefs.hot_load = prefs.hot_load.clamp(1.0, 100.0);
         prefs.hot_temp = prefs.hot_temp.clamp(1.0, 150.0);
         prefs.processes.count = prefs.processes.count.clamp(1, 30);
         fit(&mut prefs.modules, known, |id| !DEFAULT_OFF.contains(&id));

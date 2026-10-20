@@ -54,6 +54,8 @@ pub enum Icon {
     /// Something dropped here.
     ArrowDown,
     Search,
+    Palette,
+    Smartphone,
 }
 
 impl Icon {
@@ -62,7 +64,7 @@ impl Icon {
     /// "mouse-pointer-2", "panel-right", "undo-2", "refresh-cw", "power", "layers", "clock", "image-plus", "skip-back", "play", "pause", "skip-forward",
     /// "music", "volume-2", "volume-x" (their speaker an older Lucide's, as lines), "layout-grid", "gauge",
     /// "chevron-down", "briefcase", "maximize", "minimize", "file", "link", "inbox", "clipboard", "ellipsis", "list",
-    /// "image", "grip-vertical", "plus", "search";
+    /// "image", "grip-vertical", "plus", "search", "palette", "smartphone";
     /// lucide-static 1.53.0), its
     /// rectangles and circles written as paths.
     fn data(self) -> &'static [&'static str] {
@@ -98,6 +100,14 @@ impl Icon {
             Icon::ArrowDown => &["M12 5v14", "m19 12-7 7-7-7"],
             Icon::Folder => &["M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"],
             Icon::Search => &["M19 11a8 8 0 1 1-16 0a8 8 0 1 1 16 0z", "m21 21-4.34-4.34"],
+            Icon::Palette => &[
+                "M12 22a1 1 0 0 1 0-20a10 9 0 0 1 10 9a5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l0.3 0.4a1.75 1.75 0 0 1-1.4 2.8z",
+                "M13 6.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0-1 0z",
+                "M17 10.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0-1 0z",
+                "M6 12.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0-1 0z",
+                "M8 7.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0-1 0z",
+            ],
+            Icon::Smartphone => &["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z", "M12 18h0.01"],
             Icon::Activity => &["M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z", "M17 12h-2l-2 5-2-10-2 5H7"],
             Icon::Ellipsis => &["M13 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0z", "M20 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0z", "M6 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0z"],
             Icon::List => &["M3 5h.01", "M3 12h.01", "M3 19h.01", "M8 5h13", "M8 12h13", "M8 19h13"],
@@ -350,7 +360,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid.

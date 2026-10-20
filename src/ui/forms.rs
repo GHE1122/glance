@@ -260,7 +260,7 @@ fn readings(scene: &Scene) -> Vec<Reading> {
     let mut readings = Vec::new();
     if on("time") {
         let now = text::Local::at(s.t);
-        let (figure, half) = now.time(prefs.shows("time", "twelve"), lang);
+        let (figure, half) = now.time(text::twelve_hours(), lang);
         readings.push(Reading {
             kind: Kind::Time,
             id: "time".into(),
@@ -326,9 +326,9 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             unit: "%".into(),
             beside: celsius(temp),
             detail: temp.map(|t| format!("{t:.0} °C")).unwrap_or_default(),
-            hot: s.cpu.is_some_and(|v| v > prefs.hot_load),
+            hot: s.cpu.is_some_and(|v| v > super::prefs::HOT_LOAD),
             warm: temp.is_some_and(|t| t > prefs.hot_temp),
-            hot_at: Some(prefs.hot_load as f64),
+            hot_at: Some(super::prefs::HOT_LOAD as f64),
             pair: None,
         });
     }
@@ -349,9 +349,9 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             unit: "%".into(),
             beside: celsius(temp),
             detail: temp.map(|t| format!("{t:.0} °C")).unwrap_or_default(),
-            hot: usage.is_some_and(|v| v > prefs.hot_load),
+            hot: usage.is_some_and(|v| v > super::prefs::HOT_LOAD),
             warm: temp.is_some_and(|t| t > prefs.hot_temp),
-            hot_at: Some(prefs.hot_load as f64),
+            hot_at: Some(super::prefs::HOT_LOAD as f64),
             pair: None,
         });
     }
@@ -368,9 +368,9 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             unit: "%".into(),
             beside: String::new(),
             detail: text::size(s.memory.used),
-            hot: share * 100.0 > prefs.hot_load,
+            hot: share * 100.0 > super::prefs::HOT_LOAD,
             warm: false,
-            hot_at: Some(prefs.hot_load as f64),
+            hot_at: Some(super::prefs::HOT_LOAD as f64),
             pair: None,
         });
     }
