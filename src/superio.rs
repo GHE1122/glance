@@ -370,8 +370,7 @@ impl SuperIo {
             return if at.elapsed() < STALE_AFTER { last.clone() } else { BoardSensors::default() };
         };
         let mut sensors = BoardSensors::default();
-        // Unconnected inputs read 0 or −128 / 127.
-        let celsius = |raw: u8| Some(raw as i8).filter(|&c| c > 0 && c < 127).map(f32::from);
+        let celsius = |raw: u8| plausible(f32::from(raw as i8));
         match self.kind {
             Kind::Ite { temps, fans } => {
                 for input in 0..temps as usize {
@@ -396,7 +395,7 @@ impl SuperIo {
             Kind::NuvotonEc => {
                 for (register, name) in &self.ec_temps {
                     // In 1/256 °C, kept to the half degree the chip measures.
-                    let celsius = self.register16(*register).map(|raw| (raw as i16 / 128) as f32 / 2.0).filter(|&c| c > 0.0 && c < 127.0);
+                    let celsius = self.register16(*register).map(|raw| (raw as i16 / 128) as f32 / 2.0).and_then(plausible);
                     if let Some(value) = celsius {
                         sensors.temps.push((name.clone(), value));
                     }
@@ -651,8 +650,31 @@ fn nuvoton_layout(chip: u16) -> Option<(usize, usize)> {
     })
 }
 
+/// The hottest a board's sensor reads of what it is put by: no part a board measures runs hotter (a processor stops
+/// at 105 °C at most, its chipset well before).
+const HOTTEST: f32 = 110.0;
+
+/// A board's temperature as read, if an input with something on it reads so. Unconnected inputs read 0 or −128 / 127,
+/// or, with nothing on them to pull them down (as on MAXSUN's and ASUS's boards of Nuvoton chips), 111 to 125 °C: none
+/// past what the board's parts run at.
+fn plausible(celsius: f32) -> Option<f32> {
+    Some(celsius).filter(|&c| c > 0.0 && c <= HOTTEST)
+}
+
 #[cfg(test)]
 mod tests {
+    /// Inputs with nothing on them are not shown: 0, −128, 127, nor the 111 to 125 °C of those left floating (as two
+    /// boards' reports had them); a board's parts at their hottest are.
+    #[test]
+    fn floating_inputs_are_not_shown() {
+        for none in [0.0, -128.0, 127.0, 111.0, 118.5, 125.0] {
+            assert_eq!(super::plausible(none), None, "{none}");
+        }
+        for some in [0.5, 34.0, 95.0, 105.0, 110.0] {
+            assert_eq!(super::plausible(some), Some(some));
+        }
+    }
+
     /// Gigabyte's inputs named by the board's socket: an Intel board with the same chip gets no AM5 board's names.
     #[test]
     fn names_gigabytes_inputs_by_its_board() {
