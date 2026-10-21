@@ -30,7 +30,8 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory6, IDWriteFontCollection, IDWriteFontSetBuilder1, IDWriteInMemoryFontFileLoader,
+    DWriteCreateFactory, IDWriteFactory, IDWriteFactory6, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, IDWriteFontCollection, IDWriteFontSetBuilder1, IDWriteInMemoryFontFileLoader,
     IDWriteTextLayout1, DWRITE_CONTAINER_TYPE_WOFF2, DWRITE_LINE_METRICS, DWRITE_TEXT_RANGE, IDWriteTextFormat3, IDWriteTextLayout,
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_AXIS_TAG_WEIGHT, DWRITE_FONT_AXIS_TAG_WIDTH, DWRITE_FONT_AXIS_VALUE,
     DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_LEADING,
@@ -55,7 +56,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use super::icons::{self, Icon, Segment};
 
-use super::canvas::{Align, Canvas, Color, Family, Fill, Font, FontKey, Point};
+use super::canvas::{Align, Canvas, Color, Family, Fill, Font, FontKey, Inks, Point};
 
 /// The faces shipped inside the program, Latin only (the system supplies
 /// Chinese): Archivo, with its weight and width axes, for chart paper, and
@@ -433,18 +434,7 @@ impl Gfx {
             DWRITE_FONT_AXIS_VALUE { axisTag: DWRITE_FONT_AXIS_TAG_WEIGHT, value: font.weight },
             DWRITE_FONT_AXIS_VALUE { axisTag: DWRITE_FONT_AXIS_TAG_WIDTH, value: font.width },
         ];
-        let (name, collection): (PCWSTR, Option<&IDWriteFontCollection>) = match font.family {
-            Family::Archivo => (PCWSTR(self.archivo.1.as_ptr()), Some(&self.archivo.0)),
-            Family::Inter => (PCWSTR(self.inter.1.as_ptr()), Some(&self.inter.0)),
-            Family::Segoe => (w!("Segoe UI Variable Text"), None),
-            Family::SegoeDisplay => (w!("Segoe UI Variable Display"), None),
-            Family::YaHei => (w!("Microsoft YaHei UI"), None),
-            // (Asked for only once it is had: see `serif::family`.)
-            Family::Serif => match self.serif.get_or_init(|| crate::serif::face().and_then(|face| face_of(&self.write, &self.loader, face).ok())) {
-                Some((collection, name)) => (PCWSTR(name.as_ptr()), Some(collection)),
-                None => (w!("Microsoft YaHei UI"), None),
-            },
-        };
+        let (name, collection) = self.face(font.family);
         let format = unsafe {
             self.write
                 .CreateTextFormat(name, collection, &axes, font.size, w!("zh-cn"))
@@ -460,6 +450,22 @@ impl Gfx {
         }
         self.formats.borrow_mut().insert(font.key(), (format.clone(), Instant::now()));
         format
+    }
+
+    /// `family`'s name, and the collection it is in (none: the system's).
+    fn face(&self, family: Family) -> (PCWSTR, Option<&IDWriteFontCollection>) {
+        match family {
+            Family::Archivo => (PCWSTR(self.archivo.1.as_ptr()), Some(&self.archivo.0)),
+            Family::Inter => (PCWSTR(self.inter.1.as_ptr()), Some(&self.inter.0)),
+            Family::Segoe => (w!("Segoe UI Variable Text"), None),
+            Family::SegoeDisplay => (w!("Segoe UI Variable Display"), None),
+            Family::YaHei => (w!("Microsoft YaHei UI"), None),
+            // (Asked for only once it is had: see `serif::family`.)
+            Family::Serif => match self.serif.get_or_init(|| crate::serif::face().and_then(|face| face_of(&self.write, &self.loader, face).ok())) {
+                Some((collection, name)) => (PCWSTR(name.as_ptr()), Some(collection)),
+                None => (w!("Microsoft YaHei UI"), None),
+            },
+        }
     }
 
     /// Lays `text` out on one line, `width` DIPs wide at most.
@@ -951,6 +957,10 @@ pub struct Frame<'a> {
 }
 
 impl Canvas for Frame<'_> {
+    fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32) {
+        Frame::markdown(self, text, font, inks, x, y, width, height);
+    }
+
     fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align) {
         Frame::text(self, text, font, color, x, y, width, align);
     }
@@ -1491,6 +1501,12 @@ impl<'a> Frame<'a> {
         if self.moving.get() {
             return None;
         }
+        self.axes()
+    }
+
+    /// The transform drawn through now and how many of the target's pixels a DIP is, where the transform keeps axes
+    /// as they are (no turn, skew or mirror), whether or not what is drawn moves.
+    fn axes(&self) -> Option<(Matrix3x2, f32)> {
         let mut t = Matrix3x2::default();
         let mut dpi = (0.0f32, 0.0f32);
         unsafe {
@@ -1654,6 +1670,48 @@ impl<'a> Frame<'a> {
         let (x, y) = self.on_pixel(x, y);
         let layout = self.gfx.wrapped(text, font, width);
         unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: x, Y: y }, &layout, self.brush(color), self.text_snap()) };
+    }
+
+    /// Draws a note's words as the box they are written in does (see `Canvas::markdown`): laid out in a face of the
+    /// font's family, each stretch's weight, slant, size, strike, face and ink set on it (the faces chosen by weight
+    /// and slant, as the text services choose them, slanted where the face has no italic).
+    #[allow(clippy::too_many_arguments)]
+    pub fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32) {
+        let drawn = (|| -> Result<()> {
+            let wide: Vec<u16> = text.encode_utf16().collect();
+            let factory: IDWriteFactory = self.gfx.write.cast()?;
+            let weight = |bold: bool| if bold { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT(font.weight.round() as i32) };
+            let (face, collection) = self.gfx.face(font.family);
+            let format = unsafe { factory.CreateTextFormat(face, collection, weight(false), DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, font.size, w!("zh-cn"))? };
+            let layout = unsafe { factory.CreateTextLayout(&wide, &format, width.max(0.0), height.max(0.0))? };
+            unsafe { layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)? };
+            let brush = |ink| unsafe { self.dc.CreateSolidColorBrush(&inks.of(ink).d2d(), None) };
+            // (Each size made whole pixels high, as the text services make a face's height, a font's height in whole
+            // pixels as Windows' fonts are asked for: else its words came out a little smaller, and its lines closer.)
+            let per = self.axes().map_or(1.0, |(t, device)| t.M11 * device);
+            let whole = |size: f32| (size * per).round().max(1.0) / per;
+            for (range, dress) in crate::notes::markdown::dressing(text) {
+                let range = DWRITE_TEXT_RANGE { startPosition: range.start as u32, length: (range.end - range.start) as u32 };
+                unsafe {
+                    layout.SetFontWeight(weight(dress.bold), range)?;
+                    layout.SetFontStyle(if dress.italic { DWRITE_FONT_STYLE_ITALIC } else { DWRITE_FONT_STYLE_NORMAL }, range)?;
+                    layout.SetFontSize(whole(font.size * dress.size), range)?;
+                    layout.SetStrikethrough(dress.struck, range)?;
+                    if dress.code {
+                        layout.SetFontFamilyName(&HSTRING::from(super::canvas::CODE_FACE), range)?;
+                    }
+                    layout.SetDrawingEffect(&brush(dress.ink)?, range)?;
+                }
+            }
+            let (left, top) = self.on_pixel(x, y);
+            Canvas::clip(self, x, y, width, height);
+            unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: left, Y: top }, &layout, self.brush(inks.words), self.text_snap()) };
+            Canvas::unclip(self);
+            Ok(())
+        })();
+        if let Err(error) = drawn {
+            self.fail(error);
+        }
     }
 
     /// Draws `text` with its first baseline-box at `(x, y)`, in a box `width` wide.

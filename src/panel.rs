@@ -453,9 +453,10 @@ impl Controller {
         self.post(OPEN_SETTINGS);
     }
 
-    /// The note `name` stuck on the desktop with its corner at `at` (asked from any thread: done on the panel's).
-    pub fn stick_note(&self, name: String, at: POINT) {
-        STUCK.lock().unwrap().push((name, OnDesk::Stick(at)));
+    /// The note `name` stuck on the desktop with its corner at `at`, `size` large (DIPs: the page's it is stuck from;
+    /// none, as large as a note is stuck) (asked from any thread: done on the panel's).
+    pub fn stick_note(&self, name: String, at: POINT, size: Option<(f32, f32)>) {
+        STUCK.lock().unwrap().push((name, OnDesk::Stick(at, size)));
         self.post(STICK_NOTES);
     }
 
@@ -890,7 +891,7 @@ impl Controller {
                 STICK_NOTES => {
                     for (name, asked) in std::mem::take(&mut *STUCK.lock().unwrap()) {
                         match asked {
-                            OnDesk::Stick(at) => widgets.stick_note(&name, at),
+                            OnDesk::Stick(at, size) => widgets.stick_note(&name, at, size),
                             OnDesk::Unstick => widgets.unstick_note(&name),
                             OnDesk::Move(dx, dy, done) => widgets.move_note(&name, dx, dy, done),
                         }
@@ -1367,10 +1368,10 @@ impl Controller {
 /// Notes asked to be stuck on the desktop, and where (see `Controller::stick_note`), or taken off it (none).
 static STUCK: std::sync::Mutex<Vec<(String, OnDesk)>> = std::sync::Mutex::new(Vec::new());
 
-/// What is asked of a note on the desktop: stuck there with its corner at a point, taken away, or moved by so much
-/// (and kept where it is, once it is let go).
+/// What is asked of a note on the desktop: stuck there with its corner at a point (as large as the page it is stuck
+/// from, DIPs), taken away, or moved by so much (and kept where it is, once it is let go).
 enum OnDesk {
-    Stick(POINT),
+    Stick(POINT, Option<(f32, f32)>),
     Unstick,
     Move(i32, i32, bool),
 }

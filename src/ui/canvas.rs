@@ -125,6 +125,29 @@ impl PartialEq for Picture {
     }
 }
 
+/// The inks a note's words are written in (see `Canvas::markdown`): its words', faint (Markdown's marks, a quote, a
+/// done task), the accent (a link's).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Inks {
+    pub words: Color,
+    pub faint: Color,
+    pub accent: Color,
+}
+
+impl Inks {
+    pub fn of(&self, ink: crate::notes::markdown::Ink) -> Color {
+        use crate::notes::markdown::Ink;
+        match ink {
+            Ink::Words => self.words,
+            Ink::Faint => self.faint,
+            Ink::Accent => self.accent,
+        }
+    }
+}
+
+/// The fixed face code in a note is written in.
+pub const CODE_FACE: &str = "Cascadia Mono";
+
 /// What the panel's readings are painted with: each platform paints these
 /// with its own graphics (Direct2D and DirectWrite on Windows). Coordinates
 /// are in DIPs; text is placed by the top of its line box.
@@ -142,6 +165,11 @@ pub trait Canvas {
     fn text_scaled(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align, scale: f32) {
         self.text(text, Font { size: font.size * scale, ..font }, color, x, y, width, align);
     }
+    /// `text`, a note's words in Markdown, as the box it is written in writes them (see `notes::markdown::dressing`): in
+    /// lines `width` wide from (`x`, `y`), in `font`, each stretch dressed as its looks make it, in `inks`; what is past
+    /// `height` down cut off.
+    #[allow(clippy::too_many_arguments)]
+    fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32);
     /// How wide `text` is in `font`.
     fn measure(&self, text: &str, font: Font) -> f32;
     /// The ascent and descent of `font`'s line box.

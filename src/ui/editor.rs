@@ -264,12 +264,7 @@ impl Editor {
                 let _ = match look {
                     Look::Heading(level) => {
                         let _ = font.SetBold(tomTrue.0);
-                        font.SetSize(palette.points * match level {
-                            1 => 1.6,
-                            2 => 1.35,
-                            3 => 1.2,
-                            _ => 1.08,
-                        })
+                        font.SetSize(palette.points * crate::notes::markdown::heading_size(*level))
                     }
                     Look::Bold => font.SetBold(tomTrue.0),
                     Look::Italic => font.SetItalic(tomTrue.0),

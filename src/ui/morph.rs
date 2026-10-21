@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 
-use super::canvas::{Align, Canvas, Color, Fill, Font, Picture, Point};
+use super::canvas::{Align, Canvas, Color, Fill, Font, Inks, Picture, Point};
 use super::icons::Icon;
 
 /// One thing drawn, in the coordinates it was recorded at.
@@ -15,6 +15,8 @@ pub enum Op {
     /// larger than its font it is drawn (moving between two sizes, it is
     /// drawn larger or smaller rather than set in a font for each).
     Text { text: String, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align, inked: f32, scale: f32 },
+    /// A note's words in Markdown, written in lines in their box (see `Canvas::markdown`).
+    Markdown { text: String, font: Font, inks: Inks, x: f32, y: f32, w: f32, h: f32 },
     /// To a box, or (`part`) the part of it a fraction fills, from its bottom or its left (see `Canvas::clip_part`).
     Clip { x: f32, y: f32, w: f32, h: f32, part: Option<(f32, bool)> },
     Unclip,
@@ -125,7 +127,7 @@ impl Op {
                 let left = if *align == Align::End { x + width - inked } else { *x };
                 Bounds { x: left, y: *y, w: *inked, h: font.size * scale * 1.25 }
             }
-            Op::Clip { x, y, w, h, .. } | Op::Fill { x, y, w, h, .. } | Op::Rounded { x, y, w, h, .. } | Op::Outline { x, y, w, h, .. } | Op::Shadow { x, y, w, h, .. } | Op::Frosted { x, y, w, h, .. } => {
+            Op::Clip { x, y, w, h, .. } | Op::Fill { x, y, w, h, .. } | Op::Rounded { x, y, w, h, .. } | Op::Outline { x, y, w, h, .. } | Op::Shadow { x, y, w, h, .. } | Op::Frosted { x, y, w, h, .. } | Op::Markdown { x, y, w, h, .. } => {
                 Bounds { x: *x, y: *y, w: *w, h: *h }
             }
             Op::Circle { centre, radius, .. } | Op::Arc { centre, radius, .. } => Bounds { x: centre.x - radius, y: centre.y - radius, w: 2.0 * radius, h: 2.0 * radius },
@@ -151,6 +153,7 @@ impl Op {
             Op::Shadow { color, .. } | Op::Arc { color, .. } | Op::Icon { color, .. } => fade(color),
             Op::Shape { fill, .. } | Op::Outline { fill, .. } => fade_fill(fill),
             Op::Picture { opacity, .. } => *opacity *= alpha,
+            Op::Markdown { inks, .. } => *inks = Inks { words: inks.words.alpha(alpha), faint: inks.faint.alpha(alpha), accent: inks.accent.alpha(alpha) },
             Op::Frosted { below, .. } => *below = std::mem::take(below).into_iter().map(|op| op.faded(alpha)).collect(),
             Op::Clip { .. } | Op::Unclip => {}
         }
@@ -170,6 +173,7 @@ impl Op {
             Op::Shadow { color, .. } | Op::Arc { color, .. } | Op::Icon { color, .. } => color.a >= LEAST,
             Op::Shape { fill: f, .. } | Op::Outline { fill: f, .. } => fill(f),
             Op::Picture { opacity, .. } => *opacity >= LEAST,
+            Op::Markdown { inks, .. } => inks.words.a >= LEAST,
             Op::Frosted { below, .. } => below.iter().any(|op| op.bounds().is_some() && op.shows()),
             Op::Clip { .. } | Op::Unclip => true,
         }
@@ -193,6 +197,10 @@ impl Op {
             Op::Clip { x, y, w, h, part } => {
                 let (x, y, w, h) = rect(x, y, w, h);
                 Op::Clip { x, y, w, h, part }
+            }
+            Op::Markdown { text, font, inks, x, y, w, h } => {
+                let (x, y, w, h) = rect(x, y, w, h);
+                Op::Markdown { text, font: Font { size: map.length(font.size), ..font }, inks, x, y, w, h }
             }
             Op::Unclip => Op::Unclip,
             Op::Fill { color, x, y, w, h } => {
@@ -267,6 +275,10 @@ impl Op {
                 vec![Op::Clip { x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t), part }]
             }
             (Op::Unclip, Op::Unclip) => vec![Op::Unclip],
+            // (The same words in the same inks: their box and size between; other words, each faded on its own way.)
+            (Op::Markdown { text: at, font: af, inks: ai, x: ax, y: ay, w: aw, h: ah }, Op::Markdown { text: bt, font: bf, inks: bi, x: bx, y: by, w: bw, h: bh }) if at == bt && ai == bi && af.family == bf.family => {
+                vec![Op::Markdown { text: bt.clone(), font: Font { size: lerp(af.size, bf.size, t), ..*bf }, inks: *bi, x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t) }]
+            }
             (Op::Fill { color: ac, x: ax, y: ay, w: aw, h: ah }, Op::Fill { color: bc, x: bx, y: by, w: bw, h: bh }) => {
                 vec![Op::Fill { color: lerp_color(*ac, *bc, t), x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t) }]
             }
@@ -344,6 +356,7 @@ impl Op {
         match self {
             Op::Text { text, font, color, x, y, width, align, scale, .. } if (scale - 1.0).abs() < 1e-3 => canvas.text(text, *font, *color, *x, *y, *width, *align),
             Op::Text { text, font, color, x, y, width, align, scale, .. } => canvas.text_scaled(text, *font, *color, *x, *y, *width, *align, *scale),
+            Op::Markdown { text, font, inks, x, y, w, h } => canvas.markdown(text, *font, *inks, *x, *y, *w, *h),
             Op::Clip { x, y, w, h, part: None } => canvas.clip(*x, *y, *w, *h),
             Op::Clip { x, y, w, h, part: Some((fraction, up)) } => canvas.clip_part(*x, *y, *w, *h, *fraction, *up),
             Op::Unclip => canvas.unclip(),
@@ -499,6 +512,10 @@ impl Canvas for Recorder<'_> {
     fn text_scaled(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align, scale: f32) {
         let inked = (self.measure.measure(text, font) * scale).min(width);
         self.push(Op::Text { text: text.into(), font, color, x, y, width, align, inked, scale });
+    }
+
+    fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, w: f32, h: f32) {
+        self.push(Op::Markdown { text: text.into(), font, inks, x, y, w, h });
     }
 
     fn measure(&self, text: &str, font: Font) -> f32 {
@@ -683,6 +700,7 @@ mod tests {
         struct Measure;
         impl Canvas for Measure {
             fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {}
+            fn markdown(&self, _: &str, _: Font, _: Inks, _: f32, _: f32, _: f32, _: f32) {}
             fn measure(&self, text: &str, _: Font) -> f32 {
                 text.len() as f32
             }

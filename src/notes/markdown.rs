@@ -27,6 +27,78 @@ pub enum Look {
     Plain,
 }
 
+/// How much larger than the words round it a heading of `level` is.
+pub fn heading_size(level: u8) -> f32 {
+    match level {
+        1 => 1.6,
+        2 => 1.35,
+        3 => 1.2,
+        _ => 1.08,
+    }
+}
+
+/// Which of a note's inks a stretch of its words is in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ink {
+    Words,
+    Faint,
+    Accent,
+}
+
+/// How a stretch of words is dressed, all the looks over it laid on: how much larger than the words round it, bold,
+/// slanted, struck through, in the fixed face, in which ink.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Dress {
+    pub size: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub struck: bool,
+    pub code: bool,
+    pub ink: Ink,
+}
+
+impl Dress {
+    const PLAIN: Dress = Dress { size: 1.0, bold: false, italic: false, struck: false, code: false, ink: Ink::Words };
+
+    fn with(mut self, look: Look) -> Dress {
+        match look {
+            Look::Heading(level) => {
+                self.bold = true;
+                self.size = heading_size(level);
+            }
+            Look::Bold => self.bold = true,
+            Look::Italic => self.italic = true,
+            Look::Struck => self.struck = true,
+            Look::Code => self.code = true,
+            Look::Link => self.ink = Ink::Accent,
+            Look::Faint => self.ink = Ink::Faint,
+            Look::Plain => self.ink = Ink::Words,
+        }
+        self
+    }
+}
+
+/// `text` (`units` UTF-16 units long) in stretches each dressed alike, end to end, as its looks (see `looks`) dress it
+/// laid on in their order, a later one over an earlier one where they meet: as the box a note is written in dresses
+/// its words (see `ui::editor::Editor::dress`), for its words drawn as they are written there.
+pub fn dressing(text: &str) -> Vec<(Range<usize>, Dress)> {
+    let units = text.encode_utf16().count();
+    let mut each = vec![Dress::PLAIN; units];
+    for (range, look) in looks(text) {
+        for dress in &mut each[range.start.min(units)..range.end.min(units)] {
+            *dress = dress.with(look);
+        }
+    }
+    let mut stretches: Vec<(Range<usize>, Dress)> = Vec::new();
+    for (at, dress) in each.into_iter().enumerate() {
+        match stretches.last_mut() {
+            Some((range, last)) if *last == dress => range.end = at + 1,
+            _ => stretches.push((at..at + 1, dress)),
+        }
+    }
+    stretches
+}
+
 /// The looks of `text`'s stretches (in UTF-16 units, as the text services count, each line break one), in the order
 /// they are laid on: a container's look first (its marks with it), its words' after.
 pub fn looks(text: &str) -> Vec<(Range<usize>, Look)> {
@@ -182,5 +254,22 @@ mod tests {
         assert!(look_of(&looks, task).contains(&Look::Faint));
         let link = text.encode_utf16().count() - "链接](https://a.b)".encode_utf16().count();
         assert!(look_of(&looks, link).contains(&Look::Link));
+    }
+
+    /// Dressed as the looks laid on in their order make it: a heading's words larger, bold and in the words' ink,
+    /// its `#` faint; bold's marks faint and its words not; every unit in one stretch, end to end.
+    #[test]
+    fn dresses_each_stretch_as_its_looks_laid_on_make_it() {
+        let text = "# 本周\n**粗** 字";
+        let stretches = dressing(text);
+        let dress_at = |at: usize| stretches.iter().find(|(range, _)| range.contains(&at)).map(|(_, dress)| *dress).unwrap();
+        assert_eq!(dress_at(0), Dress { size: 1.6, bold: true, ink: Ink::Faint, ..Dress::PLAIN });
+        assert_eq!(dress_at(2), Dress { size: 1.6, bold: true, ..Dress::PLAIN });
+        assert_eq!(dress_at(5), Dress { bold: true, ink: Ink::Faint, ..Dress::PLAIN });
+        assert_eq!(dress_at(7), Dress { bold: true, ..Dress::PLAIN });
+        assert_eq!(dress_at(11), Dress::PLAIN);
+        assert_eq!(stretches.first().unwrap().0.start, 0);
+        assert_eq!(stretches.last().unwrap().0.end, text.encode_utf16().count());
+        assert!(stretches.windows(2).all(|pair| pair[0].0.end == pair[1].0.start && pair[0].1 != pair[1].1));
     }
 }

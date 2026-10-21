@@ -1101,15 +1101,13 @@ impl Content {
         if self.bare() {
             (theme.pad_x, theme.pad_top, theme.pad_bottom) = (0.0, 0.0, 0.0);
             theme.outer = (0.0, 0.0, 0.0);
-            // (As round as its card is as the notes show: see `view::stuck_note_lane`.)
-            theme.radius = view::note_radius(&theme, crate::notes::view() == crate::settings::NotesView::Cards);
         }
         theme
     }
 
     /// Whether it is a note stuck on the desktop alone: its card the whole of it (see `dressed`).
     fn bare(&self) -> bool {
-        matches!(self, Content::Readings(readings) if readings.only.as_deref().is_some_and(|only| only.starts_with(view::STUCK_NOTE)))
+        matches!(self, Content::Readings(readings) if readings.only.as_deref().is_some_and(|only| only.starts_with(view::STUCK_NOTE_LANE)))
     }
 
     /// The preferences its readings are drawn by, where they are not the panel's (`prefs`): without the music lane
@@ -1294,15 +1292,16 @@ impl Widgets {
         true
     }
 
-    /// The note `name` stuck on the desktop: a widget of its card alone, its corner at `at` (one stuck already is
-    /// raised instead).
-    pub fn stick_note(&mut self, name: &str, at: POINT) {
+    /// The note `name` stuck on the desktop: a widget of its page alone, its corner at `at`, `size` large (DIPs: the
+    /// page's it is stuck from; none, as `view::STUCK_NOTE` makes it). One stuck already is raised instead.
+    pub fn stick_note(&mut self, name: &str, at: POINT, size: Option<(f32, f32)>) {
         if self.raise_note(name) {
             return;
         }
         let Some(contact) = monitor_at(at) else { return };
-        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
-        let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE)), ..Readings::new(choice) });
+        let (wide, tall) = size.unwrap_or(view::STUCK_NOTE);
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (wide - view::STUCK_NOTE.0, tall - view::STUCK_NOTE.1) };
+        let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
         if let Some(widget) = Widget::new(contact, at, content) {
             widget.window.yield_to(self.settings);
             self.list.push(widget);
@@ -1320,7 +1319,7 @@ impl Widgets {
     /// The note `name` stuck on the desktop taken away (the note deleted): its widget not put away to be brought back,
     /// gone; merged with another, the other left as it was.
     pub fn unstick_note(&mut self, name: &str) {
-        let only = format!("{}{name}", view::STUCK_NOTE);
+        let only = format!("{}{name}", view::STUCK_NOTE_LANE);
         let Some((index, part)) = self.list.iter().enumerate().find_map(|(index, widget)| widget.content.holding(&only).map(|part| (index, part))) else { return };
         match part {
             None => {
@@ -1341,7 +1340,7 @@ impl Widgets {
     /// The widget the note `name` is stuck on the desktop as (alone, or merged with another) moved by (`dx`, `dy`)
     /// physical px, as what it is written in over it is moved; where `done`, kept where it is.
     pub fn move_note(&mut self, name: &str, dx: i32, dy: i32, done: bool) {
-        let only = format!("{}{name}", view::STUCK_NOTE);
+        let only = format!("{}{name}", view::STUCK_NOTE_LANE);
         let Some(widget) = self.list.iter_mut().find(|widget| widget.content.holding(&only).is_some()) else { return };
         if (dx, dy) != (0, 0) {
             widget.moved_by(dx, dy);
@@ -1354,7 +1353,7 @@ impl Widgets {
     /// The widget the note `name` is stuck on the desktop as (alone, or merged with another), raised in front; whether
     /// there is one.
     pub fn raise_note(&mut self, name: &str) -> bool {
-        let only = format!("{}{name}", view::STUCK_NOTE);
+        let only = format!("{}{name}", view::STUCK_NOTE_LANE);
         let Some(widget) = self.list.iter_mut().find(|widget| widget.content.holding(&only).is_some()) else { return false };
         widget.window.raise();
         widget.next_frame = Instant::now();
@@ -1370,7 +1369,7 @@ impl Widgets {
         }
         let Some(contact) = monitor_at(at) else { return false };
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
-        let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE)), ..Readings::new(choice) });
+        let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
         let Some(mut widget) = Widget::new(contact, at, content) else { return false };
         // (Not torn off: the panel it came from stays, as it does as a note is stuck from its menu.)
         widget.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: false, moved: true });
@@ -2937,7 +2936,7 @@ impl Widget {
                                     };
                                     // (A note stuck on the desktop, its own card pressed: written in where it is,
                                     // over it, not beside it.)
-                                    let over = matches!(hit, view::Hit::Note(_)) && self.content.readings_mut().is_some_and(|readings| readings.only.as_deref().is_some_and(|only| only.starts_with(view::STUCK_NOTE)));
+                                    let over = matches!(hit, view::Hit::Note(_)) && self.content.readings_mut().is_some_and(|readings| readings.only.as_deref().is_some_and(|only| only.starts_with(view::STUCK_NOTE_LANE)));
                                     if let Some(page) = page {
                                         self.open_page(page, over);
                                     }
@@ -3242,8 +3241,8 @@ impl Widget {
         // rest, as the readings step); else laid out for what it shows, or
         // for the room it is sized to.
         let only_moved = matches!(self.drag, Some(Drag::Move { .. })) || self.fling.is_some();
-        // A note stuck on the desktop alone: designed as wide as its card is in the panel (see `view::stuck_note_width`).
-        let card_wide = self.content.bare().then(|| view::stuck_note_width(look.skin, crate::notes::view()));
+        // A note stuck on the desktop alone: its page, made as large as it is made (see `view::STUCK_NOTE`).
+        let page = self.content.bare();
         let sized_to = self.room.filter(|_| matches!(self.drag, Some(Drag::Size { .. })));
         match &mut self.content {
             Content::Readings(readings) => {
@@ -3259,13 +3258,15 @@ impl Widget {
                         };
                         // (Made shorter, its lists give way; its other lanes are as designed: see `view::Layout::giving`.)
                         let designed = view::Layout::with_columns(heights.iter().map(|(_, h)| h[0]).collect(), columns, &theme).giving(view::gives(&scene));
-                        let designed = match card_wide {
-                            Some(wide) => designed.clone().fitted((wide, designed.height())),
-                            None => designed,
+                        let (designed, least, shape_least) = match page {
+                            true => (designed.clone().fitted(view::STUCK_NOTE), view::STUCK_NOTE_LEAST, view::STUCK_NOTE_LEAST),
+                            false => {
+                                let least = (designed.width() - columns as f32 * (view::COLUMN_WIDTH - view::LANE_LEAST), designed.least_height());
+                                (designed, least, SHAPE_LEAST)
+                            }
                         };
-                        let least = (designed.width() - columns as f32 * (view::COLUMN_WIDTH - view::LANE_LEAST), designed.least_height());
                         let wanted = sized_to.unwrap_or((designed.width() + readings.choice.extra.0, designed.height() + readings.choice.extra.1));
-                        let size = within(wanted, SHAPE_LEAST);
+                        let size = within(wanted, shape_least);
                         let extra = (size.0 - designed.width(), size.1 - designed.height());
                         // Smaller than all of it fits in: each lane in a shape of its own (see `view::Shape`), across
                         // side by side, else one over another.
@@ -3965,7 +3966,7 @@ mod tests {
     #[test]
     fn finds_a_stuck_note_merged_or_alone() {
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
-        let note = |name: &str| Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE)), ..Readings::new(choice.clone()) });
+        let note = |name: &str| Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice.clone()) });
         assert_eq!(note("a.md").holding("note:a.md"), Some(None));
         let merged = Content::Merged(Box::new(Merged::new(vec![Content::Music(MusicShown::new(music::LEAST)), note("a.md")], true, music::LEAST)));
         assert_eq!(merged.holding("note:a.md"), Some(Some(1)));

@@ -29,7 +29,7 @@ use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCan
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use super::canvas::{Align, Canvas, Color, Point};
+use super::canvas::{Align, Canvas, Color, Family, Font, Inks, Point};
 use super::gfx::{self, Frame, Gfx, Surface};
 use super::icons::Icon;
 use super::theme::{Skin, Theme};
@@ -71,14 +71,12 @@ pub enum Side {
     Left,
     Right,
     Below,
-    /// Over it, from its corner (a note stuck on the desktop, written in where it is): as large as it, at least.
+    /// Over it, from its corner (a note stuck on the desktop, written in where it is): as large as it.
     Over,
 }
 
 /// How wide it is (DIPs); its head, its search box, a row, a letter's heading, its foot; the room round its parts.
 const WIDTH: f32 = 360.0;
-/// The least it is, over what it opens from (DIPs): room to write a note in.
-const OVER_LEAST: (f32, f32) = (300.0, 280.0);
 const HEAD: f32 = 52.0;
 const SEARCH: f32 = 34.0;
 const ROW: f32 = 40.0;
@@ -312,18 +310,82 @@ impl Writing {
 /// (glass's in the ink of its colour), and as opaque colours (the words' box takes none other: a faint ink half see
 /// through came out as solid as the words, and Markdown's faint marks no fainter), as they show over the page.
 fn palette_for(theme: &Theme, colour: crate::notes::Colour, pixels: f32) -> super::editor::Palette {
+    let inks = word_inks(theme, colour);
+    super::editor::Palette { text: colorref(inks.words), faint: colorref(inks.faint), accent: colorref(inks.accent), points: pixels * 0.75, face: "Microsoft YaHei UI".into(), code_face: super::canvas::CODE_FACE.into() }
+}
+
+/// The inks a note of colour `colour` is written in on its page (see `palette_for`), opaque.
+fn word_inks(theme: &Theme, colour: crate::notes::Colour) -> Inks {
     let (text, _, faint) = super::view::note_inks(theme, colour);
     let ground = match theme.skin {
         Skin::Paper => theme.paper,
         _ if theme.dark => Color::hex(0x26282E, 1.0),
         _ => Color::hex(0xF5F6F8, 1.0),
     };
-    let opaque = |ink: Color| colorref(super::view::over(Color { a: 1.0, ..ground }, ink));
+    let opaque = |ink: Color| super::view::over(Color { a: 1.0, ..ground }, ink);
     let accent = match theme.skin {
         Skin::Paper => theme.text,
         _ => super::theme::accent(theme.dark),
     };
-    super::editor::Palette { text: opaque(text), faint: opaque(faint), accent: opaque(accent), points: pixels * 0.75, face: "Microsoft YaHei UI".into(), code_face: "Cascadia Mono".into() }
+    Inks { words: opaque(text), faint: opaque(faint), accent: opaque(accent) }
+}
+
+/// How high a note's words are written (DIPs).
+pub(super) const WORDS: f32 = 15.0;
+
+/// What is said at the head of a note's page of when it was written (`when`, how long ago; none: it is new).
+fn note_said(when: Option<&str>, lang: super::text::Lang) -> String {
+    match (when, lang) {
+        (None, super::text::Lang::Zh) => "新便签".to_string(),
+        (None, super::text::Lang::En) => "New note".to_string(),
+        (Some(when), super::text::Lang::Zh) => format!("{when} 修改"),
+        (Some(when), super::text::Lang::En) => format!("Written {when}"),
+    }
+}
+
+/// What is said at the foot of a note's page of its words `text`: how many characters, kept as it is written.
+fn note_counted(text: &str, lang: super::text::Lang) -> String {
+    let count = text.chars().filter(|c| !c.is_whitespace()).count();
+    match lang {
+        super::text::Lang::Zh => format!("{count} 字 · 自动保存"),
+        super::text::Lang::En => format!("{count} characters · kept as you write"),
+    }
+}
+
+/// A note's page's face, `width` × `height` from (`x`, `y`), but for what is pressed on it and its words: its ground
+/// of its colour (see `view::note_page`), at its head its colour's dot and what `said` says of when it was written; at
+/// its foot, ruled off, what `counted` says of its words and its file's `name` in the room left (none: the foot left
+/// for what was said of keeping it). Its words are written between (see `note_words`).
+#[allow(clippy::too_many_arguments)]
+fn note_face(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, said: &str, counted: Option<&str>, name: Option<&str>, (x, y, width, height): (f32, f32, f32, f32)) {
+    super::view::note_page(frame, theme, colour, (x, y, width, height));
+    frame.fill_circle(super::view::note_colour(colour), Point { x: x + PAD + 5.0, y: y + 26.0 }, 5.0);
+    frame.text(said, theme.small, theme.text2, x + PAD + 18.0, y + 18.0, width - 2.0 * PAD - 80.0, Align::Start);
+    let bottom = y + height - FOOT;
+    frame.fill(theme.rule, x + PAD, bottom, width - 2.0 * PAD, 1.0);
+    let Some(counted) = counted else { return };
+    frame.text(counted, theme.small, theme.text3, x + PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * PAD, Align::Start);
+    let room = width - 2.0 * PAD - frame.measure(counted, theme.small) - 16.0;
+    // (Where it fits: shortened past a few letters, a name says nothing.)
+    if let Some(name) = name.filter(|_| room >= 96.0) {
+        frame.text(name, theme.small, theme.text3, x + width - PAD - room, bottom + (FOOT - 16.0) / 2.0, room, Align::End);
+    }
+}
+
+/// Where a note's words are written on its page `width` × `height` (DIPs, from its corner): under its head, over its
+/// foot (as `words_box` places its box).
+fn note_words(width: f32, height: f32) -> (f32, f32, f32, f32) {
+    (PAD, HEAD + 4.0, width - 2.0 * PAD, height - HEAD - 4.0 - FOOT)
+}
+
+/// A note stuck on the desktop, `width` × `height` from (`x`, `y`): its page as it is written in (see `paint_note`),
+/// but for what is pressed there and the caret, its words as the page writes them: its words `text`, its colour
+/// `colour`, written `when` (how long ago), kept in the file `name`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_stuck_note(frame: &dyn Canvas, theme: &Theme, lang: super::text::Lang, text: &str, colour: crate::notes::Colour, when: &str, name: &str, (x, y, width, height): (f32, f32, f32, f32)) {
+    note_face(frame, theme, colour, &note_said(Some(when), lang), Some(&note_counted(text, lang)), Some(name), (x, y, width, height));
+    let (left, top, wide, tall) = note_words(width, height);
+    frame.markdown(text, Font::new(Family::YaHei, WORDS, 400.0), word_inks(theme, colour), x + left, y + top, wide, tall);
 }
 
 /// What a note's menu does: its colour chosen, it taken to the Recycle Bin.
@@ -487,8 +549,8 @@ fn run(asks: Receiver<Ask>) {
 
 /// Where the page `opening` asks for is on the screen (physical px, its shadow's room left out), and how many pixels a
 /// DIP is there: beside what it opens from on its side away from the edge, else on the other, else over it; under the
-/// top edge's panel, as tall as the room under it is; over a note stuck on the desktop, as wide and tall as its card,
-/// and no less than a page to write in.
+/// top edge's panel, as tall as the room under it is; over a note stuck on the desktop, just where it is (it is drawn
+/// as this page, see `paint_stuck_note`).
 fn placed(opening: &Opening) -> (RECT, f32) {
     let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
     let monitor = unsafe { MonitorFromRect(&opening.by, MONITOR_DEFAULTTONEAREST) };
@@ -501,12 +563,12 @@ fn placed(opening: &Opening) -> (RECT, f32) {
     let scale = dpi.max(96) as f32 / 96.0;
     let (wide, gap) = ((WIDTH * scale).round() as i32, (GAP * scale).round() as i32);
     let least = (480.0 * scale) as i32;
-    let wide = if opening.side == Side::Over { (opening.by.right - opening.by.left).max((OVER_LEAST.0 * scale) as i32).min(room.right - room.left) } else { wide };
+    let wide = if opening.side == Side::Over { (opening.by.right - opening.by.left).min(room.right - room.left) } else { wide };
     let left_of = opening.by.left - gap - wide;
     let right_of = opening.by.right + gap;
     let (x, y, tall) = match opening.side {
         Side::Over => {
-            let tall = (opening.by.bottom - opening.by.top).max((OVER_LEAST.1 * scale) as i32).min(room.bottom - room.top);
+            let tall = (opening.by.bottom - opening.by.top).min(room.bottom - room.top);
             (opening.by.left, opening.by.top, tall)
         }
         Side::Below => {
@@ -530,8 +592,16 @@ fn placed(opening: &Opening) -> (RECT, f32) {
 
 /// Where a note's words are written in its page's window (physical px), its page `wide` × `tall` past `room` (its
 /// shadow's): under its head, over its foot.
-fn words_box(room: i32, wide: i32, tall: i32, scale: f32) -> RECT {
+pub(super) fn words_box(room: i32, wide: i32, tall: i32, scale: f32) -> RECT {
     RECT { left: room + (PAD * scale) as i32, top: room + ((HEAD + 4.0) * scale) as i32, right: room + wide - (PAD * scale) as i32, bottom: room + tall - (FOOT * scale) as i32 }
+}
+
+/// The window `window` (of Glance's) kept off the screen (`hidden`) or shown again as it was, nothing else of it changed.
+fn hide(window: HWND, hidden: bool) {
+    let cloak = windows::core::BOOL::from(hidden);
+    unsafe {
+        let _ = DwmSetWindowAttribute(window, windows::Win32::Graphics::Dwm::DWMWA_CLOAK, &cloak as *const _ as *const _, size_of::<windows::core::BOOL>() as u32);
+    }
 }
 
 /// The page `opening` asks for, up beside what it opens from.
@@ -609,7 +679,7 @@ fn show(opening: Opening) {
                 None => crate::notes::Colour::ALL[shown.len() % crate::notes::Colour::ALL.len()],
             };
             let rect = words_box(room_px, wide, tall, scale);
-            let pixels = 15.0 * scale;
+            let pixels = WORDS * scale;
             let palette = palette_for(&theme, colour, pixels);
             if let Some(editor) = super::editor::Editor::new(hwnd, rect, &palette.face, pixels, palette.text) {
                 crate::perf::mark(|| "beside editor".into());
@@ -703,6 +773,10 @@ fn let_go(told: bool) {
         open.close();
     }
     if let Some(mut beside) = held {
+        // (The note it was over shown again before it goes: nothing between.)
+        if let Some(note) = beside.over() {
+            hide(note, false);
+        }
         // (The text services let go of before the window they write in.)
         EDITOR.with(|held| held.borrow_mut().take());
         beside.writing = None;
@@ -1001,6 +1075,11 @@ impl Beside {
         self.redraw();
     }
 
+    /// The note stuck on the desktop it is over (its widget's window), where it is over one.
+    fn over(&self) -> Option<HWND> {
+        self.opening.as_ref().filter(|opening| opening.side == Side::Over && opening.owner != 0).map(|opening| HWND(opening.owner as *mut _))
+    }
+
     /// Whether it is drawn whole: the desktop behind it taken, where its skin shows it (chart paper's does not).
     fn ready(&self) -> bool {
         self.theme.skin == Skin::Paper || BEHIND.with(|held| held.borrow().1.is_some())
@@ -1019,6 +1098,12 @@ impl Beside {
             let _ = SetForegroundWindow(self.hwnd);
             let _ = SetFocus(Some(self.hwnd));
         }
+        // Over a note stuck on the desktop: the note, as it is written in, its page alone (it is drawn as the page is,
+        // just where it is; under a page that lets the desktop through, glass's, it showed through it, the two panes
+        // one over the other another colour, its edge round the page's).
+        if let Some(note) = self.over() {
+            hide(note, true);
+        }
         // (Told again as it comes in front: the panels come over it again, the front having taken it over them.)
         crate::app().controller.page_front(Some(self.hwnd));
     }
@@ -1026,6 +1111,11 @@ impl Beside {
     /// The point (`x`, `y`) physical px in its window, on its page (DIPs from the page's corner, past its shadow's room).
     fn on_page(&self, x: f32, y: f32) -> (f32, f32) {
         (x / self.scale - self.inset, y / self.scale - self.inset)
+    }
+
+    /// How large its page `page` (as `page_on_screen` finds it) is, in DIPs.
+    fn page_size(&self, page: RECT) -> (f32, f32) {
+        ((page.right - page.left) as f32 / self.scale, (page.bottom - page.top) as f32 / self.scale)
     }
 
     /// Where its page is on the screen (physical px): its window less its shadow's room.
@@ -1188,7 +1278,7 @@ impl Beside {
             }
             let _ = self.keep();
             let place = self.page_on_screen();
-            crate::app().controller.stick_note(name, POINT { x: place.left, y: place.top });
+            crate::app().controller.stick_note(name, POINT { x: place.left, y: place.top }, Some(self.page_size(place)));
             return true;
         }
         crate::app().controller.move_note(name, to.x - from.x, to.y - from.y, done);
@@ -1218,7 +1308,7 @@ impl Beside {
             NoteChoice::Stick => {
                 let Some(name) = writing.name.clone() else { return false };
                 let place = self.page_on_screen();
-                crate::app().controller.stick_note(name, POINT { x: place.left + (24.0 * self.scale) as i32, y: place.top + (24.0 * self.scale) as i32 });
+                crate::app().controller.stick_note(name, POINT { x: place.left + (24.0 * self.scale) as i32, y: place.top + (24.0 * self.scale) as i32 }, Some(self.page_size(place)));
                 true
             }
             NoteChoice::TakeAway => {
@@ -1708,18 +1798,18 @@ impl Beside {
             self.hits = hits;
             return;
         };
-        // Of its colour as its card on the panel is (see `view::note_page`); its dot by when it was written.
-        super::view::note_page(frame, &theme, writing.colour, (width, height));
-        let mark = super::view::note_colour(writing.colour);
-        frame.fill_circle(mark, Point { x: PAD + 5.0, y: 26.0 }, 5.0);
+        // Its face, as a note stuck on the desktop is (see `paint_stuck_note`): of its colour as its card on the panel
+        // is, its dot by when it was written; at its foot how many characters, kept as it is written, and where (or,
+        // in place of them, what was said of keeping it, in the foot's whole width, on two lines where it needs them).
         let when = super::text::since(writing.written_ms, crate::station::now_ms(), lang);
-        let said = match (&writing.name, lang) {
-            (None, super::text::Lang::Zh) => "新便签".to_string(),
-            (None, super::text::Lang::En) => "New note".to_string(),
-            (Some(_), super::text::Lang::Zh) => format!("{when} 修改"),
-            (Some(_), super::text::Lang::En) => format!("Written {when}"),
-        };
-        frame.text(&said, theme.small, theme.text2, PAD + 18.0, 18.0, width - 2.0 * PAD - 80.0, Align::Start);
+        let said = note_said(writing.name.as_ref().map(|_| when.as_str()), lang);
+        let counted = note_counted(&writing.editor.text(), lang);
+        note_face(frame, &theme, writing.colour, &said, writing.said.is_none().then_some(counted.as_str()), writing.name.as_deref(), (0.0, 0.0, width, height));
+        if let Some(said) = &writing.said {
+            let bottom = height - FOOT;
+            let tall = frame.gfx.wrapped_height(said, theme.small, width - 2.0 * PAD).min(FOOT - 8.0);
+            frame.text_wrapped(said, theme.small, theme.signal, PAD, bottom + (FOOT - tall) / 2.0, width - 2.0 * PAD);
+        }
         for (at, hit, icon) in [(width - PAD - 28.0, Hit::Close, Icon::Close), (width - PAD - 60.0, Hit::NoteMenu, Icon::Ellipsis)] {
             let place = (at, 12.0, 28.0, 28.0);
             if lit(place, self.pointer) {
@@ -1742,31 +1832,6 @@ impl Beside {
             let (x, y) = self.on_page(x as f32, y as f32);
             let scale = self.scale;
             frame.fill(theme.text, x, y, (w as f32 / scale).max(1.2), h as f32 / scale);
-        }
-        // Its foot: how many characters; kept as it is written, and where (or what was said of it).
-        let bottom = height - FOOT;
-        frame.fill(theme.rule, PAD, bottom, width - 2.0 * PAD, 1.0);
-        let text = editor.text();
-        let count = text.chars().filter(|c| !c.is_whitespace()).count();
-        let counted = match lang {
-            super::text::Lang::Zh => format!("{count} 字 · 自动保存"),
-            super::text::Lang::En => format!("{count} characters · kept as you write"),
-        };
-        // (What was said of keeping it in the foot's whole width, on two lines where it needs them: in place of the
-        // count, which it would else lie over; the file's name after the count, in the room the count leaves.)
-        match (&writing.said, &writing.name) {
-            (Some(said), _) => {
-                let tall = frame.gfx.wrapped_height(said, theme.small, width - 2.0 * PAD).min(FOOT - 8.0);
-                frame.text_wrapped(said, theme.small, theme.signal, PAD, bottom + (FOOT - tall) / 2.0, width - 2.0 * PAD);
-            }
-            (None, name) => {
-                frame.text(&counted, theme.small, theme.text3, PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * PAD, Align::Start);
-                let room = width - 2.0 * PAD - frame.measure(&counted, theme.small) - 16.0;
-                // (Where it fits: shortened past a few letters, a name says nothing.)
-                if let Some(name) = name.as_ref().filter(|_| room >= 96.0) {
-                    frame.text(name, theme.small, theme.text3, width - PAD - room, bottom + (FOOT - 16.0) / 2.0, room, Align::End);
-                }
-            }
         }
         self.hits = hits;
     }
@@ -2248,6 +2313,19 @@ mod tests {
                 assert_ne!(palette.text.0, palette.faint.0, "{skin:?} {dark}");
             }
         }
+    }
+
+    /// A note's page opened over the note stuck on the desktop, to be written in where it is: just where it is, as large
+    /// (made larger, a note stuck smaller than a page to write in grew as it was written in, and its words moved).
+    #[test]
+    fn a_note_s_page_over_it_is_just_where_it_is() {
+        use super::super::theme::Skin;
+        use super::{placed, Opening, Page, Side};
+        use windows::Win32::Foundation::RECT;
+        let by = RECT { left: 200, top: 200, right: 420, bottom: 380 };
+        let opening = Opening { page: Page::Note(Some("a.md".into())), by, side: Side::Over, skin: Skin::Paper, dark: false, folder: None, owner: 0 };
+        let (page, _) = placed(&opening);
+        assert_eq!((page.left, page.top, page.right, page.bottom), (by.left, by.top, by.right, by.bottom));
     }
 
     /// A note's page left for another note pressed on the panel: its going, asked for as it was left, comes after the
