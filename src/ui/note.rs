@@ -247,6 +247,55 @@ fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, sys
     }
 }
 
+/// What a button of the format bar puts on the words chosen: marks, or a link.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Format {
+    Marked(crate::notes::edit::Marked),
+    Link,
+}
+
+/// The format bar's buttons (see docs/station-and-notes.md, section 九 6): bold, slanted, struck through, code, link.
+const BAR: [(Icon, Format); 5] = {
+    use crate::notes::edit::Marked;
+    [(Icon::Bold, Format::Marked(Marked::Bold)), (Icon::Italic, Format::Marked(Marked::Italic)), (Icon::Strikethrough, Format::Marked(Marked::Struck)), (Icon::Code, Format::Marked(Marked::Code)), (Icon::Link, Format::Link)]
+};
+/// How large each of its buttons is, how far in from its edge they are, and how far it is from the words chosen (DIPs,
+/// for words `WORDS` high: larger as they are).
+const BAR_BUTTON: f32 = 28.0;
+const BAR_INSET: f32 = 4.0;
+const BAR_GAP: f32 = 6.0;
+
+/// Where the format bar shows (window pixels), a note's words written `pixels` high in `editor`: over what is chosen
+/// (its first character), under it where the words' box has no room above, within the box. While something is chosen,
+/// not while the pointer is choosing it (`pressing`), nor while the input method composes. None: it does not show.
+fn bar_at(editor: &Editor, pixels: f32, pressing: bool) -> Option<RECT> {
+    let (from, to) = editor.selection();
+    if from == to || pressing || editor.composing() {
+        return None;
+    }
+    let per = pixels / WORDS;
+    let (wide, tall) = (((BAR.len() as f32 * BAR_BUTTON + 2.0 * BAR_INSET) * per).round() as i32, ((BAR_BUTTON + 2.0 * BAR_INSET) * per).round() as i32);
+    let gap = (BAR_GAP * per).round() as i32;
+    let bounds = editor.bounds();
+    let (from, to) = (from.min(to) as usize, from.max(to) as usize);
+    let first = editor.character(from)?;
+    let top = match first.top - gap - tall {
+        above if above >= bounds.top => above,
+        _ => editor.character(to - 1).map_or(first.bottom, |last| last.bottom) + gap,
+    };
+    let left = first.left.min(bounds.right - wide).max(bounds.left);
+    let top = top.min(bounds.bottom - tall).max(bounds.top);
+    Some(RECT { left, top, right: left + wide, bottom: top + tall })
+}
+
+/// Which of the format bar's buttons (at `bar`, for words `pixels` high) `point` is on: none between them, at its edge.
+fn bar_button(bar: &RECT, point: POINT, pixels: f32) -> Option<usize> {
+    let per = pixels / WORDS;
+    let (x, y) = (point.x as f32 - bar.left as f32 - BAR_INSET * per, point.y as f32 - bar.top as f32 - BAR_INSET * per);
+    let nth = (x / (BAR_BUTTON * per)).floor();
+    (x >= 0.0 && y >= 0.0 && y < BAR_BUTTON * per && nth < BAR.len() as f32).then_some(nth as usize)
+}
+
 /// The text on the clipboard (its line breaks `\n`), if there is any.
 fn clipboard_text(owner: HWND) -> Option<String> {
     use windows::Win32::Foundation::HGLOBAL;
@@ -304,6 +353,11 @@ pub struct Writing {
     /// The character the key last down makes is to be eaten: the key did what it does to the words as Markdown is
     /// written (see `pressed`), or nothing.
     eaten: Rc<Cell<bool>>,
+    /// How high its words are written (pixels), whether the pointer is pressed on them (choosing), and which of the
+    /// format bar's buttons it is over (see `bar_at`).
+    pixels: Rc<Cell<f32>>,
+    pressing: Rc<Cell<bool>>,
+    over: Rc<Cell<Option<usize>>>,
 }
 
 impl Writing {
@@ -342,6 +396,9 @@ impl Writing {
             keyed: Rc::new(Cell::new(false)),
             depth: Rc::new(Cell::new(0)),
             eaten: Rc::new(Cell::new(false)),
+            pixels: Rc::new(Cell::new(pixels)),
+            pressing: Rc::new(Cell::new(false)),
+            over: Rc::new(Cell::new(None)),
         };
         writing.dress();
         Some(writing)
@@ -374,6 +431,7 @@ impl Writing {
     /// Its words written `pixels` high in `theme`'s inks (its window's scale changed, or its skin), dressed again so.
     pub fn restyle(&mut self, theme: &Theme, pixels: f32) {
         self.palette = palette_for(theme, self.colour, pixels);
+        self.pixels.set(pixels);
         self.dress();
     }
 
@@ -405,6 +463,7 @@ impl Writing {
     /// pressed, are followed (a web address, or a file of the PC's). Over them the pointer is the hand.
     pub fn answer(&self) -> Answer {
         let (editor, reads, keyed, depth, eaten) = (self.editor.clone(), self.reads.clone(), self.keyed.clone(), self.depth.clone(), self.eaten.clone());
+        let (pixels, pressing, over) = (self.pixels.clone(), self.pressing.clone(), self.over.clone());
         Rc::new(move |hwnd, message, wparam, lparam| {
             let point = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
             let pointer = || {
@@ -455,6 +514,48 @@ impl Writing {
                     depth.set(depth.get() - 1);
                     return Some(Some(LRESULT(0)));
                 }
+            }
+            // The format bar's, where it shows and the pointer is on it: a button pressed puts what it puts on the words
+            // chosen (what is chosen chosen still), the pointer over it lights it, an arrow. Else what is pressed on the
+            // words chooses (the bar not shown till it is let go).
+            let at_bar = |point: POINT| bar_at(&editor, pixels.get(), pressing.get()).filter(|bar| point.x >= bar.left && point.x < bar.right && point.y >= bar.top && point.y < bar.bottom);
+            let on_bar = match message {
+                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_MOUSEMOVE => at_bar(point).map(|bar| bar_button(&bar, point, pixels.get())),
+                WM_SETCURSOR => at_bar(pointer()).map(|_| None),
+                _ => None,
+            };
+            if message == WM_MOUSEMOVE {
+                over.set(on_bar.flatten());
+            }
+            if let Some(button) = on_bar {
+                match (message, button) {
+                    (WM_LBUTTONDOWN | WM_LBUTTONDBLCLK, Some(button)) => {
+                        let (from, to) = editor.selection();
+                        let (text, chosen) = (editor.text(), (from.max(0) as usize, to.max(0) as usize));
+                        let made = match BAR[button].1 {
+                            Format::Marked(how) => Some(crate::notes::edit::toggle(&text, chosen, how)),
+                            Format::Link => crate::notes::edit::link(&text, chosen, clipboard_text(hwnd).as_deref().and_then(crate::notes::edit::web_address)),
+                        };
+                        depth.set(depth.get() + 1);
+                        if let Some(edit) = made {
+                            editor.apply(&edit);
+                        }
+                        depth.set(depth.get() - 1);
+                    }
+                    (WM_SETCURSOR, _) => unsafe {
+                        SetCursor(LoadCursorW(None, IDC_ARROW).ok());
+                        return Some(Some(LRESULT(1)));
+                    },
+                    _ => {}
+                }
+                return Some(Some(LRESULT(0)));
+            }
+            match message {
+                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => pressing.set(true),
+                // (Let go, or moved with the button up: a press whose letting go went elsewhere is over too.)
+                WM_LBUTTONUP => pressing.set(false),
+                WM_MOUSEMOVE => pressing.set(pressing.get() && wparam.0 & 0x0001 != 0),
+                _ => {}
             }
             depth.set(depth.get() + 1);
             let ticked = (message == WM_LBUTTONDOWN && !editor.composing())
@@ -671,6 +772,19 @@ impl Writing {
             super::canvas::task_box(frame, inks, bx, by, side / scale, boxed.done);
         }
         frame.unclip();
+        if let Some(bar) = bar_at(&self.editor, self.pixels.get(), self.pressing.get()) {
+            let per = self.pixels.get() / WORDS / scale;
+            let (left, top) = in_window(bar.left as f32, bar.top as f32);
+            let (right, bottom) = in_window(bar.right as f32, bar.bottom as f32);
+            let plate = super::menu::plate(frame, super::menu::Look::of(theme.skin, theme.dark), (left, top, right - left, bottom - top));
+            for (nth, (icon, _)) in BAR.iter().enumerate() {
+                let (x, y, side) = (left + (BAR_INSET + nth as f32 * BAR_BUTTON) * per, top + BAR_INSET * per, BAR_BUTTON * per);
+                if self.over.get() == Some(nth) {
+                    frame.fill_rounded(plate.highlight, x, y, side, side, (plate.radius - BAR_INSET * per).max(2.0));
+                }
+                frame.icon(*icon, Point { x: x + side / 2.0, y: y + side / 2.0 }, 16.0 * per, plate.icon);
+            }
+        }
         if let (Some((cx, cy, cw, ch)), true) = (self.editor.caret(), caret_on) {
             let (cx, cy) = in_window(cx as f32, cy as f32);
             frame.fill(theme.text, cx, cy, (cw as f32 / scale).max(1.2), ch as f32 / scale);
@@ -797,6 +911,12 @@ The quick brown fox, 1% low";
             writing.dress();
             let written = gfx.draw_offscreen(size, scale, |frame| writing.paint(frame, &theme, Lang::Zh, (0.0, 0.0, w, h), (0.0, 0.0), scale, false)).unwrap();
             crate::studio::save_png(&out.join(format!("note-{name}-written.png")), size.0, size.1, &written).unwrap();
+            // Words chosen (the quote's): the format bar over them.
+            let quote = text.encode_utf16().position(|c| c == u16::from(b'>')).unwrap() as i32 + 2;
+            writing.editor.select((quote, quote + 3));
+            writing.dress();
+            let chosen = gfx.draw_offscreen(size, scale, |frame| writing.paint(frame, &theme, Lang::Zh, (0.0, 0.0, w, h), (0.0, 0.0), scale, false)).unwrap();
+            crate::studio::save_png(&out.join(format!("note-{name}-bar.png")), size.0, size.1, &chosen).unwrap();
         }
         unsafe {
             let _ = DestroyWindow(hwnd);
@@ -901,6 +1021,70 @@ mod tests {
         assert!(!asked.get());
         assert_eq!(pressed("ab", (0, 2), VK_K, ctrl, false, clipboard).map(|edit| edit.map(|edit| edit.with)), Some(Some("[ab](https://a.b)".into())));
         assert!(asked.get());
+    }
+
+    /// The format bar's buttons side by side in it, none at its edge or past its last, larger as the words are.
+    #[test]
+    fn the_format_bar_s_buttons() {
+        use super::{bar_button, BAR_BUTTON, BAR_INSET, WORDS};
+        use windows::Win32::Foundation::{POINT, RECT};
+        let bar = RECT { left: 100, top: 50, right: 100 + (5.0 * BAR_BUTTON + 2.0 * BAR_INSET) as i32, bottom: 50 + (BAR_BUTTON + 2.0 * BAR_INSET) as i32 };
+        let at = |x: f32, y: f32| bar_button(&bar, POINT { x: 100 + x as i32, y: 50 + y as i32 }, WORDS);
+        assert_eq!(at(BAR_INSET + 1.0, BAR_INSET + 1.0), Some(0));
+        assert_eq!(at(BAR_INSET + BAR_BUTTON * 4.5, 20.0), Some(4));
+        assert_eq!(at(1.0, 20.0), None);
+        assert_eq!(at(BAR_INSET + BAR_BUTTON * 5.0 + 1.0, 20.0), None);
+        assert_eq!(bar_button(&bar, POINT { x: 100 + (BAR_INSET * 2.0 + BAR_BUTTON * 1.5 * 2.0) as i32, y: 70 }, WORDS * 2.0), Some(1));
+    }
+
+    /// Words chosen in a note's box: the format bar shows over them, its bold pressed makes them bold (chosen still),
+    /// pressed again plain. Pressed on the words (choosing), it shows no more till the pointer is let go.
+    #[test]
+    fn the_format_bar_marks_the_words_chosen() {
+        use windows::core::w;
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let folder = std::env::temp_dir().join(format!("glance-note-bar-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("b.md"), "第一行\n第二行\n第三行\n一 粗体 字").unwrap();
+        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, 400, 300, None, None, None, None) }.unwrap();
+        let theme = super::Theme::new(super::Skin::Paper, false);
+        let mut writing = super::Writing::open(hwnd, super::words_box(0, 0, 400, 300, 1.0), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("b.md".into()), &theme, super::WORDS).unwrap();
+        let answer = writing.answer();
+        let at = |x: i32, y: i32| LPARAM(((y as isize) << 16) | (x as isize & 0xFFFF));
+        let written = |writing: &super::Writing| writing.editor.text().strip_suffix('\n').unwrap().to_string();
+        writing.editor.select((14, 16));
+        writing.touched = true;
+        writing.written();
+        let bar = super::bar_at(&writing.editor, super::WORDS, false).expect("the bar over the words chosen");
+        let chosen = writing.editor.character(14).unwrap();
+        assert!(bar.bottom <= chosen.top, "{bar:?} over {chosen:?}");
+        let bold = (bar.left + (super::BAR_INSET + super::BAR_BUTTON / 2.0) as i32, (bar.top + bar.bottom) / 2);
+        answer(hwnd, WM_LBUTTONDOWN, WPARAM(1), at(bold.0, bold.1));
+        answer(hwnd, WM_LBUTTONUP, WPARAM(0), at(bold.0, bold.1));
+        writing.written();
+        assert_eq!(written(&writing), "第一行\n第二行\n第三行\n一 **粗体** 字");
+        assert_eq!(writing.editor.selection(), (16, 18));
+        let bar = super::bar_at(&writing.editor, super::WORDS, false).unwrap();
+        let bold = (bar.left + (super::BAR_INSET + super::BAR_BUTTON / 2.0) as i32, (bar.top + bar.bottom) / 2);
+        answer(hwnd, WM_LBUTTONDOWN, WPARAM(1), at(bold.0, bold.1));
+        writing.written();
+        assert_eq!(written(&writing), "第一行\n第二行\n第三行\n一 粗体 字");
+        assert_eq!(writing.editor.selection(), (14, 16));
+        // Pressed on the words: choosing, no bar till let go.
+        let words = writing.editor.character(15).unwrap();
+        answer(hwnd, WM_LBUTTONDOWN, WPARAM(1), at(words.left + 1, words.top + 2));
+        answer(hwnd, WM_MOUSEMOVE, WPARAM(1), at(words.right + 4, words.top + 2));
+        assert!(writing.pressing.get());
+        answer(hwnd, WM_LBUTTONUP, WPARAM(0), at(words.right + 4, words.top + 2));
+        assert!(!writing.pressing.get());
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// Keys given to a note's words' box as Windows gives them (the key down, the character it makes, the key up): Enter

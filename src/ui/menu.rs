@@ -387,6 +387,28 @@ impl Sheet {
 /// What a menu is drawn in: Windows 11's (light or dark), or its skin's, as the panel's lanes are (glass's a near opaque
 /// pane of its glass, lit along its top, round as its lanes; chart paper's its paper ruled in ink, square-ish); its
 /// corners' radius (its rows' highlight concentric within them).
+/// What a plate drawn as a menu's sheet is (see `plate`): the ink of what is on it, of a choice lit on it, and how round
+/// its corners are.
+pub struct Plate {
+    pub icon: Color,
+    pub highlight: Color,
+    pub radius: f32,
+}
+
+/// A plate `width` × `height` from (`x`, `y`) drawn as a menu's sheet in `look` (its shadow, its edge), for a few choices
+/// shown as one (a note's format bar): what is drawn on it is to be drawn so.
+pub fn plate(frame: &dyn super::canvas::Canvas, look: Look, (x, y, width, height): (f32, f32, f32, f32)) -> Plate {
+    let colours = Colours::new(look, false);
+    let radius = colours.radius.min(height / 2.0);
+    frame.shadow(colours.shadow, x, y, width, height, radius, 12.0, 6.0);
+    frame.fill_rounded(colours.sheet, x, y, width, height, radius);
+    frame.stroke_rounded(Fill::Solid(colours.stroke), x, y, width, height, radius, 1.0);
+    if let Some(rim) = colours.rim {
+        frame.stroke_rounded(Fill::Down { top: y, from: rim, bottom: y + height, to: rim.alpha(rim.a * 0.3) }, x + 1.0, y + 1.0, width - 2.0, height - 2.0, radius - 1.0, 1.0);
+    }
+    Plate { icon: colours.icon, highlight: colours.highlight, radius }
+}
+
 struct Colours {
     sheet: Color,
     stroke: Color,
