@@ -9,6 +9,7 @@ pub mod beside;
 pub mod buttons;
 pub mod canvas;
 pub mod editor;
+pub mod note;
 #[cfg(windows)]
 pub mod gfx;
 pub mod life;
@@ -16,6 +17,8 @@ pub mod forms;
 #[cfg(windows)]
 pub mod glass;
 pub mod icons;
+#[cfg(windows)]
+pub mod keys;
 #[cfg(windows)]
 pub mod menu;
 pub mod morph;

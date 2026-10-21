@@ -577,6 +577,112 @@ struct Widget {
     shown: (f32, f32),
     zoom: f32,
     last_frame: Instant,
+    /// A note stuck on the desktop on it written in where it is (see `InPlace`).
+    in_place: Option<InPlace>,
+}
+
+/// How often a note written in where it is looks at its file for a change made outside, and how long after keeping it
+/// failed it is tried again.
+const READ_OUTSIDE: Duration = Duration::from_secs(1);
+const KEEP_AGAIN: Duration = Duration::from_secs(5);
+
+/// A note stuck on the desktop written in where it is, on its widget (see `ui::keys`, `ui::note::Writing`): its words
+/// in a box the text services write, placed where its card's are and drawn in the card's place (see
+/// `view::written_in_place`), the widget taking the keys. Given back (Esc, another program's window in front), what
+/// was written is kept, and it is drawn so till the notes as read show it as written (drawn from them before, it would
+/// show for a moment as it was), then let go.
+struct InPlace {
+    writing: crate::ui::note::Writing,
+    /// The note's number (as a press on it names it: see `view::Hit::Words`), and its name, as its widget shows it.
+    number: u64,
+    name: String,
+    hwnd: HWND,
+    lang: Lang,
+    /// Taking the keys.
+    taking: bool,
+    /// The window in front as it began to take them (Esc gives the front back to it).
+    before: HWND,
+    clicks: crate::ui::keys::Clicks,
+    /// A press on its words followed by them till it is let go, and a press on its menu's button.
+    selecting: bool,
+    menu_pressed: bool,
+    /// When what was written is next kept, and its file next looked at (see `READ_OUTSIDE`).
+    keep_at: Option<Instant>,
+    read_at: Instant,
+    /// Since when the caret blinks (it shows at once as it moves, or as a key comes), and what was chosen then.
+    blink_from: Instant,
+    chosen: (i32, i32),
+    /// What its words were last styled for: pixels a DIP, the skin, and whether dark.
+    styled: (f32, Skin, bool),
+    /// Its card, where it was last drawn (DIPs from its window's corner).
+    card: (f32, f32, f32, f32),
+}
+
+/// Let go of with its widget (put away, merged, the note taken off the desktop): what was written kept, or where it
+/// cannot be, put aside (see `Writing::put_aside`), its card drawn as the notes read show it again.
+impl Drop for InPlace {
+    fn drop(&mut self) {
+        crate::ui::keys::give_back(self.hwnd);
+        if !self.writing.keep(self.lang) {
+            self.writing.put_aside();
+        }
+        view::written_in_place(&self.name, false);
+    }
+}
+
+impl InPlace {
+    /// Its menu's button, in its card's head (DIPs from its window's corner).
+    fn menu_button(&self) -> (f32, f32, f32, f32) {
+        crate::ui::note::button_at(0, (self.card.0, self.card.1, self.card.2))
+    }
+
+    /// Whether `client` (physical px in its window, `px` pixels a DIP) is on its menu's button, shown while it takes
+    /// the keys.
+    fn on_menu_button(&self, client: POINT, px: f32) -> bool {
+        let (x, y) = (client.x as f32 / px, client.y as f32 / px);
+        let (bx, by, bw, bh) = self.menu_button();
+        self.taking && x >= bx && x < bx + bw && y >= by && y < by + bh
+    }
+
+    /// Whether its caret shows now, in its blink (Windows' time for it).
+    fn caret_on(&self, now: Instant) -> bool {
+        let blink = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
+        // (No blink asked for: always shown.)
+        blink == u32::MAX || blink == 0 || (now.saturating_duration_since(self.blink_from).as_millis() / u128::from(blink)).is_multiple_of(2)
+    }
+
+    /// When it is next due: its caret's blink turning, what was written kept, its file looked at.
+    fn due(&self, now: Instant) -> Option<Instant> {
+        let blink = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
+        let turns = (self.taking && blink != u32::MAX && blink != 0).then(|| {
+            let blink = u128::from(blink);
+            let past = now.saturating_duration_since(self.blink_from).as_millis();
+            self.blink_from + Duration::from_millis(((past / blink + 1) * blink) as u64)
+        });
+        [turns, self.keep_at, self.taking.then_some(self.read_at)].into_iter().flatten().min()
+    }
+}
+
+/// The card of the note `number` stuck on the desktop among `hits` (as drawn from `from`, its widget's content's corner,
+/// in its window `margin` from its corner: DIPs), where its words are pressed to be written in (see `view::Hit::Words`):
+/// DIPs from the window's corner.
+fn card_in(hits: &[view::HitBox], from: (f32, f32), number: u64, margin: f32) -> Option<(f32, f32, f32, f32)> {
+    hits.iter().any(|hit| hit.4 == view::Hit::Words(number)).then_some(())?;
+    hits.iter().find(|hit| hit.4 == view::Hit::Note(number)).map(|hit| (margin + from.0 + hit.0, margin + from.1 + hit.1, hit.2, hit.3))
+}
+
+/// Where a note's words are written on its card `card` (DIPs from the window's corner, `px` pixels a DIP): in its
+/// window (physical px).
+fn words_rect(card: (f32, f32, f32, f32), px: f32) -> RECT {
+    let at = |dips: f32| (dips * px).round() as i32;
+    crate::ui::note::words_box(at(card.0), at(card.1), at(card.2), at(card.3), px)
+}
+
+/// Whether the window in front is one of this thread's (a widget's, a menu up), or none for now.
+fn front_is_ours() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let front = unsafe { GetForegroundWindow() };
+    front.is_invalid() || unsafe { GetWindowThreadProcessId(front, None) } == unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }
 }
 
 /// What a widget shows.
@@ -1228,6 +1334,8 @@ pub struct Widgets {
     dropping: Option<Dropping>,
     /// The menu a press on a widget's station asked for (see `take_menu_asked`): the button, the page its station shows.
     menu_asked: Option<(view::Hit, view::Tab)>,
+    /// The menu of a note written in where it is asked for by its button (see `take_note_menu_asked`): the note's number.
+    note_menu_asked: Option<u64>,
     /// The music shown over the whole of a screen, while it is (asked for by a music widget's button).
     full: Option<crate::fullscreen::FullMusic>,
 }
@@ -1352,30 +1460,6 @@ impl Widgets {
                 widget.next_frame = Instant::now();
             }
         }
-        self.save();
-    }
-
-    /// The widget the note `name` is stuck on the desktop as (alone, or merged with another) moved by (`dx`, `dy`)
-    /// physical px, as what it is written in over it is moved; where `done`, kept where it is.
-    pub fn move_note(&mut self, name: &str, dx: i32, dy: i32, done: bool) {
-        let only = format!("{}{name}", view::STUCK_NOTE_LANE);
-        let Some(widget) = self.list.iter_mut().find(|widget| widget.content.holding(&only).is_some()) else { return };
-        if (dx, dy) != (0, 0) {
-            widget.moved_by(dx, dy);
-        }
-        if done {
-            self.save();
-        }
-    }
-
-    /// The widget the note `name` is stuck on the desktop as made `size` large (its own DIPs), as the page it is written
-    /// in over it was sized: laid out again for it (see `view::STUCK_NOTE`), its corner where it is, and kept so.
-    pub fn size_note(&mut self, name: &str, size: (f32, f32)) {
-        let only = format!("{}{name}", view::STUCK_NOTE_LANE);
-        let Some(widget) = self.list.iter_mut().find(|widget| widget.content.holding(&only).is_some()) else { return };
-        let Some(readings) = widget.content.readings_mut() else { return };
-        readings.choice.extra = (size.0 - view::STUCK_NOTE.0, size.1 - view::STUCK_NOTE.1);
-        widget.next_frame = Instant::now();
         self.save();
     }
 
@@ -1602,7 +1686,6 @@ impl Widgets {
         let px = widget.contact.scale * widget.zoom;
         let margin = widget.margin_px();
         let (x, y) = ((client.x - margin) as f32 / px, (client.y - margin) as f32 / px);
-        let (w, h) = widget.surface_size;
         // What the button under the pointer does, said under it.
         let over = widget.button_at(x, y);
         if over != widget.tip {
@@ -1654,12 +1737,13 @@ impl Widgets {
             widget.hit_hover = hit;
             widget.next_frame = Instant::now();
         }
-        let shape = if over.is_some() || hit.is_some() {
-            windows::Win32::UI::WindowsAndMessaging::IDC_HAND
-        } else {
-            let (left, right, top, bottom) = edges_at(x, y, w, h);
-            crate::panel::sizing(left, right, top, bottom)
-        };
+        // (Over the words written in where they are, theirs: see `ui::keys`. Its menu's button, the hand.)
+        let writing = widget.in_place.as_ref().filter(|in_place| in_place.taking);
+        if over.is_none() && writing.is_some_and(|in_place| in_place.writing.editor.holds(client)) {
+            return;
+        }
+        // (As a press there acts: see `takes_at`.)
+        let shape = pointer_for(&widget.takes_at(x, y), over.is_some(), hit, writing.is_some_and(|in_place| in_place.on_menu_button(client, px)));
         widget.window.point(shape);
     }
 
@@ -1804,6 +1888,117 @@ impl Widgets {
 
     pub fn take_menu_asked(&mut self) -> Option<(view::Hit, view::Tab)> {
         self.menu_asked.take()
+    }
+
+    /// The menu of a note written in where it is asked for by its button (see `InPlace`), taken: the note's number.
+    pub fn take_note_menu_asked(&mut self) -> Option<u64> {
+        self.note_menu_asked.take()
+    }
+
+    /// A press, a move, a let go or a wheel's turn on the widget at `msg.hwnd`, for a note stuck on the desktop on it to
+    /// be written in where it is (see `InPlace`): its words pressed, written in there (the press theirs, as the text
+    /// services take it). Written in, the pointer's on its words (a press there, the hand followed by them till it is
+    /// let go, the wheel), and on its menu's button. Whether it was theirs (else the widget's, as ever: moved, sized,
+    /// its buttons pressed).
+    pub fn write(&mut self, msg: &windows::Win32::UI::WindowsAndMessaging::MSG) -> bool {
+        let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == msg.hwnd) else { return false };
+        widget.write(msg, &mut self.note_menu_asked)
+    }
+
+    /// What was written in the note written in where it is on the widget at `hwnd` (its words took a message: see
+    /// `ui::keys::took`) seen to: dressed, kept a moment after it changed (see `note::KEEP_AFTER_MS`), drawn, the
+    /// caret shown at once where it moved.
+    pub fn written(&mut self, hwnd: HWND) {
+        let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
+        let Some(in_place) = widget.in_place.as_mut() else { return };
+        let now = Instant::now();
+        let changed = in_place.writing.written();
+        if changed {
+            in_place.keep_at = Some(now + Duration::from_millis(u64::from(crate::ui::note::KEEP_AFTER_MS)));
+        }
+        let chosen = in_place.writing.editor.selection();
+        if changed || chosen != in_place.chosen {
+            (in_place.chosen, in_place.blink_from) = (chosen, now);
+        }
+        widget.next_frame = now;
+    }
+
+    /// The widget at `hwnd` to give back the keys it takes (see `ui::keys::LEFT`): Esc pressed (`escaped`: the front
+    /// given back to the window that had it), or another program's window come in front (one of this thread's, a menu,
+    /// it takes them again as that goes).
+    pub fn keys_left(&mut self, hwnd: HWND, escaped: bool) {
+        let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
+        if escaped || !front_is_ours() {
+            widget.stop_writing(escaped);
+        }
+    }
+
+    /// Whether a note is written in where it is now (its widget taking the keys).
+    pub fn writing(&self) -> bool {
+        self.list.iter().any(|w| w.in_place.as_ref().is_some_and(|in_place| in_place.taking))
+    }
+
+    /// The menu of the note `number` stuck on the desktop on the widget at `hwnd` (its card pressed with the right
+    /// button, or its menu's button while it is written in), up: its colours, it taken off the desktop, it taken away
+    /// (see `ui::note::menu`). Its name, and what each row does. None where it is no such note there.
+    pub fn note_menu(&self, hwnd: HWND, number: u64, lang: Lang, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, String, Vec<crate::ui::note::Choice>)> {
+        let widget = self.list.iter().find(|w| w.window.hwnd == hwnd)?;
+        card_in(&widget.hits, widget.hits_from, number, 0.0)?;
+        let name = crate::notes::named(number)?;
+        let written = widget.in_place.as_ref().filter(|in_place| in_place.number == number).map(|in_place| in_place.writing.colour);
+        let colour = written.or_else(|| crate::notes::shown().iter().find(|note| note.name == name).map(|note| note.colour)).unwrap_or_default();
+        let (items, choices) = crate::ui::note::menu(lang, colour, true, true);
+        let open = crate::ui::menu::Menu::open(items, self.look_of(hwnd), over_the_panel)?;
+        Some((open, name, choices))
+    }
+
+    /// `choice` made in the menu of the note `name` stuck on the desktop (see `note_menu`): its colour, or it taken off the
+    /// desktop, or taken away, what is written in it kept first (not kept, it stays, saying so: taken away, the
+    /// Recycle Bin would have had the note as it was before).
+    pub fn note_chose(&mut self, name: &str, choice: crate::ui::note::Choice) {
+        use crate::ui::note::Choice;
+        let index = self.list.iter().position(|w| w.in_place.as_ref().is_some_and(|in_place| in_place.name == name));
+        let kept = index.is_none_or(|index| {
+            let widget = &mut self.list[index];
+            widget.next_frame = Instant::now();
+            let in_place = widget.in_place.as_mut().unwrap();
+            in_place.writing.keep(in_place.lang)
+        });
+        let written = index.and_then(|index| self.list[index].in_place.as_ref());
+        let folder = written.map_or_else(crate::notes::folder, |in_place| crate::notes::folder_at(in_place.writing.folder.clone()));
+        let named = written.and_then(|in_place| in_place.writing.name.clone()).unwrap_or_else(|| name.to_string());
+        match choice {
+            Choice::Colour(colour) => match index {
+                Some(index) => {
+                    let widget = &mut self.list[index];
+                    let theme = widget.content.dressed(Theme::new(widget.drawn_look.0, widget.drawn_look.1));
+                    widget.in_place.as_mut().unwrap().writing.recolour(&theme, colour);
+                }
+                None => {
+                    let _ = folder.colour(&named, colour);
+                    crate::notes::read_again();
+                }
+            },
+            Choice::Unstick if kept => self.unstick_note(name),
+            Choice::TakeAway if kept => {
+                if folder.take_away(&named) {
+                    crate::notes::read_again();
+                    self.unstick_note(name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Glance going: what is written in notes where they are kept (or, where it cannot be, put aside: see
+    /// `Writing::put_aside`).
+    pub fn keep_as_glance_goes(&mut self) {
+        for in_place in self.list.iter_mut().filter_map(|w| w.in_place.as_mut()) {
+            if !in_place.writing.keep(in_place.lang) {
+                in_place.writing.put_aside();
+                in_place.writing.unkept = false;
+            }
+        }
     }
 
     /// The music shown over the whole of the screen `monitor` (physical px) at `scale`.
@@ -1973,6 +2168,10 @@ impl Widgets {
                 widget.hidden();
                 continue;
             }
+            // A note on it written in where it is seen to, drawn as it is due (see `tend_writing`).
+            if let Some(at) = widget.tend_writing(now) {
+                widget.next_frame = widget.next_frame.min(at);
+            }
             // What is behind it, looked at as often as it is due, drawn only as it changes.
             let sees = look.skin.sees_backdrop() && widget.content.skinned();
             if sees && widget.look_behind(self.live && sees) {
@@ -2002,6 +2201,8 @@ impl Widgets {
                 Frame::Rest | Frame::Waiting => {
                     // (The pointer over it: looked at often, so that what comes with it goes as soon as it leaves.)
                     let rest = if widget.lingered.is_some() { WATCHED } else if widget.hover { HOVERED_FRAME } else { REST_FRAME };
+                    // (Sooner, a note written in where it is due: its caret's blink, its keeping.)
+                    let rest = widget.in_place.as_ref().and_then(|in_place| in_place.due(now)).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
                     widget.next_frame = now + rest;
                     due = due.min(rest);
                     // (What is behind looked at sooner, a frame of it having come: drawn only if it changed.)
@@ -2197,6 +2398,66 @@ struct Request {
 /// Posted to a widget's window as a frame of what is behind it has come.
 pub const CAPTURED: u32 = WM_APP + 12;
 
+/// What a press at (`x`, `y`) on a widget `size` large (DIPs from its surface's corner) takes, among `hits` (as drawn
+/// from `from`), `pinned` or not, `button` (one of its buttons there) or not: see `Takes`.
+fn takes(hits: &[view::HitBox], from: (f32, f32), size: (f32, f32), pinned: bool, button: bool, (x, y): (f32, f32)) -> Takes {
+    let (lx, ly) = (x - from.0, y - from.1);
+    let under = |hit: &&view::HitBox| lx >= hit.0 && lx < hit.0 + hit.2 && ly >= hit.1 && ly < hit.1 + hit.3;
+    // A thing on its station: dragged off it, or pressed (see `shelf_press`).
+    if let Some(hit) = hits.iter().find(under).map(|hit| hit.4).filter(|hit| hit.drags()) {
+        return Takes::Shelf(hit);
+    }
+    // The sound's track: slid along till let go (pinned or not: that is not moving it).
+    if let Some(track) = hits.iter().filter(|hit| hit.4.slider().is_some()).find(under) {
+        return Takes::Track(*track);
+    }
+    // Pinned, it is neither moved nor sized: only its buttons and what it shows that takes a press (the keys of what
+    // plays, a line of its lyrics, a drive's row) are pressed. (Its buttons alone were, and those did nothing pinned.)
+    let on_content = hits.iter().filter(|hit| hit.4.takes_press()).any(|hit| under(&hit));
+    if pinned && !button && !on_content {
+        return Takes::Nothing;
+    }
+    if button || pinned {
+        return Takes::Pressed;
+    }
+    // (Its edges over what it shows there: a note stuck on the desktop is its card to its edges.)
+    let edges = edges_at(x, y, size.0, size.1);
+    if edges.0 || edges.1 || edges.2 || edges.3 {
+        Takes::Edges(edges)
+    } else {
+        Takes::Whole
+    }
+}
+
+/// The pointer's shape over a widget where a press takes `takes`, `over` one of its buttons or not, over `hit` of what
+/// it shows (that takes a press), on the menu's button of a note written in where it is (`note_button`) or not: as
+/// a press there acts (sized by its edges, the hand on what is pressed, the I-beam over a note's words).
+fn pointer_for(takes: &Takes, over: bool, hit: Option<view::Hit>, note_button: bool) -> windows::core::PCWSTR {
+    use windows::Win32::UI::WindowsAndMessaging::{IDC_ARROW, IDC_HAND, IDC_IBEAM};
+    match takes {
+        _ if note_button => IDC_HAND,
+        Takes::Nothing => IDC_ARROW,
+        Takes::Edges((left, right, top, bottom)) => crate::panel::sizing(*left, *right, *top, *bottom),
+        _ if over => IDC_HAND,
+        _ if matches!(hit, Some(view::Hit::Words(_))) => IDC_IBEAM,
+        _ if hit.is_some() => IDC_HAND,
+        _ => IDC_ARROW,
+    }
+}
+
+/// What a press on a widget takes (see `Widget::takes_at`): a thing on its station (dragged off it, or pressed), the
+/// sound's track (slid along), nothing (pinned, off its buttons and what it shows that takes a press), one of its
+/// buttons or, pinned, what it shows that takes a press (acted on as it is let go), its edges or a corner (sized by
+/// them), or the whole of it (moved, or what it shows there pressed as it is let go where it was).
+enum Takes {
+    Shelf(view::Hit),
+    Track(view::HitBox),
+    Nothing,
+    Pressed,
+    Edges((bool, bool, bool, bool)),
+    Whole,
+}
+
 impl Widget {
     /// Its part at `part` (merged) taken out: as large as it was drawn (what plays), the others as they were, shorter
     /// by it along the way they go; the one left alone a widget of its own kind again. What was taken.
@@ -2228,38 +2489,177 @@ impl Widget {
         Some(content)
     }
 
-    /// `page` opened beside it, on the side of its screen with more room, drawn as it is.
-    fn open_beside(&self, page: crate::ui::beside::Page) {
-        self.open_page(page, false);
+    /// The note `number` stuck on the desktop on it written in where it is (see `InPlace`), taking the keys: the caret
+    /// at its end (`at_end`: its head or its foot clicked), else where it was, or where its words are pressed next.
+    /// Whether it is.
+    fn write_note(&mut self, number: u64, at_end: bool) -> bool {
+        // (Another note on it written in, merged with this one: given back, kept, first.)
+        if self.in_place.as_ref().is_some_and(|in_place| in_place.number != number) {
+            self.stop_writing(false);
+            self.in_place = None;
+        }
+        if self.in_place.is_none() {
+            let px = self.contact.scale * self.zoom;
+            let Some(card) = card_in(&self.hits, self.hits_from, number, self.margin_px() as f32 / px) else { return false };
+            let Some(name) = crate::notes::named(number) else { return false };
+            let theme = self.content.dressed(Theme::new(self.drawn_look.0, self.drawn_look.1));
+            let Some(writing) = crate::ui::note::Writing::open(self.window.hwnd, words_rect(card, px), &crate::notes::folder(), Some(name.clone()), &theme, crate::ui::note::WORDS * px) else { return false };
+            // (After its last words: not on the empty line the line break ending its file leaves.)
+            if at_end {
+                let end = writing.editor.text().trim_end_matches('\n').encode_utf16().count() as i32;
+                writing.editor.select((end, end));
+            }
+            view::written_in_place(&name, true);
+            let now = Instant::now();
+            let chosen = writing.editor.selection();
+            let hwnd = self.window.hwnd;
+            self.in_place = Some(InPlace { writing, number, name, hwnd, lang: crate::update::language(), taking: false, before: HWND::default(), clicks: Default::default(), selecting: false, menu_pressed: false, keep_at: None, read_at: now + READ_OUTSIDE, blink_from: now, chosen, styled: (px, theme.skin, theme.dark), card });
+        }
+        self.take_keys();
+        true
     }
 
-    /// `page` opened beside it, on the side of its screen with more room, or `over` it (a note stuck on the desktop,
-    /// written in where it is), drawn as it is.
-    fn open_page(&self, page: crate::ui::beside::Page, over: bool) {
+    /// Its note written in where it is taking the keys (see `ui::keys`): it comes to the front with them, the caret
+    /// shown at once.
+    fn take_keys(&mut self) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, WM_SETFOCUS};
+        let Some(in_place) = self.in_place.as_mut() else { return };
+        let now = Instant::now();
+        (in_place.blink_from, self.next_frame) = (now, now);
+        if in_place.taking {
+            return;
+        }
+        in_place.taking = true;
+        in_place.before = unsafe { GetForegroundWindow() };
+        crate::ui::keys::take(self.window.hwnd, in_place.writing.answer());
+        // (Its window with the focus already, no longer taking the keys since: its words told they have it, as coming
+        // to the front would tell them.)
+        let focused = unsafe { GetFocus() } == self.window.hwnd;
+        self.window.take_keys(true);
+        if focused {
+            let _ = in_place.writing.editor.send(WM_SETFOCUS, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    /// The keys its note written in where it is takes given back (see `InPlace`): what was written kept (not kept, tried
+    /// again a while after, saying so), the front given back to the window that had it where `escaped` (Esc pressed).
+    fn stop_writing(&mut self, escaped: bool) {
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow, WM_KILLFOCUS};
+        let Some(in_place) = self.in_place.as_mut().filter(|in_place| in_place.taking) else { return };
+        in_place.taking = false;
+        (in_place.selecting, in_place.menu_pressed) = (false, false);
+        crate::ui::keys::give_back(self.window.hwnd);
+        // (What the input method is composing written, the caret hidden.)
+        let _ = in_place.writing.editor.send(WM_KILLFOCUS, WPARAM(0), LPARAM(0));
+        let _ = in_place.writing.written();
+        let now = Instant::now();
+        in_place.keep_at = (!in_place.writing.keep(in_place.lang)).then_some(now + KEEP_AGAIN);
+        let before = in_place.before;
+        self.window.take_keys(false);
+        if escaped && !before.is_invalid() && unsafe { IsWindow(Some(before)) }.as_bool() {
+            let _ = unsafe { SetForegroundWindow(before) };
+        }
+        self.next_frame = now;
+    }
+
+    /// Its note written in where it is seen to as time goes (see `InPlace`): the keys given back where another
+    /// program's window came in front unheard (as a menu of this thread's went), what was written kept when it is due,
+    /// its file looked at for a change made outside. Given back and kept, let go once the notes read show it as
+    /// written. When it is next due.
+    fn tend_writing(&mut self, now: Instant) -> Option<Instant> {
+        if self.in_place.as_ref().is_some_and(|in_place| in_place.taking) && !front_is_ours() {
+            self.stop_writing(false);
+        }
+        let in_place = self.in_place.as_mut()?;
+        if in_place.keep_at.is_some_and(|at| now >= at) && !in_place.writing.answering() {
+            in_place.keep_at = (!in_place.writing.keep(in_place.lang)).then_some(now + KEEP_AGAIN);
+            self.next_frame = now;
+        }
+        if in_place.taking && now >= in_place.read_at {
+            in_place.read_at = now + READ_OUTSIDE;
+            in_place.writing.read_outside();
+            self.next_frame = now;
+        }
+        if !in_place.taking && in_place.keep_at.is_none() && in_place.writing.read_as_written() {
+            self.in_place = None;
+            self.next_frame = now;
+            return None;
+        }
+        in_place.due(now)
+    }
+
+    /// The pointer's `msg` for its note written in where it is, or to be (see `Widgets::write`), its menu asked for by
+    /// its button told in `menu_asked`. Whether it was theirs.
+    fn write(&mut self, msg: &windows::Win32::UI::WindowsAndMessaging::MSG, menu_asked: &mut Option<u64>) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL};
+        let px = self.contact.scale * self.zoom;
+        let hwnd = self.window.hwnd;
+        let mut client = POINT { x: (msg.lParam.0 & 0xFFFF) as i16 as i32, y: ((msg.lParam.0 >> 16) & 0xFFFF) as i16 as i32 };
+        // (The wheel's, on the screen.)
+        if msg.message == WM_MOUSEWHEEL {
+            let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client) };
+        }
+        let hand_on = |message: u32| unsafe { SendMessageW(hwnd, message, Some(msg.wParam), Some(msg.lParam)) };
+        match msg.message {
+            WM_LBUTTONDOWN => {
+                let margin = self.margin_px();
+                let (x, y) = ((client.x - margin) as f32 / px, (client.y - margin) as f32 / px);
+                // (Its own buttons, the widget's.)
+                if self.button_at(x, y).is_some() {
+                    return false;
+                }
+                if !self.in_place.as_ref().is_some_and(|in_place| in_place.taking) {
+                    let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
+                    let Some(view::Hit::Words(number)) = self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4) else { return false };
+                    if !self.write_note(number, false) {
+                        return false;
+                    }
+                }
+                let Some(in_place) = self.in_place.as_mut() else { return false };
+                if in_place.on_menu_button(client, px) {
+                    in_place.menu_pressed = true;
+                    return true;
+                }
+                if !in_place.writing.editor.holds(client) {
+                    return false;
+                }
+                in_place.selecting = true;
+                let pressed = in_place.clicks.press(client);
+                hand_on(pressed);
+                true
+            }
+            WM_LBUTTONUP | WM_MOUSEMOVE => {
+                let Some(in_place) = self.in_place.as_mut().filter(|in_place| in_place.taking) else { return false };
+                if msg.message == WM_LBUTTONUP && std::mem::take(&mut in_place.menu_pressed) {
+                    if in_place.on_menu_button(client, px) {
+                        *menu_asked = Some(in_place.number);
+                    }
+                    return true;
+                }
+                if !in_place.selecting {
+                    return false;
+                }
+                in_place.selecting &= msg.message != WM_LBUTTONUP;
+                hand_on(msg.message);
+                true
+            }
+            WM_MOUSEWHEEL if self.in_place.as_ref().is_some_and(|in_place| in_place.taking && in_place.writing.editor.holds(client)) => {
+                hand_on(msg.message);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `page` opened beside it, on the side of its screen with more room, drawn as it is.
+    fn open_beside(&self, page: crate::ui::beside::Page) {
         use crate::ui::beside::{Opening, Side};
         let by = self.rect();
         let screen = self.contact.monitor;
-        let side = match over {
-            true => Side::Over,
-            false if (by.left + by.right) / 2 > (screen.left + screen.right) / 2 => Side::Left,
-            false => Side::Right,
-        };
+        let side = if (by.left + by.right) / 2 > (screen.left + screen.right) / 2 { Side::Left } else { Side::Right };
         let (skin, dark) = self.drawn_look;
         crate::ui::beside::open(Opening { page, by, side, skin, dark, folder: None, owner: self.window.hwnd.0 as isize });
-    }
-
-    /// Moved by (`dx`, `dy`) physical px by something other than the hand on it (a note written in over it, moved):
-    /// no longer stuck to an edge, on the screen it comes to.
-    fn moved_by(&mut self, dx: i32, dy: i32) {
-        self.at = POINT { x: self.at.x + dx, y: self.at.y + dy };
-        self.stuck = None;
-        self.along = None;
-        self.keeps_to = (false, false);
-        let rect = self.rect();
-        if let Some(contact) = monitor_at(POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 }) {
-            self.moved_to(contact);
-        }
-        self.next_frame = Instant::now();
     }
 
     fn new(contact: Contact, at: POINT, content: Content) -> Option<Self> {
@@ -2329,6 +2729,7 @@ impl Widget {
             shown: (0.0, 0.0),
             zoom: 1.0,
             last_frame: Instant::now(),
+            in_place: None,
         })
     }
 
@@ -2632,6 +3033,12 @@ impl Widget {
         self.offered().into_iter().find(|(c, _)| (c.x - x).hypot(c.y - y) <= BUTTON / 2.0 + 2.0).map(|(_, b)| b)
     }
 
+    /// What a press at (`x`, `y`) (DIPs from its surface's corner) takes (see `Takes`), as `press` acts on it and the
+    /// pointer's shape says it (see `Widgets::hover`).
+    fn takes_at(&self, x: f32, y: f32) -> Takes {
+        takes(&self.hits, self.hits_from, self.surface_size, self.pinned, self.button_at(x, y).is_some(), (x, y))
+    }
+
     fn press(&mut self, client: POINT) {
         let px = self.contact.scale * self.zoom;
         let margin = self.margin_px();
@@ -2654,48 +3061,43 @@ impl Widget {
             view::Hit::Pages(list, most) if f32::from_bits(most) > 0.0 && lx >= hx && lx < hx + w && ly >= hy && ly < hy + h => Some((list, f32::from_bits(most), w, Instant::now())),
             _ => None,
         });
-        // On a thing on its station: dragged off it, or pressed (see `shelf_press`).
-        if let Some(hit) = self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4).filter(|hit| hit.drags()) {
-            self.shelf_press = Some((hit, from));
-            unsafe { SetCapture(self.window.hwnd) };
-            return;
-        }
-        // On the sound's track: it is slid along till let go (pinned or not: that is not moving it).
-        if let Some((hx, hy, wide, tall, hit)) = self.hits.iter().find(|(hx, hy, w, h, hit)| hit.slider().is_some() && lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).copied() {
-            self.drag = Some(match hit.upright() {
-                true => Drag::Slide { slider: hit.slider().unwrap(), from: hy + tall + self.hits_from.1, wide: tall, upright: true },
-                false => Drag::Slide { slider: hit.slider().unwrap(), from: hx + self.hits_from.0, wide, upright: false },
-            });
-            unsafe { SetCapture(self.window.hwnd) };
-            self.slide();
-            return;
-        }
-        let edges = edges_at(x, y, w, h);
-        // Pinned, it is neither moved nor sized: only its buttons and what it shows that takes a press (the keys of
-        // what plays, a line of its lyrics, a drive's row) are pressed. (Its buttons alone were, and those did
-        // nothing pinned.)
-        let on_content = self.hits.iter().any(|(hx, hy, w, h, hit)| hit.takes_press() && lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h);
-        if self.pinned && self.button_at(x, y).is_none() && !on_content {
-            note("widget: pressed while pinned");
-            return;
-        }
-        if self.button_at(x, y).is_some() || self.pinned {
-            // A press on a button: acted on as it is let go.
-            self.drag = Some(Drag::Move { grab: POINT { x: from.x - self.at.x, y: from.y - self.at.y }, trail: Vec::new(), torn: false, moved: false });
-        } else if edges.0 || edges.1 || edges.2 || edges.3 {
-            let room = (self.surface_size.0 * self.zoom, self.surface_size.1 * self.zoom);
-            self.drag = Some(Drag::Size { edges, from, room, corner: self.at });
-            self.keeps_to = (edges.0, edges.2);
-            // (What showed is measured against the room it has now, at each sizing: not the room one long ago left.)
-            if let Content::Readings(readings) = &mut self.content {
-                readings.taken = None;
+        match self.takes_at(x, y) {
+            Takes::Shelf(hit) => {
+                self.shelf_press = Some((hit, from));
+                unsafe { SetCapture(self.window.hwnd) };
+                return;
             }
-        } else {
-            self.drag = Some(Drag::Move { grab: POINT { x: from.x - self.at.x, y: from.y - self.at.y }, trail: Vec::new(), torn: false, moved: false });
-            self.splitting = match &self.content {
-                Content::Merged(merged) => merged.part_at((x, y)).filter(|(part, _)| *part > 0),
-                _ => None,
-            };
+            Takes::Track((hx, hy, wide, tall, hit)) => {
+                self.drag = Some(match hit.upright() {
+                    true => Drag::Slide { slider: hit.slider().unwrap(), from: hy + tall + self.hits_from.1, wide: tall, upright: true },
+                    false => Drag::Slide { slider: hit.slider().unwrap(), from: hx + self.hits_from.0, wide, upright: false },
+                });
+                unsafe { SetCapture(self.window.hwnd) };
+                self.slide();
+                return;
+            }
+            Takes::Nothing => {
+                note("widget: pressed while pinned");
+                return;
+            }
+            // (Acted on as it is let go.)
+            Takes::Pressed => self.drag = Some(Drag::Move { grab: POINT { x: from.x - self.at.x, y: from.y - self.at.y }, trail: Vec::new(), torn: false, moved: false }),
+            Takes::Edges(edges) => {
+                let room = (self.surface_size.0 * self.zoom, self.surface_size.1 * self.zoom);
+                self.drag = Some(Drag::Size { edges, from, room, corner: self.at });
+                self.keeps_to = (edges.0, edges.2);
+                // (What showed is measured against the room it has now, at each sizing: not the room one long ago left.)
+                if let Content::Readings(readings) = &mut self.content {
+                    readings.taken = None;
+                }
+            }
+            Takes::Whole => {
+                self.drag = Some(Drag::Move { grab: POINT { x: from.x - self.at.x, y: from.y - self.at.y }, trail: Vec::new(), torn: false, moved: false });
+                self.splitting = match &self.content {
+                    Content::Merged(merged) => merged.part_at((x, y)).filter(|(part, _)| *part > 0),
+                    _ => None,
+                };
+            }
         }
         unsafe { SetCapture(self.window.hwnd) };
         // Above every window while it is in hand, kept on the desktop or not.
@@ -2954,6 +3356,11 @@ impl Widget {
                                     self.unsay();
                                 }
                                 Some(hit) if hit.opens_menu() => return Released::Menu(hit),
+                                // A note stuck on the desktop, its card clicked (its head, its foot): written in where
+                                // it is, the caret at its end.
+                                Some(view::Hit::Note(number)) if card_in(&self.hits, self.hits_from, number, 0.0).is_some() => {
+                                    self.write_note(number, true);
+                                }
                                 // Quick launch's choosing of programs, a note: beside it on the side with more room.
                                 Some(hit @ (view::Hit::AddApp | view::Hit::NewNote | view::Hit::Note(_))) => {
                                     use crate::ui::beside::Page;
@@ -2963,11 +3370,8 @@ impl Widget {
                                         view::Hit::Note(number) => crate::notes::named(number).map(|name| Page::Note(Some(name))),
                                         _ => None,
                                     };
-                                    // (A note stuck on the desktop, its own card pressed: written in where it is,
-                                    // over it, not beside it.)
-                                    let over = matches!(hit, view::Hit::Note(_)) && self.content.readings_mut().is_some_and(|readings| readings.only.as_deref().is_some_and(|only| only.starts_with(view::STUCK_NOTE_LANE)));
                                     if let Some(page) = page {
-                                        self.open_page(page, over);
+                                        self.open_beside(page);
                                     }
                                 }
                                 Some(view::Hit::Line(index)) => {
@@ -3691,6 +4095,10 @@ impl Widget {
         // What plays: as its switches say, the pointer where it is over it (letting clicks through, it is not).
         let shows = (!matches!(self.content, Content::Readings(_))).then(|| Shows::from(&crate::app().settings.lock().unwrap().view));
         let pointer = cursor_position().filter(|_| self.hover && !self.click_through).map(|c| ((c.x - self.at.x) as f32 / px, (c.y - self.at.y) as f32 / px));
+        // A note written in where it is: its card where it was last drawn, should none be drawn now.
+        let was_card = self.in_place.as_ref().and_then(|in_place| card_in(&self.hits, self.hits_from, in_place.number, margin));
+        let mut in_place = self.in_place.as_mut();
+        let mut card_gone = false;
         let behind = &mut self.behind;
         let content = &mut self.content;
         let Some(surface) = self.surface.as_mut() else { return };
@@ -3771,6 +4179,35 @@ impl Widget {
                     pressed = Some((hits, (0.0, 0.0)));
                 }
             }
+            // A note written in where it is: its card drawn by what writes it, where the card is now (its words' box
+            // placed there, written as large as its scale makes them). Its card gone (the note taken off it, a part
+            // torn out), given back.
+            if let Some(in_place) = in_place.as_deref_mut() {
+                match pressed.as_ref().map_or(was_card, |(hits, from)| card_in(hits, *from, in_place.number, margin)) {
+                    Some(card) => {
+                        if in_place.styled != (px, theme.skin, theme.dark) {
+                            in_place.styled = (px, theme.skin, theme.dark);
+                            in_place.writing.restyle(theme, crate::ui::note::WORDS * px);
+                        }
+                        let words = words_rect(card, px);
+                        if in_place.writing.editor.bounds() != words {
+                            in_place.writing.editor.place(words);
+                        }
+                        in_place.card = card;
+                        frame.origin(0.0, 0.0);
+                        in_place.writing.paint(frame, theme, scene.lang, card, (0.0, 0.0), px, in_place.taking && in_place.caret_on(now));
+                        if in_place.taking {
+                            let place = in_place.menu_button();
+                            let lit = cursor_position().is_some_and(|c| {
+                                let (x, y) = ((c.x - window.left) as f32 / px, (c.y - window.top) as f32 / px);
+                                x >= place.0 && x < place.0 + place.2 && y >= place.1 && y < place.1 + place.3
+                            });
+                            crate::ui::note::paint_button(frame, theme, place, Icon::Ellipsis, lit);
+                        }
+                    }
+                    None => card_gone = true,
+                }
+            }
             frame.place(Matrix3x2::translation(margin, margin));
             if let Some(beside) = drop_target {
                 let ring = theme.text.alpha(0.85);
@@ -3797,6 +4234,10 @@ impl Widget {
             }
         });
         self.frame_took = surface.took;
+        if card_gone {
+            self.stop_writing(false);
+            self.in_place = None;
+        }
         if let Some((hits, from)) = pressed {
             (self.hits, self.hits_from) = (hits, from);
             self.show_stations();
@@ -4006,6 +4447,47 @@ mod tests {
         let merged = Content::Merged(Box::new(Merged::new(vec![Content::Music(MusicShown::new(music::LEAST)), note("a.md")], true, music::LEAST)));
         assert_eq!(merged.holding("note:a.md"), Some(Some(1)));
         assert_eq!(merged.holding("note:b.md"), None);
+    }
+
+    /// A note stuck on the desktop (its card the whole widget, to its edges): sized by its edges and corners, the pointer
+    /// there saying so (it was the hand of the card under it, and the note seemed not to be sized at all), its words
+    /// pressed to be written in, the I-beam over them, and elsewhere moved, or its card pressed, the hand. Pinned, its card
+    /// pressed, never sized.
+    #[test]
+    fn a_stuck_note_is_sized_by_its_edges_and_says_so() {
+        use windows::Win32::UI::WindowsAndMessaging::{IDC_HAND, IDC_IBEAM, IDC_SIZENWSE, IDC_SIZEWE};
+        let (w, h) = view::STUCK_NOTE;
+        let (wx, wy, ww, wh) = crate::ui::note::words_in(w, h);
+        let hits = vec![(wx, wy, ww, wh, view::Hit::Words(7)), (0.0, 0.0, w, h, view::Hit::Note(7))];
+        let hit_at = |(x, y): (f32, f32)| hits.iter().find(|hit| x >= hit.0 && x < hit.0 + hit.2 && y >= hit.1 && y < hit.1 + hit.3).map(|hit| hit.4);
+        let at = |pinned: bool, point: (f32, f32)| {
+            let taken = takes(&hits, (0.0, 0.0), (w, h), pinned, false, point);
+            (pointer_for(&taken, false, hit_at(point), false), taken)
+        };
+        let (corner, side, words, head) = ((w - 2.0, h - 2.0), (1.0, h / 2.0), (wx + 40.0, wy + 30.0), (w / 2.0, 20.0));
+        assert!(matches!(at(false, corner), (shape, Takes::Edges((false, true, false, true))) if shape == IDC_SIZENWSE));
+        assert!(matches!(at(false, side), (shape, Takes::Edges((true, false, false, false))) if shape == IDC_SIZEWE));
+        assert!(matches!(at(false, words), (shape, Takes::Whole) if shape == IDC_IBEAM));
+        assert!(matches!(at(false, head), (shape, Takes::Whole) if shape == IDC_HAND));
+        assert!(matches!(at(true, corner), (shape, Takes::Pressed) if shape == IDC_HAND));
+    }
+
+    /// A note stuck on the desktop, its card found among what a widget drew (from its content's corner, in its window
+    /// past its margin) where its words are there to be written in, and none where they are not (a note's card on the
+    /// workbench, opened beside), its words' box placed where its card draws them, at any scale.
+    #[test]
+    fn a_stuck_note_s_card_is_found_and_written_where_its_words_are() {
+        let (wx, wy, ww, wh) = crate::ui::note::words_in(300.0, 220.0);
+        let hits = vec![(wx, wy, ww, wh, view::Hit::Words(7)), (0.0, 0.0, 300.0, 220.0, view::Hit::Note(7)), (0.0, 230.0, 300.0, 40.0, view::Hit::Note(8))];
+        let card = (14.0, 16.0, 300.0, 220.0);
+        assert_eq!(card_in(&hits, (4.0, 6.0), 7, 10.0), Some(card));
+        assert_eq!(card_in(&hits, (4.0, 6.0), 8, 10.0), None);
+        for px in [1.0, 1.25, 1.5, 2.0] {
+            let words = words_rect(card, px);
+            let drawn = [(card.0 + wx) * px, (card.1 + wy) * px, (card.0 + wx + ww) * px, (card.1 + wy + wh) * px];
+            let placed = [words.left, words.top, words.right, words.bottom].map(|edge| edge as f32);
+            assert!(drawn.iter().zip(placed).all(|(drawn, placed)| (drawn - placed).abs() <= 1.0), "{px}: {drawn:?} {placed:?}");
+        }
     }
 
     /// A note stuck on the desktop is its page alone, in every skin: nothing ruled off under it as chart paper rules a

@@ -4,9 +4,7 @@
 //! - quick launch's adding: what is kept, in its order (dragged into another, taken off by its cross), and what may
 //!   be added, by its kind: every program the Start menu lists (searched by name or pinyin), files and folders used
 //!   lately; what is not listed chosen on the PC, or dropped on it, as on quick launch;
-//! - a note written: its words in a box the text services write (see `editor`: the keys, the input method, selection,
-//!   undo and the clipboard theirs), kept as they are typed (a moment after the last key), its colour chosen or it
-//!   taken to the Recycle Bin from its menu.
+//! - a note written (see `note`): its colour chosen, it stuck on the desktop or taken to the Recycle Bin from its menu.
 //!
 //! A window of its own thread (a single-threaded apartment with OLE, for the shell's pictures and what is dropped on
 //! it), drawn as Glance draws. The adding and a thing's page are drawn in the skin as the panel is: its sheet over
@@ -29,7 +27,7 @@ use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCan
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use super::canvas::{Align, Canvas, Color, Family, Font, Inks, Point};
+use super::canvas::{Align, Canvas, Color, Point};
 use super::gfx::{self, Frame, Gfx, Surface};
 use super::icons::Icon;
 use super::theme::{Skin, Theme};
@@ -71,8 +69,6 @@ pub enum Side {
     Left,
     Right,
     Below,
-    /// Over it, from its corner (a note stuck on the desktop, written in where it is): as large as it.
-    Over,
 }
 
 /// How wide it is (DIPs); its head, its search box, a row, a letter's heading, its foot; the room round its parts.
@@ -83,8 +79,6 @@ const ROW: f32 = 40.0;
 const LETTER: f32 = 26.0;
 const FOOT: f32 = 48.0;
 const PAD: f32 = 16.0;
-/// The room a note's page leaves at its sides, round its words, its head's and its foot's (DIPs).
-const NOTE_PAD: f32 = 20.0;
 /// The gap between it and what it opens from (DIPs).
 const GAP: f32 = 8.0;
 /// How long a search may be.
@@ -143,8 +137,6 @@ const ROW_IN: f32 = 8.0;
 /// Its timer for drawing again while a mark slides (each frame's time).
 const SLIDING: usize = 6;
 const SHOW_WITHIN_MS: u32 = 400;
-/// How long after the last key a note is kept.
-const KEEP_AFTER_MS: u32 = 600;
 
 /// The page's window while one is up (0 while none is): what a page's going asked for later is for (see `go_soon`).
 static PAGE: AtomicIsize = AtomicIsize::new(0);
@@ -299,229 +291,22 @@ struct Beside {
     /// A picture was not ready as it was last drawn: drawn again soon.
     waiting: bool,
     /// The note written, on a note's page.
-    writing: Option<Writing>,
+    writing: Option<super::note::Writing>,
     /// How it was opened (made again so as its screen's scale changes).
     opening: Option<Opening>,
-    /// Over a note stuck on the desktop, moved by its head: where its corner last was (the note moved along by as
-    /// much as it moves since).
+    /// A note kept in a file, moved by its head: where its corner was as it was taken (pulled far enough, the note is
+    /// stuck on the desktop where it is put: see `carry_note`).
     moved_from: Option<POINT>,
     /// Shown on the screen yet: not before it is first drawn whole (on glass and Windows 11, with the desktop behind it,
     /// see `ready`), else it came up as it was drawn, and a moment after changed (the desktop come in behind).
     shown: bool,
-    /// The note stuck on the desktop it is over hidden under it (see `draw`), shown again as it goes.
-    hiding: bool,
-    /// Over a note stuck on the desktop: being sized by its edges (see `Sizing`).
-    sizing: Option<Sizing>,
     /// The kind listed's mark, sliding to it as another is chosen (glass's: see `view::glass_choice`).
     marks: super::thumb::Dots<Kinds>,
 }
 
-/// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
-/// colour, its words' box, whether what is written is not yet kept, and what was last said of keeping it.
-struct Writing {
-    /// The folder it is in (kept to: the folder chosen in the settings changed meanwhile, it is kept where it was read).
-    folder: std::path::PathBuf,
-    name: Option<String>,
-    stamp: Option<crate::notes::store::Stamp>,
-    colour: crate::notes::Colour,
-    written_ms: u64,
-    /// Its words' box, held by `EDITOR` too (see `write`).
-    editor: Rc<super::editor::Editor>,
-    /// What its Markdown is dressed in (see `editor::Editor::dress`).
-    palette: super::editor::Palette,
-    unkept: bool,
-    said: Option<String>,
-    /// How its Markdown shows away from the lines written on, as it was last dressed, and those lines (see
-    /// `notes::markdown::Shown`).
-    shown: crate::notes::markdown::Shown,
-    written: std::ops::RangeInclusive<usize>,
-    /// What was chosen in it as it opened (the caret), and whether it has been written in or the caret moved since:
-    /// till then no line is written on, and it shows as the note did where it was pressed (its marks put away).
-    opened_at: (i32, i32),
-    touched: bool,
-}
-
-/// `color` as Windows' GDI writes one.
-fn colorref(color: Color) -> windows::Win32::Foundation::COLORREF {
-    windows::Win32::Foundation::COLORREF(((color.b * 255.0).round() as u32) << 16 | ((color.g * 255.0).round() as u32) << 8 | (color.r * 255.0).round() as u32)
-}
-
-impl Writing {
-    /// Its words dressed as their Markdown reads, its marks put away off the lines written on (those of the caret, or
-    /// of what is chosen, once it has been written in or the caret moved: see `touched`).
-    fn dress(&mut self) {
-        use crate::notes::markdown::{written_lines, Shown, NONE_WRITTEN};
-        let text = self.editor.text();
-        let shown = Shown::of(&text);
-        let (from, to) = self.editor.selection();
-        let written = if self.touched { written_lines(&text, (from.max(0) as usize, to.max(0) as usize)) } else { NONE_WRITTEN };
-        let mut hidden = shown.hidden(&written);
-        hidden.extend(shown.boxes(&written).map(|boxed| boxed.marks.clone()));
-        let rooms: Vec<usize> = shown.boxes(&written).map(|boxed| boxed.room).collect();
-        self.editor.dress(&crate::notes::markdown::looks(&text), &hidden, &rooms, &self.palette);
-        READS.with_borrow_mut(|reads| *reads = Some(Reads { shown: shown.clone(), written: written.clone(), folder: self.folder.clone() }));
-        self.shown = shown;
-        self.written = written;
-    }
-
-    /// The lines written on now (see `dress`).
-    fn written_now(&self) -> std::ops::RangeInclusive<usize> {
-        let (from, to) = self.editor.selection();
-        match self.touched {
-            true => crate::notes::markdown::written_lines(&self.editor.text(), (from.max(0) as usize, to.max(0) as usize)),
-            false => crate::notes::markdown::NONE_WRITTEN,
-        }
-    }
-}
-
-/// How the note written shows away from the lines written on, for its words' box's messages (see `write`), which come
-/// whatever the page is in the middle of: as it was last dressed, and the folder it is in.
-struct Reads {
-    shown: crate::notes::markdown::Shown,
-    written: std::ops::RangeInclusive<usize>,
-    folder: std::path::PathBuf,
-}
-
-/// The page `was` sized by its `edges` held (left, right, top, bottom) moved by `by` (physical px): those edges as
-/// far as that, the others where they were, no smaller than `least`, and within `work` (its screen's work area).
-fn sized_page(was: RECT, (l, r, t, b): (bool, bool, bool, bool), (dx, dy): (i32, i32), least: (i32, i32), work: RECT) -> RECT {
-    let mut page = was;
-    if l {
-        page.left = (was.left + dx).max(work.left).min(was.right - least.0);
-    }
-    if r {
-        page.right = (was.right + dx).min(work.right).max(was.left + least.0);
-    }
-    if t {
-        page.top = (was.top + dy).max(work.top).min(was.bottom - least.1);
-    }
-    if b {
-        page.bottom = (was.bottom + dy).min(work.bottom).max(was.top + least.1);
-    }
-    page
-}
-
-/// Where a to-do's box is drawn, in the room drawn for it from `left`, by its line's `baseline` (in the window: see
-/// `Editor::character`, `Editor::baseline`), its words `pixels` high: its left, its top and its side.
-fn box_in(left: i32, baseline: i32, pixels: f32) -> (f32, f32, f32) {
-    use crate::notes::markdown::{BOX_IN, BOX_RISE, BOX_SIDE};
-    let side = BOX_SIDE * pixels;
-    (left as f32 + BOX_IN * pixels, baseline as f32 - BOX_RISE * pixels - side / 2.0, side)
-}
-
-/// What a note's words are written in on its page (`pixels` high), its colour `colour`: as its card's on the panel are
-/// (glass's in the ink of its colour), and as opaque colours (the words' box takes none other: a faint ink half see
-/// through came out as solid as the words, and Markdown's faint marks no fainter), as they show over the page.
-fn palette_for(theme: &Theme, colour: crate::notes::Colour, pixels: f32) -> super::editor::Palette {
-    let inks = word_inks(theme, colour);
-    super::editor::Palette { text: colorref(inks.words), faint: colorref(inks.faint), accent: colorref(inks.accent), points: pixels * 0.75, face: "Microsoft YaHei UI".into(), code_face: super::canvas::CODE_FACE.into() }
-}
-
-/// The inks a note of colour `colour` is written in on its page (see `palette_for`), opaque.
-fn word_inks(theme: &Theme, colour: crate::notes::Colour) -> Inks {
-    // (The skin's own, as its head and foot are written: a card's own ink, glass's, is for its card's light pane, and
-    // on a page's, lighter over a page's breadth, it was dark on dark in the dark. Its colour is the page's tint.)
-    let _ = colour;
-    let (text, faint) = (theme.text, theme.text3);
-    let ground = page_under(theme);
-    let opaque = |ink: Color| super::view::over(Color { a: 1.0, ..ground }, ink);
-    let accent = match theme.skin {
-        Skin::Paper => theme.text,
-        _ => super::theme::accent(theme.dark),
-    };
-    Inks { words: opaque(text), faint: opaque(faint), accent: opaque(accent) }
-}
-
-/// What a note's page is reckoned to lie over, its inks made opaque over (the box takes colours with no see-through):
-/// the skin's sheet.
-fn page_under(theme: &Theme) -> Color {
-    match theme.skin {
-        Skin::Paper => theme.paper,
-        _ if theme.dark => Color::hex(0x26282E, 1.0),
-        _ => Color::hex(0xF5F6F8, 1.0),
-    }
-}
-
-/// How high a note's words are written (DIPs).
-pub(super) const WORDS: f32 = 15.0;
-
-/// What is said at the head of a note's page of when it was written (`when`, how long ago; none: it is new).
-fn note_said(when: Option<&str>, lang: super::text::Lang) -> String {
-    match (when, lang) {
-        (None, super::text::Lang::Zh) => "新便签".to_string(),
-        (None, super::text::Lang::En) => "New note".to_string(),
-        (Some(when), super::text::Lang::Zh) => format!("{when} 修改"),
-        (Some(when), super::text::Lang::En) => format!("Written {when}"),
-    }
-}
-
-/// What is said at the foot of a note's page of its words `text`: how many characters, kept as it is written.
-fn note_counted(text: &str, lang: super::text::Lang) -> String {
-    let count = text.chars().filter(|c| !c.is_whitespace()).count();
-    match lang {
-        super::text::Lang::Zh => format!("{count} 字 · 自动保存"),
-        super::text::Lang::En => format!("{count} characters · kept as you write"),
-    }
-}
-
-/// A note's page's face, `width` × `height` from (`x`, `y`), but for what is pressed on it and its words: its ground
-/// of its colour (see `view::note_page`), at its head its colour's dot and what `said` says of when it was written; at
-/// its foot, ruled off, what `counted` says of its words and its file's `name` in the room left (none: the foot left
-/// for what was said of keeping it). Its words are written between (see `note_words`).
-#[allow(clippy::too_many_arguments)]
-fn note_face(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, said: &str, counted: Option<&str>, name: Option<&str>, (x, y, width, height): (f32, f32, f32, f32)) {
-    super::view::note_page(frame, theme, colour, (x, y, width, height));
-    frame.fill_circle(super::view::note_colour(colour), Point { x: x + NOTE_PAD + 5.0, y: y + 26.0 }, 5.0);
-    frame.text(said, theme.small, theme.text2, x + NOTE_PAD + 18.0, y + 18.0, width - 2.0 * NOTE_PAD - 80.0, Align::Start);
-    let bottom = y + height - FOOT;
-    frame.fill(theme.rule, x + NOTE_PAD, bottom, width - 2.0 * NOTE_PAD, 1.0);
-    let Some(counted) = counted else { return };
-    frame.text(counted, theme.small, theme.text3, x + NOTE_PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * NOTE_PAD, Align::Start);
-    let room = width - 2.0 * NOTE_PAD - frame.measure(counted, theme.small) - 16.0;
-    // (Where it fits: shortened past a few letters, a name says nothing.)
-    if let Some(name) = name.filter(|_| room >= 96.0) {
-        frame.text(name, theme.small, theme.text3, x + width - NOTE_PAD - room, bottom + (FOOT - 16.0) / 2.0, room, Align::End);
-    }
-}
-
-/// Where a note's words are written on its page `width` × `height` (DIPs, from its corner): under its head, over its
-/// foot (as `words_box` places its box).
-fn note_words(width: f32, height: f32) -> (f32, f32, f32, f32) {
-    (NOTE_PAD, HEAD + 4.0, width - 2.0 * NOTE_PAD, height - HEAD - 4.0 - FOOT)
-}
-
-/// A note stuck on the desktop, `width` × `height` from (`x`, `y`): its page as it is written in (see `paint_note`),
-/// but for what is pressed there and the caret, its words as the page writes them: its words `text`, its colour
-/// `colour`, written `when` (how long ago), kept in the file `name`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn paint_stuck_note(frame: &dyn Canvas, theme: &Theme, lang: super::text::Lang, text: &str, colour: crate::notes::Colour, when: &str, name: &str, (x, y, width, height): (f32, f32, f32, f32)) {
-    note_face(frame, theme, colour, &note_said(Some(when), lang), Some(&note_counted(text, lang)), Some(name), (x, y, width, height));
-    let (left, top, wide, tall) = note_words(width, height);
-    frame.markdown(text, Font::new(Family::YaHei, WORDS, 400.0), word_inks(theme, colour), x + left, y + top, wide, tall);
-}
-
-/// What a note's menu does: its colour chosen, it taken to the Recycle Bin.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum NoteChoice {
-    Colour(crate::notes::Colour),
-    Stick,
-    /// Its card on the desktop, which the page is over, taken off it (the note kept).
-    Unstick,
-    TakeAway,
-}
-
-/// Over a note stuck on the desktop, the page being sized by an edge (or a corner) held, the note along with it: the
-/// edges held (left, right, top, bottom), and where the pointer and the page were as it was taken (on the screen,
-/// physical px).
-struct Sizing {
-    edges: (bool, bool, bool, bool),
-    from: POINT,
-    page: RECT,
-}
-
 thread_local! {
     /// A note's menu up, with what each row does.
-    static MENU: RefCell<Option<(super::menu::Menu, Vec<NoteChoice>)>> = const { RefCell::new(None) };
+    static MENU: RefCell<Option<(super::menu::Menu, Vec<super::note::Choice>)>> = const { RefCell::new(None) };
 }
 
 /// What quick launch's adding lists: the Start menu's programs, files used lately, the folders they are in.
@@ -566,13 +351,10 @@ enum Hit {
 
 thread_local! {
     static BESIDE: RefCell<Option<Beside>> = const { RefCell::new(None) };
-    /// A note's words' box while the page shows one: reached by its messages whatever the page is in the middle of
-    /// (see `write`).
-    static EDITOR: RefCell<Option<Rc<super::editor::Editor>>> = const { RefCell::new(None) };
-    /// See `Reads`.
-    static READS: RefCell<Option<Reads>> = const { RefCell::new(None) };
-    /// The box was given a key, or the input method's words, since this was last asked (see `Writing::touched`).
-    static KEYED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// What a note's words' box answers the page's messages with while the page shows one (see `note::Writing::answer`):
+    /// reached by them whatever the page is in the middle of (see `write`), and how deep they are in it.
+    static ANSWER: RefCell<Option<super::note::Answer>> = const { RefCell::new(None) };
+    static ANSWERING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 fn with<R>(act: impl FnOnce(&mut Beside) -> R) -> Option<R> {
@@ -686,8 +468,7 @@ fn run(asks: Receiver<Ask>) {
 
 /// Where the page `opening` asks for is on the screen (physical px, its shadow's room left out), and how many pixels a
 /// DIP is there: beside what it opens from on its side away from the edge, else on the other, else over it; under the
-/// top edge's panel, as tall as the room under it is; over a note stuck on the desktop, just where it is (it is drawn
-/// as this page, see `paint_stuck_note`).
+/// top edge's panel, as tall as the room under it is.
 fn placed(opening: &Opening) -> (RECT, f32) {
     let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
     let monitor = unsafe { MonitorFromRect(&opening.by, MONITOR_DEFAULTTONEAREST) };
@@ -706,14 +487,10 @@ fn placed(opening: &Opening) -> (RECT, f32) {
 fn placed_in(opening: &Opening, room: RECT, scale: f32) -> RECT {
     let (wide, gap) = ((WIDTH * scale).round() as i32, (GAP * scale).round() as i32);
     let least = (480.0 * scale) as i32;
-    let wide = if opening.side == Side::Over { opening.by.right - opening.by.left } else { wide }.min(room.right - room.left);
+    let wide = wide.min(room.right - room.left);
     let left_of = opening.by.left - gap - wide;
     let right_of = opening.by.right + gap;
     let (x, y, tall) = match opening.side {
-        Side::Over => {
-            let tall = (opening.by.bottom - opening.by.top).min(room.bottom - room.top);
-            (opening.by.left, opening.by.top, tall)
-        }
         Side::Below => {
             let tall = (room.bottom - opening.by.bottom - gap - gap).max(least).min(room.bottom - room.top);
             ((opening.by.left + opening.by.right - wide) / 2, opening.by.bottom + gap, tall)
@@ -731,20 +508,6 @@ fn placed_in(opening: &Opening, room: RECT, scale: f32) -> RECT {
     let x = x.clamp(room.left, room.right - wide);
     let y = y.clamp(room.top, room.bottom - tall);
     RECT { left: x, top: y, right: x + wide, bottom: y + tall }
-}
-
-/// Where a note's words are written in its page's window (physical px), its page `wide` × `tall` past `room` (its
-/// shadow's): under its head, over its foot.
-pub(super) fn words_box(room: i32, wide: i32, tall: i32, scale: f32) -> RECT {
-    RECT { left: room + (NOTE_PAD * scale) as i32, top: room + ((HEAD + 4.0) * scale) as i32, right: room + wide - (NOTE_PAD * scale) as i32, bottom: room + tall - (FOOT * scale) as i32 }
-}
-
-/// The window `window` (of Glance's) kept off the screen (`hidden`) or shown again as it was, nothing else of it changed.
-fn hide(window: HWND, hidden: bool) {
-    let cloak = windows::core::BOOL::from(hidden);
-    unsafe {
-        let _ = DwmSetWindowAttribute(window, windows::Win32::Graphics::Dwm::DWMWA_CLOAK, &cloak as *const _ as *const _, size_of::<windows::core::BOOL>() as u32);
-    }
 }
 
 /// The page `opening` asks for, up beside what it opens from.
@@ -805,61 +568,20 @@ fn show(opening: Opening) {
             opening: Some(opening.clone()),
             moved_from: None,
             shown: false,
-            hiding: false,
-            sizing: None,
             marks: super::thumb::Dots::new(),
         };
         let page = beside.page.clone();
         let theme = beside.theme.clone();
-        // Over a note stuck on the desktop: the note left out of what is behind the page (and every scene) while the
-        // page is up, as it is hidden under it (see `draw`). Taken in, the page's glass showed the note's through it
-        // till what was behind was taken again, the two panes one over the other, lighter, for a moment.
-        if let Some(note) = beside.over() {
-            super::scene::leave_out(note, true);
-        }
         BESIDE.with(|cell| *cell.borrow_mut() = Some(beside));
         // A note: its words read, and a box for them where the page writes them.
         if let Page::Note(name) = page {
             let folder = opening.folder.clone().map_or_else(crate::notes::folder, crate::notes::folder_at);
-            let read = name.as_ref().and_then(|name| folder.read(name));
-            crate::perf::mark(|| "beside note read".into());
-            let shown = crate::notes::shown();
-            let colour = match &name {
-                Some(name) => shown.iter().find(|note| &note.name == name).map(|note| note.colour).unwrap_or_default(),
-                // (A new note takes the next colour round.)
-                None => crate::notes::Colour::ALL[shown.len() % crate::notes::Colour::ALL.len()],
-            };
-            let rect = words_box(room_px, wide, tall, scale);
-            let pixels = WORDS * scale;
-            let palette = palette_for(&theme, colour, pixels);
-            if let Some(editor) = super::editor::Editor::new(hwnd, rect, &palette.face, pixels, palette.text) {
-                crate::perf::mark(|| "beside editor".into());
-                if let Some((text, _)) = &read {
-                    editor.set_text(text);
-                }
-                let _ = editor.send(WM_SETFOCUS, WPARAM(0), LPARAM(0));
-                let editor = Rc::new(editor);
-                EDITOR.with(|held| *held.borrow_mut() = Some(editor.clone()));
-                let written_ms = read.as_ref().map_or_else(crate::station::now_ms, |(_, stamp)| stamp.written_ms);
-                *WRITING.lock().unwrap() = name.clone();
-                let opened_at = editor.selection();
-                let mut writing = Writing {
-                    folder: folder.path.clone(),
-                    name,
-                    stamp: read.map(|(_, stamp)| stamp),
-                    colour,
-                    written_ms,
-                    editor,
-                    palette,
-                    unkept: false,
-                    said: None,
-                    shown: Default::default(),
-                    written: crate::notes::markdown::NONE_WRITTEN,
-                    opened_at,
-                    touched: false,
-                };
-                writing.dress();
+            let rect = super::note::words_box(room_px, room_px, wide, tall, scale);
+            if let Some(writing) = super::note::Writing::open(hwnd, rect, &folder, name.clone(), &theme, super::note::WORDS * scale) {
                 crate::perf::mark(|| "beside words dressed".into());
+                let _ = writing.editor.send(WM_SETFOCUS, WPARAM(0), LPARAM(0));
+                ANSWER.with(|held| *held.borrow_mut() = Some(writing.answer()));
+                *WRITING.lock().unwrap() = name;
                 with(|beside| beside.writing = Some(writing));
             }
         }
@@ -925,7 +647,7 @@ fn gone() {
 /// The page up gone (see `gone`), what gives way to it told so (`told`), or not (another comes at once).
 fn let_go(told: bool) {
     // (Its words' box given a message meanwhile, and in the middle of it: the page goes once it has answered.)
-    let answering = EDITOR.with(|held| held.borrow().as_ref().is_some_and(|editor| Rc::strong_count(editor) > 2));
+    let answering = ANSWERING.get() > 0;
     let held = if answering { Err(()) } else { BESIDE.with(|cell| cell.try_borrow_mut().map(|mut beside| beside.take()).map_err(drop)) };
     let Ok(mut held) = held else {
         go_soon(PAGE.load(Ordering::Acquire));
@@ -942,16 +664,8 @@ fn let_go(told: bool) {
         open.close();
     }
     if let Some(mut beside) = held {
-        // (The note it was over shown again before it goes: nothing between.)
-        if let Some(note) = beside.over() {
-            if beside.hiding {
-                hide(note, false);
-            }
-            super::scene::leave_out(note, false);
-        }
         // (The text services let go of before the window they write in.)
-        EDITOR.with(|held| held.borrow_mut().take());
-        READS.with_borrow_mut(|reads| *reads = None);
+        ANSWER.with(|held| held.borrow_mut().take());
         beside.writing = None;
         unsafe {
             let _ = windows::Win32::System::Ole::RevokeDragDrop(beside.hwnd);
@@ -975,101 +689,21 @@ fn let_go(told: bool) {
     *WRITING.lock().unwrap() = None;
 }
 
-/// A message for a note's words' box, given it where it is one of its: what it answers (none: the page's own). Given it
-/// whatever the page is in the middle of: an input method answers inside the message that asked it (the box placing
-/// its windows as it is drawn, say), and a composition the box ends (a press on its words) comes back inside that
-/// press. (Given only while the page was free, those went past the box: a composition it ended never ended in it, its
-/// words left in it as they were shown, the syllables' marks with them.) The page's own part is done then too, or as
-/// soon as the page is free.
-fn write(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
-    let editor = EDITOR.with(|held| held.borrow().clone())?;
-    let point = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
-    let pointer = || {
-        let mut at = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut at);
-            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut at);
-        }
-        at
-    };
-    let its = match message {
-        // (Esc leaves the page; the rest of the keys and the input method's are the box's.)
-        WM_KEYDOWN => wparam.0 != usize::from(VK_ESCAPE.0),
-        WM_KEYUP | WM_CHAR | WM_SYSCHAR | WM_UNICHAR | WM_SETFOCUS | WM_KILLFOCUS => true,
-        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_NOTIFY | WM_IME_SETCONTEXT | WM_IME_CHAR | WM_IME_REQUEST | WM_IME_COMPOSITIONFULL | WM_IME_SELECT => true,
-        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN => editor.holds(point),
-        // (A press begun in it is followed till let go, wherever the pointer goes.)
-        WM_LBUTTONUP | WM_MOUSEMOVE => editor.holds(point) || unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == hwnd,
-        WM_SETCURSOR => (lparam.0 & 0xFFFF) as u32 == HTCLIENT && editor.holds(pointer()),
-        WM_MOUSEWHEEL => true,
-        WM_TIMER => !matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW | SHOW | SLIDING),
-        _ => false,
-    };
-    if !its {
+/// A message for a note's words' box, given it where it is one of its (see `note::Writing::answer`): what it answers
+/// (none: not its, the page's own, its own timers among them, or the system's to answer as well). The page's own part is
+/// done then too, or as soon as the page is free.
+fn write(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<Option<LRESULT>> {
+    if message == WM_TIMER && matches!(wparam.0, BLINK | AGAIN | KEEP | FOLLOW | SHOW | SLIDING) {
         return None;
     }
-    if matches!(message, WM_KEYDOWN | WM_CHAR | WM_IME_COMPOSITION) {
-        KEYED.set(true);
-    }
-    // A to-do's box pressed: ticked, or no longer (as if typed: undo takes it back). Drawn as a box (off the lines
-    // written on), pressed anywhere in its room; written out, on its `[ ]`.
-    let ticked = (message == WM_LBUTTONDOWN)
-        .then(|| {
-            let drawn = READS.with_borrow(|reads| {
-                let reads = reads.as_ref()?;
-                reads.shown.boxes(&reads.written).find_map(|boxed| {
-                    let room = editor.character(boxed.room)?;
-                    (point.x >= room.left && point.x < room.right && point.y >= room.top && point.y < room.bottom).then(|| (boxed.marks.end - 3..boxed.marks.end, boxed.done))
-                })
-            });
-            drawn.or_else(|| {
-                let at = editor.at(point);
-                let text = editor.text();
-                crate::notes::markdown::tasks(&text).into_iter().find(|(range, _)| range.start <= at && at < range.end)
-            })
-        })
-        .flatten();
-    // A link's words, where they show as it reads: pressed, followed (a web address, or a file of the PC's).
-    let link_under = |point: POINT| {
-        let at = editor.at(point);
-        let on = editor.character(at).is_some_and(|drawn| point.x >= drawn.left && point.x < drawn.right && point.y >= drawn.top && point.y < drawn.bottom);
-        READS.with_borrow(|reads| reads.as_ref().filter(|_| on).and_then(|reads| reads.shown.link_at(at, &reads.written).map(|link| (link.to.clone(), reads.folder.clone()))))
-    };
-    let followed = match (ticked.is_none(), message) {
-        (true, WM_LBUTTONDOWN) => link_under(point),
-        _ => None,
-    };
-    let answered = match (ticked, followed, message) {
-        (Some((range, done)), _, _) => {
-            editor.replace(range.start, range.end, if done { "[ ]" } else { "[x]" });
-            Some(LRESULT(0))
-        }
-        (None, Some((to, folder)), _) => {
-            crate::notes::follow_link(&to, &folder);
-            Some(LRESULT(0))
-        }
-        // (Its shape asked of the text services as their host asks it: see `Editor::set_cursor`. Over a link that
-        // would be followed, the hand.)
-        (None, None, WM_SETCURSOR) => {
-            match link_under(pointer()) {
-                Some(_) => unsafe {
-                    SetCursor(LoadCursorW(None, IDC_HAND).ok());
-                },
-                None => editor.set_cursor(pointer()),
-            }
-            Some(LRESULT(1))
-        }
-        (None, None, _) => editor.send(message, wparam, lparam),
-    };
-    drop(editor);
-    if with(Beside::written).is_none() {
+    let answer = ANSWER.with(|held| held.borrow().clone())?;
+    ANSWERING.set(ANSWERING.get() + 1);
+    let answered = answer(hwnd, message, wparam, lparam);
+    ANSWERING.set(ANSWERING.get() - 1);
+    if answered.is_some() && with(Beside::written).is_none() {
         let _ = unsafe { PostMessageW(Some(hwnd), WRITTEN, WPARAM(0), LPARAM(0)) };
     }
-    // (The input method's, unanswered by the box, are the system's as well.)
-    match (answered, message) {
-        (None, WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_NOTIFY | WM_IME_SETCONTEXT | WM_IME_CHAR | WM_IME_REQUEST) => None,
-        (answered, _) => Some(answered.unwrap_or(LRESULT(0))),
-    }
+    answered
 }
 
 /// Whether `window` is one of this thread's (the page's, its menu's).
@@ -1080,7 +714,7 @@ fn ours(window: HWND) -> bool {
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let point = || ((lparam.0 & 0xFFFF) as i16 as f32, ((lparam.0 >> 16) & 0xFFFF) as i16 as f32);
     // A note's words' box: the keys, the input method's, what the pointer does over it, its own timers.
-    if let Some(answered) = write(hwnd, message, wparam, lparam) {
+    if let Some(Some(answered)) = write(hwnd, message, wparam, lparam) {
         return answered;
     }
     match message {
@@ -1099,17 +733,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             let (x, y) = point();
             with(|beside| {
                 let (x, y) = beside.on_page(x, y);
-                if !beside.size_from(x, y) {
-                    beside.hold(x, y);
-                }
+                beside.hold(x, y);
             });
-        }
-        // Over an edge that sizes it (over a note stuck on the desktop), the shape that says so.
-        WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT && with(|beside| beside.size_shape()).flatten().is_some() => {
-            if let Some(shape) = with(|beside| beside.size_shape()).flatten() {
-                unsafe { SetCursor(LoadCursorW(None, shape).ok()) };
-            }
-            return LRESULT(1);
         }
         WM_PAINT => {
             with(Beside::draw);
@@ -1118,10 +743,6 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_MOUSEMOVE => {
             let (x, y) = point();
             with(|beside| {
-                if beside.sizing.is_some() {
-                    beside.size_to();
-                    return;
-                }
                 let (x, y) = beside.on_page(x, y);
                 beside.pointer = Some((x, y));
                 if let Some((_, from, moved)) = beside.holding.as_mut() {
@@ -1133,10 +754,6 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_LBUTTONUP => {
             let (x, y) = point();
             let close = with(|beside| {
-                if beside.sizing.is_some() {
-                    beside.sized();
-                    return false;
-                }
                 let (x, y) = beside.on_page(x, y);
                 if beside.holding.is_some() { beside.let_go(x) } else { beside.press(x, y) }
             })
@@ -1157,7 +774,6 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_CAPTURECHANGED => {
             with(|beside| {
-                beside.sized();
                 beside.holding = None;
                 beside.pressed = None;
                 beside.redraw();
@@ -1217,16 +833,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with(|beside| beside.place_ime());
             return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
         }
-        // Another program's window come in front: the page goes (the panel takes no focus, and leaves it up; its own
-        // menu leaves it up too).
-        // Over a note stuck on the desktop: taken by its head (where nothing of it is pressed) and moved, the note
-        // with it, as a window is by its title.
+        // A note kept in a file: taken by its head (where nothing of it is pressed) and moved as a window is by its title
+        // (put down far enough away, it is stuck on the desktop there: see `carry_note`).
         WM_NCHITTEST => {
             let at = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
-            // (Its edges, over a note stuck on the desktop, size it: pressed as its own, not taken by its head.)
-            if with(|beside| beside.edges_on_screen(at).is_some()).unwrap_or(false) {
-                return LRESULT(HTCLIENT as isize);
-            }
             if with(|beside| beside.takes_by_head(at)).unwrap_or(false) {
                 return LRESULT(HTCAPTION as isize);
             }
@@ -1237,8 +847,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_ENTERSIZEMOVE => {
             with(|beside| beside.moved_from = Some(beside.corner()));
         }
-        // Moved by its head: kept within its screen's work area, as the note under it is (the two move together, by
-        // as much, and so stay one over the other).
+        // Moved by its head: kept within its screen's work area.
         WM_MOVING => {
             let place = unsafe { &mut *(lparam.0 as *mut RECT) };
             let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -1250,16 +859,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             *place = RECT { left, top, right: left + wide, bottom: top + tall };
             return LRESULT(1);
         }
-        WM_MOVE => {
-            with(|beside| beside.carry_note(false));
-        }
         WM_EXITSIZEMOVE => {
-            if with(|beside| beside.carry_note(true)).unwrap_or(false) {
-                gone();
-            }
+            with(Beside::carry_note);
         }
-        // (The choosing of programs stays: a program is dragged onto it from another window, Explorer pressed to take
-        // it. It goes by its own close, Esc, or as the panel or widget it opened from goes.)
+        // Another program's window come in front: the page goes (the panel takes no focus, and leaves it up; its own
+        // menu leaves it up too). (The choosing of programs stays: a program is dragged onto it from another window,
+        // Explorer pressed to take it. It goes by its own close, Esc, or as the panel or widget it opened from goes.)
         WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
             if !ours(HWND(lparam.0 as *mut _)) && !with(|beside| beside.page == Page::Picker).unwrap_or(false) {
                 // (Gone once the page is free: this may come in the middle of what it does.)
@@ -1308,92 +913,9 @@ impl Beside {
             let _ = SetWindowPos(self.hwnd, None, page.left - room, page.top - room, wide + 2 * room, tall + 2 * room, SWP_NOZORDER | SWP_NOACTIVATE);
         }
         if let Some(writing) = &self.writing {
-            writing.editor.place(words_box(room, wide, tall, self.scale));
+            writing.editor.place(super::note::words_box(room, room, wide, tall, self.scale));
         }
         self.redraw();
-    }
-
-    /// Over a note stuck on the desktop (kept in a file), the edges of its page a press at `at` (on the screen) would size,
-    /// as a widget's are (see `widget::edges_at`): none elsewhere.
-    fn edges_on_screen(&self, at: POINT) -> Option<(bool, bool, bool, bool)> {
-        self.over()?;
-        self.writing.as_ref()?.name.as_ref()?;
-        let mut client = at;
-        let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut client) };
-        let (x, y) = self.on_page(client.x as f32, client.y as f32);
-        let (w, h) = self.page_size(self.page_on_screen());
-        Some(crate::widget::edges_at(x, y, w, h)).filter(|(l, r, t, b)| *l || *r || *t || *b)
-    }
-
-    /// The pointer's shape over the edges it would size (or held by them), none elsewhere.
-    fn size_shape(&self) -> Option<windows::core::PCWSTR> {
-        let mut at = POINT::default();
-        let _ = unsafe { GetCursorPos(&mut at) };
-        let (l, r, t, b) = self.sizing.as_ref().map(|sizing| sizing.edges).or_else(|| self.edges_on_screen(at))?;
-        Some(match () {
-            _ if (l && t) || (r && b) => IDC_SIZENWSE,
-            _ if (r && t) || (l && b) => IDC_SIZENESW,
-            _ if l || r => IDC_SIZEWE,
-            _ => IDC_SIZENS,
-        })
-    }
-
-    /// A press at (`x`, `y`) DIPs on its page: over a note stuck on the desktop, on an edge that sizes it, taken by that
-    /// edge (see `Sizing`); whether it was.
-    fn size_from(&mut self, x: f32, y: f32) -> bool {
-        let (wide, tall) = self.page_size(self.page_on_screen());
-        if self.over().is_none() || self.writing.as_ref().is_none_or(|writing| writing.name.is_none()) {
-            return false;
-        }
-        let edges = crate::widget::edges_at(x, y, wide, tall);
-        if !(edges.0 || edges.1 || edges.2 || edges.3) {
-            return false;
-        }
-        let mut from = POINT::default();
-        let _ = unsafe { GetCursorPos(&mut from) };
-        self.sizing = Some(Sizing { edges, from, page: self.page_on_screen() });
-        // (Its corner followed by the note's as it moves: see `carry_note`.)
-        self.moved_from = Some(self.corner());
-        unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.hwnd) };
-        true
-    }
-
-    /// Sized as the pointer is now: the edges held as far as it has gone, the others where they were, no smaller than
-    /// a stuck note is made (`view::STUCK_NOTE_LEAST`) and within its screen's work area; the note's corner along.
-    fn size_to(&mut self) {
-        let Some(sizing) = &self.sizing else { return };
-        let mut at = POINT::default();
-        let _ = unsafe { GetCursorPos(&mut at) };
-        let (dx, dy) = (at.x - sizing.from.x, at.y - sizing.from.y);
-        let (l, r, t, b) = sizing.edges;
-        let least = ((super::view::STUCK_NOTE_LEAST.0 * self.scale).round() as i32, (super::view::STUCK_NOTE_LEAST.1 * self.scale).round() as i32);
-        let was = sizing.page;
-        let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let _ = unsafe { GetMonitorInfoW(MonitorFromRect(&was, MONITOR_DEFAULTTONEAREST), &mut screen) };
-        let page = sized_page(was, (l, r, t, b), (dx, dy), least, screen.rcWork);
-        if page != self.page_on_screen() {
-            self.move_to(page);
-        }
-    }
-
-    /// Let go of the edges it was sized by: the note stuck on the desktop made as large as the page, its corner where
-    /// the page's is, and kept so.
-    fn sized(&mut self) {
-        let Some(sizing) = self.sizing.take() else { return };
-        if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == self.hwnd {
-            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
-        }
-        self.carry_note(true);
-        let page = self.page_on_screen();
-        let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return };
-        if (page.right - page.left, page.bottom - page.top) != (sizing.page.right - sizing.page.left, sizing.page.bottom - sizing.page.top) {
-            crate::app().controller.size_note(name, self.page_size(page));
-        }
-    }
-
-    /// The note stuck on the desktop it is over (its widget's window), where it is over one.
-    fn over(&self) -> Option<HWND> {
-        self.opening.as_ref().filter(|opening| opening.side == Side::Over && opening.owner != 0).map(|opening| HWND(opening.owner as *mut _))
     }
 
     /// Whether it is drawn whole: the desktop behind it taken, where its skin shows it (chart paper's does not).
@@ -1436,152 +958,59 @@ impl Beside {
         RECT { left: place.left + room, top: place.top + room, right: place.right - room, bottom: place.bottom - room }
     }
 
-    /// The page's own part of what was written in a note's words' box: its words dressed as their Markdown reads (not
-    /// while the input method composes: its words are its till they are written), kept a moment after the last change,
-    /// the caret shown.
+    /// The page's own part of what was written in a note's words' box (see `note::Writing::written`): kept a moment after
+    /// the last change, the caret shown.
     fn written(&mut self) {
         let Some(writing) = self.writing.as_mut() else { return };
-        let composed = writing.editor.take_composed();
-        let changed = writing.editor.take_changed();
-        // (Written in, or the caret moved: the lines it is on written on from now.)
-        let keyed = KEYED.replace(false);
-        let touched = !writing.touched && (keyed || composed || writing.editor.selection() != writing.opened_at);
-        writing.touched |= touched;
-        let composing = writing.editor.composing();
-        // Dressed again as it is written in, or as the lines written on change (not while the input method composes:
-        // its words are its till they are written).
-        if composed || (!composing && (changed || touched || writing.written_now() != writing.written)) {
-            writing.dress();
-        }
-        if changed {
-            writing.unkept = true;
-            writing.said = None;
+        if writing.written() {
             unsafe {
-                let _ = SetTimer(Some(self.hwnd), KEEP, KEEP_AFTER_MS, None);
+                let _ = SetTimer(Some(self.hwnd), KEEP, super::note::KEEP_AFTER_MS, None);
             }
         }
         self.caret_on = true;
         self.redraw();
     }
 
-    /// Glance going: what is written kept (see `keep`), or, where it cannot be, put beside Glance's settings, in
-    /// "unsaved notes", not lost with it (and said so in the journal).
+    /// Glance going: what is written kept (see `keep`), or, where it cannot be, put aside (see `note::Writing::put_aside`).
     fn keep_as_glance_goes(&mut self) {
-        if self.keep() {
-            return;
+        if !self.keep() {
+            if let Some(writing) = &self.writing {
+                writing.put_aside();
+            }
         }
-        let Some(writing) = self.writing.as_ref() else { return };
-        let stem = writing.name.as_deref().and_then(|name| std::path::Path::new(name).file_stem()).map_or_else(|| "note".to_string(), |stem| stem.to_string_lossy().into_owned());
-        let dir = crate::settings::config_dir().join("unsaved notes");
-        let path = dir.join(format!("{stem} {}.md", crate::station::now_ms()));
-        let put = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, writing.editor.text()));
-        crate::journal::note(match put {
-            Ok(()) => format!("beside: Glance went with a note it could not keep; what was written is in {}", path.display()),
-            Err(error) => format!("beside: Glance went with a note it could not keep, nor put in {} ({error})", path.display()),
-        });
     }
 
-    /// The note written kept in its file, where what is written is not kept yet (see `notes::Folder::write`): a new
-    /// one named by its title as it is first kept (an empty one never), one changed outside meanwhile kept apart.
-    /// Whether all that was written is kept now (a failure leaves it not kept: the page stays up, and says so).
+    /// The note written kept in its file (see `note::Writing::keep`), its name now told (see `writing_for`). Whether all
+    /// that was written is kept now (a failure leaves it not kept: the page stays up, and says so).
     fn keep(&mut self) -> bool {
         let lang = self.lang;
-        let Some(writing) = self.writing.as_mut().filter(|writing| writing.unkept) else { return true };
-        let text = writing.editor.text();
-        let folder = crate::notes::folder_at(writing.folder.clone());
-        let name = match &writing.name {
-            Some(name) => name.clone(),
-            None if text.trim().is_empty() => {
-                writing.unkept = false;
-                return true;
-            }
-            None => {
-                let title = crate::notes::Note { name: String::new(), text: text.clone(), colour: writing.colour, stamp: Default::default() }.title();
-                let today = super::text::Local::at(crate::station::now_ms());
-                let named = folder.name_for(&title, &match lang {
-                    super::text::Lang::Zh => format!("便签 {}月{}日", today.month, today.day),
-                    super::text::Lang::En => format!("Note {}-{}", today.month, today.day),
-                });
-                let _ = folder.colour(&named, writing.colour);
-                named
-            }
-        };
-        match folder.write(&name, &text, writing.stamp) {
-            Ok(crate::notes::Written::Done(stamp)) => {
-                *WRITING.lock().unwrap() = Some(name.clone());
-                writing.name = Some(name);
-                writing.stamp = Some(stamp);
-                writing.written_ms = stamp.written_ms;
-            }
-            Ok(crate::notes::Written::Apart(apart, stamp)) => {
-                writing.said = Some(match lang {
-                    super::text::Lang::Zh => format!("这条便签在别处被改过或删除，你写的已另存为“{apart}”"),
-                    super::text::Lang::En => format!("Changed or deleted elsewhere meanwhile: what you wrote is kept as \"{apart}\""),
-                });
-                // (Its stamp of the bytes written here: read again, another's change meanwhile would be taken for them.)
-                writing.stamp = Some(stamp);
-                *WRITING.lock().unwrap() = Some(apart.clone());
-                writing.name = Some(apart);
-            }
-            Err(_) => {
-                // (Not kept: tried again with the next key, and as the page goes, which waits on it.)
-                writing.said = Some(lang.pick("没能保存，请检查便签文件夹；关闭前会再试", "Not kept: see the notes' folder (tried again before it closes)").to_string());
-                return false;
-            }
-        }
-        writing.unkept = false;
-        crate::notes::read_again();
-        true
+        let Some(writing) = self.writing.as_mut() else { return true };
+        let kept = writing.keep(lang);
+        *WRITING.lock().unwrap() = writing.name.clone();
+        kept
     }
 
     /// The note's menu, at its button.
     fn note_menu(&self, at: POINT) {
-        use crate::notes::Colour;
-        use super::menu::{Item, Mark, Menu};
         let Some(writing) = &self.writing else { return };
-        let lang = self.lang;
-        let names = [(Colour::Blue, lang.pick("蓝色", "Blue")), (Colour::Yellow, lang.pick("黄色", "Yellow")), (Colour::Green, lang.pick("绿色", "Green")), (Colour::Pink, lang.pick("粉色", "Pink")), (Colour::Purple, lang.pick("紫色", "Purple")), (Colour::Grey, lang.pick("灰色", "Grey"))];
-        // (Each colour a dot of it, as the note's own by its name.)
-        let mut rows: Vec<(NoteChoice, &'static str, Mark, bool, bool)> = names.iter().map(|(colour, name)| (NoteChoice::Colour(*colour), *name, Mark::Colour(super::view::note_colour(*colour)), writing.colour == *colour, false)).collect();
-        if writing.name.is_some() {
-            // (Over its card on the desktop: that taken off it; else stuck there.)
-            match self.over() {
-                Some(_) => rows.push((NoteChoice::Unstick, lang.pick("从桌面取下", "Take off the desktop"), Mark::Icon(Icon::PinOff), false, true)),
-                None => rows.push((NoteChoice::Stick, lang.pick("贴到桌面", "Stick on the desktop"), Mark::Icon(Icon::Pin), false, true)),
-            }
-            rows.push((NoteChoice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Mark::Icon(Icon::Close), false, false));
-        }
-        let items = rows.iter().map(|(_, label, mark, checked, rule_before)| Item { label, mark: Some(*mark), checked: *checked, rule_before: *rule_before }).collect();
-        if let Some(menu) = Menu::open_at(items, super::menu::Look::of(self.theme.skin, self.theme.dark), at, false, false) {
-            MENU.with(|held| *held.borrow_mut() = Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect())));
+        let (items, choices) = super::note::menu(self.lang, writing.colour, writing.name.is_some(), false);
+        if let Some(menu) = super::menu::Menu::open_at(items, super::menu::Look::of(self.theme.skin, self.theme.dark), at, false, false) {
+            MENU.with(|held| *held.borrow_mut() = Some((menu, choices)));
         }
     }
 
-    /// The note on the page as its file is now, where that was changed outside and nothing written here waits to be
-    /// kept (or is being composed): read again, what was chosen kept as far as the words go. (With something waiting,
-    /// it is kept apart as it is kept: see `keep`. Deleted outside: left as it is, kept apart likewise.)
+    /// The note on the page as its file is now, where that was changed outside (see `note::Writing::read_outside`).
     fn read_outside(&mut self) {
-        let Some(writing) = self.writing.as_mut().filter(|writing| !writing.unkept && !writing.editor.composing()) else { return };
-        let Some(name) = writing.name.clone() else { return };
-        let Some((text, stamp)) = crate::notes::folder_at(writing.folder.clone()).read(&name) else { return };
-        if writing.stamp.is_some_and(|was| was.same(&stamp)) {
-            return;
+        if let Some(writing) = self.writing.as_mut() {
+            writing.read_outside();
         }
-        let chosen = writing.editor.selection();
-        writing.editor.set_text(&text);
-        writing.editor.select(chosen);
-        writing.stamp = Some(stamp);
-        writing.written_ms = stamp.written_ms;
-        writing.dress();
     }
 
-    /// Whether a press at `at` (on the screen) takes it by its head, to be moved: over a note stuck on the desktop,
-    /// in its head's row, on nothing of it pressed there.
+    /// Whether a press at `at` (on the screen) takes it by its head, to be moved: a note kept in a file (pulled off onto
+    /// the desktop, see `carry_note`, a new note, in no file yet, stays where it is), in its head's row, on nothing of it
+    /// pressed there.
     fn takes_by_head(&self, at: POINT) -> bool {
-        // (Over a note stuck on the desktop, moved with it; beside the panel, a note kept in a file pulled off onto
-        // the desktop, see `carry_note`. A new note, in no file yet, stays where it is.)
-        let over = self.opening.as_ref().is_some_and(|opening| opening.side == Side::Over);
-        if !self.writing.as_ref().is_some_and(|writing| over || writing.name.is_some()) {
+        if !self.writing.as_ref().is_some_and(|writing| writing.name.is_some()) {
             return false;
         }
         let mut client = at;
@@ -1597,82 +1026,52 @@ impl Beside {
         POINT { x: place.left, y: place.top }
     }
 
-    /// Moved by its head over a note stuck on the desktop: the note moved along by as much (and, `done`, kept where it
-    /// comes to).
-    ///
-    /// Beside the panel (or a widget), moved by its head as far as a drag goes and put down: the note stuck on the
-    /// desktop where its page was put (as from its menu), its page gone as it shows there (whether it is to go now).
-    fn carry_note(&mut self, done: bool) -> bool {
-        let Some(from) = self.moved_from else { return false };
+    /// Moved by its head as far as a drag goes and put down: the note stuck on the desktop where its page was put (as
+    /// from its menu), its page gone as it shows there.
+    fn carry_note(&mut self) {
+        let Some(from) = self.moved_from.take() else { return };
         if self.writing.as_ref().is_none_or(|writing| writing.name.is_none()) {
-            return false;
+            return;
         }
         let to = self.corner();
-        if !self.opening.as_ref().is_some_and(|opening| opening.side == Side::Over) {
-            if !done {
-                return false;
-            }
-            self.moved_from = None;
-            let far = (24.0 * self.scale) as i32;
-            if (to.x - from.x).abs() < far && (to.y - from.y).abs() < far {
-                return false;
-            }
-            // (Kept first: kept apart, as a conflict's copy, it is that copy stuck. Not kept, it stays, saying so.)
-            if !self.keep() {
-                self.redraw();
-                return false;
-            }
-            let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return false };
-            let place = self.page_on_screen();
-            leave_for(&name);
-            crate::app().controller.stick_note(name, POINT { x: place.left, y: place.top }, Some(self.page_size(place)));
-            return false;
+        let far = (24.0 * self.scale) as i32;
+        if (to.x - from.x).abs() < far && (to.y - from.y).abs() < far {
+            return;
         }
-        let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return false };
-        crate::app().controller.move_note(name, to.x - from.x, to.y - from.y, done);
-        self.moved_from = if done { None } else { Some(to) };
-        false
+        // (Kept first: kept apart, as a conflict's copy, it is that copy stuck. Not kept, it stays, saying so.)
+        if !self.keep() {
+            self.redraw();
+            return;
+        }
+        let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return };
+        let place = self.page_on_screen();
+        leave_for(&name);
+        crate::app().controller.stick_note(name, POINT { x: place.left, y: place.top }, Some(self.page_size(place)));
     }
 
     /// `choice` made in the note's menu: done; whether the page is to go.
-    fn note_chose(&mut self, choice: NoteChoice) -> bool {
+    fn note_chose(&mut self, choice: super::note::Choice) -> bool {
+        use super::note::Choice;
         let kept = self.keep();
         let Some(writing) = self.writing.as_mut() else { return false };
         let folder = crate::notes::folder_at(writing.folder.clone());
         match choice {
-            NoteChoice::Colour(colour) => {
-                writing.colour = colour;
-                // (Its words in the ink of its colour, where its card's are.)
-                writing.palette = palette_for(&self.theme, colour, writing.palette.points / 0.75);
-                writing.dress();
-                if let Some(name) = &writing.name {
-                    let _ = folder.colour(name, colour);
-                }
-                crate::notes::read_again();
+            Choice::Colour(colour) => {
+                writing.recolour(&self.theme, colour);
                 self.redraw();
                 false
             }
             // Its card on the desktop where the page is, the page gone as it shows there.
-            NoteChoice::Stick => {
+            Choice::Stick => {
                 let Some(name) = writing.name.clone() else { return false };
                 let place = self.page_on_screen();
                 leave_for(&name);
                 crate::app().controller.stick_note(name, POINT { x: place.left + (24.0 * self.scale) as i32, y: place.top + (24.0 * self.scale) as i32 }, Some(self.page_size(place)));
                 false
             }
-            // Its card taken off the desktop, the page gone with it (the note kept first: not kept, both stay, saying so).
-            // Not shown again as the page goes: it goes.
-            NoteChoice::Unstick => {
-                if !kept {
-                    self.redraw();
-                    return false;
-                }
-                let Some(name) = writing.name.clone() else { return false };
-                self.hiding = false;
-                crate::app().controller.unstick_note(name);
-                true
-            }
-            NoteChoice::TakeAway => {
+            // (Offered only where the note is stuck on the desktop, on its card there: see `widget`.)
+            Choice::Unstick => false,
+            Choice::TakeAway => {
                 // (What is written not kept, the page stays, saying so: taken away, the Recycle Bin had the note as it
                 // was before, and what was written was gone with the page.)
                 if !kept {
@@ -1977,16 +1376,6 @@ impl Beside {
             if !self.shown && self.ready() {
                 self.show_now();
             }
-            // Over a note stuck on the desktop, shown and drawn: the note, as it is written in, its page alone (it is
-            // drawn as the page is, just where it is; under a page that lets the desktop through, glass's, it showed
-            // through it, the two panes one over the other another colour, its edge round the page's). Not before the
-            // page is drawn: shown as it is due, not drawn yet, it would leave nothing of the note.
-            if self.shown && !self.hiding {
-                if let Some(note) = self.over() {
-                    hide(note, true);
-                    self.hiding = true;
-                }
-            }
         } else if let Err(error) = &drawn {
             // (Not drawn, it keeps its surface, and draws again on it; the device gone, it makes one anew on the next.)
             if !gfx::failed("page beside", Some(error)) {
@@ -2162,67 +1551,25 @@ impl Beside {
         self.hits = hits;
     }
 
-    /// A note's page: its colour, when it was written, its menu and its close over its words; under them how many
-    /// there are and where it is kept (or what was said of keeping it).
+    /// A note's page: as `note::Writing::paint` draws it, its close and its menu in its head.
     fn paint_note(&mut self, frame: &Frame, (width, height): (f32, f32)) {
         let theme = self.theme.clone();
         let lang = self.lang;
         let mut hits = Vec::new();
-        let lit = |at: (f32, f32, f32, f32), pointer: Option<(f32, f32)>| pointer.is_some_and(|(x, y)| x >= at.0 && x < at.0 + at.2 && y >= at.1 && y < at.1 + at.3);
         self.paint_ground(frame, (width, height));
         let Some(writing) = &self.writing else {
-            frame.text(lang.pick("没能打开编辑器", "The editor could not be opened"), theme.body, theme.text2, NOTE_PAD, NOTE_PAD, width - 2.0 * NOTE_PAD, Align::Start);
+            let pad = super::note::PAD;
+            frame.text(lang.pick("没能打开编辑器", "The editor could not be opened"), theme.body, theme.text2, pad, pad, width - 2.0 * pad, Align::Start);
             self.hits = hits;
             return;
         };
-        // Its face, as a note stuck on the desktop is (see `paint_stuck_note`): of its colour as its card on the panel
-        // is, its dot by when it was written; at its foot how many characters, kept as it is written, and where (or,
-        // in place of them, what was said of keeping it, in the foot's whole width, on two lines where it needs them).
-        let when = super::text::since(writing.written_ms, crate::station::now_ms(), lang);
-        let said = note_said(writing.name.as_ref().map(|_| when.as_str()), lang);
-        let counted = note_counted(&writing.editor.text(), lang);
-        note_face(frame, &theme, writing.colour, &said, writing.said.is_none().then_some(counted.as_str()), writing.name.as_deref(), (0.0, 0.0, width, height));
-        if let Some(said) = &writing.said {
-            let bottom = height - FOOT;
-            let tall = frame.gfx.wrapped_height(said, theme.small, width - 2.0 * NOTE_PAD).min(FOOT - 8.0);
-            frame.text_wrapped(said, theme.small, theme.signal, NOTE_PAD, bottom + (FOOT - tall) / 2.0, width - 2.0 * NOTE_PAD);
-        }
-        for (at, hit, icon) in [(width - PAD - 28.0, Hit::Close, Icon::Close), (width - PAD - 60.0, Hit::NoteMenu, Icon::Ellipsis)] {
-            let place = (at, 12.0, 28.0, 28.0);
-            if lit(place, self.pointer) {
-                frame.fill_rounded(theme.hover, place.0, place.1, place.2, place.3, theme.control_radius.min(14.0));
-            }
-            frame.icon(icon, Point { x: place.0 + 14.0, y: place.1 + 14.0 }, 16.0, theme.text2);
+        // (Its window's corner past the shadow's room, from the page's.)
+        writing.paint(frame, &theme, lang, (0.0, 0.0, width, height), (-self.inset, -self.inset), self.scale, self.caret_on);
+        for (nth, hit, icon) in [(0, Hit::Close, Icon::Close), (1, Hit::NoteMenu, Icon::Ellipsis)] {
+            let place = super::note::button_at(nth, (0.0, 0.0, width));
+            let lit = self.pointer.is_some_and(|(x, y)| x >= place.0 && x < place.0 + place.2 && y >= place.1 && y < place.1 + place.3);
+            super::note::paint_button(frame, &theme, place, icon, lit);
             hits.push((place.0, place.1, place.2, place.3, hit));
-        }
-        // Its words, as the text services draw them, and the caret where they say it is.
-        // (Its box placed in its window, past the shadow's room: drawn from the window's corner, not the page's.)
-        let editor = &writing.editor;
-        let mut was = windows_numerics::Matrix3x2::default();
-        unsafe {
-            frame.dc.GetTransform(&mut was);
-            frame.dc.SetTransform(&(windows_numerics::Matrix3x2::translation(-self.inset, -self.inset) * was));
-        }
-        frame.in_pixels(|target| editor.draw(target));
-        unsafe { frame.dc.SetTransform(&was) };
-        // Its to-dos' boxes, drawn in the rooms made for them (off the lines written on), within its words' box.
-        let pixels = writing.palette.points / 0.75;
-        let inks = word_inks(&theme, writing.colour);
-        let bounds = editor.bounds();
-        let (left, top) = self.on_page(bounds.left as f32, bounds.top as f32);
-        let (right, bottom) = self.on_page(bounds.right as f32, bounds.bottom as f32);
-        frame.clip(left, top, right - left, bottom - top);
-        for boxed in writing.shown.boxes(&writing.written) {
-            let (Some(room), Some(baseline)) = (editor.character(boxed.room), editor.baseline(boxed.room + 1)) else { continue };
-            let (x, y, side) = box_in(room.left, baseline, pixels);
-            let (x, y) = self.on_page(x, y);
-            super::canvas::task_box(frame, inks, x, y, side / self.scale, boxed.done);
-        }
-        frame.unclip();
-        if let (Some((x, y, w, h)), true) = (editor.caret(), self.caret_on) {
-            let (x, y) = self.on_page(x as f32, y as f32);
-            let scale = self.scale;
-            frame.fill(theme.text, x, y, (w as f32 / scale).max(1.2), h as f32 / scale);
         }
         self.hits = hits;
     }
@@ -2604,6 +1951,7 @@ mod pictures {
     #[test]
     #[ignore = "writes pictures to look at"]
     fn beside_picker() {
+        let _pretending = crate::pretending();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
@@ -2672,10 +2020,8 @@ otepad.exe"),
                             writing: None,
                             opening: None,
                             moved_from: None,
-            shown: false,
-            hiding: false,
-            sizing: None,
-            marks: super::super::thumb::Dots::new(),
+                            shown: false,
+                            marks: super::super::thumb::Dots::new(),
                         };
                         beside.search.put(&search.encode_utf16().collect::<Vec<_>>());
                         let pixels = gfx.draw_offscreen(((w * 1.5) as u32, (h * 1.5) as u32), 1.5, |frame| beside.paint(frame, (w, h))).unwrap();
@@ -2691,215 +2037,10 @@ otepad.exe"),
     }
 }
 
-#[cfg(all(test, feature = "studio"))]
-mod note_pictures {
-    use super::*;
-
-    /// A note's page as it opens, and the note stuck on the desktop it opens over, in each skin: each line's words
-    /// beginning where they do on the other (the page comes over the note without its words moving along their
-    /// lines), its marks put away (a heading's `#`, emphasis's, code's, a link's), a to-do a box; and the page once its
-    /// to-do's line is written on, that line as written. (Down the page, the text services set lines a little
-    /// further apart than DirectWrite, as they always have: within a few pixels after a few lines.)
-    /// (`cargo test --features studio --lib -- --ignored note_page_and_stuck_note` writes
-    /// `target/beside/note-<skin>-<face|page|written>.png`.)
-    #[test]
-    #[ignore = "writes pictures to look at"]
-    fn note_page_and_stuck_note() {
-        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
-        unsafe {
-            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
-        }
-        let gfx = gfx::current().unwrap();
-        let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
-        std::fs::create_dir_all(&out).unwrap();
-        let (w, h) = super::super::view::STUCK_NOTE;
-        let scale = 1.5;
-        let size = ((w * scale) as u32, (h * scale) as u32);
-        let text = "# 本周要做\n- [ ] 买**牛奶**和面包\n- [x] 交 `周报`\n看 [文档](https://a.b) 或 https://x.y/z\n> 引一句话\n- 列表一项";
-        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, size.0 as i32, size.1 as i32, None, None, None, None) }.unwrap();
-        let mut unlike = Vec::new();
-        for (skin, name) in [(Skin::Glass, "glass"), (Skin::Fluent, "fluent"), (Skin::Paper, "paper")] {
-            let theme = Theme::new(skin, false);
-            let colour = crate::notes::Colour::Blue;
-            let now = crate::station::now_ms();
-            let when = super::super::text::since(now, now, super::super::text::Lang::Zh);
-            let face = gfx.draw_offscreen(size, scale, |frame| paint_stuck_note(frame, &theme, super::super::text::Lang::Zh, text, colour, &when, "a.md", (0.0, 0.0, w, h))).unwrap();
-            crate::studio::save_png(&out.join(format!("note-{name}-face.png")), size.0, size.1, &face).unwrap();
-            let pixels = WORDS * scale;
-            let palette = palette_for(&theme, colour, pixels);
-            let editor = super::super::editor::Editor::new(hwnd, words_box(0, size.0 as i32, size.1 as i32, scale), &palette.face, pixels, palette.text).unwrap();
-            editor.set_text(text);
-            let writing = Writing {
-                folder: std::env::temp_dir(),
-                name: Some("a.md".into()),
-                stamp: None,
-                colour,
-                written_ms: now,
-                editor: Rc::new(editor),
-                palette,
-                unkept: false,
-                said: None,
-                shown: Default::default(),
-                written: crate::notes::markdown::NONE_WRITTEN,
-                opened_at: (0, 0),
-                touched: false,
-            };
-            let mut beside = Beside {
-                hwnd,
-                gfx: gfx.clone(),
-                surface: None,
-                _showing: super::super::life::Showing::of(&gfx),
-                scale,
-                theme: Rc::new(Theme::new(skin, false)),
-                lang: super::super::text::Lang::Zh,
-                page: Page::Note(Some("a.md".into())),
-                inset: 0.0,
-                frost: 0.0,
-                pressed: None,
-                choosing: false,
-                kind: Kinds::Programs,
-                dropping: false,
-                holding: None,
-                strip_scroll: 0.0,
-                strip_most: 0.0,
-                search: Typing::most(SEARCH_MOST),
-                scroll: 0.0,
-                scroll_most: 0.0,
-                pointer: None,
-                hits: Vec::new(),
-                caret: None,
-                caret_on: false,
-                waiting: false,
-                writing: Some(writing),
-                opening: None,
-                moved_from: None,
-                shown: true,
-                hiding: false,
-            sizing: None,
-                marks: super::super::thumb::Dots::new(),
-            };
-            beside.writing.as_mut().unwrap().dress();
-            let page = gfx.draw_offscreen(size, scale, |frame| beside.paint(frame, (w, h))).unwrap();
-            crate::studio::save_png(&out.join(format!("note-{name}-page.png")), size.0, size.1, &page).unwrap();
-            // Each line's words (rows with ink, over white) beginning where they do on the other.
-            let (left, top, wide, tall) = note_words(w, h);
-            let lines = |pixels: &[u8]| {
-                let inked = |x: u32, y: u32| {
-                    let at = ((y * size.0 + x) * 4) as usize;
-                    u32::from(pixels[at + 1]) + 255 - u32::from(pixels[at + 3]) < 140
-                };
-                let (xs, ys) = ((left * scale) as u32..((left + wide) * scale) as u32, (top * scale) as u32..((top + tall) * scale) as u32);
-                let mut found: Vec<u32> = Vec::new();
-                let mut in_line = false;
-                for y in ys {
-                    let first = xs.clone().find(|&x| inked(x, y));
-                    match (first, in_line) {
-                        (Some(x), false) => {
-                            found.push(x);
-                            in_line = true;
-                        }
-                        (Some(x), true) => {
-                            let last = found.last_mut().unwrap();
-                            *last = (*last).min(x);
-                        }
-                        (None, _) => in_line = false,
-                    }
-                }
-                found
-            };
-            let (on_face, on_page) = (lines(&face), lines(&page));
-            let apart = on_face.len() != on_page.len() || on_face.iter().zip(&on_page).any(|(a, b)| a.abs_diff(*b) > 2);
-            unlike.push((name, apart, on_face, on_page));
-            // Written on: the caret on its to-do's line, that line as it is written.
-            {
-                let writing = beside.writing.as_mut().unwrap();
-                writing.touched = true;
-                let at = text.encode_utf16().position(|c| c == u16::from(b'-')).unwrap() as i32 + 3;
-                writing.editor.select((at, at));
-                writing.dress();
-            }
-            let written = gfx.draw_offscreen(size, scale, |frame| beside.paint(frame, (w, h))).unwrap();
-            crate::studio::save_png(&out.join(format!("note-{name}-written.png")), size.0, size.1, &written).unwrap();
-            beside.writing = None;
-        }
-        unsafe {
-            let _ = DestroyWindow(hwnd);
-        }
-        println!("where each line's words begin, on the stuck note and its page: {unlike:?}");
-        assert!(unlike.iter().all(|(_, apart, ..)| !apart), "{unlike:?}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::goes_now;
 
-    /// A page over a note stuck on the desktop sized by an edge or a corner: the edges held follow the hand, the others
-    /// stay; it comes no smaller than a stuck note is made, and no further than its screen's work area.
-    #[test]
-    fn a_page_sized_by_its_edges_moves_those_alone_within_bounds() {
-        use windows::Win32::Foundation::RECT;
-        let rect = |left, top, right, bottom| RECT { left, top, right, bottom };
-        let (was, least, work) = (rect(100, 100, 460, 420), (220, 180), rect(0, 0, 1920, 1040));
-        // The right edge out, the bottom left corner in.
-        assert_eq!(super::sized_page(was, (false, true, false, false), (40, 30), least, work), rect(100, 100, 500, 420));
-        assert_eq!(super::sized_page(was, (true, false, false, true), (20, -40), least, work), rect(120, 100, 460, 380));
-        // Past the least: held there, from the edges not held.
-        assert_eq!(super::sized_page(was, (true, false, true, false), (300, 300), least, work), rect(240, 240, 460, 420));
-        // Past the work area: held at its edge.
-        assert_eq!(super::sized_page(was, (false, true, false, true), (2000, 2000), least, work), rect(100, 100, 1920, 1040));
-        assert_eq!(super::sized_page(was, (true, false, true, false), (-500, -500), least, work), rect(0, 0, 460, 420));
-    }
-
-    /// A note's words, in every skin, light and dark: its faint marks (Markdown's) fainter than its words, not as solid
-    /// (the box takes colours with no see-through: a faint ink given as one came out as the words' own).
-    #[test]
-    fn a_note_s_faint_marks_are_fainter() {
-        use super::super::theme::{Skin, Theme};
-        for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
-            for dark in [false, true] {
-                let palette = super::palette_for(&Theme::new(skin, dark), crate::notes::Colour::Blue, 15.0);
-                assert_ne!(palette.text.0, palette.faint.0, "{skin:?} {dark}");
-            }
-        }
-    }
-
-    /// A note's words on its page, in every skin, light and dark, every colour: as easily read as text is asked to be
-    /// (4.5 to 1 against what is under them, the page drawn over its sheet). On glass in the dark the card's own dark
-    /// ink, on a page's lighter pane, read at about 2 to 1.
-    #[test]
-    #[cfg(feature = "studio")]
-    fn a_note_s_words_read_on_its_page() {
-        use super::super::canvas::{Canvas, Color};
-        use super::super::theme::{Skin, Theme};
-        let luminance = |c: Color| {
-            let lin = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
-            0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
-        };
-        let gfx = super::gfx::Gfx::new().expect("graphics");
-        for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
-            for dark in [false, true] {
-                let theme = Theme::new(skin, dark);
-                for colour in crate::notes::Colour::ALL {
-                    let pixels = gfx
-                        .draw_offscreen((40, 40), 1.0, |frame| {
-                            frame.fill(super::page_under(&theme), 0.0, 0.0, 40.0, 40.0);
-                            super::super::view::note_page(frame, &theme, colour, (0.0, 0.0, 40.0, 40.0));
-                        })
-                        .unwrap();
-                    let at = (20 * 40 + 20) * 4;
-                    let ground = Color { r: pixels[at + 2] as f32 / 255.0, g: pixels[at + 1] as f32 / 255.0, b: pixels[at] as f32 / 255.0, a: 1.0 };
-                    let words = super::word_inks(&theme, colour).words;
-                    let (a, b) = (luminance(ground), luminance(words));
-                    let contrast = (a.max(b) + 0.05) / (a.min(b) + 0.05);
-                    assert!(contrast >= 4.5, "{skin:?} dark {dark} {colour:?}: words {words:?} on {ground:?}, {contrast:.2} to 1");
-                }
-            }
-        }
-    }
-
-    /// A note's page opened over the note stuck on the desktop, to be written in where it is: just where it is, as large
-    /// (made larger, a note stuck smaller than a page to write in grew as it was written in, and its words moved).
     /// A page beside the panel on a narrow screen at a large scale (a portrait screen 1080 px wide at 350%, the page
     /// 1260 px wide at it): within the screen, on every side, not ending Glance.
     #[test]
@@ -2909,22 +2050,11 @@ mod tests {
         use windows::Win32::Foundation::RECT;
         let room = RECT { left: 0, top: 0, right: 1080, bottom: 1920 };
         let by = RECT { left: 700, top: 300, right: 1080, bottom: 900 };
-        for side in [Side::Left, Side::Right, Side::Below, Side::Over] {
+        for side in [Side::Left, Side::Right, Side::Below] {
             let opening = Opening { page: Page::Note(Some("a.md".into())), by, side, skin: Skin::Paper, dark: false, folder: None, owner: 0 };
             let page = placed_in(&opening, room, 3.5);
             assert!(page.left >= room.left && page.right <= room.right && page.top >= room.top && page.bottom <= room.bottom, "{side:?}: {:?}", (page.left, page.top, page.right, page.bottom));
         }
-    }
-
-    #[test]
-    fn a_note_s_page_over_it_is_just_where_it_is() {
-        use super::super::theme::Skin;
-        use super::{placed, Opening, Page, Side};
-        use windows::Win32::Foundation::RECT;
-        let by = RECT { left: 200, top: 200, right: 420, bottom: 380 };
-        let opening = Opening { page: Page::Note(Some("a.md".into())), by, side: Side::Over, skin: Skin::Paper, dark: false, folder: None, owner: 0 };
-        let (page, _) = placed(&opening);
-        assert_eq!((page.left, page.top, page.right, page.bottom), (by.left, by.top, by.right, by.bottom));
     }
 
     /// A note's page left for another note pressed on the panel: its going, asked for as it was left, comes after the
@@ -2975,7 +2105,7 @@ mod timed {
             for _ in 0..5 {
                 crate::perf::mark(|| format!("round {skin:?}"));
                 let began = std::time::Instant::now();
-                open(Opening { page: Page::Note(Some("a.md".into())), by: RECT { left: 200, top: 200, right: 400, bottom: 320 }, side: Side::Over, skin, dark: false, folder: Some(folder.clone()), owner: 0 });
+                open(Opening { page: Page::Note(Some("a.md".into())), by: RECT { left: 200, top: 200, right: 400, bottom: 320 }, side: Side::Right, skin, dark: false, folder: Some(folder.clone()), owner: 0 });
                 wait(&shown);
                 took.push(began.elapsed().as_secs_f64() * 1000.0);
                 close();

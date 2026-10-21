@@ -5408,6 +5408,7 @@ mod pictures {
     #[test]
     #[ignore = "draws on this PC's graphics card, to pictures to be looked at"]
     fn draws_every_page() {
+        let _pretending = crate::pretending();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }

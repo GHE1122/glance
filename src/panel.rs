@@ -112,6 +112,8 @@ const RESTYLE: u32 = WM_APP + 3;
 const OPEN_SETTINGS: u32 = WM_APP + 4;
 /// Notes asked to be stuck on the desktop (see `Controller::stick_note`).
 const STICK_NOTES: u32 = WM_APP + 30;
+/// Posted as Glance goes, for what is written in notes where they are to be kept (see `Controller::keep_writing`).
+const KEEP_WRITING: u32 = WM_APP + 18;
 const TOGGLE: u32 = WM_APP + 5;
 /// A new sample: the overlay is drawn again.
 const OVERLAY: u32 = WM_APP + 7;
@@ -466,18 +468,17 @@ impl Controller {
         self.post(STICK_NOTES);
     }
 
-    /// The note `name`'s card on the desktop moved by (`dx`, `dy`) physical px, as it is written in over it (see
-    /// `ui::beside`), and where `done`, kept where it is.
-    pub fn move_note(&self, name: String, dx: i32, dy: i32, done: bool) {
-        STUCK.lock().unwrap().push((name, OnDesk::Move(dx, dy, done)));
-        self.post(STICK_NOTES);
-    }
-
-    /// The note `name`'s card on the desktop made `size` large (DIPs), as the page it is written in over it was sized
-    /// (see `ui::beside`).
-    pub fn size_note(&self, name: String, size: (f32, f32)) {
-        STUCK.lock().unwrap().push((name, OnDesk::Size(size)));
-        self.post(STICK_NOTES);
+    /// Glance going: what is written in notes stuck on the desktop, where they are (see `widget::InPlace`), kept on the
+    /// panel's thread (or put aside), waited for a while.
+    pub fn keep_writing(&self) {
+        let sink = self.sink.load(Ordering::Acquire);
+        if sink == 0 {
+            return;
+        }
+        let (told, kept) = std::sync::mpsc::channel();
+        *KEPT.lock().unwrap() = Some(told);
+        self.post(KEEP_WRITING);
+        let _ = kept.recv_timeout(Duration::from_secs(5));
     }
 
     /// The modules this machine has, in their default order.
@@ -606,7 +607,13 @@ impl Controller {
             // open, are drawn whenever they are due, between the messages
             // that arrived since; with neither, the loop sleeps until a
             // message comes.
-            if !unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            let got = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool();
+            // What notes written in where they are took (the messages sent to their windows as this looked, or handed
+            // on before it), seen to.
+            for hwnd in crate::ui::keys::took() {
+                widgets.written(hwnd);
+            }
+            if !got {
                 let now = Instant::now();
                 if frame_at.is_some_and(|at| now < at) {
                     // The refresh timer is set for it.
@@ -732,6 +739,14 @@ impl Controller {
                     open.close();
                 }
                 return;
+            }
+            // A note written in where it is: its keys, the characters they make, the input method's, its timers, its
+            // (see `ui::keys`).
+            if crate::ui::keys::queued(&msg) {
+                for hwnd in crate::ui::keys::took() {
+                    widgets.written(hwnd);
+                }
+                continue;
             }
             // A press on the panel, or while its menu is up (which takes every press: one away from it only closes
             // it): one of its own, not one elsewhere (see `Panel::track`).
@@ -904,9 +919,15 @@ impl Controller {
                         match asked {
                             OnDesk::Stick(at, size) => widgets.stick_note(&name, at, size),
                             OnDesk::Unstick => widgets.unstick_note(&name),
-                            OnDesk::Move(dx, dy, done) => widgets.move_note(&name, dx, dy, done),
-                            OnDesk::Size(size) => widgets.size_note(&name, size),
                         }
+                    }
+                }
+                // A note written in where it is giving back the keys (Esc, another window in front).
+                crate::ui::keys::LEFT if widgets.owns(msg.hwnd) => widgets.keys_left(msg.hwnd, msg.wParam.0 == 1),
+                KEEP_WRITING => {
+                    widgets.keep_as_glance_goes();
+                    if let Some(told) = KEPT.lock().unwrap().take() {
+                        let _ = told.send(());
                     }
                 }
                 TRAY_MENU => {
@@ -1101,6 +1122,15 @@ impl Controller {
                         full.wheel((msg.wParam.0 >> 16) as u16 as i16);
                     }
                 }
+                // A note stuck on the desktop written in where it is, or to be: the pointer's on its words, and on its
+                // menu's button (see `Widgets::write`).
+                WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_MOUSEWHEEL if widgets.owns(msg.hwnd) && widgets.write(&msg) => {
+                    if let Some(number) = widgets.take_note_menu_asked() {
+                        self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
+                        menu = widgets.note_menu(msg.hwnd, number, panels[0].lang, panels.iter().any(Panel::is_shown)).map(|(open, name, choices)| (open, MenuFor::Note(name, choices)));
+                        keep_menu_above(&menu, &mut overlay);
+                    }
+                }
                 // The desktop widgets: pressed, let go (or found let go as the pointer moves: the button up unheard,
                 // let go before it was torn off), their menu.
                 WM_LBUTTONDOWN if widgets.owns(msg.hwnd) => widgets.press(msg.hwnd, lparam_point(msg.lParam)),
@@ -1126,6 +1156,8 @@ impl Controller {
                         Some(Hit::Shelf(id) | Hit::Copied(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
                         Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
                         Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices, app)| (open, MenuFor::App(app, choices))),
+                        // A note stuck on the desktop, its card: the note's menu (its colours, taken off, taken away).
+                        Some(Hit::Note(number) | Hit::Words(number)) => widgets.note_menu(msg.hwnd, number, panels[0].lang, panel_shown).map(|(open, name, choices)| (open, MenuFor::Note(name, choices))).or_else(|| widgets.menu(msg.hwnd, panels[0].lang, panel_shown).map(|open| (open, MenuFor::Widget(msg.hwnd)))),
                         _ => widgets.menu(msg.hwnd, panels[0].lang, panel_shown).map(|open| (open, MenuFor::Widget(msg.hwnd))),
                     };
                     keep_menu_above(&menu, &mut overlay);
@@ -1354,6 +1386,8 @@ impl Controller {
                 let under = unsafe { windows::Win32::UI::WindowsAndMessaging::GetAncestor(windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(at), windows::Win32::UI::WindowsAndMessaging::GA_ROOT) };
                 crate::station::run::areas().iter().filter(|(window, _, lands)| *lands == crate::station::run::Lands::Station && *window == under).any(|(_, area, _)| at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom)
             });
+            // (Not while a note is written in where it is: Ctrl+V is its own.)
+            let over_station = over_station && !widgets.writing();
             if over_station != paste {
                 paste = over_station;
                 unsafe {
@@ -1384,13 +1418,14 @@ impl Controller {
 static STUCK: std::sync::Mutex<Vec<(String, OnDesk)>> = std::sync::Mutex::new(Vec::new());
 
 /// What is asked of a note on the desktop: stuck there with its corner at a point (as large as the page it is stuck
-/// from, DIPs), taken away, moved by so much (and kept where it is, once it is let go), or made so large (DIPs).
+/// from, DIPs), or taken away.
 enum OnDesk {
     Stick(POINT, Option<(f32, f32)>),
     Unstick,
-    Move(i32, i32, bool),
-    Size((f32, f32)),
 }
+
+/// Told as what is written in notes where they are has been kept, Glance going (see `Controller::keep_writing`).
+static KEPT: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>> = std::sync::Mutex::new(None);
 
 /// The overlay kept under `menu`, while one is up (see `Overlay::under_menu`).
 fn keep_menu_above(menu: &Option<(crate::ui::menu::Menu, MenuFor)>, overlay: &mut Option<Overlay>) {
@@ -1414,6 +1449,8 @@ enum MenuFor {
     Recent(crate::station::recent::Key, Vec<crate::station::RecentChoice>),
     /// A thing kept at hand, as its menu was opened on it, and what each row does (see `station::app_menu`).
     App(crate::station::apps::App, Vec<crate::station::AppChoice>),
+    /// A note stuck on the desktop, by its name, and what each row does (see `Widgets::note_menu`).
+    Note(String, Vec<crate::ui::note::Choice>),
 }
 
 impl Controller {
@@ -1488,6 +1525,11 @@ impl Controller {
             MenuFor::App(app, choices) => {
                 if let Some(choice) = choice.and_then(|row| choices.get(row)) {
                     crate::station::app_chose(app, *choice);
+                }
+            }
+            MenuFor::Note(name, choices) => {
+                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
+                    widgets.note_chose(&name, *choice);
                 }
             }
             MenuFor::Recent(file, choices) => {

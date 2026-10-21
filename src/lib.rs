@@ -568,6 +568,7 @@ pub fn run() {
     tray::run();
     // (What was changed last is on the disk before Glance goes, a note written in too, and what was noted last.)
     ui::beside::keep_as_glance_goes();
+    app().controller.keep_writing();
     saved_all();
     presents::stop_started();
     journal::written();
@@ -658,6 +659,15 @@ pub fn run() {
 
 /// Glance does not run on this system yet: the Linux port comes after the
 /// macOS one.
+/// For tests: what is pretended shown (the notes, the station's things, the programs found, files lately) is one for
+/// all of them, so a test pretending it holds this while it looks at it (tests run side by side: one pretending other
+/// notes in the middle of another's made it fail now and then).
+#[cfg(all(test, feature = "studio"))]
+pub fn pretending() -> std::sync::MutexGuard<'static, ()> {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn run() {
     eprintln!("Glance runs on Windows for now; the macOS and Linux versions are on their way.");

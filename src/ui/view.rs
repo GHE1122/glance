@@ -48,6 +48,19 @@ impl Hash for Glide {
 thread_local! {
     /// Whether a line sung was drawn on this thread still gliding into its place (see `gliding_drawn`).
     static GLIDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The notes stuck on the desktop written in where they are now, by their names (see `written_in_place`).
+    static IN_PLACE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The note `name` stuck on the desktop written in where it is (`written`), or no longer: while it is, its card is
+/// drawn by what writes it (see `ui::note::Writing::paint`), not here, its words where they are written.
+pub fn written_in_place(name: &str, written: bool) {
+    IN_PLACE.with_borrow_mut(|names| {
+        names.retain(|kept| kept != name);
+        if written {
+            names.push(name.to_string());
+        }
+    });
 }
 
 /// Whether what was drawn on this thread since this was last asked held a line sung still gliding into its place
@@ -203,6 +216,9 @@ pub enum Hit {
     AppsArea,
     /// A note, by its place among them (see `notes::shown`): opened beside; a new note; the menu of how they show.
     Note(u64),
+    /// A note's words where they are written in where they show (a note stuck on the desktop's, by its number: see
+    /// `widget`): pressed, written in there.
+    Words(u64),
     NewNote,
     /// The notes shown so (one of their views, chosen in their head).
     NotesShow(crate::settings::NotesView),
@@ -635,8 +651,9 @@ pub struct NoteCard {
     colour: crate::notes::Colour,
 }
 
-/// A note stuck on the desktop as its page shows it (see `ui::beside::paint_stuck_note`): its number (as a press on it
-/// names it), its words, its colour, how long ago it was written, its file's name.
+/// A note stuck on the desktop as its page shows it (see `ui::note::paint_stuck`): its number (as a press on it names
+/// it), its words, its colour, how long ago it was written, its file's name, and whether it is written in where it is
+/// (see `written_in_place`).
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub struct StuckNote {
     number: u64,
@@ -644,6 +661,7 @@ pub struct StuckNote {
     colour: crate::notes::Colour,
     when: String,
     name: String,
+    written: bool,
 }
 
 /// A file come lately as its row shows it: its number, the day it came (as the rows are grouped), its name, where it
@@ -818,8 +836,8 @@ fn note_card(note: &crate::notes::Note, lang: Lang, now: u64, lines: usize) -> N
     }
 }
 
-/// A note stuck on the desktop (`name`, its file's): its page as it is written in (see `ui::beside::paint_stuck_note`),
-/// so that written in where it is, over it, it looks as it did. None where the note is gone.
+/// A note stuck on the desktop (`name`, its file's): its page as it is written in (see `ui::note::paint_stuck`), so that
+/// written in where it is, it looks as it did. None where the note is gone.
 fn stuck_note_lane(name: &str, lang: Lang) -> Option<Vec<Block>> {
     let shown = crate::notes::shown();
     let note = shown.iter().find(|note| note.name == name)?;
@@ -828,7 +846,8 @@ fn stuck_note_lane(name: &str, lang: Lang) -> Option<Vec<Block>> {
 
 /// The note `note` stuck on the desktop, as it is drawn (see `stuck_note_lane`) at `now`.
 fn stuck_note(note: &crate::notes::Note, lang: Lang, now: u64) -> Block {
-    Block::StuckNote(StuckNote { number: crate::notes::number_of(&note.name), text: note.text.clone(), colour: note.colour, when: text::since(note.stamp.written_ms, now, lang), name: note.name.clone() })
+    let written = IN_PLACE.with_borrow(|names| names.contains(&note.name));
+    Block::StuckNote(StuckNote { number: crate::notes::number_of(&note.name), text: note.text.clone(), colour: note.colour, when: text::since(note.stamp.written_ms, now, lang), name: note.name.clone(), written })
 }
 
 /// How large a note stuck on the desktop is made where it is not stuck from its page (DIPs): its page's width beside
@@ -3507,10 +3526,14 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (Block::Notes { notes, view, tall }, Pass::Content) => {
                 paint_notes(frame, scene, (left, y + SHELF_GAP, width), notes, *view, *tall + spare, hits);
             }
-            // (All the room it is given, whatever its size.)
+            // (All the room it is given, whatever its size. Written in where it is, drawn by what writes it.)
             (Block::StuckNote(note), Pass::Content) => {
                 let room = (left, y, width, (area.y + area.h - pad_bottom - y).max(0.0));
-                super::beside::paint_stuck_note(frame, theme, scene.lang, &note.text, note.colour, &note.when, &note.name, room);
+                if !note.written {
+                    super::note::paint_stuck(frame, theme, scene.lang, &note.text, note.colour, &note.when, &note.name, room);
+                }
+                let (wx, wy, ww, wh) = super::note::words_in(room.2, room.3);
+                hits.push((room.0 + wx, room.1 + wy, ww, wh, Hit::Words(note.number)));
                 hits.push((room.0, room.1, room.2, room.3, Hit::Note(note.number)));
             }
             (Block::Apps { apps, rows, named, over }, Pass::Content) => {
@@ -5217,6 +5240,7 @@ mod tests {
     #[cfg(feature = "studio")]
     fn workbench_rails() {
         use super::*;
+        let _pretending = crate::pretending();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
@@ -5279,6 +5303,7 @@ otepad.exe", "Notepad"),
     #[cfg(feature = "studio")]
     fn workbench_looks() {
         use super::*;
+        let _pretending = crate::pretending();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
@@ -5362,6 +5387,7 @@ otepad.exe", "Notepad"),
     #[cfg(feature = "studio")]
     fn workbench_shapes() {
         use super::*;
+        let _pretending = crate::pretending();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
@@ -5442,6 +5468,7 @@ otepad.exe", "Notepad"),
     #[cfg(feature = "studio")]
     fn notes_lanes() {
         use super::*;
+        let _pretending = crate::pretending();
         use crate::notes::{Colour, Note};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -5503,6 +5530,7 @@ otepad.exe", "Notepad"),
     #[cfg(feature = "studio")]
     fn station_pages() {
         use super::*;
+        let _pretending = crate::pretending();
         use crate::station::shelf::{Item, What};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -5995,6 +6023,7 @@ six".into()));
     /// one whose name fits says nothing, and a press on either still finds it.
     #[test]
     fn a_shortened_name_is_said_whole() {
+        let _pretending = crate::pretending();
         let theme = Theme::new(Skin::Fluent, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
@@ -6242,6 +6271,7 @@ six".into()));
     #[test]
     fn a_press_names_what_it_was_on_as_the_list_changes() {
         use crate::notes::{Colour, Note};
+        let _pretending = crate::pretending();
         let note = |name: &str| Note { name: name.into(), text: name.into(), colour: Colour::Blue, stamp: crate::notes::store::Stamp { bytes: 0, written_ms: 0, digest: 0 } };
         crate::notes::pretend(vec![note("pressed-a.md"), note("pressed-b.md")]);
         let card = note_card(&crate::notes::shown()[0], Lang::En, 0, 1);
@@ -6343,6 +6373,7 @@ six".into()));
     #[test]
     #[cfg(feature = "studio")]
     fn a_workbench_in_a_shape_keeps_within_it() {
+        let _pretending = crate::pretending();
         pretend_workbench();
         let ids = ["station", "notes", "apps", "time"];
         for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
@@ -6404,6 +6435,7 @@ six".into()));
     #[test]
     #[cfg(feature = "studio")]
     fn a_rail_s_places_are_found_while_one_is_dragged() {
+        let _pretending = crate::pretending();
         let theme = Theme::new(Skin::Fluent, false);
         let app = |target: &str| crate::station::apps::App { target: target.into(), name: target.into() };
         crate::station::apps::pretend((0..5).map(|at| app(&format!("C:/{at}.exe"))).collect());
@@ -6487,9 +6519,9 @@ six".into()));
 
     /// A note stuck on the desktop is drawn as its page is as it is written in, in every skin, at any size it is made:
     /// its words, all of them, written in Markdown as the page's box writes them, just where that box is and as large;
-    /// its colour's dot and when it was written where the page has them; pressed anywhere on it, it opens. (It was
-    /// drawn as its card on the panel, its title bold and small over a few of its lines cut short: opened to be
-    /// written in, its page over it looked another thing altogether.)
+    /// its colour's dot and when it was written where the page has them, pressed on its words, written in there. (It
+    /// was drawn as its card on the panel, its title bold and small over a few of its lines cut short: opened to be
+    /// written in, its page looked another thing altogether.)
     #[test]
     fn a_note_stuck_on_the_desktop_is_drawn_as_its_page() {
         use crate::ui::morph::{Op, Recorder};
@@ -6511,17 +6543,30 @@ six".into()));
                 let ops: Vec<Op> = recorder.parts().into_iter().flat_map(|part| part.ops).collect();
                 // Its words where the page's box writes them (at twice the pixels, its box's edges on whole ones).
                 let scale = 2.0;
-                let page = super::super::beside::words_box(0, (w * scale) as i32, (h * scale) as i32, scale);
+                let page = super::super::note::words_box(0, 0, (w * scale) as i32, (h * scale) as i32, scale);
                 let words = ops.iter().find_map(|op| match op {
                     Op::Markdown { text, font, x, y, w, h, .. } => Some((text.clone(), font.size, (*x, *y, *w, *h))),
                     _ => None,
                 });
                 let boxed = (page.left as f32 / scale, page.top as f32 / scale, (page.right - page.left) as f32 / scale, (page.bottom - page.top) as f32 / scale);
-                assert_eq!(words, Some((text.to_string(), super::super::beside::WORDS, boxed)), "{skin:?} {w}x{h}");
+                assert_eq!(words, Some((text.to_string(), super::super::note::WORDS, boxed)), "{skin:?} {w}x{h}");
                 // Its dot, and when it was written after it.
                 assert!(ops.iter().any(|op| matches!(op, Op::Circle { centre, radius, .. } if (centre.x, centre.y, *radius) == (25.0, 26.0, 5.0))), "{skin:?} {w}x{h}: its dot");
                 assert!(ops.iter().any(|op| matches!(op, Op::Text { text, x, y, .. } if text.ends_with("修改") && (*x, *y) == (38.0, 18.0))), "{skin:?} {w}x{h}: when it was written");
-                assert_eq!(hits.iter().map(|hit| (hit.0, hit.1, hit.2, hit.3, hit.4)).collect::<Vec<_>>(), vec![(0.0, 0.0, w, h, Hit::Note(crate::notes::number_of("a.md")))], "{skin:?} {w}x{h}");
+                // Its words pressed, written in there, elsewhere, it is the note's.
+                let number = crate::notes::number_of("a.md");
+                assert_eq!(hits.iter().map(|hit| (hit.0, hit.1, hit.2, hit.3, hit.4)).collect::<Vec<_>>(), vec![(boxed.0, boxed.1, boxed.2, boxed.3, Hit::Words(number)), (0.0, 0.0, w, h, Hit::Note(number))], "{skin:?} {w}x{h}");
+            }
+            // Written in where it is: nothing of it drawn here (what writes it draws it all), what is pressed on it as
+            // ever, no longer, drawn here again.
+            for written in [true, false] {
+                written_in_place("a.md", written);
+                let lane = Lane { id: format!("{STUCK_NOTE_LANE}a.md"), blocks: vec![stuck_note(&note, Lang::Zh, 60_000)], ink: theme.ink("notes") };
+                let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+                let mut hits = Vec::new();
+                paint_lane(&recorder, &scene, &lane, Rect { x: 0.0, y: 0.0, w: STUCK_NOTE.0, h: STUCK_NOTE.1 }, 0.0, Pass::Content, &mut hits);
+                let drew = recorder.parts().into_iter().flat_map(|part| part.ops).any(|op| matches!(op, Op::Markdown { .. }));
+                assert_eq!((drew, hits.len()), (!written, 2), "{skin:?} written {written}");
             }
         }
     }

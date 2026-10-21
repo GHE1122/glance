@@ -50,6 +50,8 @@ pub struct Window {
     on_desktop: Cell<bool>,
     /// Above them all for now, kept on the desktop or not (see `lift`).
     lifted: Cell<bool>,
+    /// Taking the keys (see `take_keys`), and so above them all too.
+    keyed: Cell<bool>,
     /// Kept under the panel while it is open (a widget's: see `under_the_panel`).
     under_panel: Cell<bool>,
 }
@@ -64,6 +66,10 @@ pub fn on_top() -> u64 {
 }
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // (Taking the keys, what writes in it answers first: see `keys`.)
+    if let Some(answered) = super::keys::answer(hwnd, message, wparam, lparam) {
+        return answered;
+    }
     match message {
         // Clicking the panel must leave the focus where it was; a window that comes to the front (a menu, the music
         // full screen) comes there as it is clicked, with the keyboard.
@@ -164,7 +170,7 @@ impl Window {
             let _ = unsafe { DestroyWindow(hwnd) };
             return Err(error);
         }
-        Ok(Window { hwnd, click_through: false, layered, under: Cell::new(None), placed: Cell::new(RECT::default()), on_desktop: Cell::new(false), lifted: Cell::new(false), under_panel: Cell::new(false) })
+        Ok(Window { hwnd, click_through: false, layered, under: Cell::new(None), placed: Cell::new(RECT::default()), on_desktop: Cell::new(false), lifted: Cell::new(false), keyed: Cell::new(false), under_panel: Cell::new(false) })
     }
 
     pub fn place(&self, rect: RECT) {
@@ -303,9 +309,9 @@ impl Window {
     }
 
     /// Whether it is under every other window now: kept on the desktop, not
-    /// lifted.
+    /// lifted, not taking the keys.
     fn low(&self) -> bool {
-        self.on_desktop.get() && !self.lifted.get()
+        self.on_desktop.get() && !self.lifted.get() && !self.keyed.get()
     }
 
     /// Kept on the desktop (`true`): under every other window, just above
@@ -323,13 +329,20 @@ impl Window {
     /// Above them all for now (`true`: while it is moved or sized by hand,
     /// to be seen), or back where it is kept.
     pub fn lift(&self, lifted: bool) {
-        if self.lifted.replace(lifted) == lifted || !self.on_desktop.get() {
+        if self.lifted.replace(lifted) != lifted {
+            self.stand_as_kept();
+        }
+    }
+
+    /// Where it is kept now, it kept on the desktop: under the others where it is low (see `low`), else above them.
+    fn stand_as_kept(&self) {
+        if !self.on_desktop.get() {
             return;
         }
-        if lifted {
-            self.yield_to(self.under.get());
-        } else {
+        if self.low() {
             self.sink();
+        } else {
+            self.yield_to(self.under.get());
         }
     }
 
@@ -383,6 +396,28 @@ impl Window {
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(self.hwnd);
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(self.hwnd));
+        }
+    }
+
+    /// Taking the keys (`on`: brought to the front with the keyboard's focus, clicks on it leaving them there), or
+    /// never taking the focus again, as it was made (see `keys`). Kept on the desktop, it is above the others while it
+    /// takes them (as while it is moved: see `lift`), back under them after.
+    pub fn take_keys(&self, on: bool) {
+        self.let_take_keys(on);
+        if on {
+            self.focus();
+        }
+    }
+
+    /// Let take the focus or not (see `take_keys`), and standing so, but not brought to the front.
+    fn let_take_keys(&self, on: bool) {
+        unsafe {
+            let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+            let style = if on { style & !WS_EX_NOACTIVATE.0 } else { style | WS_EX_NOACTIVATE.0 };
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style as isize);
+        }
+        if self.keyed.replace(on) != on {
+            self.stand_as_kept();
         }
     }
 
@@ -440,5 +475,32 @@ pub fn desktop_window() -> Option<HWND> {
             Some(_) => continue,
             None => return progman,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A window taking the keys takes the focus as it is clicked (its style no longer asks never to), and once it gives
+    /// them back never again. Kept on the desktop, it stands above the others meanwhile, under them again after. (Not
+    /// brought to the front here: that would take the front from whatever has it as the tests run.)
+    #[test]
+    fn a_window_taking_the_keys_takes_the_focus_while_it_does() {
+        let window = Window::new().unwrap();
+        let never = || unsafe { GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE) } as u32 & WS_EX_NOACTIVATE.0 != 0;
+        let clicked = || unsafe { procedure(window.hwnd, WM_MOUSEACTIVATE, WPARAM(0), LPARAM(0)) }.0 as u32;
+        assert!(never());
+        assert_eq!(clicked(), MA_NOACTIVATE);
+        window.set_on_desktop(true);
+        assert!(window.low());
+        window.let_take_keys(true);
+        assert!(!never());
+        assert_eq!(clicked(), windows::Win32::UI::WindowsAndMessaging::MA_ACTIVATE);
+        assert!(!window.low());
+        window.let_take_keys(false);
+        assert!(never());
+        assert_eq!(clicked(), MA_NOACTIVATE);
+        assert!(window.low());
     }
 }
