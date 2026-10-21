@@ -3280,12 +3280,8 @@ impl Widget {
                 self.zoom = shown.zoom;
                 self.shown = shown.size;
                 // Another layout: what showed turns into it, from where it is now if
-                // it was still turning.
-                // (The workbench's: as its things flow anew across its columns too, cards and quick launch's things a
-                // row more or less.)
-                // (And as its lanes take other shapes, sized smaller: see `view::Shape`.)
-                let flowed = |last: &Shown| readings.workbench && (last.layout.flow(&theme) != shown.layout.flow(&theme) || last.layout.shapes(&theme) != shown.layout.shapes(&theme));
-                if let Some(last) = readings.last.take().filter(|last| last.form != shown.form || last.layout.heights.len() != shown.layout.heights.len() || flowed(last)) {
+                // it was still turning (see `turns_into`).
+                if let Some(last) = readings.last.take().filter(|last| turns_into(last, &shown, readings.workbench, sized_to.is_some(), &theme)) {
                     note(format!("widget: {} -> {}", last.form.key(), shown.form.key()));
                     let before = if readings.morph.is_some() { Before::Drawn(std::mem::take(&mut readings.drawn)) } else { Before::Shown(last) };
                     readings.morph = Some((now, before));
@@ -3853,6 +3849,20 @@ pub(crate) fn paint_hint(canvas: &dyn Canvas, theme: &Theme, (w, h): (f32, f32),
 }
 
 /// What a widget's menu offers, row by row (`full`: it shows what plays, and offers it over the whole screen).
+/// Whether a widget of readings that showed `last` turns into `shown` (see `morph`), rather than showing it at once: as
+/// it shows another form, or other lanes. The workbench's lanes, laid out for the size it is made, also as their
+/// things flow anew across its columns (cards and quick launch's things a row more or less) or its lanes take other
+/// shapes (see `view::Shape`), but not while it is sized by hand (`by_hand`): laid out again for each size the hand
+/// makes, it shows that at once, as the hand makes it (turning behind the hand, each turn from one still turning, what
+/// it drew showed through faded twice over, and its cards' grounds were drawn lighter and darker as they faded).
+fn turns_into(last: &Shown, shown: &Shown, workbench: bool, by_hand: bool, theme: &Theme) -> bool {
+    if workbench && by_hand {
+        return false;
+    }
+    let flowed = workbench && (last.layout.flow(theme) != shown.layout.flow(theme) || last.layout.shapes(theme) != shown.layout.shapes(theme));
+    last.form != shown.form || last.layout.heights.len() != shown.layout.heights.len() || flowed
+}
+
 fn menu_choices(full: bool) -> Vec<WidgetChoice> {
     let mut choices = vec![WidgetChoice::Pin, WidgetChoice::ClickThrough, WidgetChoice::AboveOthers];
     if full {
@@ -3934,6 +3944,26 @@ mod tests {
         let merged = Content::Merged(Box::new(Merged::new(vec![Content::Music(MusicShown::new(music::LEAST)), note("a.md")], true, music::LEAST)));
         assert_eq!(merged.holding("note:a.md"), Some(Some(1)));
         assert_eq!(merged.holding("note:b.md"), None);
+    }
+
+    /// A workbench widget sized by hand shows each layout the hand makes at once (turning behind the hand, its cards
+    /// were seen twice over, fading, lighter and darker); let go, or laid out anew otherwise, as its things flow anew
+    /// it turns. A widget of readings turns into another form while sized too.
+    #[test]
+    fn a_workbench_sized_by_hand_shows_its_layout_at_once() {
+        let theme = Theme::new(Skin::Paper, false);
+        let shown = |width: f32, form: Form| {
+            let layout = view::Layout::with_columns(vec![200.0, 300.0], 1, &theme).fitted((width, 560.0));
+            Shown { form, zoom: 1.0, size: (layout.width(), layout.height()), layout, small: None, detail: view::Detail::Full }
+        };
+        let full = Form::Lanes { detail: view::Detail::Full, columns: 1 };
+        let (wide, narrow) = (shown(356.0, full), shown(240.0, full));
+        assert_ne!(wide.layout.flow(&theme), narrow.layout.flow(&theme), "the two sizes flow alike: no test");
+        assert!(!turns_into(&wide, &narrow, true, true, &theme));
+        assert!(turns_into(&wide, &narrow, true, false, &theme));
+        let other = shown(240.0, Form::Lanes { detail: view::Detail::Shape(view::Shape::Down), columns: 1 });
+        assert!(!turns_into(&wide, &other, true, true, &theme));
+        assert!(turns_into(&wide, &other, false, true, &theme));
     }
 
     /// A widget of the workbench's (a note, the station) has no game button, a game shown changing nothing in it; one of
