@@ -1940,9 +1940,9 @@ pub fn heights(scene: &Scene) -> Vec<(String, [f32; 2])> {
         .collect()
 }
 
-/// The least each lane of `heights` may be drawn as tall as (its list at its foot given way to `LIST_LEAST`), in the
-/// same order.
-pub fn least_heights(scene: &Scene) -> Vec<f32> {
+/// How much shorter than designed each lane of `heights` may be drawn (its list at its foot given way to
+/// `LIST_LEAST`; none for a lane with no list at its foot), in the same order (see `Layout::giving`).
+pub fn gives(scene: &Scene) -> Vec<f32> {
     scene
         .prefs
         .modules
@@ -1950,11 +1950,44 @@ pub fn least_heights(scene: &Scene) -> Vec<f32> {
         .filter(|entry| shows_module(entry))
         .filter_map(|entry| {
             let blocks = lane(scene, &entry.id, Detail::Full)?;
-            let natural = scene.theme.pad_top + scene.theme.pad_bottom + blocks.iter().map(Block::height).sum::<f32>();
-            let gives = blocks.last().and_then(Block::list_tall).map_or(0.0, |tall| (tall - LIST_LEAST).max(0.0));
-            Some(natural - gives)
+            Some(blocks.last().and_then(Block::list_tall).map_or(0.0, |tall| (tall - LIST_LEAST).max(0.0)))
         })
         .collect()
+}
+
+/// What each of a column's lanes is drawn taller (or, less than 0, shorter) by, the column made `change` taller than
+/// its lanes need, each lane able to be drawn shorter by its `gives`: the lanes with a list at their foot (some give)
+/// take it, made shorter as evenly as each can give; the others are drawn as designed (their readings and controls
+/// fill them as they are: drawn shorter, they were drawn over the lane under). Only with none to take it, or made
+/// shorter than they all give (smaller than its least: a widget's lanes take shapes then, see `widget`), is it shared
+/// by all.
+fn shares(gives: &[f32], change: f32) -> Vec<f32> {
+    let count = gives.len();
+    let mut takers: Vec<usize> = (0..count).filter(|&at| gives[at] > 0.0).collect();
+    let mut shares = vec![0.0; count];
+    if takers.is_empty() {
+        return vec![change / count.max(1) as f32; count];
+    }
+    if change >= 0.0 {
+        for &at in &takers {
+            shares[at] = change / takers.len() as f32;
+        }
+        return shares;
+    }
+    // Shorter: the least giving give all they can first, the rest an even share of what is left.
+    takers.sort_by(|a, b| gives[*a].total_cmp(&gives[*b]));
+    let mut left = -change;
+    for (done, &at) in takers.iter().enumerate() {
+        let taken = (left / (takers.len() - done) as f32).min(gives[at]);
+        shares[at] = -taken;
+        left -= taken;
+    }
+    if left > 0.0 {
+        for share in &mut shares {
+            *share -= left / count as f32;
+        }
+    }
+    shares
 }
 
 /// The height of the lane of module `id` showing `detail`, holding what
@@ -2756,6 +2789,9 @@ pub struct Layout {
     pub heights: Vec<f32>,
     /// The tallest column; every column is drawn this tall.
     pub lanes_height: f32,
+    /// How much shorter than in `heights` each lane may be drawn (see `giving`); none, each lane takes an even share of
+    /// what its column is made taller or shorter by.
+    gives: Vec<f32>,
     outer: (f32, f32, f32),
     lane_gap: f32,
     column_gap: f32,
@@ -2802,6 +2838,7 @@ impl Layout {
             cuts,
             heights,
             lanes_height: tallest,
+            gives: Vec::new(),
             outer: theme.outer,
             lane_gap: theme.lane_gap,
             column_gap: theme.column_gap,
@@ -2811,6 +2848,25 @@ impl Layout {
             grow: 0.0,
             rail: None,
         }
+    }
+
+    /// The same with each lane able to be drawn shorter by `gives` (in the order of the lanes, see `gives`): made larger
+    /// or smaller than its lanes need (see `fitted`), the lanes with a list at their foot take it (see `shares`).
+    pub fn giving(mut self, gives: Vec<f32>) -> Self {
+        self.gives = gives;
+        self
+    }
+
+    /// The least it may be made as tall as, its lanes each as short as it gives (see `giving`), its columns as they are.
+    pub fn least_height(&self) -> f32 {
+        let least = (0..self.columns)
+            .map(|column| {
+                let start = self.cuts[column];
+                let end = self.cuts.get(column + 1).copied().unwrap_or(self.heights.len());
+                (start..end).map(|at| self.heights[at] - self.gives.get(at).copied().unwrap_or(0.0)).sum::<f32>() + (end - start).saturating_sub(1) as f32 * self.lane_gap
+            })
+            .fold(0.0, f32::max);
+        self.height() - self.lanes_height + least
     }
 
     /// The same with the lane at `at` among the lanes (its height left out of the columns') drawn as a rail at `side`.
@@ -2930,10 +2986,10 @@ impl Layout {
             let end = self.cuts.get(column + 1).copied().unwrap_or(self.heights.len());
             let count = (end - start) as f32;
             let natural = self.heights[start..end].iter().sum::<f32>() + (count - 1.0).max(0.0) * self.lane_gap;
-            let extra = if end > start { (self.lanes_height - natural) / count } else { 0.0 };
+            let gives: Vec<f32> = (start..end).map(|at| self.gives.get(at).copied().unwrap_or(0.0)).collect();
             let x = self.column_x(column);
             let mut y = top;
-            for height in &self.heights[start..end] {
+            for (height, extra) in self.heights[start..end].iter().zip(shares(&gives, self.lanes_height - natural)) {
                 boxes.push(Rect { x, y, w: column_width, h: height + extra });
                 y += height + extra + self.lane_gap;
             }
@@ -6008,9 +6064,8 @@ six".into()));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let heights: Vec<f32> = heights(&scene).iter().map(|(_, h)| h[0]).collect();
-        let designed = Layout::with_columns(heights.clone(), 1, &theme);
-        let least = Layout::with_columns(least_heights(&scene), 1, &theme);
-        assert!(least.height() < designed.height());
+        let designed = Layout::with_columns(heights.clone(), 1, &theme).giving(gives(&scene));
+        assert!(designed.least_height() < designed.height());
         for size in [(designed.width() - 100.0, designed.height() - 80.0), (designed.width() + 150.0, designed.height() + 120.0)] {
             let layout = designed.clone().fitted(size);
             assert!((layout.width() - size.0).abs() < 0.01 && (layout.height() - size.1).abs() < 0.01, "{size:?}");
@@ -6019,6 +6074,39 @@ six".into()));
         let narrow = designed.clone().fitted((240.0, designed.height()));
         let wide = designed.clone().fitted((designed.width() + 150.0, designed.height()));
         assert!(narrow.flow(&theme).0 < wide.flow(&theme).0, "{:?} {:?}", narrow.flow(&theme), wide.flow(&theme));
+    }
+
+    /// A workbench made shorter or taller than designed: only its lanes with a list at their foot (the station's, the
+    /// notes') are drawn shorter or taller, each by no more than it gives; the time's and quick launch's are as
+    /// designed (made shorter evenly, the time's music was drawn over the station's tabs). Its least is each list given
+    /// way, and lanes never overlap.
+    #[test]
+    fn a_workbench_made_shorter_takes_it_from_its_lists() {
+        let theme = Theme::new(Skin::Paper, false);
+        let heights = vec![200.0, 300.0, 250.0, 120.0];
+        let gives = vec![0.0, 150.0, 100.0, 0.0];
+        let designed = Layout::with_columns(heights.clone(), 1, &theme).giving(gives.clone());
+        assert!((designed.height() - designed.least_height() - 250.0).abs() < 0.01, "least {}", designed.least_height());
+        for change in [-200.0, -240.0, -250.0, 0.0, 90.0] {
+            let layout = designed.clone().fitted((designed.width(), designed.height() + change));
+            let lanes = layout.lanes();
+            assert_eq!(lanes[0].h, 200.0, "{change}: the time's lane");
+            assert_eq!(lanes[3].h, 120.0, "{change}: quick launch's lane");
+            for at in [1, 2] {
+                assert!(lanes[at].h >= heights[at] - gives[at] - 0.01, "{change}: lane {at} past its least ({})", lanes[at].h);
+            }
+            assert!((lanes.iter().map(|lane| lane.h).sum::<f32>() - heights.iter().sum::<f32>() - change).abs() < 0.01, "{change}");
+            for pair in lanes.windows(2) {
+                assert!(pair[0].y + pair[0].h <= pair[1].y + 0.01, "{change}: lanes overlap");
+            }
+        }
+        // Made shorter by more than the notes give in an even share: they give all of theirs, the station the rest.
+        let lanes = designed.clone().fitted((designed.width(), designed.height() - 240.0)).lanes();
+        assert!((lanes[2].h - 150.0).abs() < 0.01 && (lanes[1].h - 160.0).abs() < 0.01, "{} {}", lanes[1].h, lanes[2].h);
+        // Lanes not told what they give (the panel's) take an even share, as before.
+        let even = Layout::with_columns(heights.clone(), 1, &theme);
+        let lanes = even.clone().fitted((even.width(), even.height() + 40.0)).lanes();
+        assert!(lanes.iter().zip(&heights).all(|(lane, h)| (lane.h - h - 10.0).abs() < 0.01));
     }
 
     /// A grid's pages: as many as go on one, else each but the last a cell short (that cell the way to the next).

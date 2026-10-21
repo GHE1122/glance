@@ -3231,16 +3231,16 @@ impl Widget {
                 let shown = match readings.last.clone().filter(|last| only_moved && last.form == readings.choice.form) {
                     Some(last) => last,
                     // The workbench's lanes: laid out again for the size it is made (its columns as wide, its lists as
-                    // tall), not scaled to it, down to its least (see `view::LANE_LEAST`, `view::least_heights`).
+                    // tall), not scaled to it, down to its least (see `view::LANE_LEAST`, `view::gives`).
                     None if readings.workbench => {
                         let heights = view::heights(&scene);
                         let columns = match readings.choice.form {
                             Form::Lanes { columns, .. } => columns.min(heights.len()).max(1),
                             Form::Small(_) => 1,
                         };
-                        let designed = view::Layout::with_columns(heights.iter().map(|(_, h)| h[0]).collect(), columns, &theme);
-                        let least = view::Layout::with_columns(view::least_heights(&scene), columns, &theme);
-                        let least = (designed.width() - columns as f32 * (view::COLUMN_WIDTH - view::LANE_LEAST), least.height().min(designed.height()));
+                        // (Made shorter, its lists give way; its other lanes are as designed: see `view::Layout::giving`.)
+                        let designed = view::Layout::with_columns(heights.iter().map(|(_, h)| h[0]).collect(), columns, &theme).giving(view::gives(&scene));
+                        let least = (designed.width() - columns as f32 * (view::COLUMN_WIDTH - view::LANE_LEAST), designed.least_height());
                         let wanted = sized_to.unwrap_or((designed.width() + readings.choice.extra.0, designed.height() + readings.choice.extra.1));
                         let size = within(wanted, SHAPE_LEAST);
                         let extra = (size.0 - designed.width(), size.1 - designed.height());
