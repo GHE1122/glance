@@ -174,8 +174,6 @@ pub fn run() {
             DispatchMessageW(&msg);
         }
     }
-    // The other threads end with the process.
-    std::process::exit(0);
 }
 
 /// Asks the Glance already running to open its settings.

@@ -471,6 +471,8 @@ pub fn run() {
     }
 
     journal::note_crashes();
+    // (Glance's own run ends waiting for what was noted: see its end.)
+    journal::write_apart();
     let config = settings::config_dir();
     let mut settings = Settings::load(&config);
 
@@ -561,9 +563,12 @@ pub fn run() {
         })
         .expect("a thread started");
     tray::run();
-    // (What was changed last is on the disk before Glance goes.)
+    // (What was changed last is on the disk before Glance goes, and what was noted last.)
     saved_all();
     presents::stop();
+    journal::written();
+    // The other threads end with the process.
+    std::process::exit(0);
 }
 
 /// `glance.exe` started elevated (see `run`): the sensors' own program started in its place, elevated as it is.

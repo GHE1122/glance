@@ -356,9 +356,15 @@ def main():
         if os.environ.get("PROBE_THREADS"):
             subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(__file__), "threads.py"), "glance.exe", "3"])
     finally:
-        probe.kill()
-        probe.wait()
-        print(f"probe ended; marks in {marks_path}")
+        # Quit as its tray's menu quits it (it ends its frames' trace as it goes: ended by its PID, the trace stays and
+        # takes the next run's events); by its PID if it has not gone in a while.
+        try:
+            user32.PostMessageW(tray(probe.pid), WM_CLOSE, 0, 0)
+            probe.wait(timeout=10)
+        except (TypeError, subprocess.TimeoutExpired):
+            probe.kill()
+            probe.wait()
+        print(f"probe ended (code {probe.returncode}); marks in {marks_path}")
 
 
 if __name__ == "__main__":

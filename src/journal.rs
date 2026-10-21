@@ -5,12 +5,13 @@
 //! nothing that names the user goes in: a user's folder in a path is written
 //! `<user>`. Written as the settings are (see `elevation::write_in_place`):
 //! Glance runs elevated and never follows a link someone put in the user's
-//! folder.
+//! folder; and as they are, on a thread of its own (see `write_later`).
 
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt::Display;
-use std::sync::{Mutex, PoisonError};
+use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -94,10 +95,93 @@ impl Log {
         push(&mut self.lines, what.clone());
         self.last = Some((what, now, 0));
         let text: String = self.lines.iter().map(|line| format!("{line}\n")).collect();
-        if crate::elevation::ensure_folder(dir).is_ok() {
-            let _ = crate::elevation::write_in_place(dir, FILE, text.as_bytes());
+        match APART.load(std::sync::atomic::Ordering::Relaxed) {
+            true => write_later(dir.to_path_buf(), text),
+            false => write(dir, &text),
         }
     }
+}
+
+/// Whether the log is written on a thread of its own (see `write_later`): in Glance's own run, which waits for it as
+/// it ends; else as it is noted (the elevated helpers', which end as soon as they are done).
+static APART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// From now on the log is written on a thread of its own (see `write_later`); `written` waits for it.
+pub fn write_apart() {
+    APART.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The log's text to be written in each folder it is kept in (the latest: one noted before it is not written too), and
+/// whether some is being written. Written to the disk as it is (see `elevation::write_in_place`), a line noted on a
+/// thread that draws held it up for as long: it is written on a thread of its own, as the settings are (see
+/// `save_later`).
+static UNWRITTEN: Mutex<(Vec<(PathBuf, String)>, bool)> = Mutex::new((Vec::new(), false));
+static WRITTEN: Condvar = Condvar::new();
+/// Held while the log's file is written, and while what is written next is taken (see `written_now`).
+static WRITING: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// This is the thread that writes the log.
+    static WRITER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Writes `text` in `dir` on the thread that writes the log, after what came before.
+fn write_later(dir: PathBuf, text: String) {
+    let mut unwritten = UNWRITTEN.lock().unwrap_or_else(PoisonError::into_inner);
+    let idle = unwritten.0.is_empty() && !unwritten.1;
+    match unwritten.0.iter_mut().find(|(kept_in, _)| *kept_in == dir) {
+        Some(waiting) => waiting.1 = text,
+        None => unwritten.0.push((dir, text)),
+    }
+    if !idle {
+        return;
+    }
+    unwritten.1 = true;
+    drop(unwritten);
+    std::thread::Builder::new()
+        .name("glance: journal written".into())
+        .spawn(|| {
+            WRITER.with(|writer| writer.set(true));
+            loop {
+                let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+                let next = {
+                    let mut unwritten = UNWRITTEN.lock().unwrap_or_else(PoisonError::into_inner);
+                    if unwritten.0.is_empty() {
+                        unwritten.1 = false;
+                        WRITTEN.notify_all();
+                        return;
+                    }
+                    std::mem::take(&mut unwritten.0)
+                };
+                next.iter().for_each(|(dir, text)| write(dir, text));
+            }
+        })
+        .expect("a thread started");
+}
+
+fn write(dir: &Path, text: &str) {
+    if crate::elevation::ensure_folder(dir).is_ok() {
+        let _ = crate::elevation::write_in_place(dir, FILE, text.as_bytes());
+    }
+}
+
+/// Waits till what was noted is written.
+pub fn written() {
+    let mut unwritten = UNWRITTEN.lock().unwrap_or_else(PoisonError::into_inner);
+    while !unwritten.0.is_empty() || unwritten.1 {
+        unwritten = WRITTEN.wait(unwritten).unwrap_or_else(PoisonError::into_inner);
+    }
+}
+
+/// Writes what was noted here and now, as the process ends at once (a crash): what the thread that writes the log
+/// takes after was noted after it. (Not on that thread: it would wait on itself.)
+fn written_now() {
+    if WRITER.with(Cell::get) {
+        return;
+    }
+    let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+    let next = std::mem::take(&mut UNWRITTEN.lock().unwrap_or_else(PoisonError::into_inner).0);
+    next.iter().for_each(|(dir, text)| write(dir, text));
 }
 
 /// Adds `what`, stamped with the local time, keeping only the latest lines.
@@ -160,6 +244,7 @@ pub fn note_crashes() {
             format!(" at {file}:{}", at.line())
         });
         note(format!("crashed: {message}{}", place.unwrap_or_default()));
+        written_now();
         previous(info);
     }));
 }
@@ -181,6 +266,7 @@ mod tests {
             log.add(&dir, "again");
         }
         log.add(&dir, r"could not read C:\Users\Someone O'Else\AppData\x and D:\Users\me/y");
+        written();
         let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), KEPT);
@@ -188,6 +274,25 @@ mod tests {
         assert!(lines[KEPT - 3].ends_with("  again"));
         assert!(lines[KEPT - 2].ends_with("  (the line before came 2 more times)"));
         assert!(lines[KEPT - 1].ends_with(r"could not read C:\Users\<user>\AppData\x and D:\Users\<user>/y"), "{}", lines[KEPT - 1]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Written apart (Glance's own run), what was noted is in the file once `written` returns, the latest of it: lines
+    /// noted one after another while one is written are written together, after it.
+    #[test]
+    fn what_was_noted_apart_is_written_once_waited_for() {
+        let dir = std::env::temp_dir().join(format!("glance-journal-apart-test-{}", std::process::id()));
+        // (The other tests' lines, written apart too from now on, are written where they always are.)
+        write_apart();
+        let mut log = read(&dir);
+        for i in 0..50 {
+            log.add(&dir, format!("apart {i}"));
+        }
+        written();
+        let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 50);
+        assert!(lines[49].ends_with("  apart 49"), "{}", lines[49]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
