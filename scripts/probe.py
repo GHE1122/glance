@@ -37,6 +37,7 @@ user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 psapi = ctypes.WinDLL("psapi")
 WM_CLOSE, WM_HOTKEY, WM_APP = 0x0010, 0x0312, 0x8000
+WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE = 0x0231, 0x0232
 SHOW_SETTINGS, PERF_TURN = WM_APP + 2, WM_APP + 90
 TH32CS_SNAPTHREAD = 0x4
 SWP_NOZORDER, SWP_NOACTIVATE, SWP_NOMOVE = 0x4, 0x10, 0x2
@@ -298,12 +299,15 @@ def run_resize(pid, marks, rounds):
     frames, gaps = [], []
     for _ in range(rounds):
         since = time.perf_counter()
-        # As a drag: a step every 8 ms (a 125 Hz mouse), 300 px out and back.
+        # As a drag of its edge: the window told the sizing began and ended, as Windows tells it, and a step every
+        # 8 ms between (a 125 Hz mouse), 300 px out and back.
+        user32.SendMessageW(hwnd, WM_ENTERSIZEMOVE, 0, 0)
         steps = list(range(0, 300, 5)) + list(range(300, 0, -5))
         for step in steps:
             user32.SetWindowPos(hwnd, None, 0, 0, width + step, height + step // 2, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE)
             time.sleep(0.008)
         user32.SetWindowPos(hwnd, None, 0, 0, width, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE)
+        user32.SendMessageW(hwnd, WM_EXITSIZEMOVE, 0, 0)
         until = time.perf_counter()
         drawn = [mark for mark in marks.after(since, "settings frame") if mark[0] <= until]
         frames += [took(mark) for mark in drawn]

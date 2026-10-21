@@ -280,6 +280,10 @@ fn inset_blurred(frame: &Frame, r: Rect, radius: f32, y: f32, deviation: f32, co
     within(frame, r, radius, || draw_image(frame, &output(&blurred).unwrap(), Vector2 { X: 0.0, Y: y }))
 }
 
+/// The steps of scale (physical pixels a DIP) the pieces of shadows are made at while a window is sized by hand (see
+/// `sliced`): a sixteenth either way at most, at 1.5, stretched.
+const SIZED_STEP: f32 = 0.125;
+
 /// Draws over `at` what `paint` draws over a rectangle (given it, in its own
 /// DIPs) that is the same all along its middle: past `cut` DIPs in from each
 /// side (across, down), every column (row) is the same as the next (a box's
@@ -293,9 +297,10 @@ fn inset_blurred(frame: &Frame, r: Rect, radius: f32, y: f32, deviation: f32, co
 /// It is made at the frame's scale, and starting at the same fraction of a
 /// pixel as `at` does, and ending as `at` does: each of its pixels is one of
 /// the frame's, nothing in it moved by a fraction of a pixel (a rim a pixel
-/// wide is drawn as sharp as if it were drawn at `at` itself). Whether it was
-/// drawn: not where `at` is too small to have a middle, or the frame is
-/// turned or stretched; then the caller draws it as it is.
+/// wide is drawn as sharp as if it were drawn at `at` itself; sized by hand,
+/// near it: see below). Whether it was drawn: not where `at` is too small to
+/// have a middle, or the frame is turned or stretched; then the caller draws
+/// it as it is.
 fn sliced(frame: &Frame, at: Rect, cut: (f32, f32), key: ([u8; 4], [u32; 4]), paint: impl FnOnce(&Frame, Rect) -> Result<()>) -> Result<bool> {
     let dc = &frame.dc;
     let mut transform = Matrix3x2::default();
@@ -307,10 +312,16 @@ fn sliced(frame: &Frame, at: Rect, cut: (f32, f32), key: ([u8; 4], [u32; 4]), pa
     if at.w < 2.0 * cut.0 + 2.0 || at.h < 2.0 * cut.1 + 2.0 || transform.M12 != 0.0 || transform.M21 != 0.0 || transform.M11 != transform.M22 || transform.M11 <= 0.0 {
         return Ok(false);
     }
-    // Physical pixels a DIP, and where `at`'s sides fall on the frame's pixels.
-    let px = dpi.0 / 96.0 * transform.M11;
+    // Physical pixels a DIP, and where `at`'s sides fall on the frame's pixels. Sized by hand, a panel zoomed as it is
+    // sized is drawn at a scale of its own each frame, and made for it, its pieces were made again each frame (tens a
+    // frame: a sized glass panel's frames twice as long), never drawn again: they are made at the nearest
+    // `SIZED_STEP` instead, and drawn stretched the little that is left over, on no pixel in particular, each made
+    // once for the frames sized through its step; at rest, made again as they are.
+    let sized = super::gfx::sized_by_hand();
+    let drawn = dpi.0 / 96.0 * transform.M11;
+    let px = if sized { (drawn / SIZED_STEP).round().max(1.0) * SIZED_STEP } else { drawn };
     let device = |v: f32, offset: f32| (v * transform.M11 + offset) * dpi.0 / 96.0;
-    let phase = |v: f32| v.rem_euclid(1.0);
+    let phase = |v: f32| if sized { 0.0 } else { v.rem_euclid(1.0) };
     let (left, top) = (phase(device(at.x, transform.M31)), phase(device(at.y, transform.M32)));
     let (right, bottom) = (phase(device(at.x + at.w, transform.M31)), phase(device(at.y + at.h, transform.M32)));
     // Its size in pixels: room for the corners and a few pixels between, and
@@ -736,6 +747,30 @@ mod tests {
     /// Glass with no picture of the desktop to frost (none taken yet, or taken on a device since lost) is tinted as
     /// at its most frosted: the desktop shows through it sharp, and how busy it is is not known; tinted as the
     /// picture last had it, a busy desktop came through all but clear, and the readings over it were lost.
+    /// A box's shadow, while the window it is in is sized by hand, is made once for the scales near one another its
+    /// frames are drawn at (a panel zoomed as it is sized: a scale of its own each frame), not once for each; at
+    /// rest, at each scale as it is.
+    #[test]
+    fn a_shadow_sized_by_hand_is_made_once_for_scales_near_one_another() {
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        let shapes = [(Rect { x: 10.0, y: 10.0, w: 200.0, h: 120.0 }, 8.0)];
+        let specs = [Shadow { y: 2.0, blur: 8.0, spread: 0.0, color: Color::hex(0, 0.2) }];
+        let draw = |scale: f32| {
+            Frame::whole(&gfx, (400, 300), scale, |frame| shadows(frame, &shapes, &specs).expect("drawn")).expect("frame");
+            gfx.made_count()
+        };
+        {
+            let _sizing = super::super::gfx::sizing(true);
+            let made = draw(1.5);
+            assert!(made > 0);
+            assert_eq!(draw(1.53), made, "near: the same one");
+            assert_eq!(draw(1.47), made, "near: the same one");
+            assert!(draw(1.75) > made, "further: one of its own");
+        }
+        let made = draw(1.5);
+        assert!(draw(1.53) > made, "at rest: each scale's own");
+    }
+
     /// A displacement map worked out only where it changes is the one worked out pixel by pixel, for pieces long and
     /// short, rounded more and less than the rim reaches, at whole and fractional sizes and scales.
     #[test]

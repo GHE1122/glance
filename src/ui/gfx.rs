@@ -641,15 +641,28 @@ impl Gfx {
         self.stops.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
     }
 
+    /// How many bitmaps made from their keys alone are kept (see `made`).
+    #[cfg(test)]
+    pub fn made_count(&self) -> usize {
+        self.made.borrow().len()
+    }
+
+    /// The bitmap `key` stands for, if one was made for it and is kept (see `made`).
+    fn kept(&self, key: [u32; 4]) -> Option<ID2D1Bitmap1> {
+        let mut made = self.made.borrow_mut();
+        let (bitmap, used) = made.get_mut(&key)?;
+        *used = Instant::now();
+        Some(bitmap.clone())
+    }
+
     /// The bitmap `key` stands for: the one made for it before, else made
     /// now by `make`. Those drawn least lately are let go of past
     /// `MADE_BUDGET` (a widget sized frame by frame makes one for each size).
     pub fn made(&self, key: [u32; 4], make: impl FnOnce() -> Result<ID2D1Bitmap1>) -> Result<ID2D1Bitmap1> {
-        let now = Instant::now();
-        if let Some((bitmap, used)) = self.made.borrow_mut().get_mut(&key) {
-            *used = now;
-            return Ok(bitmap.clone());
+        if let Some(bitmap) = self.kept(key) {
+            return Ok(bitmap);
         }
+        let now = Instant::now();
         let bitmap = make()?;
         let mut made = self.made.borrow_mut();
         made.insert(key, (bitmap.clone(), now));
@@ -1722,6 +1735,11 @@ pub fn sizing(on: bool) -> Sizing {
     Sizing
 }
 
+/// Whether what this thread draws now is being sized by hand (see `sizing`).
+pub fn sized_by_hand() -> bool {
+    SIZING.with(Cell::get)
+}
+
 /// See `sizing`.
 pub struct Sizing;
 
@@ -1932,8 +1950,10 @@ impl Layer {
         let dc = &frame.dc;
         // Being sized by hand (see `sizing`), what it shows changes each frame, and keeping it keeps nothing: it is
         // drawn where it shows, and its bitmap let go (a window's size of the card's memory, each layer), to be made
-        // again at the size it comes to rest at.
-        if SIZING.with(Cell::get) {
+        // again at the size it comes to rest at. What shows as it did (the settings' library, while the window
+        // around it is sized) is drawn from what is kept, as at rest.
+        let kept = self.bitmap.as_ref().is_some_and(|(shown, _)| *shown == key);
+        if SIZING.with(Cell::get) && !kept {
             self.bitmap = None;
             return unsafe { Self::draw_through(frame, local, area, halo, paint) };
         }
@@ -2133,6 +2153,36 @@ mod tests {
     /// A frame something of which failed as it was drawn is not had to be shown: what it was for shows what it
     /// showed. (Drawn straight onto its surface, a panel sized on a card short of memory showed its ground with a
     /// reading or two on it.)
+    /// A layer drawn while a window is sized by hand is painted again only where what it shows has changed: one that
+    /// shows as it did (the settings' library, as the window around it is sized) is drawn from what it kept, one that
+    /// changed is drawn straight where it shows, and none is kept for it till the sizing ends.
+    #[test]
+    fn a_layer_sized_by_hand_is_painted_again_only_as_it_changes() {
+        let gfx = super::Gfx::new().expect("graphics");
+        let mut layer = super::Layer::default();
+        let painted = std::cell::Cell::new(0);
+        let mut draw = |key: u64| {
+            super::Frame::whole(&gfx, (32, 32), 1.0, |frame| {
+                layer.draw(frame, key, windows_numerics::Matrix3x2::identity(), (0.0, 0.0, 16.0, 16.0), 1.0, None, |_| {
+                    painted.set(painted.get() + 1);
+                    Ok(())
+                })
+                .expect("drawn");
+            })
+            .expect("frame");
+            painted.get()
+        };
+        assert_eq!(draw(1), 1);
+        {
+            let _sizing = super::sizing(true);
+            assert_eq!(draw(1), 1, "as it was: drawn from what was kept");
+            assert_eq!(draw(2), 2, "changed: painted where it shows");
+            assert_eq!(draw(2), 3, "nothing kept while sized");
+        }
+        assert_eq!(draw(2), 4);
+        assert_eq!(draw(2), 4);
+    }
+
     #[test]
     fn a_frame_failed_is_not_shown() {
         use super::Canvas;

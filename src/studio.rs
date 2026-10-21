@@ -1291,10 +1291,13 @@ fn panel_memory(gfx: &Gfx, surface: &mut crate::ui::gfx::Surface, window: window
     let sizing = crate::ui::gfx::sizing(!still && std::env::var_os("GLANCE_AT_REST").is_none());
     let before = card_memory();
     let (began, mut most, mut frames) = (Instant::now(), before, 0);
+    let mut took = Vec::new();
     while began.elapsed() < Duration::from_secs(6) {
         let t = began.elapsed().as_secs_f32();
         let zoom = if still { 1.0 } else { 1.0 + 0.45 * (t * 1.3).sin() };
+        let frame_began = Instant::now();
         frame_at(zoom, surface, &mut filming)?;
+        took.push(frame_began.elapsed().as_secs_f64() * 1000.0);
         frames += 1;
         most = most.max(card_memory());
         std::thread::sleep(Duration::from_millis(16));
@@ -1308,6 +1311,8 @@ fn panel_memory(gfx: &Gfx, surface: &mut crate::ui::gfx::Surface, window: window
         std::thread::sleep(Duration::from_secs(1));
         after.push(card_memory());
     }
-    println!("panel {skin_name:<6} still {still:<5} frames {frames:>4}  card MB: before {before}, at most {most}, then {after:?}");
+    took.sort_by(f64::total_cmp);
+    let at = |share: f64| took[((took.len() - 1) as f64 * share) as usize];
+    println!("panel {skin_name:<6} still {still:<5} frames {frames:>4}  ms a frame: median {:.2}, p95 {:.2}, most {:.2}  card MB: before {before}, at most {most}, then {after:?}", at(0.5), at(0.95), at(1.0));
     Ok(())
 }
