@@ -1,0 +1,30 @@
+{
+  "width": 1080, "height": 1920, "scale": 1.8, "fps": 30,
+  "wallpaper": "target/song/wallpaper.png",
+  "shots": [
+    {
+      "name": "music-widget", "skin": "glass", "seconds": 21.6, "panel": false,
+      "music": {
+        "lyrics": "target/song/lyrics.json", "heard": "target/song/heard.json", "cover": "target/song/cover.png",
+        "title": "一盏一盏", "artist": "Glance", "length": 32.9,
+        "keys": [
+          { "t": 0.6, "x": 40, "y": 620, "w": 520, "h": 72, "opacity": 0 },
+          { "t": 1.4, "x": 40, "y": 620, "w": 520, "h": 72 },
+          { "t": 5.6, "x": 40, "y": 620, "w": 520, "h": 72 },
+          { "t": 6.6, "x": 40, "y": 560, "w": 520, "h": 196 },
+          { "t": 10.4, "x": 40, "y": 560, "w": 520, "h": 196 },
+          { "t": 11.4, "x": 100, "y": 480, "w": 400, "h": 380 },
+          { "t": 15.6, "x": 100, "y": 480, "w": 400, "h": 380 },
+          { "t": 16.6, "x": 20, "y": 500, "w": 560, "h": 360 }
+        ]
+      }
+    },
+    {
+      "name": "music-full", "skin": "glass", "seconds": 12.9, "panel": false,
+      "music": {
+        "lyrics": "target/song/lyrics.json", "heard": "target/song/heard.json", "cover": "target/song/cover.png",
+        "title": "一盏一盏", "artist": "Glance", "length": 32.9, "from": 20.0, "full": true, "serif": "website/dl/NotoSerifSC-Black.otf"
+      }
+    }
+  ]
+}

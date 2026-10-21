@@ -152,6 +152,13 @@ fn read(track: &crate::lyrics::Track) -> Option<Cover> {
     squared(&factory, &picture)
 }
 
+/// The picture in the file at `path` (a JPEG, a PNG) as a cover, as a player's would be.
+#[cfg(feature = "studio")]
+pub fn of_picture(path: &std::path::Path) -> Option<Cover> {
+    let factory: IWICImagingFactory = unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()? };
+    squared(&factory, &decoded(&factory, &std::fs::read(path).ok()?)?)
+}
+
 /// A picture as a file keeps it (a JPEG, a PNG), read.
 fn decoded(factory: &IWICImagingFactory, bytes: &[u8]) -> Option<IWICBitmapSource> {
     unsafe {

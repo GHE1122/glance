@@ -125,6 +125,149 @@ struct Shot {
     /// Widgets on the desktop from the start.
     #[serde(default)]
     widgets: Vec<Placed>,
+    /// A song playing, filmed as a music widget on the desktop or as the music full screen, instead of the panel.
+    #[serde(default)]
+    music: Option<MusicShot>,
+}
+
+/// A song as the music widget or the full screen shows it: its lines (as Glance's lyrics hold them, in a JSON file),
+/// what is heard of it (see `studio/song.py`), its cover (a picture), what it is called and by whom, how long it is,
+/// and how far into it the shot begins (seconds).
+#[derive(Deserialize)]
+struct MusicShot {
+    lyrics: String,
+    heard: String,
+    cover: String,
+    title: String,
+    artist: String,
+    length: f64,
+    #[serde(default)]
+    from: f64,
+    /// The widget: where it is and how large (DIPs on the screen) and how opaque, key by key, eased between them.
+    #[serde(default)]
+    keys: Vec<MusicKey>,
+    /// The full screen instead, over the whole frame, its lines in the serif face in the file named (else in YaHei,
+    /// as till the face is had).
+    #[serde(default)]
+    full: bool,
+    #[serde(default)]
+    serif: Option<String>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+struct MusicKey {
+    t: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    #[serde(default = "opaque")]
+    opacity: f32,
+}
+
+fn opaque() -> f32 {
+    1.0
+}
+
+/// What is heard of a song every `step` seconds, as `sound::Heard` says it.
+#[derive(Deserialize)]
+struct HeardSong {
+    step: f64,
+    level: Vec<f32>,
+    bands: Vec<[f32; crate::sound::BANDS]>,
+    beat: Vec<f32>,
+}
+
+impl HeardSong {
+    /// What is heard at `at` seconds into the song (the last look before it: nothing before the first, the last after
+    /// the end).
+    fn at(&self, at: f64) -> crate::sound::Heard {
+        if at < self.step {
+            return crate::sound::Heard::default();
+        }
+        let index = ((at / self.step) as usize - 1).min(self.level.len() - 1);
+        crate::sound::Heard { level: self.level[index], bands: self.bands[index], beat: self.beat[index] }
+    }
+}
+
+/// The widget at `t` seconds, its keys eased between (held past the ends).
+fn music_key(keys: &[MusicKey], t: f32) -> MusicKey {
+    match keys.iter().position(|key| key.t > t) {
+        Some(0) => keys[0],
+        None => keys[keys.len() - 1],
+        Some(next) => {
+            let (a, b) = (keys[next - 1], keys[next]);
+            let k = ((t - a.t) / (b.t - a.t)).clamp(0.0, 1.0);
+            let k = k * k * (3.0 - 2.0 * k);
+            let mix = |p: f32, q: f32| p + (q - p) * k;
+            MusicKey { t, x: mix(a.x, b.x), y: mix(a.y, b.y), w: mix(a.w, b.w), h: mix(a.h, b.h), opacity: mix(a.opacity, b.opacity) }
+        }
+    }
+}
+
+/// How long the music is drawn before a shot's first frame is kept (seconds): its colours come to the cover's, its
+/// spectrum and the full screen's smoke to the song, as they would have while it played.
+const MUSIC_BEFORE: f32 = 2.0;
+
+/// A song playing (see `MusicShot`), filmed at the script's moments: each frame drawn for its own moment, every motion
+/// in it timed from that moment, not from the clock as it draws.
+fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, desktop: &crate::ui::backdrop::Capture, folder: &Path) -> Result<(), String> {
+    use crate::ui::music::{Ground, Music, Played, Shows as MusicShows};
+    let read = |path: &str| std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"));
+    let lines: std::sync::Arc<Vec<crate::lyrics::Line>> = std::sync::Arc::new(serde_json::from_str(&read(&music.lyrics)?).map_err(|e| format!("{}: {e}", music.lyrics))?);
+    let heard: HeardSong = serde_json::from_str(&read(&music.heard)?).map_err(|e| format!("{}: {e}", music.heard))?;
+    let cover = std::sync::Arc::new(crate::cover::of_picture(Path::new(&music.cover)).ok_or_else(|| format!("{}: not a picture", music.cover))?);
+    let lang = if shot.lang == "en" { Lang::En } else { Lang::Zh };
+    if let Some(serif) = &music.serif {
+        crate::serif::have(std::fs::read(serif).map_err(|e| format!("{serif}: {e}"))?);
+    }
+    // (Its volume, as the sound's key shows it.)
+    crate::playing::pretend(crate::playing::Now { timeline: None, players: 1, title: music.title.clone(), artist: music.artist.clone(), album: String::new(), app: lang.pick("音乐", "Music").into(), playing: true, volume: Some(60), muted: false, sung: None });
+    let px = script.scale;
+    let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
+    let shows = MusicShows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+    let mut widget = Music::default();
+    let mut full = crate::fullscreen::Shown::new(std::time::Instant::now());
+    let mut smoke = if music.full { Some(crate::ui::smoke::Smoke::new(gfx).map_err(|e| e.to_string())?) } else { None };
+    let began = std::time::Instant::now() + std::time::Duration::from_secs_f32(MUSIC_BEFORE);
+    let frames = (shot.seconds * script.fps).round() as i64;
+    let before = (MUSIC_BEFORE * script.fps).round() as i64;
+    for index in -before..frames {
+        let t = index as f32 / script.fps;
+        let now = if t >= 0.0 { began + std::time::Duration::from_secs_f32(t) } else { began - std::time::Duration::from_secs_f32(-t) };
+        let position = (music.from + t as f64).max(0.0);
+        let sound = heard.at(music.from + t as f64);
+        let played = || Played { lines: lines.clone(), position, length: music.length, title: music.title.clone(), artist: music.artist.clone(), cover: cover.clone(), sound };
+        let pixels = if let Some(smoke) = smoke.as_mut() {
+            full.follow(now, sound, Some(Some(&cover)), Some(lines.clone()), crate::lyrics::sung_at(&lines, position));
+            full.render_smoke(smoke, (script.width, script.height)).map_err(|e| e.to_string())?;
+            let smoke = &*smoke;
+            gfx.draw_offscreen((script.width, script.height), px, |frame| full.paint(frame, (sw, sh), Some(smoke), position, now))
+        } else {
+            let key = music_key(&music.keys, t);
+            gfx.draw_offscreen((script.width, script.height), px, |frame| {
+                if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
+                    unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+                }
+                if key.opacity <= 0.0 {
+                    return;
+                }
+                let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+                let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: key.opacity, ..Default::default() };
+                unsafe { frame.dc.PushLayer(&layer, None) };
+                frame.place(Matrix3x2::translation(key.x, key.y));
+                widget.paint_played(frame, (key.w, key.h), &shows, Ground::of(&shows), px, None, now, played());
+                frame.origin(0.0, 0.0);
+                unsafe { frame.dc.PopLayer() };
+            })
+        }
+        .map_err(|e| e.to_string())?;
+        gfx.sweep();
+        if index >= 0 {
+            save_png(&folder.join(format!("{:05}.png", index + 1)), script.width, script.height, &pixels).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn yes() -> bool {
@@ -519,6 +662,9 @@ pub fn run(script: &Path, out: &Path) -> Result<(), String> {
 }
 
 fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &crate::ui::backdrop::Capture, folder: &Path) -> Result<(), String> {
+    if let Some(music) = &shot.music {
+        return film_music(gfx, script, shot, music, desktop, folder);
+    }
     let skin = Skin::named(&shot.skin);
     let lang = if shot.lang == "en" { Lang::En } else { Lang::Zh };
     let px = script.scale;

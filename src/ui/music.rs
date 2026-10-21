@@ -524,31 +524,49 @@ fn example_cover() -> Arc<Cover> {
 }
 
 /// The example as it is `t` seconds in: its line sung now, from when, and its spectrum moving with it.
-fn example(t: f64) -> Moment {
-    let lines = example_lines();
+fn example(t: f64, now: Instant) -> Moment {
     let length = EXAMPLE.len() as f64 * EXAMPLE_LINE;
-    let position = t.rem_euclid(length);
-    let now = crate::lyrics::sung_at(&lines, position);
-    let since = now.map(|now| Instant::now().checked_sub(Duration::from_secs_f64((position - lines[now].at).max(0.0))).unwrap_or_else(Instant::now));
     let mut bands = [0.0; crate::sound::BANDS];
     for (i, band) in bands.iter_mut().enumerate() {
         let x = i as f64;
         *band = (0.55 + 0.3 * (t * 2.3 + x * 0.45).sin() * (t * 0.7 + x * 0.21).cos() - x * 0.012).clamp(0.05, 1.0) as f32;
     }
-    Moment {
-        lines: Some(lines),
-        now,
-        since,
-        position,
-        length: Some((length, false)),
-        dragged_to: None,
-        title: "晨光序曲".into(),
-        artist: "Glance".into(),
-        said: None,
-        playing: true,
-        cover: Some(example_cover()),
-        no_cover: false,
-        sound: crate::sound::Heard { level: 0.7, bands, beat: (0.5 + 0.5 * (t * 4.0).sin()).max(0.0) as f32 },
+    let sound = crate::sound::Heard { level: 0.7, bands, beat: (0.5 + 0.5 * (t * 4.0).sin()).max(0.0) as f32 };
+    Played { lines: example_lines(), position: t.rem_euclid(length), length, title: "晨光序曲".into(), artist: "Glance".into(), cover: example_cover(), sound }.moment(now)
+}
+
+/// A track playing as it is told, not as a player tells it: its lines, how far in it is and how long (seconds), what
+/// it is, its cover and what is heard (the settings' example, the studio's song).
+pub struct Played {
+    pub lines: Arc<Vec<Line>>,
+    pub position: f64,
+    pub length: f64,
+    pub title: String,
+    pub artist: String,
+    pub cover: Arc<Cover>,
+    pub sound: crate::sound::Heard,
+}
+
+impl Played {
+    /// As it is drawn at `now`: the line sung at its position, come when that line began.
+    fn moment(self, now: Instant) -> Moment {
+        let sung = crate::lyrics::sung_at(&self.lines, self.position);
+        let since = sung.map(|index| now.checked_sub(Duration::from_secs_f64((self.position - self.lines[index].at).max(0.0))).unwrap_or(now));
+        Moment {
+            lines: Some(self.lines),
+            now: sung,
+            since,
+            position: self.position,
+            length: Some((self.length, false)),
+            dragged_to: None,
+            title: self.title,
+            artist: self.artist,
+            said: None,
+            playing: true,
+            cover: Some(self.cover),
+            no_cover: false,
+            sound: self.sound,
+        }
     }
 }
 
@@ -594,16 +612,17 @@ impl Music {
     /// merged into it: what each part shows drawn over it (see `Ground::Host`).
     pub fn paint_ground(&mut self, frame: &Frame, size: (f32, f32)) {
         let heard = crate::playing::music();
+        let now = Instant::now();
         if let Some(cover) = heard.as_ref().filter(|heard| !heard.title.is_empty()).and_then(crate::cover::of) {
             self.tint = toward(self.tint, readable(cover.base, 0.72), 0.2);
             self.accent = toward(self.accent, readable(cover.accent, 0.62), 0.2);
-            self.backdrop(frame, &cover);
+            self.backdrop(frame, &cover, now);
         } else if heard.as_ref().filter(|heard| !heard.title.is_empty()).is_some_and(crate::cover::has_none) {
             self.tint = toward(self.tint, TINT, 0.2);
             self.accent = toward(self.accent, ACCENT, 0.2);
-            self.no_backdrop();
+            self.no_backdrop(now);
         }
-        let shown = self.fading.as_ref().map_or(1.0, |(_, since)| (since.elapsed().as_secs_f32() / 1.2).min(1.0));
+        let shown = self.fading.as_ref().map_or(1.0, |(_, since)| (now.saturating_duration_since(*since).as_secs_f32() / 1.2).min(1.0));
         let before = self.fading.as_ref().map(|(before, _)| before.clone());
         let backdrop = Backdrop { size, radius: RADIUS, backdrop: self.backdrop.as_ref().map(|(_, bitmap)| bitmap.clone()), before, shown, accent: self.accent, tint: self.tint, own: true };
         let _ = backdrop.paint(frame, |_| {});
@@ -631,7 +650,14 @@ impl Music {
     /// As `paint`, the example the settings show while no music plays, `t` seconds into it (see `EXAMPLE`).
     #[allow(clippy::too_many_arguments)]
     pub fn paint_example(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, t: f64) -> Painted {
-        self.paint_moment(frame, size, shows, ground, scale, pointer, now, example(t))
+        self.paint_moment(frame, size, shows, ground, scale, pointer, now, example(t, now))
+    }
+
+    /// As `paint`, a track playing as `played` tells it (see `Played`).
+    #[cfg(feature = "studio")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_played(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, played: Played) -> Painted {
+        self.paint_moment(frame, size, shows, ground, scale, pointer, now, played.moment(now))
     }
 
     /// As `paint`, what plays as `moment` says.
@@ -672,7 +698,7 @@ impl Music {
             self.accent = toward(self.accent, ACCENT, ease);
         }
         // Turned to a line a while ago and left there: back to the one sung now.
-        if self.turned != 0 && self.turned_at.elapsed() >= TURNED_HOLD {
+        if self.turned != 0 && now.saturating_duration_since(self.turned_at) >= TURNED_HOLD {
             self.back_to_now();
         }
         // Other lyrics (another track): from the line sung now, not turned (turned for the lyrics before, they were
@@ -769,7 +795,7 @@ impl Music {
         }, ..*shows };
         let (tint, accent) = if light { (deep(self.tint), deep(self.accent)) } else { (self.tint, self.accent) };
         let ink = if light { 0x1A1A1A } else { 0xFFFFFF };
-        let mut drawing = Drawing { music: self, frame, moment: &moment, shows, ground, ink, edged: ground == Ground::Clear, light, tint, accent, fonts: Fonts::in_family(family), scale, pointer, size, turn, hits: Vec::new(), clips: Vec::new() };
+        let mut drawing = Drawing { music: self, frame, now, moment: &moment, shows, ground, ink, edged: ground == Ground::Clear, light, tint, accent, fonts: Fonts::in_family(family), scale, pointer, size, turn, hits: Vec::new(), clips: Vec::new() };
         drawing.ground(layout);
         drawing.disc(layout);
         // Turning into this layout: what is not on its ground comes in as its parts move.
@@ -797,6 +823,8 @@ impl Music {
 struct Drawing<'a> {
     music: &'a mut Music,
     frame: &'a Frame<'a>,
+    /// The moment it is drawn for (every motion in it timed from this, not from the clock as it draws).
+    now: Instant,
     moment: &'a Moment,
     shows: &'a Shows,
     ground: Ground,
@@ -1103,11 +1131,11 @@ impl Drawing<'_> {
         let (w, h) = self.size;
         let frame = self.frame;
         if let Some(cover) = &self.moment.cover {
-            self.music.backdrop(frame, cover);
+            self.music.backdrop(frame, cover, self.now);
         } else if self.moment.no_cover {
-            self.music.no_backdrop();
+            self.music.no_backdrop(self.now);
         }
-        let shown = self.music.fading.as_ref().map_or(1.0, |(_, since)| (since.elapsed().as_secs_f32() / 1.2).min(1.0));
+        let shown = self.music.fading.as_ref().map_or(1.0, |(_, since)| (self.now.saturating_duration_since(*since).as_secs_f32() / 1.2).min(1.0));
         let before = self.music.fading.as_ref().map(|(before, _)| before.clone());
         if shown >= 1.0 {
             self.music.fading = None;
@@ -1222,8 +1250,8 @@ impl Drawing<'_> {
         let over = self.pointer.is_some_and(|p| inside(p, x, row - 6.0, home + CONTROL - x, CONTROL + 12.0));
         let on_home = self.pointer.is_some_and(|p| inside(p, home, row, CONTROL, CONTROL));
         let wants = on_home || crate::playing::volume_held() || (self.music.sound_open && over);
-        self.music.sound_left = if wants { None } else { self.music.sound_left.or(Some(Instant::now())) };
-        let lingering = self.music.sound_open && self.music.sound_left.is_some_and(|left| left.elapsed() < SOUND_LINGER);
+        self.music.sound_left = if wants { None } else { self.music.sound_left.or(Some(self.now)) };
+        let lingering = self.music.sound_open && self.music.sound_left.is_some_and(|left| self.now.saturating_duration_since(left) < SOUND_LINGER);
         self.music.sound_open = sound.is_some() && fade > 0.0 && (wants || lingering);
         let to = if self.music.sound_open { 1.0 } else { 0.0 };
         let fade_step = self.music.step.min(1.0 / 30.0) / SOUND_OPEN;
@@ -2236,7 +2264,7 @@ impl Drawing<'_> {
 
     /// How far the line sung now has risen in as it came (0 to 1, eased).
     fn came(&self) -> f32 {
-        let came = self.moment.since.map_or(1.0, |since| (since.elapsed().as_secs_f32() / 0.28).min(1.0));
+        let came = self.moment.since.map_or(1.0, |since| (self.now.saturating_duration_since(since).as_secs_f32() / 0.28).min(1.0));
         1.0 - (1.0 - came).powi(3)
     }
 
@@ -2310,14 +2338,14 @@ impl Music {
 
     /// The cover behind it, blurred: made once for each cover (the one before fading out over a moment).
     /// No cover under it (the track has none): the last one's fades.
-    fn no_backdrop(&mut self) {
+    fn no_backdrop(&mut self, now: Instant) {
         if let Some((_, before)) = self.backdrop.take() {
-            self.fading = Some((before, Instant::now()));
+            self.fading = Some((before, now));
             self.ground_pixels = None;
         }
     }
 
-    fn backdrop(&mut self, frame: &Frame, cover: &Arc<Cover>) {
+    fn backdrop(&mut self, frame: &Frame, cover: &Arc<Cover>, now: Instant) {
         let key = cover.key;
         if self.backdrop.as_ref().is_some_and(|(of, _)| *of == key) {
             return;
@@ -2333,7 +2361,7 @@ impl Music {
         };
         if let Ok(bitmap) = unsafe { frame.dc.CreateBitmap(D2D_SIZE_U { width: side as u32, height: side as u32 }, Some(pixels.as_ptr().cast()), side as u32 * 4, &properties) } {
             if let Some((_, before)) = self.backdrop.take() {
-                self.fading = Some((before, Instant::now()));
+                self.fading = Some((before, now));
             }
             self.backdrop = Some((key, bitmap));
             self.ground_pixels = Some(Arc::new(pixels));
