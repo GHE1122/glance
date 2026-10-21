@@ -332,6 +332,12 @@ html[lang="en"] .looks-text h3 { font-weight: 600; letter-spacing: -0.015em; }
     #4a3f86;
   box-shadow: var(--shadow); }
 
+/* ---------- a film of Glance, drawn by its own code ---------- */
+.film { margin: 40px auto 8px; max-width: 880px; }
+.film video { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; border-radius: 20px;
+  border: 1px solid var(--glass-edge); background: #1d2340; box-shadow: var(--shadow); }
+.film figcaption { margin-top: 14px; color: var(--ink-2); font-size: 14.5px; text-align: center; }
+
 /* ---------- the overlay ---------- */
 /* The overlay over a soft dusk (drawn by overlay.js), in the colours of
    the desktop above. */
