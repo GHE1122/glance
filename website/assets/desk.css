@@ -8,7 +8,7 @@
   border: 1px solid var(--glass-edge); background: #1a1440; box-shadow: var(--shadow); touch-action: pan-y;
   -webkit-user-select: none; user-select: none; }
 .vdesk .screen { position: absolute; left: 0; top: 0; width: 1440px; height: 900px; transform-origin: 0 0; overflow: hidden;
-  background: #1a1440 url("img/desk-wall.webp") center / cover no-repeat; }
+  background: #1a1440 url("img/desk-wall.webp?v=2") center / cover no-repeat; }
 .vdesk.live .screen { cursor: default; }
 
 /* The taskbar, as plain as a taskbar is: a few programs in its middle. */

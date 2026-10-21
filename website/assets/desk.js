@@ -66,7 +66,7 @@
   var mon = GD.readings ? GD.readings(lang) : null;
   var wall = new Image();
   wall.onload = function () { request(); };
-  wall.src = base + "img/desk-wall.webp";
+  wall.src = base + "img/desk-wall.webp?v=2";
   function behind(box) { return wall.complete && wall.naturalWidth ? { image: wall, x: -box.x, y: -box.y, w: SW, h: SH } : null; }
 
   // ---------------- easing ----------------
