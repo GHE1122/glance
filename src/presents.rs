@@ -192,6 +192,7 @@ pub fn start() {
         crate::journal::note(format!("frames: no trace session ({})", status.0));
         return;
     }
+    STARTED.store(true, std::sync::atomic::Ordering::Release);
     for provider in [DXGI, D3D9] {
         let _ = unsafe { EnableTraceEx2(handle, &provider, EVENT_CONTROL_CODE_ENABLE_PROVIDER.0, TRACE_LEVEL_INFORMATION as u8, u64::MAX, 0, 0, None) };
     }
@@ -250,6 +251,17 @@ pub fn start() {
         // Stopped (by Glance as it ends, or by anything else): no frames are counted from now (see `counting`).
         *PRESENTS.lock().unwrap() = None;
     }).expect("a thread started");
+}
+
+/// Whether this process started the session (see `stop_started`).
+static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ends the session if this process started it (Glance reading for itself), as it quits: one the sensors' process
+/// started is its own, and runs on while it waits for Glance to be started again.
+pub fn stop_started() {
+    if STARTED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        stop();
+    }
 }
 
 /// Ends the session: it would outlive Glance otherwise.
@@ -491,6 +503,26 @@ fn screen_of(window: HWND) -> (bool, Option<u32>, Option<(HMONITOR, RECT)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Glance that did not start the session (its readings came from the sensors' process, which traces itself)
+    /// leaves it as it quits: the sensors' process, waiting a while for Glance started again, traced on, and stopped
+    /// by the Glance that quit, counted no frames for the next.
+    #[test]
+    #[ignore = "starts a trace session of this account's"]
+    fn a_session_started_elsewhere_is_left_as_glance_quits() {
+        let name = name();
+        let mut handle = CONTROLTRACE_HANDLE::default();
+        let mut status = unsafe { StartTraceW(&mut handle, PCWSTR(name.as_ptr()), Properties::new(&name).get()) };
+        if status == ERROR_ALREADY_EXISTS {
+            stop();
+            status = unsafe { StartTraceW(&mut handle, PCWSTR(name.as_ptr()), Properties::new(&name).get()) };
+        }
+        assert_eq!(status, ERROR_SUCCESS, "a session started");
+        stop_started();
+        let there = unsafe { ControlTraceW(CONTROLTRACE_HANDLE::default(), PCWSTR(name.as_ptr()), Properties::new(&name).get(), EVENT_TRACE_CONTROL_QUERY) } == ERROR_SUCCESS;
+        stop();
+        assert!(there, "the session started elsewhere was stopped");
+    }
 
     /// What the shell shows over everything as the virtual desktops are switched (covering the screen, drawn anew
     /// all the while) stands for no program; nor does a window that is cloaked (on another virtual desktop): the

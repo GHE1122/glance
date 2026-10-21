@@ -567,7 +567,7 @@ pub fn run() {
     tray::run();
     // (What was changed last is on the disk before Glance goes, and what was noted last.)
     saved_all();
-    presents::stop();
+    presents::stop_started();
     journal::written();
     // The other threads end with the process.
     std::process::exit(0);
