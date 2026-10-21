@@ -1,0 +1,64 @@
+{
+ "width": 1920,
+ "height": 1080,
+ "scale": 1.5,
+ "fps": 30,
+ "start_ms": 1792593000000,
+ "wallpaper": "target/studio/wall-wide-dark.png",
+ "shots": [
+  {
+   "name": "workbench-zh",
+   "skin": "glass",
+   "theme": "dark",
+   "lang": "zh",
+   "edge": "left",
+   "workbench": true,
+   "modules": [
+    "time",
+    "station",
+    "notes",
+    "apps"
+   ],
+   "seconds": 0.034
+  },
+  {
+   "name": "workbench-en",
+   "skin": "glass",
+   "theme": "dark",
+   "lang": "en",
+   "edge": "left",
+   "workbench": true,
+   "modules": [
+    "time",
+    "station",
+    "notes",
+    "apps"
+   ],
+   "seconds": 0.034
+  },
+  {
+   "name": "music",
+   "skin": "glass",
+   "theme": "dark",
+   "seconds": 0.034,
+   "music": {
+    "lyrics": "target/song/lyrics.json",
+    "heard": "target/song/heard.json",
+    "cover": "target/song/cover.png",
+    "length": 32.9,
+    "title": "一盏一盏",
+    "artist": "Glance",
+    "from": 17.4,
+    "keys": [
+     {
+      "t": 0,
+      "x": 300,
+      "y": 160,
+      "w": 680,
+      "h": 400
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -11,11 +11,14 @@
 
 Glance is a free, open-source system monitor for Windows that stays out of
 the way. Push the pointer against the edge of the screen and a panel slides
-out with everything your PC is doing; move away and it slides back.
+out with everything your PC is doing; move away and it slides back. Since 0.4
+it has two more components, a [workbench](#workbench) for the things you
+reach for and [music](#music) that sings along, each on whichever edge you
+give it, or torn off onto the desktop.
 
-[Website](https://glancepc.com/en/) · [中文说明](README.zh-CN.md) · [Download](https://github.com/lulu-loopp/glance/releases/latest) · [Hardware](#hardware) · [Build](#build)
+[Try it in the browser](https://glancepc.com/en/#desk) · [Website](https://glancepc.com/en/) · [中文说明](README.zh-CN.md) · [Download](https://github.com/lulu-loopp/glance/releases/latest) · [Hardware](#hardware) · [Build](#build)
 
-![Glance's panel in the frosted-glass look, over the desktop](docs/images/desktop-en.webp)
+![Glance's three components on one desktop in the frosted-glass look: the workbench at the left edge, the monitor at the right, and music as a strip of lyrics](docs/images/desktop-en.webp)
 
 ## What it shows
 
@@ -31,15 +34,61 @@ out with everything your PC is doing; move away and it slides back.
 - **WSL and Docker**, for developers (off until chosen, under *More modules*): WSL 2's processors, memory and GPU and the distributions running, read from Windows alone so that no distribution is started or kept running; the containers Docker's current engine runs, each with its processors, memory, network and disk
 - **Games**: while a fullscreen game runs, at the top: its frame rate, 1% low, a chart of its frame times and the screen's refresh rate; the game's own CPU, GPU, memory and video memory; whether the graphics card is held back by its power or temperature limit (NVIDIA); how long you have played; and whether your microphone is muted
 
+## Workbench
+
+A second panel, for the things you reach for, on the edge you give it (the
+left, say, with the monitor on the right). Size it freely and it lays its
+blocks out for the room.
+
+- **Station**: drop or paste files, pictures, text and links onto it, and
+  they wait there until you drag them into another program. *Recently
+  copied* keeps what passed through the clipboard (it can be paused), and
+  *Recent files* lists what was just downloaded or saved. Double-click to
+  open, right-click to pin, as cards or as a list. What sits too long is
+  cleared away.
+- **Notes**, in Markdown: each note is a `.md` file in `Documents\Glance 便签`
+  (or a folder you choose), so any editor opens it too. Headings, emphasis,
+  to-do boxes and links show as they read: tick a box or open a link with a
+  click, and the marks show only on the line you are writing. A note can be
+  stuck on the desktop and written in right there. What another program
+  changes in a note is read in, and nothing is written over unread.
+- **Quick launch**: programs, files, folders and web links side by side, a
+  click away, picked from every program in the Start menu, from what you used
+  lately, or dragged in.
+- **Time and media**: the time and the date, and what is playing.
+
+![The workbench at the screen's left edge in the frosted-glass look: the time, the station with files and a link, notes, and quick launch's rail](docs/images/workbench-en.webp)
+
+## Music
+
+What is playing, with its cover, controls, position and volume, and lyrics
+that follow the song line by line, word by word where the timing is known.
+Size it and it changes form: a strip of one line, a player, a card with the
+lines around the one sung, and, wide enough, a stage with a spinning record
+and a spectrum. Its full screen shows the lines large over smoke taken from
+the cover's colours, moving with the beat. With a clear background it is a
+line of lyrics floating over the desktop, and each part (the cover, the title,
+the translation, the spectrum, the controls) can be switched off.
+
+Lyrics are looked up on NetEase Cloud Music, QQ Music, Kugou and LRCLIB at
+once. A local file's own lyrics come first, and a translation is shown where
+there is one. Any player whose song shows in Windows' media flyout works.
+NetEase Cloud Music tells its position only through the InfLink-rs plug-in,
+which the settings install in one click.
+
+![Music on the desktop as a stage: a spinning record, the song's lines with the one sung lit word by word, and a spectrum](docs/images/music.webp)
+
 ## Desktop widgets
 
-Drag the panel away from the edge and it tears off as a widget that stays on
-the desktop. Size it by any edge or corner and it lays itself out for the
-room: the panel's lanes, tiles, a chart with the figures beneath, a strip,
-or a few rings, each turning smoothly into the next. Bring it near an edge of
-the screen and it shows where it would sit; let go and it sits there as a
-slim strip or rail, centred where you left it. Throw it off the screen to put
-it away (the tray icon's menu brings it back). Hover over it for its row of buttons (rest on one, and it says what it does):
+Drag a panel away from the edge, the monitor, the workbench or music, and it
+tears off as a widget that stays on the desktop: pulled by one block's
+heading, that block alone, otherwise the whole panel. Size it by any edge or
+corner and it lays itself out for the room: the monitor's lanes, tiles, a
+chart with the figures beneath, a strip, or a few rings, each turning
+smoothly into the next. Bring it near an edge of the screen and it shows
+where it would stick. Let go and it sticks there, as large as it is, and
+slides along the edge as you drag it. Throw it off the screen to put it away
+(the tray icon's menu brings it back). Hover over it for its row of buttons (rest on one, and it says what it does):
 the frame rate of the window in front (for a game Glance does not recognise as
 one), the settings, a pin that locks its place and size, click-through, and
 put away. With click-through on, clicks reach what is behind; to turn it off,
@@ -157,7 +206,10 @@ for administrator rights at every start and cannot start with Windows.
 
 - **Open the panel**: push the pointer against the screen's right edge (the
   push needed, where the panel appears, how many columns it takes and how
-  large it is are in the settings). A deliberate push is needed, so scroll
+  large it is are in the settings). The settings' *Layout* page shows your
+  screens as Windows arranges them: drag the monitor, the workbench or music
+  onto any edge, several onto one if you like. An edge holding nothing opens
+  nothing. A deliberate push is needed, so scroll
   bars at the edge stay usable. With several screens, the settings show them
   as they are arranged: click an edge of any of them, left, top or right, for
   the panel to open from it, and again to turn it off. Where an edge leads on

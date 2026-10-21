@@ -5,7 +5,9 @@ rounded corners (GitHub cannot round a picture itself), as WebP.
 
     python studio/readme.py RENDERS FONT.ttf OUT-FOLDER [NAME...]
 
-Only the pictures NAMEd (banner, looks, desktop, widgets), if any are.
+Only the pictures NAMEd (banner, looks, desktop, widgets, workbench, music),
+if any are. The workbench and music are rendered by readme-components.json,
+the desktop by readme-hero.json.
 """
 import json
 import sys
@@ -102,11 +104,35 @@ def looks(renders, fonts, lang, wallpaper):
 
 
 def desktop(renders, lang):
-    return rounded(Image.open(renders / f"desktop-{lang}" / "00001.png"), radius=28)
+    """Glance's three components on one desktop (readme-hero.json): the workbench at the left edge, the monitor at
+    the right and music as a strip of lyrics. Each is rendered alone over the same wallpaper, so what each adds to
+    the bare desktop (itself, its shadow, the glass's view of the wallpaper) is added to it, apart as they lie."""
+    def frame(name):
+        return np.asarray(Image.open(renders / name / "00001.png").convert("RGB"), dtype=np.int32)
+    bare = frame("hero-bare")
+    out = bare.copy()
+    taken = np.zeros(bare.shape[:2], dtype=bool)
+    for name in (f"hero-workbench-{lang}", f"hero-monitor-{lang}", "hero-music"):
+        added = frame(name) - bare
+        mine = np.abs(added).sum(axis=2) > 0
+        if (taken & mine).any():
+            raise SystemExit(f"{name} lies over another component: move it in readme-hero.json")
+        taken |= mine
+        out += added
+    return rounded(Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), radius=28)
 
 
 def widgets(renders, lang):
     return rounded(Image.open(renders / f"widgets-{lang}" / "00001.png"), radius=28)
+
+
+def workbench(renders, lang):
+    return rounded(Image.open(renders / f"workbench-{lang}" / "00001.png"), radius=28)
+
+
+def music(renders):
+    """The music widget, its lyrics a song's whatever the language."""
+    return rounded(Image.open(renders / "music" / "00001.png"), radius=28)
 
 
 if __name__ == "__main__":
@@ -120,6 +146,7 @@ if __name__ == "__main__":
         "looks": lambda lang: looks(renders, fonts, lang, wallpaper),
         "desktop": lambda lang: desktop(renders, lang),
         "widgets": lambda lang: widgets(renders, lang),
+        "workbench": lambda lang: workbench(renders, lang),
     }
     for lang in ("en", "zh"):
         for name, make in makers.items():
@@ -129,3 +156,8 @@ if __name__ == "__main__":
             path = out / f"{name}-{lang}.webp"
             picture.save(path, "WEBP", quality=92, method=6)
             print(f"{path}: {picture.width}x{picture.height}, {path.stat().st_size // 1024} KB")
+    if not chosen or "music" in chosen:
+        picture = music(renders)
+        path = out / "music.webp"
+        picture.save(path, "WEBP", quality=92, method=6)
+        print(f"{path}: {picture.width}x{picture.height}, {path.stat().st_size // 1024} KB")
