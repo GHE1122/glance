@@ -41,17 +41,54 @@ enum Made {
     Icon,
 }
 
-/// The most pictures kept (the oldest asked for go first).
+/// The most pictures kept (those asked for longest ago go first: never one drawn now, as a list turned through many
+/// others pictured, else the first made, quick launch's, went and showed none till made again).
 const KEPT_MOST: usize = 256;
 
 struct Kept {
-    made: HashMap<Key, Option<Picture>>,
-    /// Asked for, in the order they were (the oldest first), and being made.
-    order: Vec<Key>,
+    made: Used<Key, Option<Picture>>,
+    /// Those being made.
     asked: HashSet<Key>,
     /// What each path was found to be, and when; those being looked at.
-    looked: HashMap<PathBuf, (std::time::Instant, Looked)>,
+    looked: Used<PathBuf, (std::time::Instant, Looked)>,
     looking: HashSet<PathBuf>,
+}
+
+/// What is kept, as many as `most`: those asked for longest ago let go of first, as more come.
+struct Used<K, V> {
+    kept: HashMap<K, (V, u64)>,
+    /// How many times one was asked for or kept, each so numbered.
+    asked: u64,
+    most: usize,
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V> Used<K, V> {
+    fn new(most: usize) -> Used<K, V> {
+        Used { kept: HashMap::new(), asked: 0, most }
+    }
+
+    /// What is kept for `key`, asked for now.
+    fn get<Q: std::hash::Hash + Eq + ?Sized>(&mut self, key: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+    {
+        self.asked += 1;
+        let asked = self.asked;
+        self.kept.get_mut(key).map(|(value, when)| {
+            *when = asked;
+            &*value
+        })
+    }
+
+    /// `value` kept for `key`, asked for now; past `most`, the one asked for longest ago let go of.
+    fn insert(&mut self, key: K, value: V) {
+        self.asked += 1;
+        self.kept.insert(key, (value, self.asked));
+        while self.kept.len() > self.most {
+            let Some(oldest) = self.kept.iter().min_by_key(|(_, (_, when))| *when).map(|(key, _)| key.clone()) else { break };
+            self.kept.remove(&oldest);
+        }
+    }
 }
 
 /// What a path is: a folder; a file, when it was last written (as far as that is told); nothing (gone, or on a drive
@@ -65,7 +102,7 @@ pub enum Looked {
 
 /// How long what a path was found to be stands before it is looked at again.
 const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_secs(3);
-/// The most paths kept looked at (all let go of past it: looked at again as asked).
+/// The most paths kept looked at (those asked about longest ago let go of past it: looked at again as asked).
 const LOOKED_MOST: usize = 4096;
 
 static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
@@ -81,7 +118,7 @@ pub fn start(told: impl Fn() + Send + Sync + 'static) {
     if ASKS.set(Mutex::new(sender)).is_err() {
         return;
     }
-    *KEPT.lock().unwrap() = Some(Kept { made: HashMap::new(), order: Vec::new(), asked: HashSet::new(), looked: HashMap::new(), looking: HashSet::new() });
+    *KEPT.lock().unwrap() = Some(Kept { made: Used::new(KEPT_MOST), asked: HashSet::new(), looked: Used::new(LOOKED_MOST), looking: HashSet::new() });
     std::thread::Builder::new().name("glance: station pictures".into()).spawn(move || make(asks)).expect("a thread started");
     let (sender, looks) = std::sync::mpsc::channel();
     let _ = LOOKS.set(Mutex::new(sender));
@@ -114,10 +151,9 @@ fn look(looks: Receiver<PathBuf>) {
             let mut kept = KEPT.lock().unwrap();
             let Some(kept) = kept.as_mut() else { continue };
             kept.looking.remove(&path);
-            if kept.looked.len() >= LOOKED_MOST {
-                kept.looked.clear();
-            }
-            kept.looked.insert(path, (std::time::Instant::now(), found)).is_none_or(|(_, was)| was != found)
+            let changed = kept.looked.get(&path).is_none_or(|(_, was)| *was != found);
+            kept.looked.insert(path, (std::time::Instant::now(), found));
+            changed
         };
         if changed {
             if let Some(told) = TOLD.get() {
@@ -189,12 +225,7 @@ fn make(asks: Receiver<Key>) {
             let mut kept = KEPT.lock().unwrap();
             let Some(kept) = kept.as_mut() else { continue };
             kept.asked.remove(&key);
-            kept.order.push(key.clone());
             kept.made.insert(key, made);
-            while kept.order.len() > KEPT_MOST {
-                let oldest = kept.order.remove(0);
-                kept.made.remove(&oldest);
-            }
         }
         if let Some(told) = TOLD.get() {
             told();
@@ -361,6 +392,23 @@ unsafe fn pixels_of(bitmap: HBITMAP) -> Option<Thumb> {
 #[cfg(test)]
 mod made {
     use super::*;
+
+    /// Those kept are let go of as they were last asked for, not as they were made: one asked for all along stays
+    /// as many more come and go.
+    #[test]
+    fn what_is_asked_for_all_along_is_kept() {
+        let mut used = Used::new(3);
+        used.insert("quick launch", 0);
+        for file in 1..10 {
+            assert_eq!(used.get(&"quick launch"), Some(&0), "after {file}");
+            used.insert(["a", "b", "c", "d", "e", "f", "g", "h", "i"][file - 1], file);
+        }
+        assert_eq!(used.get(&"quick launch"), Some(&0));
+        assert_eq!(used.get(&"h"), Some(&8));
+        assert_eq!(used.get(&"i"), Some(&9));
+        assert_eq!(used.get(&"g"), None);
+        assert_eq!(used.kept.len(), 3);
+    }
 
     /// A thumbnail larger than the side asked for is made smaller to fit, its shape and colours kept, and centred:
     /// never cut down to its corner.
