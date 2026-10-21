@@ -20,6 +20,9 @@ use crate::ui::icons::Icon;
 use crate::ui::smoke::{self, Smoke};
 use crate::ui::window::Window;
 
+/// How far past either end of the track a press still takes it (DIPs): at its end, as at the end of what is drawn.
+const TRACK_REACH: f32 = 8.0;
+
 /// Its smoke's colours with no cover (as it begins, and for a track with none).
 const TINT: [f32; 3] = [0.40, 0.95, 0.88];
 const TINT2: [f32; 3] = [0.84, 0.97, 0.92];
@@ -89,6 +92,9 @@ pub struct FullMusic {
     /// last turned by the wheel or a key (the bar then open a moment, saying how loud).
     volume_open: bool,
     volume_turned: Option<Instant>,
+    /// The wheel's turns not yet a step of the sound (a touchpad turns it by parts of a notch), toward the next (in
+    /// steps of a hundred and twentieth).
+    wheeled: i32,
     /// Whether the pointer over it is hidden, as last told.
     pointer_hidden: Option<bool>,
     /// What a press is on, as last drawn; the last press (for a double click); what is dragged.
@@ -135,6 +141,7 @@ impl FullMusic {
             pointer_hidden: None,
             volume_open: false,
             volume_turned: None,
+            wheeled: 0,
             hits: Vec::new(),
             pressed: None,
             dragging: None,
@@ -370,7 +377,7 @@ impl FullMusic {
     fn drag(&mut self, dragged: Hit, at: (f32, f32)) {
         let Some((area, _)) = self.hits.iter().find(|(_, hit)| *hit == dragged).copied() else { return };
         match dragged {
-            Hit::Track => crate::playing::slide_along(crate::playing::Slider::Seek(Follow::Music), ((at.0 - area.0) / area.2.max(1.0)).clamp(0.0, 1.0)),
+            Hit::Track => crate::playing::slide_along(crate::playing::Slider::Seek(Follow::Music), along_track(area, at.0)),
             // (Upright: from its bottom up.)
             Hit::Volume => {
                 let (top, bottom) = volume_bar(area);
@@ -381,18 +388,21 @@ impl FullMusic {
         }
     }
 
-    /// The sound louder or softer by `step` (of 100), the volume's bar shown a moment saying how loud.
+    /// The sound louder or softer by `step` (of 100; none: as it is, muted still where it is), the volume's bar shown a
+    /// moment saying how loud.
     fn turn_sound(&mut self, step: i32) {
-        if let Some((level, _)) = crate::playing::sound() {
+        if let Some((level, _)) = crate::playing::sound().filter(|_| step != 0) {
             crate::playing::set_sound(Some((level as i32 + step).clamp(0, 100) as u8), Some(false));
         }
         self.volume_turned = Some(Instant::now());
         self.moved = Some(Instant::now());
     }
 
-    /// The wheel turned by `delta` (120 a notch): the sound louder or softer.
+    /// The wheel turned by `delta` (120 a notch): the sound louder or softer, five in a hundred a notch (a part of a
+    /// notch kept toward the next).
     pub fn wheel(&mut self, delta: i16) {
-        self.turn_sound(delta as i32 / 120 * 5);
+        let step = crate::playing::wheel_steps(&mut self.wheeled, delta, 5);
+        self.turn_sound(step);
     }
 
     /// A key pressed: Esc leaves it, the space bar pauses or plays, left and right go back and on five seconds, up
@@ -664,7 +674,7 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
             said_bare(frame, &said, time, x, y - 30.0, shown);
         }
         if seekable {
-            hits.push(((from - 8.0, y - 10.0, wide + 16.0, 20.0), Hit::Track));
+            hits.push(((from - TRACK_REACH, y - 10.0, wide + 2.0 * TRACK_REACH, 20.0), Hit::Track));
         }
     }
     // At the right, the way out, and the sound's icon beside it; over the icon, while the pointer is over it or the
@@ -774,8 +784,26 @@ mod pictures {
     }
 }
 
+/// How far along the track `x` is, the track pressed in `area` (its reach on either side with it): along it as it is
+/// drawn, its ends where it is drawn to.
+fn along_track(area: (f32, f32, f32, f32), x: f32) -> f32 {
+    ((x - area.0 - TRACK_REACH) / (area.2 - 2.0 * TRACK_REACH).max(1.0)).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
+    /// A press on the track goes as far along what plays as the time said over it: none at its drawn start, all at its
+    /// drawn end, as much past either (in its reach).
+    #[test]
+    fn the_track_is_pressed_where_it_is_drawn() {
+        let (from, wide) = (100.0, 420.0);
+        let area = (from - super::TRACK_REACH, 0.0, wide + 2.0 * super::TRACK_REACH, 20.0);
+        assert_eq!(super::along_track(area, from), 0.0);
+        assert_eq!(super::along_track(area, from + wide), 1.0);
+        assert_eq!(super::along_track(area, from + wide / 2.0), 0.5);
+        assert_eq!((super::along_track(area, from - 5.0), super::along_track(area, from + wide + 5.0)), (0.0, 1.0));
+    }
+
     /// Chinese moves a character at a time; a word in English whole, its letters' times summed.
     #[test]
     fn words_move_whole_and_characters_alone() {

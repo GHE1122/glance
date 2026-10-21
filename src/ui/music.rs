@@ -345,7 +345,7 @@ pub struct Music {
     turned_at: Instant,
     wheeled: f32,
     /// The wheel turned over the sound, short of a step of it (see `wheel`).
-    sound_wheeled: f32,
+    sound_wheeled: i32,
 }
 
 /// Where the line aimed at in the rail of lines is drawn (from its top, DIPs): moving from where it was (`from`, the
@@ -406,7 +406,7 @@ impl Default for Music {
             turned: 0,
             turned_at: Instant::now(),
             wheeled: 0.0,
-            sound_wheeled: 0.0,
+            sound_wheeled: 0,
         }
     }
 }
@@ -573,11 +573,9 @@ impl Music {
         // turned, two in a hundred a notch (as Windows' own does); a part of a notch kept toward the next (a touchpad
         // turns it by little ones).
         if on_sound {
-            self.sound_wheeled += 2.0 * delta as f32 / NOTCH;
-            let steps = self.sound_wheeled.trunc();
-            self.sound_wheeled -= steps;
-            if let (Some((level, _)), true) = (crate::playing::sound(), steps != 0.0) {
-                let to = (level as f32 + steps).clamp(0.0, 100.0) as u8;
+            let steps = crate::playing::wheel_steps(&mut self.sound_wheeled, delta, 2);
+            if let (Some((level, _)), true) = (crate::playing::sound(), steps != 0) {
+                let to = (i32::from(level) + steps).clamp(0, 100) as u8;
                 crate::playing::set_sound(Some(to), Some(false));
             }
             return;

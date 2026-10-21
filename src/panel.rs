@@ -857,10 +857,12 @@ impl Controller {
                     }
                 }
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == PASTE_HOTKEY as usize => crate::station::run::ask(crate::station::run::Ask::Paste),
-                // Esc: a thing kept at hand dragged put back where it was (and nothing more); else the panels that go,
-                // gone.
+                // Esc: the music full screen left, over all else (and nothing more); a thing kept at hand dragged put
+                // back where it was (and nothing more); else the panels that go, gone.
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize => {
-                    if panels.iter().any(Panel::dragging_app) {
+                    if widgets.full().is_some() {
+                        widgets.leave_full();
+                    } else if panels.iter().any(Panel::dragging_app) {
                         for panel in panels.iter_mut().filter(|panel| panel.dragging_app()) {
                             panel.app_press = None;
                             panel.app_over = None;

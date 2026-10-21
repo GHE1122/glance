@@ -588,6 +588,16 @@ pub enum Slider {
     Seek(Follow),
 }
 
+/// The wheel's `delta` (120 a notch) added to what it turned before (`kept`, in hundred and twentieths of a step): the
+/// whole steps of the sound it makes (`per_notch` a notch), what is left of a step kept toward the next (a touchpad
+/// turns it by parts of a notch, none lost).
+pub fn wheel_steps(kept: &mut i32, delta: i16, per_notch: i32) -> i32 {
+    *kept += i32::from(delta) * per_notch;
+    let steps = *kept / 120;
+    *kept -= steps * 120;
+    steps
+}
+
 /// `slider` dragged to `fraction` of the way along it: the sound as loud, set at once; what plays shown as that far
 /// into its track, and played from there once let go (see `slid`).
 #[cfg(windows)]
@@ -669,6 +679,19 @@ pub fn pretend(now: Now) {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    /// A notch of the wheel turns the sound by its step; a touchpad's parts of a notch add up to as much, none lost;
+    /// back the other way, back.
+    #[test]
+    fn the_wheel_turns_the_sound_by_its_parts_too() {
+        let mut kept = 0;
+        assert_eq!(wheel_steps(&mut kept, 120, 5), 5);
+        assert_eq!(wheel_steps(&mut kept, -240, 5), -10);
+        assert_eq!((0..8).map(|_| wheel_steps(&mut kept, 30, 5)).sum::<i32>(), 10);
+        assert_eq!(wheel_steps(&mut kept, 10, 5), 0);
+        assert_eq!(wheel_steps(&mut kept, 14, 5), 1);
+        assert_eq!((0..60).map(|_| wheel_steps(&mut kept, 1, 2)).sum::<i32>(), 1);
+    }
 
     /// What is followed is kept in statics shared by these tests: one at a time.
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());

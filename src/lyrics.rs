@@ -147,7 +147,8 @@ struct Said {
     sure: bool,
 }
 
-/// Asks the sources, all at once (one far away, slow or not reached, keeps none waiting for the others): by the
+/// Asks the sources, all at once (one far away, slow or not reached, keeps none waiting for the others, and none is
+/// waited for where what is found already is not to be bettered: NetEase's timed word by word): by the
 /// track's NetEase number, the word-timed collection and NetEase itself (the collection's, with NetEase's
 /// translation where it gives none; else NetEase's); by its name, Kugou, LRCLIB, QQ Music, and the same by the number
 /// NetEase finds it by. Lyrics timed word by word first, wherever they are: the collection's or NetEase's, then
@@ -186,47 +187,55 @@ fn find(track: &Track) -> Said {
             (None, theirs) => theirs,
         }
     };
-    let found = std::thread::scope(|scope| {
-        let kugou = scope.spawn(|| answered(kugou(track)));
-        let (netease, qq, named) = match track.netease {
-            // (Played by NetEase: its own, else lyrics timed word by word elsewhere; none asked of the others.)
-            Some(id) => (by_number(id), None, None),
-            None => {
-                let searched = scope.spawn(|| match netease_search(track) {
-                    Ok(id) => id.and_then(by_number),
-                    Err(Unreached) => answered(Err(Unreached)),
-                });
-                let qq = scope.spawn(|| answered(qq_music(track)));
-                let named = answered(lrclib(track));
-                (searched.join().expect("NetEase asked"), qq.join().expect("QQ Music asked"), named)
-            }
-        };
-        chosen(track, netease, kugou.join().expect("Kugou asked"), qq, named)
-    });
+    // (Each on a thread of its own, left to end on its own where its answer is not waited for.)
+    let asked = |source: fn(&Track) -> Answer<Vec<Line>>| {
+        let (told, answer) = std::sync::mpsc::channel();
+        let track = track.clone();
+        std::thread::spawn(move || {
+            let _ = told.send(source(&track));
+        });
+        move || answer.recv().unwrap_or(Err(Unreached))
+    };
+    let by_kugou = asked(kugou);
+    // (Played by NetEase: its own, else lyrics timed word by word elsewhere; none asked of the others.)
+    let (by_qq, by_name) = match track.netease {
+        Some(_) => (None, None),
+        None => (Some(asked(qq_music)), Some(asked(lrclib))),
+    };
+    let netease = match track.netease {
+        Some(id) => by_number(id),
+        None => match netease_search(track) {
+            Ok(id) => id.and_then(by_number),
+            Err(Unreached) => answered(Err(Unreached)),
+        },
+    };
+    let found = chosen(track, netease, || answered(by_kugou()), || by_qq.and_then(|by_qq| answered(by_qq())), || by_name.and_then(|by_name| answered(by_name())));
     Said { found, sure: sure.into_inner() }
 }
 
-/// Of what the sources had of `track`'s lyrics (NetEase's, the collection's among them; Kugou's; QQ Music's; LRCLIB's),
-/// those taken (see `find`): timed word by word first, wherever they are (Kugou's with a translation from the
-/// others where theirs have none); else as its player shows them, by its NetEase number or played in QQ Music; else
-/// LRCLIB's, NetEase's, QQ Music's.
-fn chosen(track: &Track, netease: Option<Vec<Line>>, kugou: Option<Vec<Line>>, qq: Option<Vec<Line>>, named: Option<Vec<Line>>) -> Option<Vec<Line>> {
+/// Of what the sources had of `track`'s lyrics (NetEase's, the collection's among them; Kugou's; QQ Music's; LRCLIB's,
+/// each waited for as it is needed), those taken (see `find`): timed word by word first, wherever they are (Kugou's
+/// with a translation from the others where theirs have none); else as its player shows them, by its NetEase number or
+/// played in QQ Music; else LRCLIB's, NetEase's, QQ Music's.
+fn chosen(track: &Track, netease: Option<Vec<Line>>, kugou: impl FnOnce() -> Option<Vec<Line>>, qq: impl FnOnce() -> Option<Vec<Line>>, named: impl FnOnce() -> Option<Vec<Line>>) -> Option<Vec<Line>> {
     let worded = |lines: &[Line]| lines.iter().any(|line| !line.words.is_empty());
     if netease.as_deref().is_some_and(worded) {
         return netease;
     }
-    if let Some(mut lines) = kugou.filter(|lines| worded(lines)) {
+    if let Some(mut lines) = kugou().filter(|lines| worded(lines)) {
         if lines.iter().all(|line| line.translation.is_none()) {
-            for theirs in [&netease, &qq].into_iter().flatten() {
+            for theirs in [&netease, &qq()].into_iter().flatten() {
                 translated(&mut lines, theirs);
             }
         }
         return Some(lines);
     }
-    match (track.netease, qq) {
-        (Some(_), _) => netease,
-        (None, Some(qq)) if track.qq_music => Some(qq),
-        (None, qq) => named.or(netease).or(qq),
+    if track.netease.is_some() {
+        return netease;
+    }
+    match qq() {
+        Some(qq) if track.qq_music => Some(qq),
+        qq => named().or(netease).or(qq),
     }
 }
 
@@ -1106,12 +1115,15 @@ mod tests {
         let worded = |text: &str| vec![Line { at: 1.0, end: Some(2.0), text: text.into(), words: vec![Word { at: 1.0, end: 2.0, text: text.into() }], backing: None, translation: None }];
         let track = |netease: Option<u64>, qq_music: bool| Track { netease, qq_music, title: "t".into(), artist: "a".into(), album: String::new(), seconds: 100 };
         let text = |lines: Option<Vec<Line>>| lines.map(|lines| (lines[0].text.clone(), lines[0].translation.clone()));
-        assert_eq!(text(chosen(&track(Some(1), false), Some(lined("netease", Some("译"))), Some(worded("kugou")), None, None)), Some(("kugou".into(), Some("译".into()))));
-        assert_eq!(text(chosen(&track(None, true), None, Some(worded("kugou")), Some(lined("qq", None)), Some(lined("lrclib", None)))), Some(("kugou".into(), None)));
-        assert_eq!(text(chosen(&track(None, false), Some(worded("netease")), Some(worded("kugou")), None, None)), Some(("netease".into(), None)));
-        assert_eq!(text(chosen(&track(Some(1), false), Some(lined("netease", None)), Some(lined("kugou", None)), None, Some(lined("lrclib", None)))), Some(("netease".into(), None)));
-        assert_eq!(text(chosen(&track(None, true), Some(lined("netease", None)), None, Some(lined("qq", None)), Some(lined("lrclib", None)))), Some(("qq".into(), None)));
-        assert_eq!(text(chosen(&track(None, false), Some(lined("netease", None)), None, Some(lined("qq", None)), Some(lined("lrclib", None)))), Some(("lrclib".into(), None)));
+        let given = |lines: Option<Vec<Line>>| move || lines;
+        assert_eq!(text(chosen(&track(Some(1), false), Some(lined("netease", Some("译"))), given(Some(worded("kugou"))), given(None), given(None))), Some(("kugou".into(), Some("译".into()))));
+        assert_eq!(text(chosen(&track(None, true), None, given(Some(worded("kugou"))), given(Some(lined("qq", None))), given(Some(lined("lrclib", None))))), Some(("kugou".into(), None)));
+        assert_eq!(text(chosen(&track(Some(1), false), Some(lined("netease", None)), given(Some(lined("kugou", None))), given(None), given(Some(lined("lrclib", None))))), Some(("netease".into(), None)));
+        assert_eq!(text(chosen(&track(None, true), Some(lined("netease", None)), given(None), given(Some(lined("qq", None))), given(Some(lined("lrclib", None))))), Some(("qq".into(), None)));
+        assert_eq!(text(chosen(&track(None, false), Some(lined("netease", None)), given(None), given(Some(lined("qq", None))), given(Some(lined("lrclib", None))))), Some(("lrclib".into(), None)));
+        // NetEase's timed word by word: none of the others waited for (one slow, or not reached, holds nothing up).
+        let waited = || -> Option<Vec<Line>> { panic!("waited for") };
+        assert_eq!(text(chosen(&track(None, false), Some(worded("netease")), waited, waited, waited)), Some(("netease".into(), None)));
     }
 
     /// Kugou's lyrics as it gives them, sealed: opened and read (an ignored test: it asks Kugou).
