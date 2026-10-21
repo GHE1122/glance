@@ -2034,6 +2034,9 @@ otepad.exe"),
             }
             std::thread::sleep(std::time::Duration::from_millis(1500));
         }
+        // (Its device let go of before the thread ends: else it hung there.)
+        drop(gfx);
+        gfx::let_go();
     }
 }
 

@@ -579,6 +579,50 @@ mod pictures {
     /// that line as written. (Down the page, the text services set lines a little further apart than DirectWrite, as
     /// they always have: within a few pixels after a few lines.) (`cargo test --features studio --lib -- --ignored
     /// written_and_not` writes `target/beside/note-<skin>-<face|page|written>.png`, the note in a folder of the test's own.)
+    /// A note's words drawn not written in (stuck on the desktop) as they are drawn written in, pixel for pixel, at each
+    /// of the screen's usual scales: as the text services draw them (else, written in, they came out sharper).
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn its_words_are_drawn_alike_written_in_or_not() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let gfx = super::super::gfx::current().unwrap();
+        let folder = std::env::temp_dir().join(format!("glance-note-alike-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let text = "天下
+你是我的我是你的谁哦
+The quick brown fox, 1% low";
+        std::fs::write(folder.join("a.md"), text).unwrap();
+        let (w, h) = super::super::view::STUCK_NOTE;
+        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, (w * 2.0) as i32, (h * 2.0) as i32, None, None, None, None) }.unwrap();
+        let mut apart = Vec::new();
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let size = ((w * scale) as u32, (h * scale) as u32);
+            let theme = Theme::new(Skin::Fluent, true);
+            let writing = Writing::open(hwnd, words_box(0, 0, size.0 as i32, size.1 as i32, scale), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("a.md".into()), &theme, WORDS * scale).unwrap();
+            let written = gfx.draw_offscreen(size, scale, |frame| writing.paint(frame, &theme, Lang::Zh, (0.0, 0.0, w, h), (0.0, 0.0), scale, false)).unwrap();
+            let not = gfx.draw_offscreen(size, scale, |frame| paint_stuck(frame, &theme, Lang::Zh, text, writing.colour, "x", "a.md", (0.0, 0.0, w, h))).unwrap();
+            // Over its words' room: how many of its pixels differ.
+            let (left, top, wide, tall) = words_in(w, h);
+            let differ = ((top * scale) as u32..((top + tall) * scale) as u32)
+                .flat_map(|y| ((left * scale) as u32..((left + wide) * scale) as u32).map(move |x| ((y * size.0 + x) * 4) as usize))
+                .filter(|&at| written[at..at + 4] != not[at..at + 4])
+                .count();
+            apart.push((scale, differ));
+        }
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+        // (Its device let go of before the thread ends: else it hung there.)
+        drop(gfx);
+        super::super::gfx::let_go();
+        assert!(apart.iter().all(|(_, differ)| *differ == 0), "pixels apart at each scale: {apart:?}");
+    }
+
     #[test]
     #[ignore = "writes pictures to look at"]
     fn written_and_not() {
@@ -649,6 +693,8 @@ mod pictures {
             let _ = DestroyWindow(hwnd);
         }
         let _ = std::fs::remove_dir_all(&folder);
+        drop(gfx);
+        super::super::gfx::let_go();
         println!("where each line's words begin, not written in and written: {unlike:?}");
         assert!(unlike.iter().all(|(_, apart, ..)| !apart), "{unlike:?}");
     }

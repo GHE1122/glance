@@ -1719,7 +1719,9 @@ impl<'a> Frame<'a> {
                     let (from, to) = (range.start.max(words.start), range.end.min(words.end));
                     (from < to).then(|| DWRITE_TEXT_RANGE { startPosition: (from - words.start) as u32, length: (to - from) as u32 })
                 };
-                let layout = unsafe { factory.CreateTextLayout(&wide[words.clone()], &format, width.max(0.0), f32::MAX)? };
+                // (Laid out and drawn as the text services lay out and draw words, GDI's way, glyphs on whole pixels: else
+                // the same words, written in and not, were drawn apart, those not written in softer.)
+                let layout = unsafe { factory.CreateGdiCompatibleTextLayout(&wide[words.clone()], &format, width.max(0.0), f32::MAX, per, None, false)? };
                 unsafe {
                     layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
                     // (Tabs as far apart as the text services set them: else what follows one, and how lines wrap, moved.)
