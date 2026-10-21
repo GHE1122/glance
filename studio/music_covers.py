@@ -1,15 +1,19 @@
 """Two Douyin music covers composed from the video's real studio frames.
 
-    python studio/music_covers.py C:/Windows/Fonts/NotoSansSC-VF.ttf target/yujian/covers
+    python studio/music_covers.py [FONT] [OUT-FOLDER] [--frames FOLDER] [--widget N] [--full N]
+
+    python studio/music_covers.py --frames target/song/frames --widget 560 --full 240 C:/Windows/Fonts/NotoSansSC-VF.ttf target/song/covers
 
 Run from any directory. Relative arguments resolve from the current directory.
-Defaults use the installed Noto Sans SC variable font and target/yujian/covers.
+Defaults use the installed Noto Sans SC variable font, the frames of the
+yujian cut and target/yujian/covers.
 Needs Pillow, numpy and imageio-ffmpeg, as do the existing studio helpers.
 Writes 1080x1440 and 1440x1080 PNGs and quality-92, 4:4:4 JPEGs.
 
-The widget is music-widget/00721.png at 24.00 seconds, cropped to the
-native stage rect from music-shots-yujian.json. The landscape also uses
-music-full/00076.png at video time 27.50 seconds. Every UI pixel comes
+The widget is music-widget/<widget>.png (by default 00721, the record player
+at 24.00 seconds of the yujian cut), cropped to the native stage rect the
+music shots share (560x360 DIP at 20,500). The landscape also uses
+music-full/<full>.png (by default 00076). Every UI pixel comes
 from those renders. Pillow supplies only typography, background, logo,
 shadows and crop masks. UI is downsampled once, never enlarged.
 """
@@ -24,6 +28,7 @@ from compose import ACCENT, Fonts, cutout, mark, shadowed
 
 ROOT = Path(__file__).resolve().parents[1]
 FRAMES = ROOT / "target/yujian/frames"
+WIDGET, FULL = 721, 76
 HEADLINE = "屏幕边上的歌词组件"
 LINE = "歌词跟着歌声一个字一个字亮起来"
 SMALL = "Glance 0.4 · 免费开源 · Windows 10/11"
@@ -43,7 +48,7 @@ def ground(size):
 def stage():
     """Native 560x360 DIP stage at 1.8 px/DIP, with its native 14 DIP radius."""
     rect = dict(x=36, y=900, w=1008, h=648)
-    with Image.open(FRAMES / "music-widget/00721.png") as source:
+    with Image.open(FRAMES / f"music-widget/{WIDGET:05d}.png") as source:
         return cutout(source.convert("RGB"), {
             "panel": rect, "pieces": [rect], "radius": 25.2,
         })
@@ -51,7 +56,7 @@ def stage():
 
 def full_lyrics():
     """A crop retaining the complete live line and its next line, with smoke."""
-    with Image.open(FRAMES / "music-full/00076.png") as source:
+    with Image.open(FRAMES / f"music-full/{FULL:05d}.png") as source:
         return source.convert("RGBA").crop((0, 450, 1080, 1760))
 
 
@@ -125,7 +130,7 @@ def portrait(fonts):
     layout.text((56, 250), "屏幕边上的", 124)
     layout.text((52, 394), "歌词组件", 150)
     layout.text((56, 585), LINE, 43, b"Medium", SOFT)
-    layout.image("record player / 24.00s", stage(), (54, 666), 900)
+    layout.image("record player", stage(), (54, 666), 900)
     return layout.page.convert("RGB")
 
 
@@ -137,19 +142,25 @@ def landscape(fonts):
     layout.text((60, 302), LINE, 44, b"Medium", SOFT)
     layout.text((60, 383), "唱片与逐字歌词", 28, b"Medium", SOFT)
     layout.text((944, 383), "全屏歌词", 28, b"Medium", SOFT)
-    layout.image("record player / 24.00s", stage(), (56, 428), 850)
-    layout.image("full-screen lyrics / 27.50s", full_lyrics(), (940, 428), 444,
+    layout.image("record player", stage(), (56, 428), 850)
+    layout.image("full-screen lyrics", full_lyrics(), (940, 428), 444,
                  rounded=True)
     return layout.page.convert("RGB")
 
 
 def main():
+    global FRAMES, WIDGET, FULL
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("font", type=Path, nargs="?",
                         default=Path("C:/Windows/Fonts/NotoSansSC-VF.ttf"))
     parser.add_argument("out_folder", type=Path, nargs="?",
                         default=ROOT / "target/yujian/covers")
+    parser.add_argument("--frames", type=Path, default=FRAMES,
+                        help="the video's frames, with music-widget and music-full in it")
+    parser.add_argument("--widget", type=int, default=WIDGET, help="the music widget's frame")
+    parser.add_argument("--full", type=int, default=FULL, help="the full screen's frame")
     args = parser.parse_args()
+    FRAMES, WIDGET, FULL = args.frames.resolve(), args.widget, args.full
     fonts = Fonts(str(args.font.resolve()))
     out = args.out_folder.resolve()
     out.mkdir(parents=True, exist_ok=True)
