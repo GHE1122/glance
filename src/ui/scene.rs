@@ -379,6 +379,8 @@ fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) ->
 /// (made larger only, as the desktop grows past it), and a session ended cannot be started again on the same pool
 /// (measured): it is slowed while unused, not ended.
 struct Feed {
+    /// Its number, a feed made anew another (see `let_go_of_feed`).
+    id: u64,
     shell: HWND,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
@@ -440,6 +442,8 @@ struct LayerHeld {
 unsafe impl Send for LayerHeld {}
 
 static FEED: Mutex<Option<Feed>> = Mutex::new(None);
+/// The number the next feed made takes.
+static NEXT_FEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// The desktop's window a feed could not be made for (no borderless capture here, say): shown by its thumbnail.
 static REFUSED: Mutex<Option<isize>> = Mutex::new(None);
 
@@ -560,6 +564,7 @@ impl Feed {
     /// The desktop's window `shell` captured on the device `d3d`, each frame put in the layers as it comes (seldom
     /// while none is shown, see `follow_use`); none where it may not be captured without a border.
     fn new(shell: HWND, d3d: &ID3D11Device) -> Option<Feed> {
+        let id = NEXT_FEED.fetch_add(1, Ordering::Relaxed);
         if !borderless() {
             return None;
         }
@@ -606,7 +611,7 @@ impl Feed {
         let _ = session.SetMinUpdateInterval(live_span());
         session.StartCapture().ok()?;
         crate::perf::mark(|| format!("desktop feed made {}x{}", size.Width, size.Height));
-        Some(Feed { shell, pool, session, seldom: false, shared, scenes: 0 })
+        Some(Feed { id, shell, pool, session, seldom: false, shared, scenes: 0 })
     }
 
     /// Taken as often as it changes (`LIVE` at most) while a layer does not rest, seldom while none does (where the system can be
@@ -640,7 +645,13 @@ impl Feed {
         Some(layer)
     }
 
-    /// Its capture ended, its newest frame let go of (Explorer started again: another desktop window).
+    /// Whether the device it captures and copies with is lost (the graphics driver started again, the card gone): no
+    /// frame comes, nor can one be put in a layer, again.
+    fn lost(&self) -> bool {
+        unsafe { self.shared.device.device.GetDeviceRemovedReason() }.is_err()
+    }
+
+    /// Its capture ended, its newest frame let go of (Explorer started again: another desktop window; its device lost).
     fn end(self) {
         let _ = self.session.Close();
         let held = self.shared.latest.lock().unwrap().take();
@@ -651,14 +662,14 @@ impl Feed {
 }
 
 /// A layer of the desktop for a scene's `window` at `area`, from the feed for the desktop's window `shell` (made as
-/// first wanted; made anew where it was another's, as Explorer started again). None where none can be made for it
-/// (it is not asked again for that window).
-fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device) -> Option<Arc<Layer>> {
+/// first wanted; made anew, on `d3d`, where it was another's, as Explorer started again, or its device was lost), and
+/// the feed's number. None where none can be made for it (it is not asked again for that window).
+fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device) -> Option<(Arc<Layer>, u64)> {
     if *REFUSED.lock().unwrap() == Some(shell.0 as isize) {
         return None;
     }
     let mut feed = FEED.lock().unwrap();
-    if feed.as_ref().is_some_and(|feed| feed.shell != shell) {
+    if feed.as_ref().is_some_and(|feed| feed.shell != shell || feed.lost()) {
         if let Some(old) = feed.take() {
             old.end();
         }
@@ -673,17 +684,23 @@ fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device) -> O
     let layer = feed.layer(window, area)?;
     feed.scenes += 1;
     crate::perf::mark(|| format!("desktop feed held by {}", feed.scenes));
-    Some(layer)
+    Some((layer, feed.id))
 }
 
-/// A scene's layer of the feed for the desktop's window `shell` let go of: the feed ended as no scene holds one any
-/// longer (each scene gone, or let go of as its window's skin no longer shows the desktop): its frames are the
-/// desktop's whole size. (Counted, not by the layers that are: the thread a frame comes on holds them a moment as it
-/// puts it in them, and a last let go of meanwhile left the feed for good. Scenes live as long as their windows, so it
-/// is not made again and again: see `Feed`. One of a feed made anew since, Explorer started again, is not counted.)
-fn let_go_of_feed(shell: HWND) {
+/// Whether the feed numbered `id` is the one there is, its device not lost: else a layer of it is of one ended, or
+/// soon to be, and nothing comes into it.
+fn feed_goes_on(id: u64) -> bool {
+    FEED.lock().unwrap().as_ref().is_some_and(|feed| feed.id == id && !feed.lost())
+}
+
+/// A scene's layer of the feed numbered `id` let go of: the feed ended as no scene holds one any longer (each scene
+/// gone, or let go of as its window's skin no longer shows the desktop): its frames are the desktop's whole size.
+/// (Counted, not by the layers that are: the thread a frame comes on holds them a moment as it puts it in them, and a
+/// last let go of meanwhile left the feed for good. Scenes live as long as their windows, so it is not made again and
+/// again: see `Feed`. One of a feed made anew since, Explorer started again or its device lost, is not counted.)
+fn let_go_of_feed(id: u64) {
     let mut feed = FEED.lock().unwrap();
-    let Some(held) = feed.as_mut().filter(|feed| feed.shell == shell) else { return };
+    let Some(held) = feed.as_mut().filter(|feed| feed.id == id) else { return };
     held.scenes = held.scenes.saturating_sub(1);
     crate::perf::mark(|| format!("desktop feed held by {}", held.scenes));
     if held.scenes == 0 {
@@ -763,9 +780,9 @@ pub struct Scene {
     paced: bool,
     shared: Arc<Shared>,
     /// The desktop, captured itself and put under the windows behind, where a thumbnail of its window would leave out
-    /// what it shows (see `Feed`): the window it is put in, its layer, and the desktop's window it is of; the device to
-    /// start that on.
-    desktop: Option<(HWND, Arc<Layer>, HWND)>,
+    /// what it shows (see `Feed`): the window it is put in, its layer, the desktop's window it is of and the feed's
+    /// number; the device to start that on.
+    desktop: Option<(HWND, Arc<Layer>, HWND, u64)>,
     d3d: ID3D11Device,
 }
 
@@ -1006,14 +1023,14 @@ impl Scene {
         let shell = unsafe { GetShellWindow() };
         let desktop_at = behind.iter().find(|(window, _)| *window == shell).map(|(_, rect)| *rect);
         let apart = desktop_at.is_some() && !feed_refused(shell) && drawn_apart(shell);
-        // Its layer, of the desktop's window as it is now (one of another, as Explorer started again, let go of), put
-        // where it is to be before anything else is, and its window in the desktop's place (the bottom); the
-        // desktop's own thumbnail where none could be made.
-        if self.desktop.as_ref().is_some_and(|(_, _, of)| !apart || *of != shell) {
+        // Its layer, of the desktop's window as it is now (one of another, as Explorer started again, or of a feed
+        // ended or whose device was lost, let go of: a feed made anew), put where it is to be before anything else is,
+        // and its window in the desktop's place (the bottom); the desktop's own thumbnail where none could be made.
+        if self.desktop.as_ref().is_some_and(|(_, _, of, feed)| !apart || *of != shell || !feed_goes_on(*feed)) {
             self.let_desktop_go();
         }
         let own = match (&self.desktop, apart) {
-            (Some((window, layer, _)), true) => {
+            (Some((window, layer, ..)), true) => {
                 unsafe {
                     let _ = SetWindowPos(*window, None, area.left, area.top, (area.right - area.left).max(1), (area.bottom - area.top).max(1), SWP_NOACTIVATE | SWP_NOZORDER);
                 }
@@ -1021,8 +1038,8 @@ impl Scene {
                 Some(*window)
             }
             (None, true) => self.desktop_window(area).and_then(|window| match desktop_layer(shell, window, area, &self.d3d) {
-                Some(layer) => {
-                    self.desktop = Some((window, layer, shell));
+                Some((layer, feed)) => {
+                    self.desktop = Some((window, layer, shell, feed));
                     Some(window)
                 }
                 None => {
@@ -1113,10 +1130,10 @@ impl Scene {
 
     /// Its desktop's part let go of, and the window it was in (its layer first).
     fn let_desktop_go(&mut self) {
-        if let Some((window, layer, shell)) = self.desktop.take() {
+        if let Some((window, layer, _, feed)) = self.desktop.take() {
             empty_layer(&layer);
             drop(layer);
-            let_go_of_feed(shell);
+            let_go_of_feed(feed);
             unsafe {
                 let _ = DestroyWindow(window);
             }
@@ -1132,7 +1149,7 @@ impl Scene {
         // (A frame being read meanwhile is of what was there: marked so first, see `Shared::read`.)
         *self.shared.of.lock().unwrap() = (least, now_100ns(), Vec::new());
         self.shared.resting.store(true, Ordering::Release);
-        if let Some((_, layer, _)) = &self.desktop {
+        if let Some((_, layer, ..)) = &self.desktop {
             rest_layer(layer);
         }
         self.forget();
