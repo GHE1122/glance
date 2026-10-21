@@ -5325,33 +5325,11 @@ otepad.exe", "Notepad"),
         }
     }
 
-    /// For pictures: a station of four things, three kept at hand, three notes.
+    /// For pictures: the workbench as the studio films it.
     #[cfg(feature = "studio")]
     fn pretend_workbench() {
-        use super::*;
-        use crate::notes::{Colour, Note};
-        use crate::station::shelf::{Item, What};
-        let now = crate::station::now_ms();
-        let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
-        let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0 };
-        crate::station::run::pretend(vec![
-            item(1, What::Files { paths: vec![file("website/apple-touch-icon.png")], kept: Vec::new() }, 400),
-            item(2, What::Text { text: "会议改到周四下午三点\n地点：二楼小会议室".into() }, 180),
-            item(3, What::Files { paths: vec![file("docs")], kept: Vec::new() }, 60),
-            item(4, What::Files { paths: vec![file("Cargo.toml")], kept: Vec::new() }, 20),
-        ], ShelfView::Cards);
-        let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into() };
-        crate::station::apps::pretend(vec![
-            app(r"C:\Windows\explorer.exe", "Explorer"),
-            app(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "Calculator"),
-            app(r"C:\Windows\System32\cmd.exe", "Command"),
-        ]);
-        let note = |name: &str, text: &str, colour: Colour, ago_min: u64| Note { name: name.into(), text: text.into(), colour, stamp: crate::notes::store::Stamp { bytes: 0, written_ms: now - ago_min * 60_000, digest: 0 } };
-        crate::notes::pretend(vec![
-            note("a.md", "# 本周要做的事\n- [x] 发布 0.3.13\n- [ ] 中转站三种视图\n周五前合并", Colour::Blue, 3),
-            note("b.md", "显卡价格记录\n5070 Ti 京东 6299", Colour::Yellow, 60 * 20),
-            note("c.md", "周末开车听的歌\n- 敢爱敢做", Colour::Green, 60 * 50),
-        ]);
+        let props = std::path::PathBuf::from(format!("{}/target/props", env!("CARGO_MANIFEST_DIR")));
+        crate::studio::pretend_workbench(Lang::Zh, &props).unwrap();
     }
 
     /// The workbench's lanes each a widget of its own in every shape (a strip down, one across, the least), and all
