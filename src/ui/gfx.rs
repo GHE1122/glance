@@ -36,7 +36,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_AXIS_TAG_WEIGHT, DWRITE_FONT_AXIS_TAG_WIDTH, DWRITE_FONT_AXIS_VALUE,
     DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_LEADING,
     DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-    DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP, DWRITE_HIT_TEST_METRICS, IDWriteInlineObject, IDWriteInlineObject_Impl,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM};
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
@@ -1705,9 +1705,36 @@ impl<'a> Frame<'a> {
                     layout.SetDrawingEffect(&brush(dress.ink)?, range)?;
                 }
             }
+            // Its marks put away, as a note not being written in shows (see `notes::markdown::Shown`): each stood in
+            // for by nothing; a to-do's list mark, box and the space after them by the room its box is drawn in, as
+            // wide as the text services make that space where it is written.
+            use crate::notes::markdown::{Shown, BOX_IN, BOX_ROOM, BOX_SIDE, NONE_WRITTEN};
+            let shown = Shown::of(text);
+            let stretch = |range: std::ops::Range<usize>| DWRITE_TEXT_RANGE { startPosition: range.start as u32, length: (range.end - range.start) as u32 };
+            let size = whole(font.size);
+            let nothing: IDWriteInlineObject = Room { width: 0.0 }.into();
+            let room: IDWriteInlineObject = Room { width: BOX_ROOM * size }.into();
+            for range in shown.hidden(&NONE_WRITTEN) {
+                unsafe { layout.SetInlineObject(&nothing, stretch(range))? };
+            }
+            for boxed in shown.boxes(&NONE_WRITTEN) {
+                unsafe { layout.SetInlineObject(&room, stretch(boxed.marks.start..boxed.room + 1))? };
+            }
             let (left, top) = self.on_pixel(x, y);
             Canvas::clip(self, x, y, width, height);
             unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: left, Y: top }, &layout, self.brush(inks.words), self.text_snap()) };
+            // Each to-do's box in its room, in the middle of its line's words (those after it).
+            for boxed in shown.boxes(&NONE_WRITTEN) {
+                let (mut at_x, mut at_y) = (0.0, 0.0);
+                let mut after = DWRITE_HIT_TEST_METRICS::default();
+                let mut start = DWRITE_HIT_TEST_METRICS::default();
+                unsafe {
+                    layout.HitTestTextPosition(boxed.room as u32 + 1, false, &mut at_x, &mut at_y, &mut after)?;
+                    layout.HitTestTextPosition(boxed.marks.start as u32, false, &mut at_x, &mut at_y, &mut start)?;
+                }
+                let side = BOX_SIDE * size;
+                super::canvas::task_box(self, inks, left + start.left + BOX_IN * size, top + after.top + after.height / 2.0 - side / 2.0, side, boxed.done);
+            }
             Canvas::unclip(self);
             Ok(())
         })();
@@ -1744,6 +1771,35 @@ impl<'a> Frame<'a> {
                 D2D1_DRAW_TEXT_OPTIONS_CLIP | self.text_snap(),
             )
         };
+    }
+}
+
+/// What stands in a note's words for what of them is put away (see `Frame::markdown`): room `width` wide (none for a
+/// mark hidden), drawn as nothing, and no taller than nothing (its line as tall as its words make it).
+#[windows::core::implement(IDWriteInlineObject)]
+struct Room {
+    width: f32,
+}
+
+impl IDWriteInlineObject_Impl for Room_Impl {
+    fn Draw(&self, _: *const core::ffi::c_void, _: windows::core::Ref<windows::Win32::Graphics::DirectWrite::IDWriteTextRenderer>, _: f32, _: f32, _: windows::core::BOOL, _: windows::core::BOOL, _: windows::core::Ref<windows::core::IUnknown>) -> Result<()> {
+        Ok(())
+    }
+
+    fn GetMetrics(&self) -> Result<windows::Win32::Graphics::DirectWrite::DWRITE_INLINE_OBJECT_METRICS> {
+        Ok(windows::Win32::Graphics::DirectWrite::DWRITE_INLINE_OBJECT_METRICS { width: self.width, height: 0.0, baseline: 0.0, supportsSideways: false.into() })
+    }
+
+    fn GetOverhangMetrics(&self) -> Result<windows::Win32::Graphics::DirectWrite::DWRITE_OVERHANG_METRICS> {
+        Ok(Default::default())
+    }
+
+    fn GetBreakConditions(&self, before: *mut windows::Win32::Graphics::DirectWrite::DWRITE_BREAK_CONDITION, after: *mut windows::Win32::Graphics::DirectWrite::DWRITE_BREAK_CONDITION) -> Result<()> {
+        unsafe {
+            *before = windows::Win32::Graphics::DirectWrite::DWRITE_BREAK_CONDITION_NEUTRAL;
+            *after = windows::Win32::Graphics::DirectWrite::DWRITE_BREAK_CONDITION_NEUTRAL;
+        }
+        Ok(())
     }
 }
 

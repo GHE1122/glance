@@ -145,6 +145,21 @@ impl Inks {
     }
 }
 
+/// A to-do's box, `side` square from (`x`, `y`), in a note's `inks`: ruled round faintly; done, filled in the accent
+/// and ticked in what reads on it (light on a dark accent, dark on a light one).
+pub fn task_box(frame: &dyn Canvas, inks: Inks, x: f32, y: f32, side: f32, done: bool) {
+    let radius = side * 0.25;
+    if done {
+        frame.fill_rounded(inks.accent, x, y, side, side, radius);
+        let light = 0.2126 * inks.accent.r + 0.7152 * inks.accent.g + 0.0722 * inks.accent.b;
+        let tick = if light > 0.6 { Color::hex(0x1A1A1A, 1.0) } else { Color::hex(0xFFFFFF, 1.0) };
+        frame.icon(super::icons::Icon::Check, Point { x: x + side / 2.0, y: y + side / 2.0 }, side * 0.78, tick);
+    } else {
+        let line = (side / 11.0).max(1.0);
+        frame.stroke_rounded(Fill::Solid(inks.faint), x + line / 2.0, y + line / 2.0, side - line, side - line, radius, line);
+    }
+}
+
 /// The fixed face code in a note is written in.
 pub const CODE_FACE: &str = "Cascadia Mono";
 
