@@ -17,15 +17,25 @@ pub struct Found {
 static FOUND: Mutex<Option<Arc<Vec<Found>>>> = Mutex::new(None);
 static LOOKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(all(test, feature = "studio"))]
+thread_local! {
+    /// What this thread's pictures pretend (see `pretend`): each test's its own, as tests run side by side.
+    static PRETENDED: std::cell::RefCell<Option<Arc<Vec<Found>>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// What the Start menu was found to list, by name (none till first read).
 pub fn all() -> Option<Arc<Vec<Found>>> {
+    #[cfg(all(test, feature = "studio"))]
+    if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
+        return Some(pretended);
+    }
     FOUND.lock().unwrap().clone()
 }
 
 /// For pictures: as if the Start menu listed these.
 #[cfg(all(test, feature = "studio"))]
 pub fn pretend(found: Vec<Found>) {
-    *FOUND.lock().unwrap() = Some(Arc::new(found));
+    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(found)));
 }
 
 /// The Start menu read (again) on a thread of its own; `told` is called once it is.
