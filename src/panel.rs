@@ -885,7 +885,9 @@ impl Controller {
                         crate::screens::changed();
                         widgets.screens_changed();
                     }
-                    panels[at].screens_changed(msg.wParam.0 as u32, now);
+                    if let Some(again) = panels[at].screens_changed(msg.wParam.0 as u32, now) {
+                        again.open(&mut panels, at, now);
+                    }
                 }
                 crate::ui::window::SCREENS_CHANGED if widgets.owns(msg.hwnd) || widgets.full_owns(msg.hwnd) => widgets.screens_changed(),
                 crate::widget::CAPTURED if widgets.owns(msg.hwnd) => widgets.captured(msg.hwnd),
@@ -1533,6 +1535,31 @@ fn panel_for<'a>(panels: &mut Vec<Panel<'a>>, controller: &'a Controller, monito
     }
     panels.push(Panel::new(controller).expect("panel window"));
     panels.len() - 1
+}
+
+/// A panel open at an edge as the screens changed, to open again where it was: along its edge where it centred, pinned
+/// if it was, with the game to bring back.
+struct Reopen {
+    anchor: POINT,
+    edge: Edge,
+    pinned: bool,
+    game: Option<HWND>,
+}
+
+impl Reopen {
+    /// The panel `at` open again: at its edge of its screen (the nearest, that one gone; another edge, that one holding
+    /// nothing now), as a panel pinned opens as Glance starts; not where the pointer is, which put every panel at one
+    /// edge. Another up at that edge of that screen already (two screens become one): that one stays, this one not.
+    fn open(self, panels: &mut [Panel], at: usize, now: Instant) {
+        let Some(contact) = monitor_at(self.anchor) else { return };
+        let edge = panels[at].pinned_edge(self.anchor, contact, Some(self.edge));
+        if panels.iter().any(|panel| panel.at(contact.monitor, edge)) {
+            return;
+        }
+        panels[at].open(self.anchor, contact, edge, None, false, now);
+        panels[at].pinned = self.pinned && panels[at].is_open();
+        panels[at].game = self.game;
+    }
 }
 
 /// A point as a message carries it (x low, y high: physical px, each within what 16 bits hold).
@@ -2308,14 +2335,16 @@ impl<'a> Panel<'a> {
     /// nor is the scale of a window over the whole desktop (a panel away from
     /// the edge: see `Placement::window`), its largest screen's: only its own
     /// screen's scale counts.
-    fn screens_changed(&mut self, dpi: u32, now: Instant) {
+    ///
+    /// Open at an edge, it is to open again where it was (see `Reopen`): what is told back.
+    fn screens_changed(&mut self, dpi: u32, now: Instant) -> Option<Reopen> {
         // Dragged onto another screen, it is laid out for it as it is let
         // go; the screens themselves changing, seen to then.
         if self.drag.is_some() {
             self.screens_missed |= dpi == 0;
-            return;
+            return None;
         }
-        let Some(placement) = &self.placement else { return };
+        let placement = self.placement.as_ref()?;
         let changed = if dpi == 0 {
             // A game leaving exclusive fullscreen sets the display mode back
             // just as the panel comes up over it, often to what it was: a
@@ -2327,14 +2356,16 @@ impl<'a> Panel<'a> {
             monitor_at(middle).is_none_or(|now| (now.scale - placement.contact.scale).abs() > 0.001)
         };
         if !changed {
-            return;
+            return None;
         }
         // Open, it opens again, laid out for the screens as they are now,
-        // pinned if it was, and still with the game to bring back; on its
-        // way out, it is gone at once, and the game comes back as when it
-        // has closed (the game's own display mode change can come as late as
+        // pinned if it was, and still with the game to bring back: where it
+        // was, at its own edge of its own screen (see `Reopen`); on its way
+        // out, it is gone at once, and the game comes back as when it has
+        // closed (the game's own display mode change can come as late as
         // that).
         let (open, closing, pinned, game, floating) = (self.is_open(), matches!(self.phase, Phase::Closing), self.pinned, self.game, self.floating());
+        let (anchor, edge) = (placement.anchor, self.edge);
         self.dismiss();
         if closing {
             bring_back(game);
@@ -2342,13 +2373,8 @@ impl<'a> Panel<'a> {
         if open && floating {
             self.open_by_hand(now);
             self.pinned = pinned;
-        } else if open {
-            if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
-                self.open(cursor, contact, self.edge_for(cursor, contact), None, false, now);
-                self.pinned = pinned;
-                self.game = game;
-            }
         }
+        (open && !floating).then_some(Reopen { anchor, edge, pinned, game })
     }
 
     /// Takes the panel down at once (for the settings, or screens no longer

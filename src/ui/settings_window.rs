@@ -1527,6 +1527,26 @@ fn point(lparam: LPARAM) -> (i32, i32) {
     ((lparam.0 & 0xFFFF) as u16 as i16 as i32, ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32)
 }
 
+/// Whether `window` is `owner`'s own: owned by it, or by one of its own.
+fn owned_by(window: HWND, owner: HWND) -> bool {
+    let mut at = window;
+    while let Ok(up) = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindow(at, windows::Win32::UI::WindowsAndMessaging::GW_OWNER) } {
+        if up == owner {
+            return true;
+        }
+        at = up;
+    }
+    false
+}
+
+/// The settings `hwnd` no longer above all, gone from the front (see `WM_ACTIVATE`).
+fn leave_the_front(hwnd: HWND) {
+    unsafe {
+        let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+    }
+    crate::app().controller.settings_front(None);
+}
+
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         FOLLOW => {
@@ -1690,14 +1710,20 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         // Closed: everything it drew with is let go; the device stays with
         // the panel.
-        // Gone to another window: a new shortcut is no longer being taken.
+        // Gone to another window: a new shortcut is no longer being taken. Another program's, or another of Glance's:
+        // no longer above all, gone from the front (see `WM_ACTIVATE`, below). One of its own (a question it asks):
+        // in front still, above all with it, which stays over it (else the widgets above all come over the question).
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
             with_ui(|ui| ui.record(false));
-            // No longer above all, gone from the front (see `WM_ACTIVATE`, below).
-            unsafe {
-                let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+            if !owned_by(HWND(lparam.0 as *mut _), hwnd) {
+                leave_the_front(hwnd);
             }
-            crate::app().controller.settings_front(None);
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        // Another program come to the front while a question of its own was (the question no longer in front, it was
+        // not told above): gone from the front.
+        windows::Win32::UI::WindowsAndMessaging::WM_ACTIVATEAPP if wparam.0 == 0 => {
+            leave_the_front(hwnd);
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         // In front: the panel, staying up, gives way to it.
