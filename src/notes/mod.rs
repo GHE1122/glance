@@ -158,10 +158,13 @@ fn follow() {
 }
 
 /// What the system tells of a folder's changes: the notes' folder's (a note come, gone, renamed or written), or one
-/// above it while it is not there (a folder come in it, which may be it, or on the way to it).
+/// above it while it is not there (a folder come in it, which may be it, or on the way to it). The notes' folder
+/// followed, the folders in the one above it are followed too: the system tells of what changes in a folder, not of
+/// the folder itself (renamed, or gone).
 struct Watch {
     path: PathBuf,
     changed: windows::Win32::Foundation::HANDLE,
+    above: Option<windows::Win32::Foundation::HANDLE>,
 }
 
 impl Watch {
@@ -171,7 +174,8 @@ impl Watch {
         let what = if path == notes { FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_DIR_NAME } else { FILE_NOTIFY_CHANGE_DIR_NAME };
         let wide = windows::core::HSTRING::from(path.as_os_str());
         let changed = unsafe { FindFirstChangeNotificationW(&wide, false, what) }.ok()?;
-        Some(Watch { path, changed })
+        let above = path.parent().filter(|_| path == notes).and_then(|above| unsafe { FindFirstChangeNotificationW(&windows::core::HSTRING::from(above.as_os_str()), false, FILE_NOTIFY_CHANGE_DIR_NAME) }.ok());
+        Some(Watch { path, changed, above })
     }
 
     /// Till the folder changes, or Glance asks for it to be read again; whether it is still followed (followed again
@@ -179,14 +183,22 @@ impl Watch {
     fn wait(&self) -> bool {
         use windows::Win32::Foundation::WAIT_OBJECT_0;
         use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
-        let came = unsafe { WaitForMultipleObjects(&[again().0, self.changed], false, INFINITE) };
-        came.0 != WAIT_OBJECT_0.0 + 1 || unsafe { windows::Win32::Storage::FileSystem::FindNextChangeNotification(self.changed) }.is_ok()
+        let mut handles = vec![again().0, self.changed];
+        handles.extend(self.above);
+        let came = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+        // (Asked again: followed as it was. A folder changed: followed on as long as it can be.)
+        match came.0.checked_sub(WAIT_OBJECT_0.0).map(|at| at as usize) {
+            Some(at) if (1..handles.len()).contains(&at) => unsafe { windows::Win32::Storage::FileSystem::FindNextChangeNotification(handles[at]) }.is_ok(),
+            _ => true,
+        }
     }
 }
 
 impl Drop for Watch {
     fn drop(&mut self) {
-        let _ = unsafe { windows::Win32::Storage::FileSystem::FindCloseChangeNotification(self.changed) };
+        for changed in std::iter::once(self.changed).chain(self.above) {
+            let _ = unsafe { windows::Win32::Storage::FileSystem::FindCloseChangeNotification(changed) };
+        }
     }
 }
 
@@ -228,6 +240,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(made >= Duration::from_millis(100) && made < Duration::from_secs(2), "{made:?}");
         assert!(written >= Duration::from_millis(100) && written < Duration::from_secs(2), "{written:?}");
+    }
+
+    /// The notes' folder followed, renamed (by another program, a sync) is told of as it is: the system tells of
+    /// what changes in a folder followed, never of the folder itself, and one renamed was followed on under its new
+    /// name, its old notes shown, and one made in its place never read.
+    #[test]
+    fn the_folder_renamed_is_told_of() {
+        let root = std::env::temp_dir().join(format!("glance-notes-renamed-{}", std::process::id()));
+        let notes = root.join("Glance Notes");
+        let elsewhere = root.join("Old Notes");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&notes).unwrap();
+        let watch = Watch::start(notes.clone(), &notes).expect("followed");
+        let changing = std::thread::spawn({
+            let (notes, elsewhere) = (notes.clone(), elsewhere.clone());
+            move || {
+                std::thread::sleep(Duration::from_millis(150));
+                std::fs::rename(&notes, &elsewhere).unwrap();
+                // (Not told of: a note written where it went, which is, ends the wait.)
+                std::thread::sleep(Duration::from_secs(2));
+                std::fs::write(elsewhere.join("a.md"), "a note").unwrap();
+            }
+        });
+        let began = std::time::Instant::now();
+        watch.wait();
+        let told = began.elapsed();
+        changing.join().unwrap();
+        drop(watch);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(told >= Duration::from_millis(100) && told < Duration::from_secs(2), "{told:?}");
     }
 
     /// A conflict's copy known by its name, in either language, a second one numbered; a note merely about conflicts
