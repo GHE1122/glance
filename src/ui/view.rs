@@ -743,8 +743,10 @@ impl Tile {
         use crate::station::shelf::What;
         let (label, kind, face) = match &item.what {
             What::Files { paths, kept } => {
-                // (A file gone from where it was, by its copy where one is kept.)
-                let first = match kept.first().filter(|name| !name.is_empty() && !paths[0].exists()) {
+                // (A file gone from where it was, by its copy where one is kept. Whether it is gone as last looked at,
+                // on a thread of its own: a drive slow to answer, one on the network gone, never holds the drawing.)
+                let gone = || paths.first().is_some_and(|path| crate::station::thumbs::looked(path) == Some(crate::station::thumbs::Looked::Gone));
+                let first = match kept.first().filter(|name| !name.is_empty() && gone()) {
                     Some(name) => folder.path(name),
                     None => paths.first().cloned().unwrap_or_default(),
                 };

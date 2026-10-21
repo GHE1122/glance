@@ -73,14 +73,23 @@ pub fn pretend(apps: Vec<App>) {
     *SHOWN.lock().unwrap() = Some(Arc::new(apps));
 }
 
+/// What a thing kept at hand opens (see `opens`): the path of what it opens (or a Store app's name, a web address),
+/// and what that is given (a shortcut's arguments: two shortcuts to one browser, each to a profile of its own, open two
+/// things).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Opened {
+    pub path: String,
+    pub arguments: String,
+}
+
 /// What `target` (a thing kept at hand, or a program the Start menu lists) opens, as one thing however it is named:
 /// a desktop program the Start menu names by a known folder and its path in it (`shell:AppsFolder\{folder}\a.exe`)
-/// by the file's path, a shortcut by what it points at, a path the same in any case; a Store app, a folder, a web
-/// address as it is. Two that open the same are one thing kept (a program dropped on quick launch is the Start
+/// by the file's path, a shortcut by what it points at with what it gives it, a path the same in any case; a Store
+/// app, a folder, a web address as it is. Two that open the same are one thing kept (a program dropped on quick launch is the Start
 /// menu's). Shortcuts are read through the shell (a thread in a COM apartment); found once each (a shortcut not
 /// read for want of an apartment is not kept as found: read again where there is one).
-pub fn opens(target: &str) -> String {
-    static FOUND: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
+pub fn opens(target: &str) -> Opened {
+    static FOUND: Mutex<Option<std::collections::HashMap<String, Opened>>> = Mutex::new(None);
     if let Some(found) = FOUND.lock().unwrap().as_ref().and_then(|found| found.get(target).cloned()) {
         return found;
     }
@@ -104,31 +113,32 @@ pub fn same(a: &str, b: &str) -> bool {
 
 /// What `target` opens (see `opens`), and whether that is settled: not where a shortcut could not be read and this
 /// thread is in no COM apartment (where the shell cannot be asked).
-fn resolved(target: &str) -> (String, bool) {
+fn resolved(target: &str) -> (Opened, bool) {
+    let itself = || Opened { path: target.to_string(), arguments: String::new() };
     if target.starts_with("https://") || target.starts_with("http://") {
-        return (target.to_string(), true);
+        return (itself(), true);
     }
     let path = match target.strip_prefix("shell:AppsFolder\\") {
         // (A known folder's number, then the path in it; or a path; else a Store app's name.)
         Some(named) => match named.strip_prefix('{').and_then(|rest| rest.split_once("}\\")) {
             Some((folder, rest)) => match known_folder(folder) {
                 Some(folder) => folder.join(rest),
-                None => return (target.to_string(), true),
+                None => return (itself(), true),
             },
             None if Path::new(named).is_absolute() => PathBuf::from(named),
-            None => return (target.to_string(), true),
+            None => return (itself(), true),
         },
         None => PathBuf::from(target),
     };
-    let (path, settled) = if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("lnk")) {
+    let ((path, arguments), settled) = if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("lnk")) {
         match link_target(&path) {
             Some(target) => (target, true),
-            None => (path, in_apartment()),
+            None => ((path, String::new()), in_apartment()),
         }
     } else {
-        (path, true)
+        ((path, String::new()), true)
     };
-    (path.to_string_lossy().to_lowercase(), settled)
+    (Opened { path: path.to_string_lossy().to_lowercase(), arguments: arguments.trim().to_string() }, settled)
 }
 
 /// Whether this thread is in a COM apartment (the shell may be asked from it).
@@ -156,9 +166,9 @@ fn known_folder(id: &str) -> Option<PathBuf> {
     }
 }
 
-/// What the shortcut at `path` points at, where it says (on a thread in a COM apartment).
+/// What the shortcut at `path` points at, where it says, and what it gives it (on a thread in a COM apartment).
 #[cfg(windows)]
-fn link_target(path: &Path) -> Option<PathBuf> {
+fn link_target(path: &Path) -> Option<(PathBuf, String)> {
     use windows::core::Interface;
     use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
@@ -167,8 +177,12 @@ fn link_target(path: &Path) -> Option<PathBuf> {
         link.cast::<IPersistFile>().ok()?.Load(&windows::core::HSTRING::from(path.as_os_str()), STGM_READ).ok()?;
         let mut found = [0u16; 1024];
         link.GetPath(&mut found, std::ptr::null_mut(), 0).ok()?;
-        let length = found.iter().position(|unit| *unit == 0).unwrap_or(found.len());
-        (length > 0).then(|| PathBuf::from(String::from_utf16_lossy(&found[..length])))
+        let text = |units: &[u16]| String::from_utf16_lossy(&units[..units.iter().position(|unit| *unit == 0).unwrap_or(units.len())]);
+        let found = text(&found);
+        // (As long as a command line may be.)
+        let mut given = vec![0u16; 32_768];
+        link.GetArguments(&mut given).ok()?;
+        (!found.is_empty()).then(|| (PathBuf::from(found), text(&given)))
     }
 }
 
@@ -178,7 +192,7 @@ fn known_folder(_: &str) -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn link_target(_: &Path) -> Option<PathBuf> {
+fn link_target(_: &Path) -> Option<(PathBuf, String)> {
     None
 }
 
@@ -187,7 +201,7 @@ fn link_target(_: &Path) -> Option<PathBuf> {
 /// points at is a program installed to be set up when first opened). The Start menu lists documents, folders and
 /// web addresses beside them, which quick launch's picker leaves out.
 pub fn is_program(target: &str) -> bool {
-    let opened = opens(target);
+    let opened = opens(target).path;
     let named = opened.strip_prefix("shell:AppsFolder\\").unwrap_or(&opened);
     if named.starts_with("http://") || named.starts_with("https://") {
         return false;
@@ -247,6 +261,36 @@ mod tests {
         assert!(!same(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App"));
         assert!(same("https://github.com", "https://github.com"));
         assert!(!same("https://github.com", "https://GITHUB.com/a"));
+    }
+
+    /// Shortcuts to one program are one thing kept where they give it the same, two where they give it each its own
+    /// (two profiles of a browser); one giving it nothing is the program itself.
+    #[test]
+    #[cfg(windows)]
+    fn knows_shortcuts_apart_by_what_they_give() {
+        use windows::core::{Interface, HSTRING};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+        let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        let dir = crate::settings::local_dir().join("apps-shortcuts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = known_folder("1AC14E77-02E7-4E5D-B744-2EB1AE5198B7").expect("the System folder").join("notepad.exe");
+        let shortcut = |name: &str, arguments: &str| {
+            let path = dir.join(name);
+            unsafe {
+                let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+                link.SetPath(&HSTRING::from(program.as_os_str())).unwrap();
+                link.SetArguments(&HSTRING::from(arguments)).unwrap();
+                link.cast::<IPersistFile>().unwrap().Save(&HSTRING::from(path.as_os_str()), true).unwrap();
+            }
+            path.to_string_lossy().into_owned()
+        };
+        let (one, two, again, bare) = (shortcut("one.lnk", "--profile-directory=Default"), shortcut("two.lnk", "--profile-directory=\"Profile 1\""), shortcut("again.lnk", "--profile-directory=Default"), shortcut("bare.lnk", ""));
+        assert!(!same(&one, &two));
+        assert!(same(&one, &again));
+        assert!(same(&bare, &program.to_string_lossy()));
+        assert!(!same(&one, &program.to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// What the Start menu lists that is a program: a Store app, a program known by its own name, a program file
