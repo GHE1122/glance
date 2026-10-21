@@ -4113,7 +4113,7 @@ impl Widget {
         let pointer = cursor_position().filter(|_| self.hover && !self.click_through).map(|c| ((c.x - self.at.x) as f32 / px, (c.y - self.at.y) as f32 / px));
         // A note written in where it is: its card where it was last drawn, should none be drawn now.
         let was_card = self.in_place.as_ref().and_then(|in_place| card_in(&self.hits, self.hits_from, in_place.number, margin));
-        let mut in_place = self.in_place.as_mut();
+        let in_place = self.in_place.as_mut();
         let mut card_gone = false;
         let behind = &mut self.behind;
         let content = &mut self.content;
