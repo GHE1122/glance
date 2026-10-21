@@ -327,6 +327,14 @@ struct Writing {
     palette: super::editor::Palette,
     unkept: bool,
     said: Option<String>,
+    /// How its Markdown shows away from the lines written on, as it was last dressed, and those lines (see
+    /// `notes::markdown::Shown`).
+    shown: crate::notes::markdown::Shown,
+    written: std::ops::RangeInclusive<usize>,
+    /// What was chosen in it as it opened (the caret), and whether it has been written in or the caret moved since:
+    /// till then no line is written on, and it shows as the note did where it was pressed (its marks put away).
+    opened_at: (i32, i32),
+    touched: bool,
 }
 
 /// `color` as Windows' GDI writes one.
@@ -335,11 +343,47 @@ fn colorref(color: Color) -> windows::Win32::Foundation::COLORREF {
 }
 
 impl Writing {
-    /// Its words dressed as their Markdown reads.
-    fn dress(&self) {
+    /// Its words dressed as their Markdown reads, its marks put away off the lines written on (those of the caret, or
+    /// of what is chosen, once it has been written in or the caret moved: see `touched`).
+    fn dress(&mut self) {
+        use crate::notes::markdown::{written_lines, Shown, NONE_WRITTEN};
         let text = self.editor.text();
-        self.editor.dress(&crate::notes::markdown::looks(&text), &self.palette);
+        let shown = Shown::of(&text);
+        let (from, to) = self.editor.selection();
+        let written = if self.touched { written_lines(&text, (from.max(0) as usize, to.max(0) as usize)) } else { NONE_WRITTEN };
+        let mut hidden = shown.hidden(&written);
+        hidden.extend(shown.boxes(&written).map(|boxed| boxed.marks.clone()));
+        let rooms: Vec<usize> = shown.boxes(&written).map(|boxed| boxed.room).collect();
+        self.editor.dress(&crate::notes::markdown::looks(&text), &hidden, &rooms, &self.palette);
+        READS.with_borrow_mut(|reads| *reads = Some(Reads { shown: shown.clone(), written: written.clone(), folder: self.folder.clone() }));
+        self.shown = shown;
+        self.written = written;
     }
+
+    /// The lines written on now (see `dress`).
+    fn written_now(&self) -> std::ops::RangeInclusive<usize> {
+        let (from, to) = self.editor.selection();
+        match self.touched {
+            true => crate::notes::markdown::written_lines(&self.editor.text(), (from.max(0) as usize, to.max(0) as usize)),
+            false => crate::notes::markdown::NONE_WRITTEN,
+        }
+    }
+}
+
+/// How the note written shows away from the lines written on, for its words' box's messages (see `write`), which come
+/// whatever the page is in the middle of: as it was last dressed, and the folder it is in.
+struct Reads {
+    shown: crate::notes::markdown::Shown,
+    written: std::ops::RangeInclusive<usize>,
+    folder: std::path::PathBuf,
+}
+
+/// Where a to-do's box is drawn, over the room `room` drawn for it (in the window: see `Editor::character`), its
+/// words `pixels` high: its left, its top and its side.
+fn box_in(room: RECT, pixels: f32) -> (f32, f32, f32) {
+    use crate::notes::markdown::{BOX_IN, BOX_SIDE};
+    let side = BOX_SIDE * pixels;
+    (room.left as f32 + BOX_IN * pixels, (room.top + room.bottom) as f32 / 2.0 - side / 2.0, side)
 }
 
 /// What a note's words are written in on its page (`pixels` high), its colour `colour`: as its card's on the panel are
@@ -491,6 +535,10 @@ thread_local! {
     /// A note's words' box while the page shows one: reached by its messages whatever the page is in the middle of
     /// (see `write`).
     static EDITOR: RefCell<Option<Rc<super::editor::Editor>>> = const { RefCell::new(None) };
+    /// See `Reads`.
+    static READS: RefCell<Option<Reads>> = const { RefCell::new(None) };
+    /// The box was given a key, or the input method's words, since this was last asked (see `Writing::touched`).
+    static KEYED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn with<R>(act: impl FnOnce(&mut Beside) -> R) -> Option<R> {
@@ -759,7 +807,22 @@ fn show(opening: Opening) {
                 EDITOR.with(|held| *held.borrow_mut() = Some(editor.clone()));
                 let written_ms = read.as_ref().map_or_else(crate::station::now_ms, |(_, stamp)| stamp.written_ms);
                 *WRITING.lock().unwrap() = name.clone();
-                let writing = Writing { folder: folder.path.clone(), name, stamp: read.map(|(_, stamp)| stamp), colour, written_ms, editor, palette, unkept: false, said: None };
+                let opened_at = editor.selection();
+                let mut writing = Writing {
+                    folder: folder.path.clone(),
+                    name,
+                    stamp: read.map(|(_, stamp)| stamp),
+                    colour,
+                    written_ms,
+                    editor,
+                    palette,
+                    unkept: false,
+                    said: None,
+                    shown: Default::default(),
+                    written: crate::notes::markdown::NONE_WRITTEN,
+                    opened_at,
+                    touched: false,
+                };
                 writing.dress();
                 crate::perf::mark(|| "beside words dressed".into());
                 with(|beside| beside.writing = Some(writing));
@@ -853,6 +916,7 @@ fn let_go(told: bool) {
         }
         // (The text services let go of before the window they write in.)
         EDITOR.with(|held| held.borrow_mut().take());
+        READS.with_borrow_mut(|reads| *reads = None);
         beside.writing = None;
         unsafe {
             let _ = windows::Win32::System::Ole::RevokeDragDrop(beside.hwnd);
@@ -909,23 +973,58 @@ fn write(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
     if !its {
         return None;
     }
-    // A to-do's box pressed: ticked, or no longer (as if typed: undo takes it back).
-    let ticked = (message == WM_LBUTTONDOWN).then(|| {
+    if matches!(message, WM_KEYDOWN | WM_CHAR | WM_IME_COMPOSITION) {
+        KEYED.set(true);
+    }
+    // A to-do's box pressed: ticked, or no longer (as if typed: undo takes it back). Drawn as a box (off the lines
+    // written on), pressed anywhere in its room; written out, on its `[ ]`.
+    let ticked = (message == WM_LBUTTONDOWN)
+        .then(|| {
+            let drawn = READS.with_borrow(|reads| {
+                let reads = reads.as_ref()?;
+                reads.shown.boxes(&reads.written).find_map(|boxed| {
+                    let room = editor.character(boxed.room)?;
+                    (point.x >= room.left && point.x < room.right && point.y >= room.top && point.y < room.bottom).then(|| (boxed.marks.end - 3..boxed.marks.end, boxed.done))
+                })
+            });
+            drawn.or_else(|| {
+                let at = editor.at(point);
+                let text = editor.text();
+                crate::notes::markdown::tasks(&text).into_iter().find(|(range, _)| range.start <= at && at < range.end)
+            })
+        })
+        .flatten();
+    // A link's words, where they show as it reads: pressed, followed (a web address, or a file of the PC's).
+    let link_under = |point: POINT| {
         let at = editor.at(point);
-        let text = editor.text();
-        crate::notes::markdown::tasks(&text).into_iter().find(|(range, _)| range.start <= at && at < range.end)
-    });
-    let answered = match (ticked.flatten(), message) {
-        (Some((range, done)), _) => {
+        let on = editor.character(at).is_some_and(|drawn| point.x >= drawn.left && point.x < drawn.right && point.y >= drawn.top && point.y < drawn.bottom);
+        READS.with_borrow(|reads| reads.as_ref().filter(|_| on).and_then(|reads| reads.shown.link_at(at, &reads.written).map(|link| (link.to.clone(), reads.folder.clone()))))
+    };
+    let followed = match (ticked.is_none(), message) {
+        (true, WM_LBUTTONDOWN) => link_under(point),
+        _ => None,
+    };
+    let answered = match (ticked, followed, message) {
+        (Some((range, done)), _, _) => {
             editor.replace(range.start, range.end, if done { "[ ]" } else { "[x]" });
             Some(LRESULT(0))
         }
-        // (Its shape asked of the text services as their host asks it: see `Editor::set_cursor`.)
-        (None, WM_SETCURSOR) => {
-            editor.set_cursor(pointer());
+        (None, Some((to, folder)), _) => {
+            crate::notes::follow_link(&to, &folder);
+            Some(LRESULT(0))
+        }
+        // (Its shape asked of the text services as their host asks it: see `Editor::set_cursor`. Over a link that
+        // would be followed, the hand.)
+        (None, None, WM_SETCURSOR) => {
+            match link_under(pointer()) {
+                Some(_) => unsafe {
+                    SetCursor(LoadCursorW(None, IDC_HAND).ok());
+                },
+                None => editor.set_cursor(pointer()),
+            }
             Some(LRESULT(1))
         }
-        (None, _) => editor.send(message, wparam, lparam),
+        (None, None, _) => editor.send(message, wparam, lparam),
     };
     drop(editor);
     if with(Beside::written).is_none() {
@@ -1209,7 +1308,14 @@ impl Beside {
         let Some(writing) = self.writing.as_mut() else { return };
         let composed = writing.editor.take_composed();
         let changed = writing.editor.take_changed();
-        if composed || (changed && !writing.editor.composing()) {
+        // (Written in, or the caret moved: the lines it is on written on from now.)
+        let keyed = KEYED.replace(false);
+        let touched = !writing.touched && (keyed || composed || writing.editor.selection() != writing.opened_at);
+        writing.touched |= touched;
+        let composing = writing.editor.composing();
+        // Dressed again as it is written in, or as the lines written on change (not while the input method composes:
+        // its words are its till they are written).
+        if composed || (!composing && (changed || touched || writing.written_now() != writing.written)) {
             writing.dress();
         }
         if changed {
@@ -1948,6 +2054,20 @@ impl Beside {
         }
         frame.in_pixels(|target| editor.draw(target));
         unsafe { frame.dc.SetTransform(&was) };
+        // Its to-dos' boxes, drawn in the rooms made for them (off the lines written on), within its words' box.
+        let pixels = writing.palette.points / 0.75;
+        let inks = word_inks(&theme, writing.colour);
+        let bounds = editor.bounds();
+        let (left, top) = self.on_page(bounds.left as f32, bounds.top as f32);
+        let (right, bottom) = self.on_page(bounds.right as f32, bounds.bottom as f32);
+        frame.clip(left, top, right - left, bottom - top);
+        for boxed in writing.shown.boxes(&writing.written) {
+            let Some(room) = editor.character(boxed.room) else { continue };
+            let (x, y, side) = box_in(room, pixels);
+            let (x, y) = self.on_page(x, y);
+            super::canvas::task_box(frame, inks, x, y, side / self.scale, boxed.done);
+        }
+        frame.unclip();
         if let (Some((x, y, w, h)), true) = (editor.caret(), self.caret_on) {
             let (x, y) = self.on_page(x as f32, y as f32);
             let scale = self.scale;
@@ -2416,6 +2536,144 @@ otepad.exe"),
             }
             std::thread::sleep(std::time::Duration::from_millis(1500));
         }
+    }
+}
+
+#[cfg(all(test, feature = "studio"))]
+mod note_pictures {
+    use super::*;
+
+    /// A note's page as it opens, and the note stuck on the desktop it opens over, in each skin: each line's words
+    /// beginning where they do on the other (the page comes over the note without its words moving along their
+    /// lines), its marks put away (a heading's `#`, emphasis's, code's, a link's), a to-do a box; and the page once its
+    /// to-do's line is written on, that line as written. (Down the page, the text services set lines a little
+    /// further apart than DirectWrite, as they always have: within a few pixels after a few lines.)
+    /// (`cargo test --features studio --lib -- --ignored note_page_and_stuck_note` writes
+    /// `target/beside/note-<skin>-<face|page|written>.png`.)
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    fn note_page_and_stuck_note() {
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let gfx = gfx::current().unwrap();
+        let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let (w, h) = super::super::view::STUCK_NOTE;
+        let scale = 1.5;
+        let size = ((w * scale) as u32, (h * scale) as u32);
+        let text = "# 本周要做\n- [ ] 买**牛奶**和面包\n- [x] 交 `周报`\n看 [文档](https://a.b) 或 https://x.y/z\n> 引一句话\n- 列表一项";
+        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, size.0 as i32, size.1 as i32, None, None, None, None) }.unwrap();
+        let mut unlike = Vec::new();
+        for (skin, name) in [(Skin::Glass, "glass"), (Skin::Fluent, "fluent"), (Skin::Paper, "paper")] {
+            let theme = Theme::new(skin, false);
+            let colour = crate::notes::Colour::Blue;
+            let now = crate::station::now_ms();
+            let when = super::super::text::since(now, now, super::super::text::Lang::Zh);
+            let face = gfx.draw_offscreen(size, scale, |frame| paint_stuck_note(frame, &theme, super::super::text::Lang::Zh, text, colour, &when, "a.md", (0.0, 0.0, w, h))).unwrap();
+            crate::studio::save_png(&out.join(format!("note-{name}-face.png")), size.0, size.1, &face).unwrap();
+            let pixels = WORDS * scale;
+            let palette = palette_for(&theme, colour, pixels);
+            let editor = super::super::editor::Editor::new(hwnd, words_box(0, size.0 as i32, size.1 as i32, scale), &palette.face, pixels, palette.text).unwrap();
+            editor.set_text(text);
+            let writing = Writing {
+                folder: std::env::temp_dir(),
+                name: Some("a.md".into()),
+                stamp: None,
+                colour,
+                written_ms: now,
+                editor: Rc::new(editor),
+                palette,
+                unkept: false,
+                said: None,
+                shown: Default::default(),
+                written: crate::notes::markdown::NONE_WRITTEN,
+                opened_at: (0, 0),
+                touched: false,
+            };
+            let mut beside = Beside {
+                hwnd,
+                gfx: gfx.clone(),
+                surface: None,
+                _showing: super::super::life::Showing::of(&gfx),
+                scale,
+                theme: Rc::new(Theme::new(skin, false)),
+                lang: super::super::text::Lang::Zh,
+                page: Page::Note(Some("a.md".into())),
+                inset: 0.0,
+                frost: 0.0,
+                pressed: None,
+                choosing: false,
+                kind: Kinds::Programs,
+                dropping: false,
+                holding: None,
+                strip_scroll: 0.0,
+                strip_most: 0.0,
+                search: Typing::most(SEARCH_MOST),
+                scroll: 0.0,
+                scroll_most: 0.0,
+                pointer: None,
+                hits: Vec::new(),
+                caret: None,
+                caret_on: false,
+                waiting: false,
+                writing: Some(writing),
+                opening: None,
+                moved_from: None,
+                shown: true,
+                hiding: false,
+                marks: super::super::thumb::Dots::new(),
+            };
+            beside.writing.as_mut().unwrap().dress();
+            let page = gfx.draw_offscreen(size, scale, |frame| beside.paint(frame, (w, h))).unwrap();
+            crate::studio::save_png(&out.join(format!("note-{name}-page.png")), size.0, size.1, &page).unwrap();
+            // Each line's words (rows with ink, over white) beginning where they do on the other.
+            let (left, top, wide, tall) = note_words(w, h);
+            let lines = |pixels: &[u8]| {
+                let inked = |x: u32, y: u32| {
+                    let at = ((y * size.0 + x) * 4) as usize;
+                    u32::from(pixels[at + 1]) + 255 - u32::from(pixels[at + 3]) < 140
+                };
+                let (xs, ys) = ((left * scale) as u32..((left + wide) * scale) as u32, (top * scale) as u32..((top + tall) * scale) as u32);
+                let mut found: Vec<u32> = Vec::new();
+                let mut in_line = false;
+                for y in ys {
+                    let first = xs.clone().find(|&x| inked(x, y));
+                    match (first, in_line) {
+                        (Some(x), false) => {
+                            found.push(x);
+                            in_line = true;
+                        }
+                        (Some(x), true) => {
+                            let last = found.last_mut().unwrap();
+                            *last = (*last).min(x);
+                        }
+                        (None, _) => in_line = false,
+                    }
+                }
+                found
+            };
+            let (on_face, on_page) = (lines(&face), lines(&page));
+            let apart = on_face.len() != on_page.len() || on_face.iter().zip(&on_page).any(|(a, b)| a.abs_diff(*b) > 2);
+            unlike.push((name, apart, on_face, on_page));
+            // Written on: the caret on its to-do's line, that line as it is written.
+            {
+                let writing = beside.writing.as_mut().unwrap();
+                writing.touched = true;
+                let at = text.encode_utf16().position(|c| c == u16::from(b'-')).unwrap() as i32 + 3;
+                writing.editor.select((at, at));
+                writing.dress();
+            }
+            let written = gfx.draw_offscreen(size, scale, |frame| beside.paint(frame, (w, h))).unwrap();
+            crate::studio::save_png(&out.join(format!("note-{name}-written.png")), size.0, size.1, &written).unwrap();
+            beside.writing = None;
+        }
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        println!("where each line's words begin, on the stuck note and its page: {unlike:?}");
+        assert!(unlike.iter().all(|(_, apart, ..)| !apart), "{unlike:?}");
     }
 }
 

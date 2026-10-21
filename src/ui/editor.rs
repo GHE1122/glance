@@ -242,14 +242,20 @@ impl Editor {
         (answer == windows::Win32::Foundation::S_OK).then_some(result)
     }
 
-    /// Its words dressed as `looks` says (see `notes::markdown`), in `palette`'s colours and faces: what they are
-    /// left as it is, the dressing kept out of what undo takes back (and drawn once, done).
-    pub fn dress(&self, looks: &[(std::ops::Range<usize>, crate::notes::markdown::Look)], palette: &Palette) {
+    /// Its words dressed as `looks` says (see `notes::markdown`), in `palette`'s colours and faces, `hidden` hidden
+    /// (Markdown's marks put away) and each of `rooms` (a space) made as wide as a to-do's box's room
+    /// (`markdown::BOX_ROOM`): what they are left as it is, the dressing kept out of what undo takes back (and drawn
+    /// once, done).
+    pub fn dress(&self, looks: &[(std::ops::Range<usize>, crate::notes::markdown::Look)], hidden: &[std::ops::Range<usize>], rooms: &[usize], palette: &Palette) {
         use crate::notes::markdown::Look;
         let Ok(document) = self.services.cast::<ITextDocument>() else { return };
         let face = BSTR::from(palette.face.as_str());
         let code = BSTR::from(palette.code_face.as_str());
         let color = |c: COLORREF| c.0 as i32;
+        // (A space as wide as the room: what it is wide as it is, and as much again as the room needs. Points, as the
+        // text services count, three to four pixels.)
+        let pixels = palette.points / 0.75;
+        let more = space_width(&palette.face, pixels).map(|space| (crate::notes::markdown::BOX_ROOM * pixels - space) * 0.75);
         unsafe {
             let _ = document.Undo(tomSuspend.0);
             let _ = document.Freeze();
@@ -258,6 +264,8 @@ impl Editor {
                 let _ = font.SetBold(tomFalse.0);
                 let _ = font.SetItalic(tomFalse.0);
                 let _ = font.SetStrikeThrough(tomFalse.0);
+                let _ = font.SetHidden(tomFalse.0);
+                let _ = font.SetSpacing(0.0);
                 let _ = font.SetSize(palette.points);
                 let _ = font.SetName(&face);
                 let _ = font.SetForeColor(color(palette.text));
@@ -278,11 +286,41 @@ impl Editor {
                     Look::Plain => font.SetForeColor(color(palette.text)),
                 };
             }
+            for range in hidden {
+                if let Ok(font) = document.Range(range.start as i32, range.end as i32).and_then(|range| range.GetFont()) {
+                    let _ = font.SetHidden(tomTrue.0);
+                }
+            }
+            for room in rooms.iter().filter(|_| more.is_some()) {
+                if let Ok(font) = document.Range(*room as i32, *room as i32 + 1).and_then(|range| range.GetFont()) {
+                    let _ = font.SetSpacing(more.unwrap_or_default());
+                }
+            }
             let _ = document.Unfreeze();
             let _ = document.Undo(tomResume.0);
         }
         // (Dressing is no writing.)
         self.kept.changed.set(false);
+    }
+
+    /// Where the character at `at` (UTF-16 units) is drawn (in the window): from its left and its line's top to where
+    /// the next begins and its line's foot. None where it is not drawn (scrolled out of the box).
+    pub fn character(&self, at: usize) -> Option<RECT> {
+        // (tomStart, tomEnd; tomClientCoord: in the window, not on the screen; TA_BOTTOM.)
+        const START: i32 = 32;
+        const END: i32 = 0;
+        const IN_WINDOW: i32 = 256;
+        const FOOT: i32 = 8;
+        let document = self.services.cast::<ITextDocument>().ok()?;
+        let range = unsafe { document.Range(at as i32, at as i32 + 1) }.ok()?;
+        let point = |kind: i32| {
+            let (mut x, mut y) = (0, 0);
+            unsafe { range.GetPoint(tomConstants(kind | IN_WINDOW), &mut x, &mut y) }.ok().map(|()| (x, y))
+        };
+        let (left, top) = point(START)?;
+        let (_, bottom) = point(START | FOOT)?;
+        let (right, _) = point(END)?;
+        Some(RECT { left, top, right: right.max(left), bottom })
     }
 
     /// Where among its words (in UTF-16 units) the point `point` (in the window) is.
@@ -315,6 +353,11 @@ impl Editor {
         self.answer(EM_EXSETSEL, WPARAM(0), LPARAM(&range as *const _ as isize));
     }
 
+    /// Where its words are written (in the window).
+    pub fn bounds(&self) -> RECT {
+        self.kept.rect.get()
+    }
+
     /// Whether `point` (in the window) is where its words are.
     pub fn holds(&self, point: POINT) -> bool {
         let rect = self.kept.rect.get();
@@ -341,6 +384,28 @@ impl Editor {
     pub fn caret(&self) -> Option<(i32, i32, i32, i32)> {
         self.kept.caret_shown.get().then(|| self.kept.caret.get()).flatten()
     }
+}
+
+/// How wide a space is in `face` `pixels` high (pixels), as DirectWrite lays it (as the text services draw here),
+/// measured once for each (none where DirectWrite could not lay it).
+fn space_width(face: &str, pixels: f32) -> Option<f32> {
+    use windows::Win32::Graphics::DirectWrite::{DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_METRICS};
+    thread_local! {
+        static MEASURED: std::cell::RefCell<Vec<(String, u32, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    if let Some(width) = MEASURED.with_borrow(|measured| measured.iter().find(|(kept, size, _)| kept == face && *size == pixels.to_bits()).map(|(_, _, width)| *width)) {
+        return Some(width);
+    }
+    let measured = (|| unsafe {
+        let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+        let format = factory.CreateTextFormat(&HSTRING::from(face), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, pixels, windows::core::w!("zh-cn")).ok()?;
+        let layout = factory.CreateTextLayout(&[u16::from(b' ')], &format, 1000.0, 1000.0).ok()?;
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        layout.GetMetrics(&mut metrics).ok()?;
+        Some(metrics.widthIncludingTrailingWhitespace)
+    })()?;
+    MEASURED.with_borrow_mut(|kept| kept.push((face.to_string(), pixels.to_bits(), measured)));
+    Some(measured)
 }
 
 impl Drop for Editor {
@@ -691,7 +756,7 @@ mod tests {
             let editor = Editor::new(hwnd, RECT { left: 0, top: 0, right: 400, bottom: 300 }, "Microsoft YaHei UI", 20.0, COLORREF(0)).expect("text services");
             let palette = Palette { text: COLORREF(0x202020), faint: COLORREF(0x909090), accent: COLORREF(0xD07000), points: 15.0, face: "Microsoft YaHei UI".into(), code_face: "Cascadia Mono".into() };
             editor.set_text("# Title\nbody");
-            editor.dress(&looks(&editor.text()), &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &palette);
             let document: ITextDocument = editor.services.cast().unwrap();
             let font_at = |at: i32| document.Range(at, at + 1).unwrap().GetFont().unwrap();
             // "T" (2) bold and larger; "b" of body (8) neither.
@@ -707,7 +772,7 @@ mod tests {
                 let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(usize::from(c)), LPARAM(0));
             }
             assert_eq!(editor.text().trim_end(), "# Title\nbody!");
-            editor.dress(&looks(&editor.text()), &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &palette);
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
             assert_eq!(editor.text().trim_end(), "# Title\nbody");
             assert_eq!(font_at(2).GetBold().unwrap(), tomTrue.0);
@@ -727,12 +792,12 @@ mod tests {
             for c in "你好世界".encode_utf16() {
                 let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(usize::from(c)), LPARAM(0));
             }
-            editor.dress(&looks(&editor.text()), &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &palette);
             let back = WPARAM(usize::from(windows::Win32::UI::Input::KeyboardAndMouse::VK_BACK.0));
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN, back, LPARAM(0));
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(8), LPARAM(0));
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_KEYUP, back, LPARAM(0));
-            editor.dress(&looks(&editor.text()), &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &palette);
             assert_eq!(editor.text().trim_end(), "你好世");
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
             assert_eq!(editor.text().trim_end(), "你好世界");
@@ -749,6 +814,46 @@ mod tests {
             let _ = document.Range(0, 0).and_then(|range| range.SetText(&BSTR::from("x")));
             let _ = DestroyWindow(hwnd);
             drop(document);
+        }
+    }
+
+    /// Its marks put away as a note not written on shows them: a to-do's words begin where its box's room ends
+    /// (`markdown::BOX_ROOM` of its words' height on), as the note's face sets them; emphasis's marks take no room;
+    /// and typing then undoing leaves them put away (their dressing not what undo takes back).
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn puts_marks_away_and_makes_room_for_a_box() {
+        use crate::notes::markdown::{Shown, BOX_ROOM, NONE_WRITTEN};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""), WS_POPUP, 0, 0, 400, 300, None, None, None, None).unwrap();
+            let editor = Editor::new(hwnd, RECT { left: 0, top: 0, right: 400, bottom: 300 }, "Microsoft YaHei UI", 20.0, COLORREF(0)).expect("text services");
+            let palette = Palette { text: COLORREF(0x202020), faint: COLORREF(0x909090), accent: COLORREF(0xD07000), points: 15.0, face: "Microsoft YaHei UI".into(), code_face: "Cascadia Mono".into() };
+            let pixels = palette.points / 0.75;
+            let dress = |editor: &Editor| {
+                let text = editor.text();
+                let shown = Shown::of(&text);
+                let mut hidden = shown.hidden(&NONE_WRITTEN);
+                hidden.extend(shown.boxes(&NONE_WRITTEN).map(|boxed| boxed.marks.clone()));
+                let rooms: Vec<usize> = shown.boxes(&NONE_WRITTEN).map(|boxed| boxed.room).collect();
+                editor.dress(&looks(&text), &hidden, &rooms, &palette);
+            };
+            // "买" at 6, "粗" at 10 (after "**").
+            editor.set_text("- [ ] 买牛奶\n**粗**体");
+            dress(&editor);
+            let left_of = |at: usize| editor.character(at).expect("drawn").left;
+            let (task, bold) = (left_of(6), left_of(10));
+            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_SETFOCUS, WPARAM(0), LPARAM(0));
+            editor.select((9, 9));
+            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(usize::from(b'x')), LPARAM(0));
+            dress(&editor);
+            let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
+            let undone = (left_of(6), left_of(10));
+            drop(editor);
+            let _ = DestroyWindow(hwnd);
+            assert!((task as f32 - BOX_ROOM * pixels).abs() <= 1.5, "the to-do's words at {task}, its room {}", BOX_ROOM * pixels);
+            assert!(bold <= 1, "the emphasised words at {bold}, their marks taking room");
+            assert_eq!(undone, (task, bold), "typed and undone, the marks no longer put away");
         }
     }
 }

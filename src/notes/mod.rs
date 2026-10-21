@@ -31,6 +31,51 @@ fn again() -> &'static Event {
     AGAIN.get_or_init(|| Event(unsafe { windows::Win32::System::Threading::CreateEventW(None, false, false, None) }.expect("an event")))
 }
 
+/// A note's link followed, `to` where it goes, in the note's folder `folder`: a web address (or an e-mail's) in what
+/// opens it; else a file of the PC's (where it is, or from the folder), opened as Explorer opens it, where it is there
+/// and not of a kind Windows holds unsafe to open (a program, a script): those, and anything else, not followed. On a
+/// thread of its own (the shell may take a while).
+pub fn follow_link(to: &str, folder: &std::path::Path) {
+    let lower = to.to_ascii_lowercase();
+    let target = if ["http://", "https://", "mailto:"].iter().any(|scheme| lower.starts_with(scheme)) {
+        to.to_string()
+    } else {
+        let path = folder.join(decoded(to));
+        let safe = path.exists() && !unsafe { windows::Win32::UI::Shell::AssocIsDangerous(&windows::core::HSTRING::from(path.as_os_str())) }.as_bool();
+        if !safe {
+            crate::journal::note(format!("notes: a link not followed, to {to}"));
+            return;
+        }
+        path.to_string_lossy().into_owned()
+    };
+    let _ = std::thread::Builder::new().name("glance: link".into()).spawn(move || unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        windows::Win32::UI::Shell::ShellExecuteW(None, windows::core::w!("open"), &windows::core::HSTRING::from(target.as_str()), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
+        windows::Win32::System::Com::CoUninitialize();
+    });
+}
+
+/// A link's path as Markdown writes one (`%20` a space): its bytes written as `%` and two hex digits as they are.
+fn decoded(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (bytes[at], bytes.get(at + 1).copied().and_then(hex), bytes.get(at + 2).copied().and_then(hex)) {
+            (b'%', Some(high), Some(low)) => {
+                out.push((high * 16 + low) as u8);
+                at += 3;
+            }
+            (byte, ..) => {
+                out.push(byte);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// The notes, the last written first (none till first read).
 pub fn shown() -> Arc<Vec<Note>> {
     SHOWN.lock().unwrap().clone().unwrap_or_default()
