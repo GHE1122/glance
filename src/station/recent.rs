@@ -240,13 +240,15 @@ mod reasons {
     pub const SYSTEM: u32 = 0x4;
     pub const FOLDER: u32 = 0x10;
     pub const TEMPORARY: u32 = 0x100;
+    /// What a file listed is not: hidden, the system's, a folder, passing.
+    pub const NOT_LISTED: u32 = HIDDEN | SYSTEM | FOLDER | TEMPORARY;
 }
 
-/// A file looked for by its number: where it is (its path, when it was made, how large it is), gone, not the user's
+/// A file looked for by its number: where it is (its path, when it was made, how large it is, its attributes), gone, not the user's
 /// to open (never listed), or not to be told now (its drive away, it locked: asked again later).
 #[derive(Clone, PartialEq, Debug)]
 pub enum Looked {
-    At(PathBuf, u64, u64),
+    At(PathBuf, u64, u64, u32),
     Gone,
     Theirs,
     Unknown,
@@ -288,11 +290,17 @@ impl Kept {
         }
         let had = self.files.iter().position(|came| came.key == key);
         let come = change.reason & (CREATED | RENAMED_TO) != 0 && now.saturating_sub(change.at_ms) <= KEEP_MS;
-        if !(come || had.is_some()) || change.attributes & (HIDDEN | SYSTEM | FOLDER | TEMPORARY) != 0 {
+        // (Made hidden, the system's or passing since it was listed: no longer listed.)
+        if change.attributes & reasons::NOT_LISTED != 0 {
+            self.later.retain(|(letter, later, _)| (*letter, later.file) != (drive, change.file));
+            return had.map(|at| self.files.remove(at)).is_some();
+        }
+        if !(come || had.is_some()) {
             return false;
         }
         let (path, made_ms, bytes) = match open(change.file) {
-            Looked::At(path, made_ms, bytes) => (path, made_ms, bytes),
+            Looked::At(_, _, _, attributes) if attributes & reasons::NOT_LISTED != 0 => return had.map(|at| self.files.remove(at)).is_some(),
+            Looked::At(path, made_ms, bytes, _) => (path, made_ms, bytes),
             Looked::Unknown => {
                 if self.later.len() < LATER_MOST && !self.later.iter().any(|(letter, later, _)| (*letter, later.file) == (drive, change.file)) {
                     self.later.push((drive, change, 0));
@@ -361,7 +369,9 @@ impl Kept {
         let mut changed = false;
         self.files.retain_mut(|came| {
             let keep = match look(came.key) {
-                Looked::At(path, _, bytes) => match (!out(&path)).then(|| kind_of(&path, places)).flatten() {
+                // (Made hidden, the system's or passing meanwhile: no longer listed.)
+                Looked::At(_, _, _, attributes) if attributes & reasons::NOT_LISTED != 0 => false,
+                Looked::At(path, _, bytes, _) => match (!out(&path)).then(|| kind_of(&path, places)).flatten() {
                     Some((kind, downloaded)) => {
                         if (&came.path, came.kind, came.downloaded, came.bytes) != (&path, kind, downloaded, bytes) {
                             (came.path, came.kind, came.downloaded, came.bytes) = (path, kind, downloaded, bytes);
@@ -781,7 +791,7 @@ mod os {
                 let path = PathBuf::from(path.strip_prefix(r"\\?\").unwrap_or(&path));
                 let made = (u64::from(information.ftCreationTime.dwHighDateTime) << 32) | u64::from(information.ftCreationTime.dwLowDateTime);
                 let bytes = (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
-                Looked::At(path, super::ms_of(made), bytes)
+                Looked::At(path, super::ms_of(made), bytes, information.dwFileAttributes)
             }
         }
     }
@@ -884,7 +894,7 @@ mod tests {
         let places = places();
         let change = |file: u128, reason: u32| Change { file, folder: 9, reason, attributes: 0x20, at_ms: now };
         let mut kept = Kept::default();
-        let open = |path: &'static str, made: u64| move |_: u128| Looked::At(PathBuf::from(path), made, 10);
+        let open = |path: &'static str, made: u64| move |_: u128| Looked::At(PathBuf::from(path), made, 10, 0);
         let site = |_: &Path| Some("github.com".to_string());
         let out = |path: &Path| left_out(path, &[]);
         assert!(kept.take('C', change(1, 0x8000_0100), now, &places, &out, open(r"C:\Users\a\Downloads\a.zip", now - 1000), site));
@@ -918,8 +928,8 @@ mod tests {
         let change = |reason: u32| Change { file: 7, folder: 9, reason, attributes: 0x20, at_ms: now };
         let out = |path: &Path| left_out(path, &[]);
         let mut kept = Kept::default();
-        assert!(kept.take('C', change(0x8000_0100), now, &places, &out, |_| Looked::At(PathBuf::from(r"C:\Users\a\Downloads\c.zip"), now - 20, 1), |_| None));
-        assert!(kept.take('D', change(0x8000_0100), now, &places, &out, |_| Looked::At(PathBuf::from(r"D:\Documents\d.pdf"), now - 10, 1), |_| None));
+        assert!(kept.take('C', change(0x8000_0100), now, &places, &out, |_| Looked::At(PathBuf::from(r"C:\Users\a\Downloads\c.zip"), now - 20, 1, 0), |_| None));
+        assert!(kept.take('D', change(0x8000_0100), now, &places, &out, |_| Looked::At(PathBuf::from(r"D:\Documents\d.pdf"), now - 10, 1, 0), |_| None));
         assert_eq!(kept.files.len(), 2);
         assert!(kept.take('D', change(0x8000_0200), now, &places, &out, |_| Looked::Gone, |_| None));
         assert_eq!(kept.files.iter().map(|came| came.path.clone()).collect::<Vec<_>>(), [PathBuf::from(r"C:\Users\a\Downloads\c.zip")]);
@@ -955,13 +965,13 @@ mod tests {
             ..Kept::default()
         };
         let look = |key: Key| match (key.drive, key.file) {
-            ('D', 1) => Looked::At(PathBuf::from(r"D:\a\one.pdf"), 1, 900),
-            ('D', 2) => Looked::At(PathBuf::from(r"D:\b renamed\two.pdf"), 1, 1),
+            ('D', 1) => Looked::At(PathBuf::from(r"D:\a\one.pdf"), 1, 900, 0),
+            ('D', 2) => Looked::At(PathBuf::from(r"D:\b renamed\two.pdf"), 1, 1, 0),
             ('D', 3) => Looked::Gone,
             ('D', 5) => Looked::Unknown,
-            ('D', 6) => Looked::At(PathBuf::from(r"D:\repo\six.pdf"), 1, 1),
-            ('C', 7) => Looked::At(PathBuf::from(r"D:\Tools\tool.exe"), 1, 1),
-            ('C', 8) => Looked::At(PathBuf::from(r"D:\Photos\sea.png"), 1, 1),
+            ('D', 6) => Looked::At(PathBuf::from(r"D:\repo\six.pdf"), 1, 1, 0),
+            ('C', 7) => Looked::At(PathBuf::from(r"D:\Tools\tool.exe"), 1, 1, 0),
+            ('C', 8) => Looked::At(PathBuf::from(r"D:\Photos\sea.png"), 1, 1, 0),
             _ => Looked::Unknown,
         };
         assert!(kept.recheck(&places(), look, &|path: &Path| path.starts_with(r"D:\repo")));
@@ -987,7 +997,7 @@ mod tests {
         // Kept with where the journal was read up to.
         let kept_again: Kept = serde_json::from_slice(&serde_json::to_vec(&kept).unwrap()).unwrap();
         assert_eq!(kept_again.later.len(), 2);
-        let open = |_: char, file: u128| if file == 1 { Looked::At(PathBuf::from(r"D:\Documents\one.pdf"), now - 10, 5) } else { Looked::Unknown };
+        let open = |_: char, file: u128| if file == 1 { Looked::At(PathBuf::from(r"D:\Documents\one.pdf"), now - 10, 5, 0) } else { Looked::Unknown };
         assert!(kept.retry(now, &places, &out, open, |_| None));
         assert_eq!(kept.files.iter().map(|came| came.key.file).collect::<Vec<_>>(), [1]);
         assert_eq!(kept.later.iter().map(|(_, change, tries)| (change.file, *tries)).collect::<Vec<_>>(), [(2, 1)]);
@@ -1004,13 +1014,20 @@ mod tests {
         let places = places();
         let out = |path: &Path| left_out(path, &[]);
         let mut kept = Kept::default();
-        let open = |bytes: u64| move |_: u128| Looked::At(PathBuf::from(r"D:\Documents\a.txt"), now - 100, bytes);
+        let open = |bytes: u64| move |_: u128| Looked::At(PathBuf::from(r"D:\Documents\a.txt"), now - 100, bytes, 0);
         assert!(kept.take('D', Change { file: 1, folder: 9, reason: 0x8000_0100, attributes: 0x20, at_ms: now }, now, &places, &out, open(5), |_| None));
         // Written again (data extended, closed).
         assert!(kept.take('D', Change { file: 1, folder: 9, reason: 0x8000_0002, attributes: 0x20, at_ms: now }, now, &places, &out, open(500), |_| None));
         assert_eq!(kept.files[0].bytes, 500);
         // Another file, not listed, written: not opened.
         assert!(!kept.take('D', Change { file: 2, folder: 9, reason: 0x8000_0002, attributes: 0x20, at_ms: now }, now, &places, &out, |_| panic!("opened"), |_| None));
+        // Made hidden (its attributes changed, closed): no longer listed.
+        assert!(kept.take('D', Change { file: 1, folder: 9, reason: 0x8000_8000, attributes: 0x22, at_ms: now }, now, &places, &out, open(500), |_| None));
+        assert!(kept.files.is_empty());
+        // Made hidden while the journal was not read: taken off as it is looked for again.
+        assert!(kept.take('D', Change { file: 1, folder: 9, reason: 0x8000_0100, attributes: 0x20, at_ms: now }, now, &places, &out, open(5), |_| None));
+        assert!(kept.recheck(&places, |_| Looked::At(PathBuf::from(r"D:\Documents\a.txt"), now - 100, 5, 0x22), &out));
+        assert!(kept.files.is_empty());
     }
 
     /// A file in a repository's working tree or a program's folder, however deep: a tool's; beside them, or in
