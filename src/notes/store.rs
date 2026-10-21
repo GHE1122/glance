@@ -204,12 +204,20 @@ impl Folder {
     fn put_back(&self, name: &str, text: &str, displaced: &Path) -> std::io::Result<Written> {
         let path = self.path.join(name);
         let written = self.apart(name, text)?;
-        // (In its place still what was written here, kept apart now: taken away; anything else there is another's.)
-        if std::fs::read(&path).is_ok_and(|now| now == text.as_bytes()) {
-            std::fs::remove_file(&path)?;
+        let stem = Path::new(name).file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+        // In its place still what was written here, kept apart now: taken away; anything else there is another's, and
+        // stays. Moved aside first, in one move, and looked at where no one else writes: looked at in its place and
+        // then taken away by its name, a file written there in between was taken away in its stead.
+        let taken = self.free_hidden(&format!(".{name}.glance-taken"));
+        if put_new(&path, &taken).is_ok() {
+            if std::fs::read(&taken).is_ok_and(|now| now == text.as_bytes()) {
+                std::fs::remove_file(&taken)?;
+            } else if put_new(&taken, &path).is_err() {
+                // (Another's, and yet another written in its place meanwhile: kept beside it, never over it.)
+                self.put_new_named(&format!("{stem}{}.md", self.apart), &taken)?;
+            }
         }
         if put_new(displaced, &path).is_err() {
-            let stem = Path::new(name).file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
             self.put_new_named(&format!("{stem}{}.md", self.apart), displaced)?;
         }
         Ok(written)

@@ -108,6 +108,8 @@ enum Ask {
     Follow(RECT, Skin, bool),
     /// The skin chosen does not see the desktop: the scene kept from page to page let go of.
     Unsee,
+    /// Glance going: what is written on the page kept (see `Beside::keep_as_glance_goes`), told when it is.
+    Quitting(Sender<()>),
 }
 
 static ASKS: OnceLock<Mutex<Sender<Ask>>> = OnceLock::new();
@@ -205,6 +207,18 @@ pub fn follow_skin(skin: Skin) {
 
 /// What the page up was last asked to follow, or opened from (see `follow`).
 static FOLLOWED: Mutex<Option<(RECT, Skin, bool)>> = Mutex::new(None);
+
+/// Glance going: what is written on the page up kept before it goes, as long as that takes (a while at most). Else
+/// what was written since it was last kept (it is kept a moment after the last key), or all of it where it could not
+/// be (its folder's drive gone), went with Glance.
+pub fn keep_as_glance_goes() {
+    if !is_up() {
+        return;
+    }
+    let (told, kept) = std::sync::mpsc::channel();
+    ask(Ask::Quitting(told));
+    let _ = kept.recv_timeout(std::time::Duration::from_secs(5));
+}
 
 /// The page up, gone.
 pub fn close() {
@@ -488,6 +502,10 @@ fn run(asks: Receiver<Ask>) {
                         Ask::Open(opening) => show(opening),
                         Ask::Close => gone(),
                         Ask::Unsee => BEHIND.with(|held| *held.borrow_mut() = (None, None, None)),
+                        Ask::Quitting(told) => {
+                            with(Beside::keep_as_glance_goes);
+                            let _ = told.send(());
+                        }
                         // (Moved along; or opened again as it was, in the skin now, its room round it the skin's, or as
                         // large as it is to be.)
                         Ask::Follow(by, skin, dark) => {
@@ -1172,6 +1190,23 @@ impl Beside {
         self.redraw();
     }
 
+    /// Glance going: what is written kept (see `keep`), or, where it cannot be, put beside Glance's settings, in
+    /// "unsaved notes", not lost with it (and said so in the journal).
+    fn keep_as_glance_goes(&mut self) {
+        if self.keep() {
+            return;
+        }
+        let Some(writing) = self.writing.as_ref() else { return };
+        let stem = writing.name.as_deref().and_then(|name| std::path::Path::new(name).file_stem()).map_or_else(|| "note".to_string(), |stem| stem.to_string_lossy().into_owned());
+        let dir = crate::settings::config_dir().join("unsaved notes");
+        let path = dir.join(format!("{stem} {}.md", crate::station::now_ms()));
+        let put = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, writing.editor.text()));
+        crate::journal::note(match put {
+            Ok(()) => format!("beside: Glance went with a note it could not keep; what was written is in {}", path.display()),
+            Err(error) => format!("beside: Glance went with a note it could not keep, nor put in {} ({error})", path.display()),
+        });
+    }
+
     /// The note written kept in its file, where what is written is not kept yet (see `notes::Folder::write`): a new
     /// one named by its title as it is first kept (an empty one never), one changed outside meanwhile kept apart.
     /// Whether all that was written is kept now (a failure leaves it not kept: the page stays up, and says so).
@@ -1314,7 +1349,7 @@ impl Beside {
 
     /// `choice` made in the note's menu: done; whether the page is to go.
     fn note_chose(&mut self, choice: NoteChoice) -> bool {
-        let _ = self.keep();
+        let kept = self.keep();
         let Some(writing) = self.writing.as_mut() else { return false };
         let folder = crate::notes::folder_at(writing.folder.clone());
         match choice {
@@ -1338,6 +1373,12 @@ impl Beside {
                 true
             }
             NoteChoice::TakeAway => {
+                // (What is written not kept, the page stays, saying so: taken away, the Recycle Bin had the note as it
+                // was before, and what was written was gone with the page.)
+                if !kept {
+                    self.redraw();
+                    return false;
+                }
                 let taken = writing.name.as_ref().is_some_and(|name| folder.take_away(name));
                 if taken {
                     writing.unkept = false;

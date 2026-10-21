@@ -565,7 +565,8 @@ pub fn run() {
         })
         .expect("a thread started");
     tray::run();
-    // (What was changed last is on the disk before Glance goes, and what was noted last.)
+    // (What was changed last is on the disk before Glance goes, a note written in too, and what was noted last.)
+    ui::beside::keep_as_glance_goes();
     saved_all();
     presents::stop_started();
     journal::written();
