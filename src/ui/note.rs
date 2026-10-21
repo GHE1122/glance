@@ -8,7 +8,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LRESULT, POINT, RECT};
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_DOWN, VK_E, VK_ESCAPE, VK_I, VK_K, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_UP, VK_V, VK_X, VK_Y, VK_Z,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::canvas::{Align, Canvas, Color, Family, Font, Inks, Point};
@@ -192,6 +194,85 @@ struct Reads {
 /// What a note's words' box answers its window's messages with (see `Writing::answer`).
 pub use super::keys::Answer;
 
+/// The keys held as another goes down.
+#[derive(Clone, Copy, Default)]
+struct Held {
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+}
+
+/// Whether `key` writes a character (a letter, a digit, a mark): with Ctrl held, one of the text services' own keys
+/// that dress the words (bold, centred, spaced) where it is not one a note's (see `pressed`).
+fn writes(key: VIRTUAL_KEY) -> bool {
+    matches!(key.0, 0x30..=0x39 | 0x41..=0x5A | 0x60..=0x6F | 0xBA..=0xC0 | 0xDB..=0xDF | 0xE2)
+}
+
+/// What `key` going down does to the words as Markdown is written (see `notes::edit`), `text` written and `chosen`
+/// chosen, `held` held with it (`system`: told as a system key, Alt held): an edit made (`Some(Some)`), or nothing done
+/// (`Some(None)`: the key and the character it makes eaten), or none: the key the text services' as always.
+///
+/// Enter carries a list on (Shift+Enter a line break), Ctrl+Enter ticks a to-do, Tab and Shift+Tab move a list's items in
+/// and out, Backspace takes an item's mark off, Alt+Up and Alt+Down move lines. Ctrl+B, Ctrl+I, Ctrl+Shift+X and Ctrl+E
+/// put on and take off bold, slanted, struck through and code, Ctrl+K makes a link (to the web address on the clipboard,
+/// `clipboard` asked only then), Ctrl+1 to 3 headings and Ctrl+0 none. Ctrl with any other key that writes is eaten but
+/// for choosing all, copying, cutting, pasting, undoing and redoing: the text services' own would dress the words in
+/// ways a note's file does not keep.
+fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, system: bool, clipboard: impl FnOnce() -> Option<String>) -> Option<Option<crate::notes::edit::Edit>> {
+    use crate::notes::edit::{self, Marked};
+    let caret = (chosen.0 == chosen.1).then_some(chosen.0);
+    if system || held.alt {
+        return match key {
+            VK_UP | VK_DOWN if held.alt && !held.ctrl && !held.shift => Some(edit::move_lines(text, chosen, key == VK_UP)),
+            _ => None,
+        };
+    }
+    let marked = |how| Some(Some(edit::toggle(text, chosen, how)));
+    match (key, held.ctrl, held.shift) {
+        (VK_RETURN, false, false) => caret.and_then(|caret| edit::enter(text, caret)).map(Some),
+        (VK_RETURN, true, false) => Some(edit::toggle_task(text, chosen.0)),
+        (VK_TAB, false, out) => edit::indent(text, chosen, out),
+        (VK_BACK, false, false) => caret.and_then(|caret| edit::backspace(text, caret)).map(Some),
+        (_, false, _) => None,
+        (VK_B, true, false) => marked(Marked::Bold),
+        (VK_I, true, false) => marked(Marked::Italic),
+        (VK_E, true, false) => marked(Marked::Code),
+        (VK_X, true, true) => marked(Marked::Struck),
+        (VK_K, true, false) => Some(edit::link(text, chosen, clipboard().as_deref().and_then(edit::web_address))),
+        (VK_0 | VK_1 | VK_2 | VK_3, true, false) => Some(Some(edit::heading(text, chosen, (key.0 - VK_0.0) as u8))),
+        (VK_A | VK_C | VK_V | VK_X | VK_Z | VK_Y, true, false) | (VK_Z, true, true) => None,
+        (key, true, _) if writes(key) => Some(None),
+        _ => None,
+    }
+}
+
+/// The text on the clipboard (its line breaks `\n`), if there is any.
+fn clipboard_text(owner: HWND) -> Option<String> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    // (CF_UNICODETEXT.)
+    const TEXT: u32 = 13;
+    let mut taken = Vec::new();
+    unsafe {
+        OpenClipboard(Some(owner)).ok()?;
+        if let Ok(held) = GetClipboardData(TEXT) {
+            let memory = HGLOBAL(held.0);
+            let units = GlobalLock(memory) as *const u16;
+            if !units.is_null() {
+                let mut at = 0;
+                while *units.add(at) != 0 {
+                    taken.push(*units.add(at));
+                    at += 1;
+                }
+                let _ = GlobalUnlock(memory);
+            }
+        }
+        let _ = CloseClipboard();
+    }
+    (!taken.is_empty()).then(|| String::from_utf16_lossy(&taken).replace("\r\n", "\n").replace('\r', "\n"))
+}
+
 /// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
 /// colour, its words' box, whether what is written is not yet kept, and what was last said of keeping it.
 pub struct Writing {
@@ -219,6 +300,9 @@ pub struct Writing {
     /// box's messages are in it now (one comes inside another: see `answering`).
     keyed: Rc<Cell<bool>>,
     depth: Rc<Cell<u32>>,
+    /// The character the key last down makes is to be eaten: the key did what it does to the words as Markdown is
+    /// written (see `pressed`), or nothing.
+    eaten: Rc<Cell<bool>>,
 }
 
 impl Writing {
@@ -256,6 +340,7 @@ impl Writing {
             touched: false,
             keyed: Rc::new(Cell::new(false)),
             depth: Rc::new(Cell::new(0)),
+            eaten: Rc::new(Cell::new(false)),
         };
         writing.dress();
         Some(writing)
@@ -322,7 +407,7 @@ impl Writing {
     /// written on), pressed anywhere in its room, written out, on its `[ ]`. A link's words, where they show as it reads,
     /// pressed, are followed (a web address, or a file of the PC's). Over them the pointer is the hand.
     pub fn answer(&self) -> Answer {
-        let (editor, reads, keyed, depth) = (self.editor.clone(), self.reads.clone(), self.keyed.clone(), self.depth.clone());
+        let (editor, reads, keyed, depth, eaten) = (self.editor.clone(), self.reads.clone(), self.keyed.clone(), self.depth.clone(), self.eaten.clone());
         Rc::new(move |hwnd, message, wparam, lparam| {
             let point = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
             let pointer = || {
@@ -336,6 +421,8 @@ impl Writing {
             let its = match message {
                 // (Esc is the window's: it leaves the words.)
                 WM_KEYDOWN => wparam.0 != usize::from(VK_ESCAPE.0),
+                // (Of the system's keys, Alt+Up and Alt+Down: lines moved.)
+                WM_SYSKEYDOWN => matches!(VIRTUAL_KEY(wparam.0 as u16), VK_UP | VK_DOWN),
                 WM_KEYUP | WM_CHAR | WM_SYSCHAR | WM_UNICHAR | WM_SETFOCUS | WM_KILLFOCUS => true,
                 WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_NOTIFY | WM_IME_SETCONTEXT | WM_IME_CHAR | WM_IME_REQUEST | WM_IME_COMPOSITIONFULL | WM_IME_SELECT => true,
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN => editor.holds(point),
@@ -348,11 +435,32 @@ impl Writing {
             if !its {
                 return None;
             }
-            if matches!(message, WM_KEYDOWN | WM_CHAR | WM_IME_COMPOSITION) {
+            if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_CHAR | WM_IME_COMPOSITION) {
                 keyed.set(true);
             }
+            // A key that writes Markdown (see `pressed`), decided as it goes down (with what is held with it), the
+            // character it makes eaten after it: not while the input method composes (its keys are its).
+            if message == WM_CHAR && eaten.replace(false) {
+                return Some(Some(LRESULT(0)));
+            }
+            if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) {
+                eaten.set(false);
+                let held = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
+                let held = Held { ctrl: held(VK_CONTROL), shift: held(VK_SHIFT), alt: held(VK_MENU) };
+                let (from, to) = editor.selection();
+                let made = (!editor.composing()).then(|| pressed(&editor.text(), (from.max(0) as usize, to.max(0) as usize), VIRTUAL_KEY(wparam.0 as u16), held, message == WM_SYSKEYDOWN, || clipboard_text(hwnd))).flatten();
+                if let Some(made) = made {
+                    eaten.set(true);
+                    depth.set(depth.get() + 1);
+                    if let Some(edit) = made {
+                        editor.apply(&edit);
+                    }
+                    depth.set(depth.get() - 1);
+                    return Some(Some(LRESULT(0)));
+                }
+            }
             depth.set(depth.get() + 1);
-            let ticked = (message == WM_LBUTTONDOWN)
+            let ticked = (message == WM_LBUTTONDOWN && !editor.composing())
                 .then(|| {
                     let drawn = reads.try_borrow().ok().and_then(|reads| {
                         reads.shown.boxes(&reads.written).find_map(|boxed| {
@@ -747,5 +855,96 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Which keys write Markdown: Enter in a list (not Shift+Enter, not with words chosen), Tab, Backspace at an item's
+    /// words, the format keys. Ctrl with the text services' own keys (centring, line spacing) eaten, choosing all,
+    /// copying, pasting, undoing theirs still, as are the keys that write nothing (Ctrl+arrows). The clipboard asked only
+    /// for a link.
+    #[test]
+    fn which_keys_write_markdown() {
+        use super::{pressed, Held, VIRTUAL_KEY};
+        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+        let none = Held::default();
+        let ctrl = Held { ctrl: true, ..none };
+        let shift = Held { shift: true, ..none };
+        let alt = Held { alt: true, ..none };
+        let asked = std::cell::Cell::new(false);
+        let clipboard = || {
+            asked.set(true);
+            Some("https://a.b".to_string())
+        };
+        let made = |text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held| pressed(text, chosen, key, held, held.alt, || None).map(|edit| edit.map(|edit| edit.with));
+        assert_eq!(made("- a", (3, 3), VK_RETURN, none), Some(Some("\n- ".into())));
+        assert_eq!(made("- a", (3, 3), VK_RETURN, shift), None);
+        assert_eq!(made("- a", (2, 3), VK_RETURN, none), None);
+        assert_eq!(made("words", (5, 5), VK_RETURN, none), None);
+        assert_eq!(made("- [ ] a", (7, 7), VK_RETURN, ctrl), Some(Some("x".into())));
+        assert_eq!(made("- a\n- b", (7, 7), VK_TAB, none), Some(Some("  ".into())));
+        assert_eq!(made("- a", (3, 3), VK_TAB, none), Some(None));
+        assert_eq!(made("words", (5, 5), VK_TAB, none), None);
+        assert_eq!(made("- a", (2, 2), VK_BACK, none), Some(Some(String::new())));
+        assert_eq!(made("- a", (3, 3), VK_BACK, none), None);
+        assert_eq!(made("a\nb", (2, 2), VK_UP, alt), Some(Some("b\na".into())));
+        assert_eq!(made("a\nb", (2, 2), VK_F4, alt), None);
+        assert_eq!(made("ab", (0, 2), VK_B, ctrl), Some(Some("**ab**".into())));
+        assert_eq!(made("ab", (0, 2), VK_X, Held { ctrl: true, shift: true, alt: false }), Some(Some("~~ab~~".into())));
+        assert_eq!(made("ab", (0, 2), VK_2, ctrl), Some(Some("## ".into())));
+        for key in [VK_L, VK_R, VK_J, VK_5, VK_OEM_PLUS, VK_H] {
+            assert_eq!(made("ab", (0, 2), key, ctrl), Some(None), "Ctrl+{:#x}", key.0);
+        }
+        for key in [VK_A, VK_C, VK_V, VK_X, VK_Z, VK_Y, VK_LEFT, VK_BACK, VK_DELETE, VK_HOME] {
+            assert_eq!(made("ab", (0, 2), key, ctrl), None, "Ctrl+{:#x}", key.0);
+        }
+        assert_eq!(pressed("ab", (0, 2), VK_B, ctrl, false, clipboard).map(|edit| edit.map(|edit| edit.with)), Some(Some("**ab**".into())));
+        assert!(!asked.get());
+        assert_eq!(pressed("ab", (0, 2), VK_K, ctrl, false, clipboard).map(|edit| edit.map(|edit| edit.with)), Some(Some("[ab](https://a.b)".into())));
+        assert!(asked.get());
+    }
+
+    /// Keys given to a note's words' box as Windows gives them (the key down, the character it makes, the key up): Enter
+    /// in a list carries it on, the caret on the new item, Tab moves that item in, its character eaten (no tab written
+    /// after it), and one undo takes back each.
+    #[test]
+    fn keys_given_to_the_box_write_markdown() {
+        use windows::core::w;
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_RETURN, VK_TAB};
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let folder = std::env::temp_dir().join(format!("glance-note-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("k.md"), "1. a\n2. b").unwrap();
+        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, 400, 300, None, None, None, None) }.unwrap();
+        let theme = super::Theme::new(super::Skin::Paper, false);
+        let writing = super::Writing::open(hwnd, super::words_box(0, 0, 400, 300, 1.0), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("k.md".into()), &theme, super::WORDS).unwrap();
+        let answer = writing.answer();
+        let key = |key: VIRTUAL_KEY, character: usize| {
+            answer(hwnd, WM_KEYDOWN, WPARAM(usize::from(key.0)), LPARAM(1));
+            answer(hwnd, WM_CHAR, WPARAM(character), LPARAM(1));
+            answer(hwnd, WM_KEYUP, WPARAM(usize::from(key.0)), LPARAM(1));
+        };
+        let written = || writing.editor.text().strip_suffix('\n').unwrap().to_string();
+        let undo = || {
+            // (EM_UNDO.)
+            writing.editor.send(0x00C7, WPARAM(0), LPARAM(0));
+        };
+        writing.editor.select((4, 4));
+        key(VK_RETURN, 0x0D);
+        assert_eq!(written(), "1. a\n2. \n3. b");
+        assert_eq!(writing.editor.selection(), (8, 8));
+        key(VK_TAB, 0x09);
+        assert_eq!(written(), "1. a\n   1. \n2. b");
+        assert_eq!(writing.editor.selection(), (11, 11));
+        undo();
+        assert_eq!(written(), "1. a\n2. \n3. b");
+        undo();
+        assert_eq!(written(), "1. a\n2. b");
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

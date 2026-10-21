@@ -123,6 +123,56 @@ struct Tree {
     underlined: Vec<Range<usize>>,
 }
 
+/// Whether `line` is a list's marks alone, as written before its words are (`- `, `1.`, `- [ ] `, `> - - `): no rule.
+fn marks_alone(line: &str) -> bool {
+    let mut rest = line.trim_start_matches([' ', '\t']);
+    while let Some(after) = rest.strip_prefix('>') {
+        rest = after.trim_start_matches([' ', '\t']);
+    }
+    let rule = rest.chars().next().is_some_and(|first| matches!(first, '-' | '*' | '_') && rest.chars().all(|c| c == first || c == ' ' || c == '\t') && rest.chars().filter(|&c| c == first).count() >= 3);
+    if rule {
+        return false;
+    }
+    let mut marks = 0;
+    loop {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let mark = match digits {
+            0 if rest.starts_with(['-', '*', '+']) => 1,
+            1..=9 if rest[digits..].starts_with(['.', ')']) => digits + 1,
+            _ => break,
+        };
+        let after = &rest[mark..];
+        if !(after.is_empty() || after.starts_with([' ', '\t'])) {
+            break;
+        }
+        rest = after.trim_start_matches([' ', '\t']);
+        marks += 1;
+    }
+    marks > 0 && (rest.is_empty() || ["[ ]", "[x]", "[X]"].contains(&rest))
+}
+
+/// `text` as these edits read it: each line that is a list's marks alone given a word, so it is read as the item it is
+/// to be once written in (CommonMark reads an item with nothing in it, under a paragraph, as the paragraph's words), and
+/// where each word was put (the byte of `text` it was put before, and how many bytes it is).
+fn to_be_written(text: &str) -> (String, Vec<(usize, usize)>) {
+    let mut written = String::with_capacity(text.len());
+    let mut put = Vec::new();
+    let mut start = 0;
+    for line in text.split('\n') {
+        written.push_str(line);
+        if marks_alone(line) {
+            let word = if line.ends_with([' ', '\t']) { "x" } else { " x" };
+            put.push((start + line.len(), word.len()));
+            written.push_str(word);
+        }
+        start += line.len() + 1;
+        if start <= text.len() {
+            written.push('\n');
+        }
+    }
+    (written, put)
+}
+
 impl Tree {
     fn of(text: &str) -> Tree {
         let mut lines = Vec::new();
@@ -134,7 +184,23 @@ impl Tree {
         lines.push(start..text.len());
         let mut tree = Tree { lines, items: Vec::new(), lists: Vec::new(), code: Vec::new(), quotes: Vec::new(), underlined: Vec::new() };
         let (mut items, mut lists, mut quotes) = (Vec::new(), Vec::new(), 0);
-        for (event, range) in Parser::new_ext(text, READ).into_offset_iter() {
+        let (written, put) = to_be_written(text);
+        // (A byte of what was read where it is in `text`: within a word put, where it was put.)
+        let back = |at: usize| {
+            let mut by = 0;
+            for &(before, length) in &put {
+                if at < before + by {
+                    break;
+                }
+                if at < before + by + length {
+                    return before;
+                }
+                by += length;
+            }
+            at - by
+        };
+        for (event, range) in Parser::new_ext(&written, READ).into_offset_iter() {
+            let range = back(range.start)..back(range.end);
             match event {
                 Event::Start(Tag::BlockQuote(_)) => {
                     quotes += 1;
@@ -907,6 +973,9 @@ mod tests {
     fn enter_on_an_empty_item_ends_it() {
         assert_eq!(enter_at("- a\n- ‸").as_deref(), Some("- a\n\n‸"));
         assert_eq!(enter_at("- a\n  - b\n  - ‸").as_deref(), Some("- a\n  - b\n- ‸"));
+        // (An item with nothing in it yet is the item it is to be, though under a paragraph CommonMark reads it as words.)
+        assert_eq!(enter_at("- a\n  - ‸").as_deref(), Some("- a\n- ‸"));
+        assert_eq!(enter_at("1. a\n   1. ‸").as_deref(), Some("1. a\n2. ‸"));
         assert_eq!(enter_at("- [ ] ‸").as_deref(), Some("‸"));
         assert_eq!(enter_at("1. a\n2. ‸\n3. b").as_deref(), Some("1. a\n‸\n2. b"));
         assert_eq!(enter_at("1. ‸\n2. b").as_deref(), Some("‸\n1. b"));
@@ -929,6 +998,10 @@ mod tests {
         assert_eq!(tab("1. a\n2. «b\n3. c»\n4. d", false), Some(Some("1. a\n   1. «b\n   2. c»\n2. d".into())));
         assert_eq!(tab("- a\n  - b‸", true), Some(Some("- a\n- b‸".into())));
         assert_eq!(tab("1. a\n   1. b‸\n   2. c", true), Some(Some("1. a\n2. b‸\n   1. c".into())));
+        // An item just begun (Enter, then Tab), nothing in it yet.
+        assert_eq!(tab("- a\n- ‸", false), Some(Some("- a\n  - ‸".into())));
+        assert_eq!(tab("1. a\n2. ‸\n3. b", false), Some(Some("1. a\n   1. ‸\n2. b".into())));
+        assert_eq!(tab("- [ ] a\n- [ ] ‸", false), Some(Some("- [ ] a\n  - [ ] ‸".into())));
         // The first item has none to come under, one in none none to come out of, outside a list, the key's own.
         assert_eq!(tab("- a‸", false), Some(None));
         assert_eq!(tab("- a‸", true), Some(None));
@@ -947,6 +1020,7 @@ mod tests {
         assert_eq!(back_at("- ‸a").as_deref(), Some("‸a"));
         assert_eq!(back_at("- [ ] ‸买").as_deref(), Some("‸买"));
         assert_eq!(back_at("- a\n  - ‸b").as_deref(), Some("- a\n- ‸b"));
+        assert_eq!(back_at("- a\n  - ‸").as_deref(), Some("- a\n- ‸"));
         assert_eq!(back_at("- a\n- ‸b").as_deref(), Some("- a\n  ‸b"));
         assert_eq!(back_at("1. a\n2. ‸b\n3. c").as_deref(), Some("1. a\n   ‸b\n2. c"));
         assert_eq!(back_at("1. ‸a\n2. b").as_deref(), Some("‸a\n1. b"));

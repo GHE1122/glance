@@ -366,6 +366,17 @@ impl Editor {
         self.kept.changed.set(true);
     }
 
+    /// `edit` made (see `notes::edit`): its words written as one step for undo to take back (not gathered with what was
+    /// typed before it or is typed after), what it chooses chosen.
+    pub fn apply(&self, edit: &crate::notes::edit::Edit) {
+        self.answer(EM_STOPGROUPTYPING, WPARAM(0), LPARAM(0));
+        // (Each line break one carriage return, as the text services keep them.)
+        self.replace(edit.range.start, edit.range.end, &edit.with.replace('\n', "\r"));
+        self.answer(EM_STOPGROUPTYPING, WPARAM(0), LPARAM(0));
+        self.typed.set(Typed::Nothing);
+        self.select((edit.chosen.0 as i32, edit.chosen.1 as i32));
+    }
+
     /// What is chosen in it (from, to: characters).
     pub fn selection(&self) -> (i32, i32) {
         let mut range = CHARRANGE::default();

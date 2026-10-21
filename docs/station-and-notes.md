@@ -349,10 +349,11 @@
 
 ### 2.1 按键怎么接进来
 
-- 拦截放在 `WM_CHAR` 而不是 `WM_KEYDOWN`：消息循环里 `TranslateMessage` 已经为回车、Tab、退格生成了字符消息（`'\r'`、`'\t'`、`'\b'`），只拦 `WM_KEYDOWN` 时字符还会再到一次。Ctrl 组合键（Ctrl+B 等）也以控制字符的形式到 `WM_CHAR`，同样在这里拦，`WM_KEYDOWN` 里只处理没有字符的键。
-- Alt+↑ / Alt+↓ 来的是 `WM_SYSKEYDOWN`，`Writing::answer` 要接这个消息，处理了就不再交给系统（否则会激活窗口菜单）。
-- 输入法组字时（`ITextServices` 报告正在组字，或收到 `WM_IME_STARTCOMPOSITION` 之后、`WM_IME_ENDCOMPOSITION` 之前）所有动作都不拦截，点方框勾选也不做。
-- 每个动作用一次 `ITextDocument::BeginEditCollection` / `EndEditCollection` 包起来：写入替换、设好选区，撤销一次撤回整个动作（包括重排的编号）。打字触发的重排（例如在有序列表中间粘贴了一项）也和那次输入合成一步。
+- 在 `WM_KEYDOWN` 时决定（这时能读到 Ctrl、Shift、Alt 的状态，`notes::edit` 的决定写成纯函数 `note::pressed`，有单元测试），决定处理的键，它随后生成的字符消息（`TranslateMessage` 为回车、Tab、退格、Ctrl 组合键生成的 `'\r'`、`'\t'`、`'\b'` 和控制字符）也吃掉，否则字符会再到 RichEdit 一次（实测 Tab 会多插一个制表符）。下一个按键按下时清掉这个标记。
+- Ctrl 加上会写字的键时，除了全选、复制、剪切、粘贴、撤销、重做和便签自己的格式键，其余一律吃掉：RichEdit 自带的 Ctrl+E（居中）、Ctrl+L/R/J（对齐）、Ctrl+1/2/5（行距）、Ctrl+=（下标）等会给文字加上 Markdown 文件存不下来的格式。
+- Alt+↑ / Alt+↓ 来的是 `WM_SYSKEYDOWN`，`Writing::answer` 只接这两个，处理了就不再交给系统（否则会激活窗口菜单），其他系统键照旧。
+- 输入法组字时（收到 `WM_IME_STARTCOMPOSITION` 之后、`WM_IME_ENDCOMPOSITION` 之前）所有动作都不拦截，点方框勾选也不做。
+- 每个动作就是一次替换（`notes::edit` 把编号重排、子项移动都并进同一段替换里），写入前后各发一次 `EM_STOPGROUPTYPING`，撤销一次正好撤回整个动作，不会和前后打的字合在一起。再设好选区。撤销和重做由 RichEdit 自己完成，不会触发重排。
 
 ### 3. 待办
 
