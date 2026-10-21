@@ -1109,7 +1109,15 @@ impl Content {
 
     /// Whether it is a note stuck on the desktop alone: its card the whole of it (see `dressed`).
     fn bare(&self) -> bool {
-        matches!(self, Content::Readings(readings) if readings.only.as_deref().is_some_and(|only| only.starts_with(view::STUCK_NOTE_LANE)))
+        self.stuck_note().is_some()
+    }
+
+    /// The name of the note it is, stuck on the desktop alone.
+    fn stuck_note(&self) -> Option<&str> {
+        match self {
+            Content::Readings(readings) => readings.only.as_deref().and_then(|only| only.strip_prefix(view::STUCK_NOTE_LANE)),
+            _ => None,
+        }
     }
 
     /// The preferences its readings are drawn by, where they are not the panel's (`prefs`): without the music lane
@@ -1295,19 +1303,27 @@ impl Widgets {
     }
 
     /// The note `name` stuck on the desktop: a widget of its page alone, its corner at `at`, `size` large (DIPs: the
-    /// page's it is stuck from; none, as `view::STUCK_NOTE` makes it). One stuck already is raised instead.
+    /// page's it is stuck from; none, as `view::STUCK_NOTE` makes it). One stuck already is raised instead. (The page
+    /// it comes from told as it shows: see `beside::stuck_shown`.)
     pub fn stick_note(&mut self, name: &str, at: POINT, size: Option<(f32, f32)>) {
         if self.raise_note(name) {
+            crate::ui::beside::stuck_shown(name);
             return;
         }
-        let Some(contact) = monitor_at(at) else { return };
+        let Some(contact) = monitor_at(at) else {
+            crate::ui::beside::stuck_shown(name);
+            return;
+        };
         let (wide, tall) = size.unwrap_or(view::STUCK_NOTE);
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (wide - view::STUCK_NOTE.0, tall - view::STUCK_NOTE.1) };
         let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
-        if let Some(widget) = Widget::new(contact, at, content) {
-            widget.window.yield_to(self.settings);
-            self.list.push(widget);
-            self.save();
+        match Widget::new(contact, at, content) {
+            Some(widget) => {
+                widget.window.yield_to(self.settings);
+                self.list.push(widget);
+                self.save();
+            }
+            None => crate::ui::beside::stuck_shown(name),
         }
     }
 
@@ -3792,6 +3808,12 @@ impl Widget {
         self.window.show_in_place();
         if self.tip.is_some() {
             crate::ui::tip::above();
+        }
+        // (A note stuck from its page shown: the page goes, now that it is here.)
+        if !self.shown_once && whole {
+            if let Some(name) = self.content.stuck_note() {
+                crate::ui::beside::stuck_shown(name);
+            }
         }
         self.shown_once |= whole;
     }

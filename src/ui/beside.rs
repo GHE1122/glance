@@ -154,6 +154,26 @@ fn go_soon(page: isize) {
     let _ = unsafe { PostMessageW(Some(HWND(post as *mut _)), GO_SOON, WPARAM(page as usize), LPARAM(0)) };
 }
 
+/// The page that goes as the note it put on the desktop shows there (see `stuck_shown`): its window, and the note's
+/// name.
+static LEAVES_FOR: Mutex<Option<(isize, String)>> = Mutex::new(None);
+
+/// The page up to go once the note `name` it puts on the desktop shows there: else, gone first, nothing was there a
+/// moment (the note shows once its widget is made and drawn, on the panel's thread).
+fn leave_for(name: &str) {
+    *LEAVES_FOR.lock().unwrap() = Some((PAGE.load(Ordering::Acquire), name.to_string()));
+}
+
+/// The note `name` shown on the desktop (or not to be: one there already raised, or none could be made): the page
+/// that put it there goes.
+pub fn stuck_shown(name: &str) {
+    let mut leaves = LEAVES_FOR.lock().unwrap();
+    if leaves.as_ref().is_some_and(|(_, waits)| waits == name) {
+        let (page, _) = leaves.take().unwrap();
+        go_soon(page);
+    }
+}
+
 /// Whether a page's going asked for `meant` (its window) is for the page up now, `up`.
 fn goes_now(meant: isize, up: isize) -> bool {
     meant != 0 && meant == up
@@ -1336,7 +1356,7 @@ impl Beside {
     /// comes to).
     ///
     /// Beside the panel (or a widget), moved by its head as far as a drag goes and put down: the note stuck on the
-    /// desktop where its page was put (as from its menu), its page gone (whether it is to go).
+    /// desktop where its page was put (as from its menu), its page gone as it shows there (whether it is to go now).
     fn carry_note(&mut self, done: bool) -> bool {
         let Some(from) = self.moved_from else { return false };
         if self.writing.as_ref().is_none_or(|writing| writing.name.is_none()) {
@@ -1359,8 +1379,9 @@ impl Beside {
             }
             let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return false };
             let place = self.page_on_screen();
+            leave_for(&name);
             crate::app().controller.stick_note(name, POINT { x: place.left, y: place.top }, Some(self.page_size(place)));
-            return true;
+            return false;
         }
         let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return false };
         crate::app().controller.move_note(name, to.x - from.x, to.y - from.y, done);
@@ -1386,12 +1407,13 @@ impl Beside {
                 self.redraw();
                 false
             }
-            // Its card on the desktop where the page is, the page gone.
+            // Its card on the desktop where the page is, the page gone as it shows there.
             NoteChoice::Stick => {
                 let Some(name) = writing.name.clone() else { return false };
                 let place = self.page_on_screen();
+                leave_for(&name);
                 crate::app().controller.stick_note(name, POINT { x: place.left + (24.0 * self.scale) as i32, y: place.top + (24.0 * self.scale) as i32 }, Some(self.page_size(place)));
-                true
+                false
             }
             NoteChoice::TakeAway => {
                 // (What is written not kept, the page stays, saying so: taken away, the Recycle Bin had the note as it
