@@ -115,6 +115,9 @@ impl Device {
 /// (Tests: how long a read is made to take, see `Shared::read`.)
 #[cfg(test)]
 static READ_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// (Tests: how long closing a frame is made to take, see `close`: as long as on Windows 10 while a frame is met.)
+#[cfg(test)]
+static CLOSE_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// What a scene's frames meet as they come, on whatever thread they come on.
 struct Shared {
@@ -156,14 +159,14 @@ struct Halves {
 unsafe impl Send for Halves {}
 
 impl Shared {
-    /// Reads `frame` back (if it is of the area as it is now), for it to be taken (the thread that draws to be told:
-    /// see `reader`); whether it was.
-    fn read(&self, frame: &Direct3D11CaptureFrame) -> bool {
+    /// Reads `frame` back, if it is of the area as it is now: what it holds, and when the area was arranged as it
+    /// was read (to be handed on, see `hand_on`).
+    fn read(&self, frame: &Direct3D11CaptureFrame) -> Option<(Capture, i64)> {
         // (Tests: a read as slow as on a slow card, to widen what a frame met while it is read overlaps.)
         #[cfg(test)]
         std::thread::sleep(std::time::Duration::from_millis(READ_DELAY_MS.load(Ordering::Relaxed)));
         let (area, arranged, covered) = self.of.lock().unwrap().clone();
-        let read = (|| {
+        (|| {
             if frame.SystemRelativeTime().ok()?.Duration < arranged {
                 crate::widget::note_sparingly("scene-early", || "scene: a frame from before it was arranged passed over".into());
                 return None;
@@ -185,9 +188,13 @@ impl Shared {
             }
             let (kept, luma) = keep(&self.device, &mut self.halves.lock().unwrap(), &self.spare, &texture, width as u32, height as u32, area, &covered)?;
             let taken = self.taken.fetch_add(1, Ordering::Relaxed) + 1;
-            Some(Capture::from_texture(area, Texture { texture: kept, spare: self.spare.clone() }, luma, taken))
-        })();
-        let Some(capture) = read else { return false };
+            Some((Capture::from_texture(area, Texture { texture: kept, spare: self.spare.clone() }, luma, taken), arranged))
+        })()
+    }
+
+    /// `capture`, read of the area as it was arranged at `arranged`, handed on to be taken (the thread that draws to
+    /// be told: see `reader`); whether it was.
+    fn hand_on(&self, capture: Capture, arranged: i64) -> bool {
         // Arranged anew (or rested) while it was read: of what was there before, not taken. (Looked at and handed on
         // under one lock: what arranges or rests it marks it so before it clears what was handed on, so that one
         // handed on meanwhile is cleared too, never left behind.)
@@ -742,14 +749,14 @@ fn reader() -> &'static std::sync::mpsc::Sender<(Arc<Shared>, Direct3D11CaptureF
                         let _timed = crate::perf::Timed::start("scene read", String::new);
                         shared.read(&frame)
                     };
-                    if !read {
-                        shared.wanted.store(true, Ordering::Release);
-                    }
                     close(Some(frame));
-                    // No longer being read before the thread that draws is told: what it wants then is wanted.
+                    // No longer being read before what was read is handed on: what is wanted once it is taken is
+                    // wanted, not taken for served by this read (wanted while the frame was closed, it was never read).
                     shared.reading.fetch_sub(1, Ordering::AcqRel);
-                    if read {
+                    if read.is_some_and(|(capture, arranged)| shared.hand_on(capture, arranged)) {
                         (shared.wake)();
+                    } else {
+                        shared.wanted.store(true, Ordering::Release);
                     }
                 }
             })
@@ -762,6 +769,8 @@ fn reader() -> &'static std::sync::mpsc::Sender<(Arc<Shared>, Direct3D11CaptureF
 /// with a lock held that meeting a frame takes (see the top).
 fn close(frame: Option<Direct3D11CaptureFrame>) {
     if let Some(frame) = frame {
+        #[cfg(test)]
+        std::thread::sleep(std::time::Duration::from_millis(CLOSE_DELAY_MS.load(Ordering::Relaxed)));
         let _ = frame.Close();
     }
 }
@@ -1574,6 +1583,53 @@ mod tests {
         println!("{ready} read in 2 s; at most {most} being read at once");
         assert!(ready > 5, "{ready} read");
         assert_eq!(most, 1, "{most} read at once");
+    }
+
+    /// A frame wanted again as soon as the one wanted before is taken (the frame after a first, of a scene arranged
+    /// anew, wanted to be sure of the windows behind) is read too, however long closing the one read takes: wanted
+    /// while that was still being closed, it was taken for wanted while one is read, and never read.
+    /// `cargo test --lib -- --ignored --exact ui::scene::tests::wanted_once_one_is_taken_another_is_read --nocapture`.
+    #[test]
+    #[ignore = "puts a window on this PC's screen and captures it"]
+    fn wanted_once_one_is_taken_another_is_read() {
+        use std::time::{Duration, Instant};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        CLOSE_DELAY_MS.store(std::env::var("SCENE_CLOSE_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(30), Ordering::Relaxed);
+        changing_window();
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        let over = over_all("GlanceWantedAgainOver");
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let mut scene = Scene::new(RECT { left: 150, top: 150, right: 450, bottom: 350 }, wake, &gfx).expect("scene");
+        scene.arrange(RECT { left: 150, top: 150, right: 450, bottom: 350 }, over);
+        let pump = || unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        };
+        let taken = |scene: &Scene| {
+            let began = Instant::now();
+            while began.elapsed() < Duration::from_secs(3) {
+                pump();
+                if scene.ready().is_some() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            false
+        };
+        scene.want();
+        let first = taken(&scene);
+        // Wanted again at once, as the thread that draws does.
+        scene.want();
+        let second = taken(&scene);
+        CLOSE_DELAY_MS.store(0, Ordering::Relaxed);
+        assert!(first, "no first frame read");
+        assert!(second, "the frame wanted once the first was taken was never read");
     }
 
     /// A scene arranged at alternating places and sizes over a window that changes all the time (so frames keep
