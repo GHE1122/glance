@@ -42,8 +42,18 @@ impl App {
 
 static SHOWN: Mutex<Option<Arc<Vec<App>>>> = Mutex::new(None);
 
+#[cfg(all(test, feature = "studio"))]
+thread_local! {
+    /// What this thread's pictures pretend (see `pretend`): each test's its own, as tests run side by side.
+    static PRETENDED: std::cell::RefCell<Option<Arc<Vec<App>>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// What is kept at hand, in its order.
 pub fn shown() -> Arc<Vec<App>> {
+    #[cfg(all(test, feature = "studio"))]
+    if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
+        return pretended;
+    }
     SHOWN.lock().unwrap().clone().unwrap_or_default()
 }
 
@@ -70,7 +80,7 @@ pub fn follow(apps: &[App]) {
 /// For pictures: as if these were kept at hand.
 #[cfg(all(test, feature = "studio"))]
 pub fn pretend(apps: Vec<App>) {
-    *SHOWN.lock().unwrap() = Some(Arc::new(apps));
+    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(apps)));
 }
 
 /// What a thing kept at hand opens (see `opens`): the path of what it opens (or a Store app's name, a web address),
