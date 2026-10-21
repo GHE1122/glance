@@ -338,7 +338,9 @@ pub struct Music {
     arm: f32,
     /// Laid out anew (another layout, or what it shows switched): since when, and where its parts were (they move
     /// from there to where they go, what else it shows coming in, over `TURN`); what it showed last.
-    turning: Option<(Instant, Placed)>,
+    /// (And the layout it was, with whether it showed the lines round the one sung now, whose lines and spectrum fade
+    /// out as this one's come in.)
+    turning: Option<(Instant, Placed, (Layout, bool))>,
     shown: Option<(Layout, Shows, bool)>,
     /// Lines turned by the wheel from the one sung now, when last turned, and the turn not yet a line.
     turned: i32,
@@ -769,17 +771,18 @@ impl Music {
         // drawn: see `zoom_at`; kept so, and in this one's terms as it is drawn.)
         let lines = layout == Layout::Player && player_shows_lines(size, shows);
         let drawn = (size.0 * zoom, size.1 * zoom);
-        if let Some((was, showed, _)) = self.shown.filter(|shown| *shown != (layout, *shows, lines)) {
+        if let Some((was, showed, had_lines)) = self.shown.filter(|shown| *shown != (layout, *shows, lines)) {
             let was_zoom = zoom_at(was, drawn, &showed);
             let was_at = placed(was, (drawn.0 / was_zoom, drawn.1 / was_zoom), &showed).scaled(was_zoom);
-            let from = match self.turning.and_then(|(since, from)| turned(now, since).map(|t| (from, t))) {
+            let from = match self.turning.and_then(|(since, from, _)| turned(now, since).map(|t| (from, t))) {
                 Some((from, t)) => tween(from, was_at, t),
                 None => was_at,
             };
-            self.turning = Some((now, from));
+            self.turning = Some((now, from, (was, had_lines)));
         }
         self.shown = Some((layout, *shows, lines));
-        let turn = self.turning.and_then(|(since, from)| turned(now, since).map(|t| (from.scaled(1.0 / zoom), t)));
+        let turn = self.turning.and_then(|(since, from, _)| turned(now, since).map(|t| (from.scaled(1.0 / zoom), t)));
+        let was = self.turning.map(|(.., was)| was);
         if turn.is_none() {
             self.turning = None;
         }
@@ -798,24 +801,68 @@ impl Music {
         let mut drawing = Drawing { music: self, frame, now, moment: &moment, shows, ground, ink, edged: ground == Ground::Clear, light, tint, accent, fonts: Fonts::in_family(family), scale, pointer, size, turn, hits: Vec::new(), clips: Vec::new() };
         drawing.ground(layout);
         drawing.disc(layout);
+        // Turning from another layout: what that one showed off its ground (its lines, its spectrum) fades out as this
+        // one's comes in, never a frame with neither. It is drawn as large as this one, its parts where it puts them
+        // there; what it would change of what is kept from frame to frame, and where it could be pressed, stay this
+        // one's.
+        if let (Some((_, t)), Some((was, had_lines))) = (turn, was.filter(|was| *was != (layout, lines))) {
+            let kept = drawing.music.kept();
+            let (hits, turning) = (drawing.hits.len(), drawing.turn.take());
+            let everything = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+            let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: 1.0 - t, ..Default::default() };
+            unsafe { frame.dc.PushLayer(&layer, None) };
+            drawing.content(was, had_lines);
+            unsafe { frame.dc.PopLayer() };
+            drawing.turn = turning;
+            drawing.hits.truncate(hits);
+            drawing.music.restore(kept);
+        }
         // Turning into this layout: what is not on its ground comes in as its parts move.
         if let Some((_, t)) = turn {
             let everything = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
             let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: t, ..Default::default() };
             unsafe { frame.dc.PushLayer(&layer, None) };
         }
-        match layout {
-            Layout::Strip => drawing.strip(),
-            Layout::Player => drawing.player(),
-            Layout::Card | Layout::Tall => drawing.card(layout),
-            Layout::Stage => drawing.stage(),
-            Layout::Column => drawing.column(),
-        }
+        drawing.content(layout, lines);
         if turn.is_some() {
             unsafe { frame.dc.PopLayer() };
         }
         let hits = drawing.hits;
         Painted { hits, busy: self.easing || self.anchoring || moment.playing || settling || coming || falling || swinging || self.fading.is_some() || self.turned != 0 || moment.dragged_to.is_some() || turn.is_some() }
+    }
+}
+
+/// What drawing a layout's content changes of what is kept from one frame to the next (see `Drawing::content`).
+struct Kept {
+    anchor: Option<Anchor>,
+    anchoring: bool,
+    easing: bool,
+    sound: (bool, f32, f32, Option<Instant>, Option<(u8, bool)>),
+    track_lit: f32,
+    #[cfg(test)]
+    drawn_lines: Vec<(usize, f32)>,
+}
+
+impl Music {
+    fn kept(&self) -> Kept {
+        Kept {
+            anchor: self.anchor,
+            anchoring: self.anchoring,
+            easing: self.easing,
+            sound: (self.sound_open, self.sound_in, self.sound_lit, self.sound_left, self.sound_seen),
+            track_lit: self.track_lit,
+            #[cfg(test)]
+            drawn_lines: self.drawn_lines.clone(),
+        }
+    }
+
+    fn restore(&mut self, kept: Kept) {
+        (self.anchor, self.anchoring, self.easing, self.track_lit) = (kept.anchor, kept.anchoring, kept.easing, kept.track_lit);
+        (self.sound_open, self.sound_in, self.sound_lit, self.sound_left, self.sound_seen) = kept.sound;
+        #[cfg(test)]
+        {
+            self.drawn_lines = kept.drawn_lines;
+        }
     }
 }
 
@@ -1116,6 +1163,18 @@ fn placed(layout: Layout, (w, h): (f32, f32), shows: &Shows) -> Placed {
 }
 
 impl Drawing<'_> {
+    /// What `layout` shows off its ground: its lines (a player's, the lines round the one sung now as `lines` says),
+    /// the spectrum, the controls.
+    fn content(&mut self, layout: Layout, lines: bool) {
+        match layout {
+            Layout::Strip => self.strip(),
+            Layout::Player => self.player(lines),
+            Layout::Card | Layout::Tall => self.card(layout),
+            Layout::Stage => self.stage(),
+            Layout::Column => self.column(),
+        }
+    }
+
     /// Where its parts are, `layout` laying them out: on their way there while it turns.
     fn placed(&self, layout: Layout) -> Placed {
         let to = placed(layout, self.size, self.shows);
@@ -1720,7 +1779,7 @@ impl Drawing<'_> {
 
     /// The player: the cover at the start, what plays beside it, the line sung now (rising in as it comes, filled as
     /// it is sung, wrapped where it is too long) and what is under it, the rows along the bottom.
-    fn player(&mut self) {
+    fn player(&mut self, lines: bool) {
         let (_, h) = self.size;
         let pad = pad_of(Layout::Player, self.shows);
         let at = self.placed(Layout::Player);
@@ -1734,7 +1793,7 @@ impl Drawing<'_> {
             return;
         }
         // Room for more than the line sung now and the one under it: the lines round it, as the card's.
-        if let (Some(lines), true) = (self.moment.lines.clone(), player_shows_lines(self.size, self.shows)) {
+        if let (Some(lines), true) = (self.moment.lines.clone(), lines) {
             // (The line sung now level with the cover's middle, where there is a cover, as far as there is room for a
             // line above it and below it: the lines all the way from under the title to the rows along the bottom.)
             let middle = at.cover.map_or((line_top + bottom) / 2.0, |(_, y, side)| y + side / 2.0);
@@ -3221,6 +3280,42 @@ mod pictures {
         let drawn = placed(Layout::Player, (w / zoom, after / zoom), &all).cover.unwrap().2 * zoom;
         let from = music.turning.expect("turning into the strip").1.cover.unwrap().2;
         assert!((from - drawn).abs() < 2.0, "the turn begins at {from}, the cover was drawn {drawn}");
+    }
+
+    /// Sized from one layout into another (a card into the stage, a player from its line to the lines round it), what
+    /// it showed still shows as the turn begins (fading out as the new one's comes in), never a frame with no lines.
+    #[test]
+    #[ignore = "draws on this PC's graphics card"]
+    fn a_turn_into_another_layout_never_shows_no_lines() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let gfx = crate::ui::gfx::held().unwrap();
+        let now = Instant::now();
+        // (The least height at which a player this wide shows the lines round the one sung now.)
+        let wide = 520.0;
+        let lines_from = (PLAYER_FROM as u32..PLAYER_MOST as u32).map(|h| h as f32).find(|h| player_shows_lines((wide, *h), &all)).unwrap();
+        let turns = [((440.0, 330.0), (600.0, 330.0)), ((wide, lines_from - 1.0), (wide, lines_from))];
+        assert_eq!(Layout::for_room(turns[0].0, &all, None), Layout::Card);
+        assert_eq!(Layout::for_room(turns[0].1, &all, Some(Layout::Card)), Layout::Stage);
+        assert_eq!((Layout::for_room(turns[1].0, &all, None), Layout::for_room(turns[1].1, &all, None)), (Layout::Player, Layout::Player));
+        let mut seen = Vec::new();
+        for (from, to) in turns {
+            let mut music = Music { last_frame: now, ..Music::default() };
+            let mut draw = |size: (f32, f32)| gfx.draw_offscreen((900, 495), 1.5, |frame| {
+                music.paint_moment(frame, size, &all, Ground::Own, 1.5, None, now, playing(false));
+            });
+            seen.push((draw(from).unwrap(), draw(to).unwrap()));
+        }
+        crate::ui::gfx::let_go();
+        // (The words are near white, as nothing else it draws is: as many of them as before, near enough, what plays
+        // at the top among them.)
+        let words = |pixels: &[u8]| pixels.chunks(4).filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200).count();
+        for ((settled, turning), (from, to)) in seen.iter().zip(turns) {
+            let (before, as_it_turns) = (words(settled), words(turning));
+            assert!(as_it_turns * 5 >= before * 4, "{from:?} to {to:?}: {as_it_turns} pixels of words as the turn begins, {before} before it");
+        }
     }
 
     /// Where the fill's edge is (DIPs from the line's start) as a line of characters with spaces between them is sung,
