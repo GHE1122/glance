@@ -18,6 +18,8 @@ pub struct Folder {
 }
 
 const SHELF: &str = "station.json";
+/// The station's own folder, in Glance's local folder (see `settings::local_dir`).
+pub const OWN: &str = "Station";
 /// The folder where a kept file is given out under the name it came with (see `named`).
 const NAMED: &str = "named";
 /// The stream of a file that says where it came from (its "mark of the web"), which Windows, Office and browsers heed
@@ -29,7 +31,7 @@ const INTERNET: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
 impl Folder {
     /// The station's own folder in the user's local application data.
     pub fn own() -> Folder {
-        Folder::at(crate::settings::local_dir().join("Station"))
+        Folder::at(crate::settings::local_dir().join(OWN))
     }
 
     pub fn at(dir: PathBuf) -> Folder {

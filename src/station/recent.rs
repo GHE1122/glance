@@ -488,9 +488,11 @@ pub fn start(told: impl Fn() + Send + Sync + 'static) {
     std::thread::Builder::new().name("glance: recent".into()).spawn(follow).expect("a thread started");
 }
 
+/// What it has found lately, kept in Glance's local folder (see `settings::local_dir`).
+pub const FILE: &str = "recent.json";
+
 #[cfg(windows)]
 fn follow() {
-    const FILE: &str = "recent.json";
     let folder = crate::settings::local_dir();
     let mut kept: Kept = std::fs::read(folder.join(FILE)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
     let places = windows_places();

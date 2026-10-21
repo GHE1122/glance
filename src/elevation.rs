@@ -1156,10 +1156,30 @@ pub fn remove_settings() -> bool {
     let remote = std::env::var_os("APPDATA").map(|roaming| std::path::PathBuf::from(roaming).join("dev.weiyi.glance.remote"));
     let own = remove_kept(&crate::settings::config_dir(), &["settings.json", crate::settings::UNREAD, crate::journal::FILE]);
     let remotes = remote.is_none_or(|folder| remove_kept(&folder, &["config.json", "config.json.new", "remote.log"]));
-    // And what it fetched and kept (the lyrics found) and its index of the music on this PC, then its local folder.
+    // And what it fetched and kept (the lyrics found), its index of the music on this PC, the station (what was copied
+    // and put on it, and what it keeps of that) and what it found of files lately, then its local folder. (The notes
+    // are the user's own files, in a folder of theirs: they stay.)
     let lyrics = crate::lyrics::kept::names();
-    let fetched = remove_kept(&crate::lyrics::kept::folder(), &lyrics.iter().map(String::as_str).collect::<Vec<_>>()) && remove_kept(&crate::settings::local_dir(), &[crate::library::INDEX_FILE, crate::serif::FILE]);
-    own && remotes && fetched
+    let local = crate::settings::local_dir();
+    let station = remove_all_kept(&local.join(crate::station::folder::OWN));
+    let fetched = remove_kept(&crate::lyrics::kept::folder(), &lyrics.iter().map(String::as_str).collect::<Vec<_>>())
+        && remove_kept(&local, &[crate::library::INDEX_FILE, crate::serif::FILE, crate::station::recent::FILE]);
+    own && remotes && station && fetched
+}
+
+/// Takes all that is in `folder` out of it, the folders in it each so too, then `folder`: as `remove_kept` takes each
+/// (a link taken as the link, nothing it leads to reached).
+fn remove_all_kept(folder: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(folder) else { return !folder.exists() };
+    let (mut files, mut inner) = (Vec::new(), true);
+    for entry in entries.flatten() {
+        // (A folder as itself: a link to one, as a link, is a file here.)
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => inner &= remove_all_kept(&entry.path()),
+            _ => files.push(entry.file_name().to_string_lossy().into_owned()),
+        }
+    }
+    remove_kept(folder, &files.iter().map(String::as_str).collect::<Vec<_>>()) && inner
 }
 
 /// Takes the files named out of `folder`, and the folder if nothing else
@@ -1638,6 +1658,28 @@ fn mark_pawnio_ours() {
 
 #[cfg(test)]
 mod tests {
+    /// A folder taken out whole as Glance is uninstalled (the station's): its files, the folders in it and theirs, and
+    /// a link in it to a folder elsewhere taken as the link, what it leads to left as it is.
+    #[test]
+    fn takes_a_folder_out_whole_but_not_what_a_link_in_it_leads_to() {
+        let root = crate::settings::local_dir().join("remove-all-kept");
+        let _ = std::fs::remove_dir_all(&root);
+        let (inside, outside) = (root.join("Station"), root.join("elsewhere"));
+        std::fs::create_dir_all(inside.join("named").join("a1")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(inside.join("station.json"), "{}").unwrap();
+        std::fs::write(inside.join("k1"), "kept").unwrap();
+        std::fs::write(inside.join("named").join("a1").join("报告 1.pdf"), "named").unwrap();
+        std::fs::write(outside.join("theirs.txt"), "theirs").unwrap();
+        let junction = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(inside.join("link")).arg(&outside).output().unwrap();
+        assert!(junction.status.success(), "{junction:?}");
+        let removed = super::remove_all_kept(&inside);
+        let (left, theirs) = (inside.exists(), std::fs::read_to_string(outside.join("theirs.txt")));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(removed && !left, "the station's folder left");
+        assert_eq!(theirs.ok().as_deref(), Some("theirs"));
+    }
+
     #[test]
     #[ignore = "registers this account's task for the remote on this machine, and runs it"]
     fn turns_the_remote_on() {
