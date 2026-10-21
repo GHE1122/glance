@@ -1433,6 +1433,8 @@
       row: ROW,
       layoutFor: function (w, h) { return forRoom([w, h], m.shows, S.layout); },
       restsAt: function (w, h) { return restsAt([w, h], m.shows); },
+      // Its own ground's colour at `w` × `h` (straight RGB, 0 to 1): the colour where it would stick is shown in too.
+      ground: function (w, h) { return groundAt(w, h).slice(0, 3); },
       // `rack`: as a widget, the side its buttons' row is on ("above", "under", "left" or "right"); in a panel, none.
       draw: function (c, w, h, t, now, pointer, playing, rack) {
         var shws = copyShows(m.shows), size = [w, h];

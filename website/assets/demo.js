@@ -21,6 +21,9 @@
     uptime: function (m) { return "Up " + Math.floor(m / 60) + " h " + (m % 60) + " min"; }
   };
 
+  // The parts each lane is of, named in its head.
+  var PARTS = { cpu: "AMD Ryzen 9 9950X", gpu: "NVIDIA GeForce RTX 5070 Ti", memory: "2 × 32 GB DDR5-6000", network: "Wi-Fi 6E" };
+
   // ---- the readings: slow walks, as a machine at moderate work ----
   function walk(value, low, high, pull, jitter) {
     var mid = (low + high) / 2;
@@ -204,7 +207,7 @@
     // looks draw them all in their one ink (site.css).
     // CPU
     var cpu = lane("cpu", 0);
-    var ch = head(T.cpu, "AMD Ryzen 9 9950X");
+    var ch = head(T.cpu, PARTS.cpu);
     var cb = big();
     var cc = chart("#3d9bff");
     var top = el("div", "top");
@@ -226,7 +229,7 @@
 
     // GPU
     var gpu = lane("gpu", 0);
-    var gh = head(T.gpu, "NVIDIA GeForce RTX 5070 Ti");
+    var gh = head(T.gpu, PARTS.gpu);
     var gb = big();
     var gc = chart("#30d158");
     var gtop = el("div", "top");
@@ -253,7 +256,7 @@
 
     // Memory
     var mem = lane("mem", 1);
-    var mh = head(T.memory, "2 × 32 GB DDR5-6000");
+    var mh = head(T.memory, PARTS.memory);
     var mb = big();
     var mc = chart("#ff9f0a");
     var mtop = el("div", "top");
@@ -268,7 +271,7 @@
 
     // Network
     var net = lane("net", 1);
-    var nh = head(T.network, "Wi-Fi 6E");
+    var nh = head(T.network, PARTS.network);
     var nrow = el("div", "top");
     var legend = el("dl", "rates");
     legend.appendChild(el("dt", "down", T.down));
@@ -342,17 +345,33 @@
   });
   if (!panels.length) return;
 
+  // The readings as they are now, for what else draws them (the monitor torn off the desk's panel as a widget, see
+  // readings.js): a copy made as they step, which what reads it cannot change, with how many steps they have taken.
+  var shown = null, steps = 0;
+  window.GlanceDemo = Object.freeze({
+    read: function () { return shown; },
+    words: Object.freeze(T),
+    parts: Object.freeze(PARTS),
+    rate: rate
+  });
+
   function refresh() {
     panels.forEach(function (p) { p.update(); });
+    var copy = JSON.parse(JSON.stringify(R));
+    copy.steps = steps;
+    Object.keys(copy).forEach(function (k) { if (typeof copy[k] === "object") Object.freeze(copy[k]); });
+    copy.procs.forEach(Object.freeze);
+    shown = Object.freeze(copy);
   }
   // A minute of readings already behind the charts, as in a panel just opened.
-  for (var i = 0; i < HISTORY; i++) step();
+  for (var i = 0; i < HISTORY; i++) { step(); steps++; }
   refresh();
   var ticks = 0;
   setInterval(function () {
     // Off screen or in a hidden tab, nothing to show.
     if (document.hidden) return;
     step();
+    steps++;
     if (++ticks % 60 === 0) R.uptime++;
     refresh();
   }, 1000);

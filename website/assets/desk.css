@@ -30,6 +30,21 @@
 .vdesk .mw canvas { display: block; width: 100%; height: 100%; }
 .vdesk .mw[hidden] { display: none; }
 
+/* Where a widget let go would stick, as Glance draws it (widget.rs `paint_hint`): in each look a pane of its own,
+   firmer once letting go would stick it there. desk.js sets how strong it is as its opacity. Glass: the glass's
+   colour under its rim. Windows 11: the accent's wash under a hairline, as Windows' own snap preview. Chart paper: a
+   pencilled outline on the paper's colour, dashed until firm. A music widget: its own ground's colour, its corners. */
+.vdesk .hint { position: absolute; left: 0; top: 0; pointer-events: none; visibility: hidden; box-sizing: border-box;
+  border-radius: 24px; background: rgba(20, 20, 26, 0.32); border: 1px solid rgba(255, 255, 255, 0.2); }
+.vdesk .hint.on { visibility: visible; }
+.vdesk .hint.firm { background: rgba(20, 20, 26, 0.6); }
+[data-look="win11"] .vdesk .hint { border-radius: 8px; background: rgba(153, 235, 255, 0.14); border-color: rgba(153, 235, 255, 0.45); }
+[data-look="win11"] .vdesk .hint.firm { background: rgba(153, 235, 255, 0.26); border-color: #99ebff; }
+[data-look="paper"] .vdesk .hint { border-radius: 16px; background: rgba(20, 35, 31, 0.45); border: 1.5px dashed #6b7b73; }
+[data-look="paper"] .vdesk .hint.firm { background: rgba(20, 35, 31, 0.75); border-style: solid; border-color: #a1b0a8; }
+.vdesk .hint.own, [data-look] .vdesk .hint.own { border-radius: 14px; border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(var(--ground), 0.5); }
+.vdesk .hint.own.firm, [data-look] .vdesk .hint.own.firm { border-color: rgba(255, 255, 255, 0.3); background: rgba(var(--ground), 0.85); }
+
 /* The full screen, over everything, the taskbar too. */
 .vdesk .full { position: absolute; inset: 0; opacity: 0; visibility: hidden; }
 .vdesk .full.on { visibility: visible; }
