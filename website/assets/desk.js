@@ -32,6 +32,14 @@
   var edges = { right: desk.querySelector('[data-at="right"]'), left: desk.querySelector('[data-at="left"]') };
   var mw = desk.querySelector(".mw"), mwCanvas = mw.querySelector("canvas"), mctx = mwCanvas.getContext("2d");
   var fullHost = desk.querySelector(".full"), escKey = desk.querySelector(".esc"), pointer = desk.querySelector(".pointer");
+  // The taskbar's programs: the workbench rail's own pictures.
+  var taskbar = desk.querySelector(".taskbar"), names = GD.apps.names(lang);
+  GD.apps.kinds.forEach(function (kind, at) {
+    var one = document.createElement("i");
+    one.title = names[at];
+    one.appendChild(GD.app(kind, 28));
+    taskbar.appendChild(one);
+  });
   var say = document.querySelector("[data-say]");
   var chapters = document.querySelector("[data-chapters]");
   var soundButton = document.querySelector("[data-sound]");
@@ -146,7 +154,7 @@
       cover = img;
       if (GD.music) {
         music = GD.music(song, cover, lang);
-        var at = BOX[BOX.length - 1], f = music.place(at[3], at[4], "full");
+        var at = BOX[BOX.length - 1], rest = { x: at[1], y: at[2], w: at[3], h: at[4] }, f = music.place(at[3], at[4], "full", rackFor(rest));
         fullButton = [f.x + f.w / 2, f.y + f.h / 2];
       }
       request();
@@ -185,6 +193,25 @@
     el.style.transform = "translate(" + x.toFixed(2) + "px," + Math.max(GAP, (WORK - h) / 2).toFixed(2) + "px)";
     el.style.visibility = p > 0 ? "visible" : "hidden";
   }
+  // Where a widget at `box` has its buttons' row, as Glance puts it (widget.rs `rack`): over its right end (under it,
+  // where the screen has no room above); narrower than the row and tall enough, down its right side (its left, where
+  // the screen has no room on the right).
+  function rackFor(box) {
+    if (box.w >= music.row || box.h < music.row) return box.y - music.reach < 0 ? "under" : "above";
+    return box.x + box.w + music.reach <= SW ? "right" : "left";
+  }
+  // What a widget at `box` takes of the pointer: itself; and, the pointer over it already, its buttons' row too
+  // (widget.rs `taking`).
+  function takes(p, box, rack, over) {
+    if (within(p, box)) return true;
+    if (!over || !rack) return false;
+    var r = music.reach;
+    return within(p, {
+      x: box.x - (rack === "left" ? r : 0), y: box.y - (rack === "above" ? r : 0),
+      w: box.w + (rack === "left" || rack === "right" ? r : 0), h: box.h + (rack === "above" || rack === "under" ? r : 0)
+    });
+  }
+  var overMusic = false;
   function musicBox(m) {
     if (m.at === "top") return { x: (SW - TOP.w) / 2, y: -TOP.h + (TOP.h + GAP) * out(m.p), w: TOP.w, h: TOP.h };
     return m.box;
@@ -206,8 +233,10 @@
       mctx.setTransform(1, 0, 0, 1, 0, 0);
       mctx.clearRect(0, 0, px, py);
       mctx.setTransform(px / cw, 0, 0, py / ch, g * px / cw, g * py / ch);
-      var c = s.cursor, over = c && c.alpha > 0 && c.x >= box.x && c.x < box.x + box.w && c.y >= box.y && c.y < box.y + box.h;
-      music.draw(mctx, box.w, box.h, s.song, now, over ? { x: c.x - box.x, y: c.y - box.y } : null, s.playing);
+      var c = s.cursor, rack = m.at === "desk" ? rackFor(box) : null;
+      // (Playing itself, its pointer comes to the row only from over it: what shows is the moment's own.)
+      overMusic = !!c && c.alpha > 0 && takes(c, box, rack, overMusic || !live);
+      music.draw(mctx, box.w, box.h, s.song, now, overMusic ? { x: c.x - box.x, y: c.y - box.y } : null, s.playing, rack);
     }
     // Opened, the full screen begins as Glance's does; closed, it is gone.
     if (s.full > 0 && song && GD.full && !full) { full = GD.full(fullHost, song, cover, lang); full.resize(); }
@@ -249,6 +278,8 @@
   function setChapter(n) {
     if (n === chapter || !chapters) return;
     chapter = n;
+    // (None of them, while the visitor has the desk: its mark goes too.)
+    if (n < 0) chapters.style.setProperty("--w", "0px");
     Array.prototype.forEach.call(chapters.querySelectorAll("button"), function (b, i) {
       b.setAttribute("aria-pressed", i === n ? "true" : "false");
       if (i === n) { chapters.style.setProperty("--x", b.offsetLeft + "px"); chapters.style.setProperty("--w", b.offsetWidth + "px"); }
@@ -387,16 +418,19 @@
     var p = dip(e), s = state;
     if (s.fullOn) { s.fullOn = false; e.preventDefault(); return; }
     var b = shownBox();
-    if (!within(p, b)) return;
-    var ed = s.music.at === "desk" ? edgesAt(p, b) : null;
-    drag = { from: p, box: { x: b.x, y: b.y, w: b.w, h: b.h }, edges: ed, moved: false };
+    if (!b) return;
+    // On its buttons' row: a click, nothing dragged.
+    var onRow = !within(p, b) && s.music.at === "desk" && takes(p, b, rackFor(b), overMusic);
+    if (!within(p, b) && !onRow) return;
+    var ed = s.music.at === "desk" && !onRow ? edgesAt(p, b) : null;
+    drag = { from: p, box: { x: b.x, y: b.y, w: b.w, h: b.h }, edges: ed, moved: false, row: onRow };
     settle = null;
     desk.setPointerCapture(e.pointerId);
     e.preventDefault();
   });
   function dragTo(p) {
     var dx = p.x - drag.from.x, dy = p.y - drag.from.y, s = state, m = s.music, ed = drag.edges;
-    if (!drag.moved && Math.hypot(dx, dy) < MOVE_FROM) return;
+    if (drag.row || !drag.moved && Math.hypot(dx, dy) < MOVE_FROM) return;
     drag.moved = true;
     if (!ed) {
       // Taken from the top edge: on the desktop from now on.

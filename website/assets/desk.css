@@ -15,9 +15,10 @@
 .vdesk .taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: 48px; display: flex; align-items: center; justify-content: center; gap: 6px;
   background: rgba(24, 20, 48, 0.72); -webkit-backdrop-filter: blur(30px) saturate(150%); backdrop-filter: blur(30px) saturate(150%);
   border-top: 1px solid rgba(255, 255, 255, 0.08); }
-.vdesk .taskbar i { display: block; width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; }
-.vdesk .taskbar i svg { width: 22px; height: 22px; }
-.vdesk .taskbar i:hover { background: rgba(255, 255, 255, 0.08); }
+.vdesk .taskbar i { width: 40px; height: 40px; border-radius: 6px; display: grid; place-items: center; transition: background .15s; }
+.vdesk .taskbar i svg { display: block; width: 28px; height: 28px; }
+.vdesk .taskbar i:hover { background: rgba(255, 255, 255, 0.1); }
+.vdesk .taskbar i:active svg { transform: scale(0.88); }
 
 /* What comes from an edge: placed and slid by desk.js. */
 .vdesk .edge { position: absolute; left: 0; top: 0; will-change: transform; }

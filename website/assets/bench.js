@@ -124,7 +124,7 @@
     return b;
   }
   function piece(cls, height) {
-    var p = el("section", "gb-piece " + cls);
+    var p = el("div", "gb-piece " + cls);
     p.style.height = height + "px";
     return p;
   }
@@ -210,6 +210,7 @@
 
     // ---- quick launch, as the rail along the panel's edge ----
     var rail = piece("gb-rail", height);
+    rail.setAttribute("role", "group");
     rail.setAttribute("aria-label", w.quick);
     var apps = place(el("div", "gb-apps"), 0, 8, RAIL_W, height - 16 - RAIL_FOOT);
     ["folder", "browser", "calculator", "notebook", "terminal"].forEach(function (kind, at) {
@@ -651,6 +652,10 @@
 
   window.GlanceDesk = window.GlanceDesk || {};
   window.GlanceDesk.bench = function (lang) { return GlanceDeskBench(lang); };
+  // A program's picture, `side` DIPs square, as the rail shows it (the desk's taskbar has the same ones), and their
+  // names.
+  window.GlanceDesk.app = function (kind, side) { return art(kind, side); };
+  window.GlanceDesk.apps = { kinds: ["folder", "browser", "calculator", "notebook", "terminal"], names: function (lang) { return WORDS[lang === "en" ? "en" : "zh"].apps; } };
   // How frosted dark glass is over a desktop whose luma (0 to 1, as the eye weighs the picture's own values) is `mean`
   // on average, spread by `spread` (its standard deviation), as Glance works it out (skins.rs `frost`): more where what
   // is behind is busy, and more where it is brighter than dark glass reads over. For the root node's --gb-frost.

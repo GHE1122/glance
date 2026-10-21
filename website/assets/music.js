@@ -39,10 +39,16 @@
   var INTERLUDE_DOT = 0.08, INTERLUDE_STEP = 0.43, INTERLUDE_WIDE = INTERLUDE_DOT * 2.5 + INTERLUDE_STEP * 2;
   var RECORD_LABEL = 0.62, BACKDROP_GROWN = 1.35, BACKDROP_DARKENED = 0.42, RADIUS = 14, HOSTED_COVER = 44;
   var TRANSLATION_ROW = 20, CARD_COVER = 64, SPECTRUM_PITCH = 7, DOWN_ROW = 1.2, BANDS = 24;
-  // The buttons set in its corner while the pointer is over it (see ui/buttons.rs): their side and the room between.
-  var BUTTON = 22, BUTTON_GAP = 4;
-  // The room round its box it draws in (DIPs, each side: its shadow), as Glance's layer for it has.
-  var MARGIN = 24;
+  // Its buttons while the pointer is over it (see ui/buttons.rs): their side and the room between. In a panel, in its
+  // corner (panel.rs), the pin, the settings and the full screen. As a widget, in a row off its edge, BUTTON_INSET
+  // from it (widget.rs `buttons`): the full screen, the settings, the pin, click-through and putting it away.
+  var BUTTON = 22, BUTTON_GAP = 4, BUTTON_INSET = 6;
+  var RACK = ["full", "settings", "pin", "through", "close"];
+  // How far the row reaches past its edge, and how long it is.
+  var REACH = BUTTON + 2 * BUTTON_INSET, ROW = RACK.length * BUTTON + (RACK.length - 1) * BUTTON_GAP;
+  // The room round its box it draws in (DIPs, each side), as Glance's window for a widget has: its shadow, and its
+  // buttons' row (widget.rs: the larger of the two).
+  var MARGIN = Math.max(24, REACH);
   // Its colours with no cover.
   var TINT = [1.0, 0.9, 0.8], ACCENT = [1.0, 0.75, 0.6];
   // The sound as the studio pretends it (Glance shows the player's own): how loud, and not muted.
@@ -59,6 +65,8 @@
     music: ["M9 18V5l12-2v13", "M9 18a3 3 0 1 1-6 0a3 3 0 1 1 6 0z", "M21 16a3 3 0 1 1-6 0a3 3 0 1 1 6 0z"],
     volume: ["M11 5L6 9H2v6h4l5 4V5Z", "M15.5 8.5a5 5 0 0 1 0 7", "M19 5a10 10 0 0 1 0 14"],
     muted: ["M11 5L6 9H2v6h4l5 4V5Z", "M22 9L16 15", "M16 9L22 15"],
+    pointer: ["M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z"],
+    close: ["M18 6 6 18", "m6 6 12 12"],
     maximize: ["M8 3H5a2 2 0 0 0-2 2v3", "M21 8V5a2 2 0 0 0-2-2h-3", "M3 16v3a2 2 0 0 0 2 2h3", "M16 21h3a2 2 0 0 0 2-2v-3"],
     pin: ["M12 17v5", "M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"],
     settings: ["M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915", "M15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z"]
@@ -1421,9 +1429,12 @@
       shows: shows,
       least: LEAST.slice(),
       margin: MARGIN,
+      reach: REACH,
+      row: ROW,
       layoutFor: function (w, h) { return forRoom([w, h], m.shows, S.layout); },
       restsAt: function (w, h) { return restsAt([w, h], m.shows); },
-      draw: function (c, w, h, t, now, pointer, playing) {
+      // `rack`: as a widget, the side its buttons' row is on ("above", "under", "left" or "right"); in a panel, none.
+      draw: function (c, w, h, t, now, pointer, playing, rack) {
         var shws = copyShows(m.shows), size = [w, h];
         var at = sungAt(t), since = at != null ? Math.max(0, t - lines[at].at) : null;
         var mo = { now: at, since: since, position: t, playing: !!playing, heard: playing ? heardAt(t) : new Array(BANDS).fill(0) };
@@ -1440,19 +1451,40 @@
           hits = hits.map(function (b) { return [b[0] * zoom, b[1] * zoom, b[2] * zoom, b[3] * zoom, b[4]]; });
         }
         c.restore();
-        // Its pin, its settings and the full screen, at its top right while the pointer is over it.
         var buttons = [];
-        if (p) {
-          var g = groundAt(w, h), top = CORNER, right = w - CORNER;
+        var g = groundAt(w, h), plate = function () {
+          var lighter = function (v) { return v + (1 - v) * 0.12; };
+          return Color(lighter(g[0]), lighter(g[1]), lighter(g[2]), 0.94);
+        };
+        // A widget's row, off its edge, the pointer over it or its row: lit only while on, as none of these is here.
+        if (rack && pointer) {
+          var r = BUTTON / 2, step = BUTTON + BUTTON_GAP;
+          RACK.forEach(function (name, place) {
+            var cx, cy;
+            if (rack === "above" || rack === "under") {
+              cx = w - r - (RACK.length - 1 - place) * step;
+              cy = rack === "under" ? h + BUTTON_INSET + r : -BUTTON_INSET - r;
+            } else {
+              cx = rack === "right" ? w + BUTTON_INSET + r : -BUTTON_INSET - r;
+              cy = r + place * step;
+            }
+            circle(c, plate(), cx, cy, r);
+            ring(c, hex(0xFFFFFF, 0.22), cx, cy, (BUTTON - 1) / 2, 1);
+            icon(c, { full: "maximize", through: "pointer" }[name] || name, cx, cy, 13, hex(0xFFFFFF, 1));
+            buttons.push([cx - r, cy - r, BUTTON, BUTTON, name]);
+          });
+        }
+        // In a panel: its pin, its settings and the full screen, at its top right while the pointer is over it.
+        if (p && !rack) {
+          var top = CORNER, right = w - CORNER;
           [["pin", "pin"], ["settings", "settings"], ["maximize", "full"]].forEach(function (one, index) {
             var bx = right - BUTTON - index * (BUTTON + BUTTON_GAP), by = top;
             var lit = p[0] >= bx && p[0] < bx + BUTTON && p[1] >= by && p[1] < by + BUTTON;
-            var lighter = function (v) { return v + (1 - v) * 0.12; };
-            var plate = Color(lighter(g[0]), lighter(g[1]), lighter(g[2]), 0.94), mark = hex(0xFFFFFF, 1);
+            var ground = plate(), mark = hex(0xFFFFFF, 1);
             var cx = bx + BUTTON / 2, cy = by + BUTTON / 2;
-            circle(c, lit ? mark : plate, cx, cy, BUTTON / 2);
+            circle(c, lit ? mark : ground, cx, cy, BUTTON / 2);
             ring(c, hex(0xFFFFFF, 0.22), cx, cy, (BUTTON - 1) / 2, 1);
-            icon(c, one[0], cx, cy, 13, lit ? plate : mark);
+            icon(c, one[0], cx, cy, 13, lit ? ground : mark);
             buttons.push([bx, by, BUTTON, BUTTON, one[1]]);
           });
         }
@@ -1460,9 +1492,19 @@
         S.drawnAt = [w, h];
       },
       // Where a control is at `w` × `h` showing `shows` (DIPs, from its corner), however shown or not just now: the full
-      // screen's button, or the key to play or pause, go back or skip, as that layout puts them; null where it has none.
-      place: function (w, h, what) {
+      // screen's button (in its corner, or with `rack` in a widget's row), or the key to play or pause, go back or
+      // skip, as that layout puts them; null where it has none.
+      place: function (w, h, what, rack) {
         var shws = copyShows(m.shows);
+        if (what === "full" && rack) {
+          var at = 0, step = BUTTON + BUTTON_GAP;
+          var across = rack === "above" || rack === "under";
+          return {
+            x: across ? w - BUTTON - (RACK.length - 1 - at) * step : rack === "right" ? w + BUTTON_INSET : -BUTTON_INSET - BUTTON,
+            y: across ? (rack === "under" ? h + BUTTON_INSET : -BUTTON_INSET - BUTTON) : at * step,
+            w: BUTTON, h: BUTTON
+          };
+        }
         if (what === "full") return { x: w - CORNER - BUTTON - 2 * (BUTTON + BUTTON_GAP), y: CORNER, w: BUTTON, h: BUTTON };
         var order = ["prev", "play", "next"].indexOf(what);
         if (order < 0) return null;
