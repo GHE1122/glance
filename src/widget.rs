@@ -111,6 +111,53 @@ fn edges_at(x: f32, y: f32, w: f32, h: f32) -> (bool, bool, bool, bool) {
     let (side, end) = (left || right, top || bottom);
     (left || end && x < CORNER, right || end && x > w - CORNER, top || side && y < CORNER, bottom || side && y > h - CORNER)
 }
+/// The edge a widget let go is stuck to and where along it its middle is (physical px): the edge of its screen's work
+/// area it is let go near (`near`), else the one it was stuck to (`stuck`, with where its middle was along it); its
+/// middle where it is let go (`rect`), slid along its edge or not. None, near none and stuck to none.
+fn stuck_after(near: Option<Side>, stuck: Option<(Side, i32)>, rect: RECT) -> Option<(Side, i32)> {
+    let side = near.or(stuck.map(|(side, _)| side))?;
+    Some((side, middle_along(rect, side)))
+}
+
+/// Where the middle of `rect` is along `side` (physical px).
+fn middle_along(rect: RECT, side: Side) -> i32 {
+    match side {
+        Side::Left | Side::Right => (rect.top + rect.bottom) / 2,
+        Side::Top | Side::Bottom => (rect.left + rect.right) / 2,
+    }
+}
+
+/// Where a surface `size` large (physical px) stuck to `side` of the work area `work`, its middle `along` it, has its
+/// corner, all in the work area; along the side where it is now (its corner `at`) for none.
+fn stuck_at(work: RECT, at: POINT, side: Side, along: Option<i32>, size: (i32, i32)) -> POINT {
+    let (x, y) = match side {
+        Side::Left => (work.left, at.y),
+        Side::Right => (work.right - size.0, at.y),
+        Side::Top => (at.x, work.top),
+        Side::Bottom => (at.x, work.bottom - size.1),
+    };
+    let x = match (side, along) {
+        (Side::Top | Side::Bottom, Some(middle)) => middle - size.0 / 2,
+        _ => x,
+    };
+    let y = match (side, along) {
+        (Side::Left | Side::Right, Some(middle)) => middle - size.1 / 2,
+        _ => y,
+    };
+    let x = x.clamp(work.left, (work.right - size.0).max(work.left));
+    let y = y.clamp(work.top, (work.bottom - size.1).max(work.top));
+    POINT { x, y }
+}
+
+/// Whether a widget's window lets a click at `cursor` through to what is under it: everywhere, set to (`setting`),
+/// but on the button that ends that (`reached`); and, as the panel's window does, over its shadow: in its `window`, off
+/// where it takes the pointer (`taking`), unless it is in hand (`held`).
+fn clicks_through(setting: bool, reached: bool, cursor: Option<POINT>, window: RECT, taking: RECT, held: bool) -> bool {
+    let inside = |r: RECT, c: POINT| (r.left..r.right).contains(&c.x) && (r.top..r.bottom).contains(&c.y);
+    let shadow = !held && cursor.is_some_and(|c| inside(window, c) && !inside(taking, c));
+    setting && !reached || shadow
+}
+
 /// How far the pointer moves a pressed widget before it moves (DIPs).
 const MOVE_FROM: f32 = 4.0;
 /// How far past what its form fills a widget's edge follows the hand:
@@ -552,6 +599,8 @@ struct Widget {
     /// whether it is on the button that ends that (the window then takes
     /// the click).
     lingered: Option<Instant>,
+    /// The pointer over its shadow, its window letting clicks there through (see `clicks_through`).
+    shadowed: bool,
     reached: bool,
     /// The button the pointer is on, said under it.
     tip: Option<Button>,
@@ -1947,8 +1996,9 @@ impl Widgets {
         let mut gone = Vec::new();
         let mut torn = Vec::new();
         for (index, widget) in self.list.iter_mut().enumerate() {
-            // (Letting clicks through, but for the one on its button.)
-            let through = widget.click_through && !widget.reached;
+            // (Letting clicks through, but for the one on its button; and over its shadow.)
+            let through = clicks_through(widget.click_through, widget.reached, cursor_position(), widget.window_rect(), widget.taking(), widget.drag.is_some());
+            widget.shadowed = through && !(widget.click_through && !widget.reached);
             widget.window.set_click_through(through);
             let hidden = widget.game_only && !playing;
             // A skin that does not see the desktop (or what it shows is not in the skin): nothing of it kept, shown or
@@ -1990,7 +2040,9 @@ impl Widgets {
                 }
                 Frame::Rest | Frame::Waiting => {
                     // (The pointer over it: looked at often, so that what comes with it goes as soon as it leaves.)
-                    let rest = if widget.lingered.is_some() { WATCHED } else if widget.hover { HOVERED_FRAME } else { REST_FRAME };
+                    // (Over its shadow, letting clicks through and so hearing nothing of the pointer: looked at as
+                    // often, so that it takes the pointer as soon as that comes onto it.)
+                    let rest = if widget.lingered.is_some() || widget.shadowed { WATCHED } else if widget.hover { HOVERED_FRAME } else { REST_FRAME };
                     widget.next_frame = now + rest;
                     due = due.min(rest);
                     // (What is behind looked at sooner, a frame of it having come: drawn only if it changed.)
@@ -2305,6 +2357,7 @@ impl Widget {
             saying: false,
             thumbs: crate::ui::thumb::Dots::new(),
             lingered: None,
+            shadowed: false,
             reached: false,
             tip: None,
             hits: Vec::new(),
@@ -3005,12 +3058,13 @@ impl Widget {
     /// what it shows or how large); already stuck, flush with its edge again.
     fn stick(&mut self) {
         let near = self.nearest_side().filter(|(_, away)| *away < STICK).map(|(side, _)| side);
-        let Some(side) = near.or(self.stuck) else { return };
-        if self.stuck.is_none() {
-            self.along = Some(self.middle_along(side));
+        let was = self.stuck.map(|side| (side, self.along.unwrap_or_else(|| self.middle_along(side))));
+        let Some((side, along)) = stuck_after(near, was, self.rect()) else { return };
+        if self.stuck != Some(side) {
             note(format!("widget: stuck to the {side:?} edge"));
-            self.stuck = Some(side);
         }
+        self.stuck = Some(side);
+        self.along = Some(along);
         self.keeps_to = (side == Side::Right, side == Side::Bottom);
     }
 
@@ -3033,35 +3087,13 @@ impl Widget {
 
     /// Where its middle is along `side` now (physical px).
     fn middle_along(&self, side: Side) -> i32 {
-        let rect = self.rect();
-        match side {
-            Side::Left | Side::Right => (rect.top + rect.bottom) / 2,
-            Side::Top | Side::Bottom => (rect.left + rect.right) / 2,
-        }
+        middle_along(self.rect(), side)
     }
 
-    /// Where a surface `size` large (physical px) stuck to `side`, its
-    /// middle `along` it, has its corner, all on its screen; along the side
-    /// where it is now for none.
+    /// Where a surface `size` large (physical px) stuck to `side`, its middle `along` it, has its corner (see the
+    /// function of that name).
     fn stuck_at(&self, side: Side, along: Option<i32>, size: (i32, i32)) -> POINT {
-        let (work, at) = (self.contact.work, self.at);
-        let (x, y) = match side {
-            Side::Left => (work.left, at.y),
-            Side::Right => (work.right - size.0, at.y),
-            Side::Top => (at.x, work.top),
-            Side::Bottom => (at.x, work.bottom - size.1),
-        };
-        let x = match (side, along) {
-            (Side::Top | Side::Bottom, Some(middle)) => middle - size.0 / 2,
-            _ => x,
-        };
-        let y = match (side, along) {
-            (Side::Left | Side::Right, Some(middle)) => middle - size.1 / 2,
-            _ => y,
-        };
-        let x = x.clamp(work.left, (work.right - size.0).max(work.left));
-        let y = y.clamp(work.top, (work.bottom - size.1).max(work.top));
-        POINT { x, y }
+        stuck_at(self.contact.work, self.at, side, along, size)
     }
 
     /// Shows where it would stick, as the skin draws it: `rect` (physical
@@ -3130,6 +3162,33 @@ impl Widget {
 
     fn margin_px(&self) -> i32 {
         (self.margin * self.contact.scale * self.zoom).ceil() as i32
+    }
+
+    /// How far past its surface its buttons' row reaches, above, under, left and right of it (physical px): none but
+    /// on the side they are at, and there only while they show (the pointer over it).
+    fn reach(&self) -> (i32, i32, i32, i32) {
+        let reach = if self.hover { ((BUTTON + 2.0 * BUTTON_INSET) * self.contact.scale * self.zoom) as i32 } else { 0 };
+        match self.rack() {
+            Rack::Above => (reach, 0, 0, 0),
+            Rack::Under => (0, reach, 0, 0),
+            Rack::Left => (0, 0, reach, 0),
+            Rack::Right => (0, 0, 0, reach),
+        }
+    }
+
+    /// Its window on the screen (physical px): its surface and the room round it for its shadow and its buttons.
+    fn window_rect(&self) -> RECT {
+        let (r, m) = (self.rect(), self.margin_px());
+        RECT { left: r.left - m, top: r.top - m, right: r.right + m, bottom: r.bottom + m }
+    }
+
+    /// Where it takes the pointer (physical px): its surface, the band round its edge that sizes it (see `edges_at`)
+    /// and, where they show, its buttons.
+    fn taking(&self) -> RECT {
+        let band = (EDGE * self.contact.scale * self.zoom).ceil() as i32;
+        let (above, under, left, right) = self.reach();
+        let r = self.rect();
+        RECT { left: r.left - band.max(left), top: r.top - band.max(above), right: r.right + band.max(right), bottom: r.bottom + band.max(under) }
     }
 
     /// Lays it out, places its window and draws it.
@@ -3415,13 +3474,7 @@ impl Widget {
             self.at.y = self.at.y.clamp(work.top, (work.bottom - size.1).max(work.top));
         }
         // The pointer over it, or (its buttons showing) over them.
-        let reach = if self.hover { ((BUTTON + 2.0 * BUTTON_INSET) * px) as i32 } else { 0 };
-        let (above, under, left, right) = match self.rack() {
-            Rack::Above => (reach, 0, 0, 0),
-            Rack::Under => (0, reach, 0, 0),
-            Rack::Left => (0, 0, reach, 0),
-            Rack::Right => (0, 0, 0, reach),
-        };
+        let (above, under, left, right) = self.reach();
         let cursor = cursor_position();
         let hovered = cursor.is_some_and(|c| {
             let r = self.rect();
@@ -4052,6 +4105,51 @@ mod tests {
         assert_eq!(only_of(&form_of(Some("note:周会: 议题.md"), form.clone())), (Some("note:周会: 议题.md".to_string()), form.clone()));
         assert_eq!(only_of(&form_of(None, form.clone())), (None, form));
         assert!(Form::from_key(&kept).is_none());
+    }
+
+    /// A widget stuck to an edge and slid along it stays where it is let go, stuck to that edge still (it went back to
+    /// where it was first stuck); let go near another edge, it is stuck to that one.
+    #[test]
+    fn a_stuck_widget_slid_along_its_edge_stays_where_it_is_let_go() {
+        let work = RECT { left: 0, top: 0, right: 1920, bottom: 1032 };
+        let size = (400, 200);
+        // Stuck to the left edge, its middle at 300 down it; slid down it to 500.
+        let at = POINT { x: 0, y: 500 };
+        let rect = RECT { left: at.x, top: at.y, right: at.x + size.0, bottom: at.y + size.1 };
+        let (side, along) = stuck_after(None, Some((Side::Left, 300)), rect).unwrap();
+        assert_eq!(side, Side::Left);
+        assert_eq!(stuck_at(work, at, side, Some(along), size), at);
+        // Slid up into the top left corner, nearer the top: stuck to the top, where it is.
+        let at = POINT { x: 0, y: 0 };
+        let rect = RECT { left: at.x, top: at.y, right: at.x + size.0, bottom: at.y + size.1 };
+        let (side, along) = stuck_after(Some(Side::Top), Some((Side::Left, 300)), rect).unwrap();
+        assert_eq!(side, Side::Top);
+        assert_eq!(stuck_at(work, at, side, Some(along), size), at);
+        // Stuck to none, let go near none: stuck to none.
+        assert_eq!(stuck_after(None, None, rect), None);
+    }
+
+    /// A widget's window lets a click over its shadow through to what is under it, as the panel's does, but not one on
+    /// it, on the band round its edge that sizes it or on its buttons, nor any while it is in hand; set to let clicks
+    /// through, it lets all through but on the button that ends that.
+    #[test]
+    fn a_click_on_a_widgets_shadow_goes_through() {
+        let window = RECT { left: 76, top: 76, right: 524, bottom: 324 };
+        let taking = RECT { left: 92, top: 60, right: 508, bottom: 308 };
+        let at = |x, y| Some(POINT { x, y });
+        // Over its shadow, left of it and under it.
+        assert!(clicks_through(false, false, at(80, 200), window, taking, false));
+        assert!(clicks_through(false, false, at(300, 316), window, taking, false));
+        // On it, on its edge's band, on its buttons' row (above it, past its window's top), and in hand.
+        assert!(!clicks_through(false, false, at(300, 200), window, taking, false));
+        assert!(!clicks_through(false, false, at(94, 200), window, taking, false));
+        assert!(!clicks_through(false, false, at(300, 62), window, taking, false));
+        assert!(!clicks_through(false, false, at(80, 200), window, taking, true));
+        // Away from its window: none of its.
+        assert!(!clicks_through(false, false, at(900, 900), window, taking, false));
+        // Set to let clicks through: all, but on the button that ends that.
+        assert!(clicks_through(true, false, at(300, 200), window, taking, false));
+        assert!(!clicks_through(true, true, at(300, 200), window, taking, false));
     }
 
     #[test]
