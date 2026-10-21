@@ -366,7 +366,8 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
 /// Looks every second at what `wanted` says is shown (whatever plays, and music with its lyrics), while what can show
 /// it is on the screen (its third), as each line of the lyrics is due, and as its player says it changed (another
 /// track, played or paused, another player); forgets what it saw of one while it is not shown. (Looked at with
-/// nothing on the screen to show it, Windows was asked what plays, and how loud, every second for nothing.)
+/// nothing on the screen to show it, Windows was asked what plays, and how loud, every second for nothing.) With
+/// nothing on the screen to show it, the thread sleeps till something that can comes on it (see `look_now`).
 #[cfg(windows)]
 pub fn watch(wanted: impl Fn() -> (bool, bool, bool) + Send + 'static, changed: impl Fn() + Send + Sync + 'static) {
     let _ = TOLD.set(Box::new(changed));
@@ -419,7 +420,8 @@ pub fn watch(wanted: impl Fn() -> (bool, bool, bool) + Send + 'static, changed: 
             let wait = next.map_or(std::time::Duration::from_secs(1), |next| next.clamp(std::time::Duration::from_millis(50), std::time::Duration::from_secs(1)));
             let (asked, woken) = &LOOK_NOW;
             let asked = asked.lock().unwrap();
-            let mut asked = woken.wait_timeout_while(asked, wait, |asked| !*asked).unwrap().0;
+            // (With nothing on the screen to show it, looked at again only as something comes on it: see `look_now`.)
+            let mut asked = if seen { woken.wait_timeout_while(asked, wait, |asked| !*asked).unwrap().0 } else { woken.wait_while(asked, |asked| !*asked).unwrap() };
             *asked = false;
         }
     }).expect("a thread started");

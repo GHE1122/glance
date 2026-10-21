@@ -437,6 +437,15 @@ impl<F: Fn(&Path, bool) -> bool> Tools<F> {
 static SHOWN: Mutex<Option<Arc<Vec<Came>>>> = Mutex::new(None);
 /// Whether the list is on (see `StationSettings::recent`).
 static ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether the settings have the list on, as they last changed (see `follow_settings`): while they do not, its thread
+/// sleeps till they do.
+static WANTED: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
+
+/// Whether the list is on, taken from the settings as they change.
+pub fn follow_settings(settings: &crate::settings::Settings) {
+    *WANTED.0.lock().unwrap() = settings.station.recent;
+    WANTED.1.notify_all();
+}
 
 /// Whether the files come lately are listed (switched on in the settings, and followed).
 pub fn on() -> bool {
@@ -498,7 +507,7 @@ fn follow() {
             if was_on {
                 publish(Vec::new());
             }
-            std::thread::sleep(EVERY);
+            drop(WANTED.1.wait_while(WANTED.0.lock().unwrap(), |wanted| !*wanted).unwrap());
             continue;
         }
         // The drives looked for again now and then (one put in, or formatted).

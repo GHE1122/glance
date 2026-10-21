@@ -372,15 +372,25 @@ static FOLLOW_OWED: AtomicBool = AtomicBool::new(false);
 /// The overlay's page asked for, to be turned to (see `open_at_overlay`); kept as `FOLLOW_OWED` is.
 static OVERLAY_OWED: AtomicBool = AtomicBool::new(false);
 static WORKBENCH_OWED: AtomicBool = AtomicBool::new(false);
+/// The screens changed, to be read again by the window (see `tick`): told outside its state, which a dialog of it
+/// may hold.
+static SCREENS_OWED: AtomicBool = AtomicBool::new(false);
+/// Whether the window was minimized as it was last sized (see WM_SIZE).
+static MINIMIZED: AtomicBool = AtomicBool::new(false);
 
 /// Draws the window if a frame is due, and says when the next one is; `None`
 /// while there is no window.
 fn tick(now: Instant) -> Option<Duration> {
     with_ui(|ui| {
-        // Minimized, nothing is drawn (it is drawn whole as it is restored: see WM_SIZE); looked at again a while
-        // later.
+        // The screens changed (see WM_DISPLAYCHANGE): as they are now.
+        if SCREENS_OWED.swap(false, Ordering::AcqRel) {
+            ui.screens = crate::screens::all();
+            ui.next_frame = now;
+        }
+        // Minimized, nothing is drawn (it is drawn whole as it is restored: see WM_SIZE), and nothing is looked at
+        // again till a message comes (restored, it is told so).
         if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(ui.hwnd) }.as_bool() {
-            return MINIMIZED_LOOK;
+            return Duration::MAX;
         }
         if ui.relabel_at.is_some_and(|at| now >= at) {
             ui.relabel();
@@ -392,9 +402,6 @@ fn tick(now: Instant) -> Option<Duration> {
         ui.next_frame.saturating_duration_since(now)
     })
 }
-
-/// How often a minimized settings window is looked at (to be drawn again once it is restored).
-const MINIMIZED_LOOK: Duration = Duration::from_millis(500);
 
 pub(crate) fn windows_build() -> u32 {
     metrics::reg_string(w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"), w!("CurrentBuild")).parse().unwrap_or(0)
@@ -476,13 +483,14 @@ enum Read {
     Map { id: String, monitor: RECT, size: (u32, u32), desktop: Capture },
 }
 
-/// How the phone remote is, as its helper says (see `Ui::remote_asked`), and a code asked of it with what for (none
-/// asked: none).
+/// How the phone remote is, as its helper says (see `Ui::remote_asked`), a code asked of it with what for (none
+/// asked: none), and the phones paired as it then has them.
 struct RemoteAnswer {
     lights: bool,
     screens: bool,
     address: Option<String>,
     code: Option<Option<(crate::phone::Code, CodeFor)>>,
+    phones: Vec<crate::phone::Phone>,
 }
 
 /// What the diagnostics are put together for.
@@ -1114,8 +1122,6 @@ struct Ui {
     /// in layers of its own: see `render::PanelLayers`).
     library_music: super::music::Music,
     library_layers: [PanelLayers; 2],
-    /// When the screens were last asked for.
-    screens_at: Instant,
     map_art: Vec<MapArt>,
     /// The desktops of the other screens the preview has shown, kept: turning to a page that shows another screen
     /// (the overlay's) and back takes them as they are, not read from the wallpaper and scaled anew each time.
@@ -1310,7 +1316,6 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             zones: Vec::new(),
             library_music: super::music::Music::default(),
             library_layers: [PanelLayers::default(), PanelLayers::default()],
-            screens_at: Instant::now(),
             map_art: Vec::new(),
             kept_stages: Vec::new(),
             read: std::sync::mpsc::channel(),
@@ -1396,6 +1401,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // The screens changed: this thread asks for them anew too (see `screens::changed`).
         WM_DISPLAYCHANGE => {
             crate::screens::changed();
+            SCREENS_OWED.store(true, Ordering::Release);
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_GETMINMAXINFO => {
@@ -1438,7 +1444,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             // Drawn at its new size; minimized, or told of the size it was last drawn at (as it is first shown,
             // drawn already), nothing new to draw. (Its surface keeps what was drawn.)
             let size = ((lparam.0 & 0xFFFF) as u32, ((lparam.0 >> 16) & 0xFFFF) as u32);
-            if wparam.0 != windows::Win32::UI::WindowsAndMessaging::SIZE_MINIMIZED as usize {
+            let minimized = wparam.0 == windows::Win32::UI::WindowsAndMessaging::SIZE_MINIMIZED as usize;
+            // Restored: on the screen again, what plays is looked at at once for the previews (see `playing::watch`).
+            if MINIMIZED.swap(minimized, Ordering::Relaxed) && !minimized {
+                crate::playing::look_now();
+            }
+            if !minimized {
                 with_ui(|ui| {
                     if ui.drawn_size != Some(size) {
                         ui.draw(Instant::now());
@@ -1906,7 +1917,7 @@ impl Ui {
         }
         self.remote_asked = Some(std::thread::spawn(move || {
             let code = ask();
-            RemoteAnswer { lights: crate::phone::lights(), screens: crate::phone::screens_kept(), address: crate::phone::web_address(), code }
+            RemoteAnswer { lights: crate::phone::lights(), screens: crate::phone::screens_kept(), address: crate::phone::web_address(), code, phones: crate::phone::phones() }
         }));
         self.next_frame = Instant::now();
     }
@@ -3651,12 +3662,6 @@ impl Ui {
 
     fn draw(&mut self, now: Instant) {
         let _timed = crate::perf::Timed::start("settings frame", || format!("{:?} {:?}", self.page, self.tab));
-        // The screens as they are about now, and the one the preview
-        // shows.
-        if now.duration_since(self.screens_at) >= Duration::from_secs(1) {
-            self.screens = crate::screens::all();
-            self.screens_at = now;
-        }
         // Desktops read meanwhile: the one shown, if it waited for it; else kept (unless kept already); the map's in
         // place, if it is still of that screen as it is.
         while let Ok(read) = self.read.1.try_recv() {
@@ -3901,7 +3906,7 @@ impl Ui {
                 if let Some(code) = answer.code {
                     self.code = code;
                 }
-                self.phones = crate::phone::phones();
+                self.phones = answer.phones;
             }
             self.next_frame = now;
         }

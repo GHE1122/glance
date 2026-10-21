@@ -208,6 +208,7 @@ impl App {
             station::run::ask(station::run::Ask::Settings);
             station::apps::follow(&held.apps);
             notes::follow_settings(&held);
+            station::recent::follow_settings(&held);
         }
         // The tray reads the shortcut's setting from here: told once it is in.
         tray::follow_settings();
@@ -508,6 +509,7 @@ pub fn run() {
     station::recent::start(|| app().controller.wake());
     station::apps::follow(&app().settings.lock().unwrap().apps);
     notes::follow_settings(&app().settings.lock().unwrap());
+    station::recent::follow_settings(&app().settings.lock().unwrap());
     notes::start(|| app().controller.wake());
     // The phone remote, if it is on: running from now, whatever stopped it.
     thread::Builder::new().name("glance: phone remote".into()).spawn(phone::keep).expect("a thread started");

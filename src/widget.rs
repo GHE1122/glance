@@ -201,7 +201,7 @@ pub fn own_window_changed(rect: RECT) {
 }
 static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
-/// How often the other programs' windows are looked at, while there are widgets.
+/// How often the other programs' windows are looked at, while a widget is shown.
 const WINDOWS_LOOKED_AT: Duration = Duration::from_millis(250);
 
 /// The other programs' windows, looked at on a thread of their own every `WINDOWS_LOOKED_AT` for as long as this is
@@ -1861,7 +1861,13 @@ impl Widgets {
             self.watching = None;
             return None;
         }
-        if self.watching.is_none() {
+        let playing = crate::ui::view::game_shown(history);
+        // Each shown (the other programs' windows looked at only while one is: see `WindowWatch`).
+        let shown: Vec<&Widget> = self.list.iter().filter(|w| !w.game_only || playing).collect();
+        let any_shown = !shown.is_empty();
+        if !any_shown {
+            self.watching = None;
+        } else if self.watching.is_none() {
             self.watching = Some(WindowWatch::start());
         }
         // Those kept on the desktop, just above it again wherever it went.
@@ -1874,9 +1880,7 @@ impl Widgets {
         // one of them moved, sized, come or gone where it meets another
         // changes what is behind that one too, as another program's would.
         self.live = look.live && look.skin.sees_backdrop();
-        let playing = crate::ui::view::game_shown(history);
         // Each shown, with its shadow and the room for its buttons round it.
-        let shown: Vec<&Widget> = self.list.iter().filter(|w| !w.game_only || playing).collect();
         let areas: Vec<(isize, RECT)> = shown
             .iter()
             .map(|w| {
@@ -1969,7 +1973,8 @@ impl Widgets {
             self.put_away_at(index);
             self.save();
         }
-        Some(due)
+        // (None shown, nothing is due of them: a game come, a sample wakes the thread, and they show.)
+        any_shown.then_some(due)
     }
 
     /// The widget in hand held over another it may be merged into: since when, and, held there long enough, that
