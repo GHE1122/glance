@@ -214,9 +214,42 @@ impl Units {
     }
 }
 
+/// `text`'s lines with words, as they read: each line's words as CommonMark reads the whole of `text` (a heading's,
+/// a list's, a to-do's, a quote's marks, emphasis's and code's taken off, a link's words without where it goes, a
+/// block of code's lines as written), in their order.
+pub fn plain_lines(text: &str) -> Vec<String> {
+    let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1)).collect();
+    let line_of = |offset: usize| starts.partition_point(|start| *start <= offset) - 1;
+    let mut lines: Vec<(usize, String)> = Vec::new();
+    for (event, range) in Parser::new_ext(text, Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH).into_offset_iter() {
+        let words = match event {
+            Event::Text(words) | Event::Code(words) | Event::Html(words) | Event::InlineHtml(words) => words,
+            _ => continue,
+        };
+        // (Words over several lines, a block of code's, each on its own line, from the one they begin on.)
+        for (more, piece) in words.split('\n').enumerate() {
+            let line = line_of(range.start) + more;
+            match lines.last_mut() {
+                Some((last, kept)) if *last == line => kept.push_str(piece),
+                _ => lines.push((line, piece.to_string())),
+            }
+        }
+    }
+    lines.into_iter().map(|(_, words)| words.trim().to_string()).filter(|words| !words.is_empty()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A note's lines read as their words, marks off: what its title and its card show.
+    #[test]
+    fn lines_read_without_their_marks() {
+        let text = "## 本周\n\n- [ ] nihao\n- [x] **做完** 了\n> 引的 `code`\n1. 看 [链接](https://a.b/c)\n\n```\nlet a = 1;\n\nb\n```\n";
+        assert_eq!(plain_lines(text), ["本周", "nihao", "做完 了", "引的 code", "看 链接", "let a = 1;", "b"]);
+        assert_eq!(plain_lines("标题\n===\n下一行"), ["标题", "下一行"]);
+        assert!(plain_lines("- [ ]\n#\n").is_empty());
+    }
 
     fn look_of(looks: &[(Range<usize>, Look)], at: usize) -> Vec<Look> {
         looks.iter().filter(|(range, _)| range.contains(&at)).map(|(_, look)| *look).collect()

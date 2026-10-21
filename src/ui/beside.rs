@@ -1235,7 +1235,7 @@ impl Beside {
                 return true;
             }
             None => {
-                let title = crate::notes::Note { name: String::new(), text: text.clone(), colour: writing.colour, stamp: Default::default() }.title().to_string();
+                let title = crate::notes::Note { name: String::new(), text: text.clone(), colour: writing.colour, stamp: Default::default() }.title();
                 let today = super::text::Local::at(crate::station::now_ms());
                 let named = folder.name_for(&title, &match lang {
                     super::text::Lang::Zh => format!("便签 {}月{}日", today.month, today.day),

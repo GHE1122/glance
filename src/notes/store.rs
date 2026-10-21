@@ -66,9 +66,9 @@ pub struct Note {
 }
 
 impl Note {
-    /// Its title: its first line with words, without a heading's marks.
-    pub fn title(&self) -> &str {
-        self.text.lines().map(|line| line.trim().trim_start_matches('#').trim()).find(|line| !line.is_empty()).unwrap_or("")
+    /// Its title: its first line with words, as it reads (its Markdown's marks off: see `markdown::plain_lines`).
+    pub fn title(&self) -> String {
+        super::markdown::plain_lines(&self.text).into_iter().next().unwrap_or_default()
     }
 }
 
@@ -451,6 +451,18 @@ fn recycle(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// A note's title is its first line as it reads: a to-do's, a list's, a heading's marks off.
+    #[test]
+    fn a_title_reads_without_marks() {
+        let title = |text: &str| Note { name: String::new(), text: text.into(), colour: Colour::Blue, stamp: Stamp::default() }.title();
+        assert_eq!(title("- [ ] nihao
+年后"), "nihao");
+        assert_eq!(title("
+## **本周**
+"), "本周");
+        assert_eq!(title("> 引的话"), "引的话");
+    }
+
     fn folder(test: &str) -> Folder {
         let path = std::env::temp_dir().join(format!("glance-notes-{}-{test}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
@@ -467,7 +479,7 @@ mod tests {
         assert_eq!(folder.write(&name, "# 本周: 要做的事?\n\n- [ ] 发布\n", None).unwrap(), Written::Done(folder.stamp(&name).unwrap()));
         assert_eq!(folder.name_for("本周: 要做的事?", "便签"), "本周 要做的事 2.md");
         let notes = folder.notes();
-        assert_eq!((notes.len(), notes[0].title(), notes[0].colour), (1, "本周: 要做的事?", Colour::Blue));
+        assert_eq!((notes.len(), notes[0].title().as_str(), notes[0].colour), (1, "本周: 要做的事?", Colour::Blue));
         folder.colour(&name, Colour::Green).unwrap();
         assert_eq!(folder.notes()[0].colour, Colour::Green);
         // (No file of its own writing left beside it.)

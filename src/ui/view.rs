@@ -802,15 +802,17 @@ fn notes_lane(full: bool, lang: Lang) -> Vec<Block> {
 
 /// `note` as its card shows it, with up to `lines` of its lines after its title.
 fn note_card(note: &crate::notes::Note, lang: Lang, now: u64, lines: usize) -> NoteCard {
+    let read = crate::notes::markdown::plain_lines(&note.text);
+    let title = read.first().map_or(lang.pick("无标题", "Untitled"), String::as_str);
     NoteCard {
         number: crate::notes::number_of(&note.name),
         // (A conflict's copy said to be one: its words, and so its title, are those of the note it was kept apart from.)
         title: format!(
             "{}{}",
-            if note.title().is_empty() { lang.pick("无标题", "Untitled") } else { note.title() },
+            title,
             if crate::notes::is_apart(&note.name) { lang.pick("（冲突副本）", " (conflicted copy)") } else { "" }
         ),
-        lines: note.text.lines().map(str::trim).filter(|line| !line.is_empty()).skip(1).take(lines).map(markdown_plain).collect(),
+        lines: read.iter().skip(1).take(lines).cloned().collect(),
         when: text::since(note.stamp.written_ms, now, lang),
         colour: note.colour,
     }
@@ -835,14 +837,6 @@ pub const STUCK_NOTE: (f32, f32) = (360.0, 320.0);
 
 /// The least a note stuck on the desktop is made (DIPs): its head, a few lines, its foot.
 pub const STUCK_NOTE_LEAST: (f32, f32) = (220.0, 180.0);
-
-/// A line of Markdown as plain words: its marks taken off (a heading's, a list's, a to-do's box, emphasis, code).
-fn markdown_plain(line: &str) -> String {
-    let line = line.trim_start_matches('#').trim_start();
-    let line = line.strip_prefix("- [ ] ").or_else(|| line.strip_prefix("- [x] ")).or_else(|| line.strip_prefix("- [X] ")).map(|rest| rest.to_string()).unwrap_or_else(|| line.to_string());
-    let line = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")).or_else(|| line.strip_prefix("> ")).map(str::to_string).unwrap_or(line);
-    line.replace("**", "").replace('`', "").replace("__", "")
-}
 
 /// A note's colour's mark: its dot (chart paper's, a list's), its band (Windows 11's), its page's.
 pub(crate) fn note_colour(colour: crate::notes::Colour) -> Color {
@@ -1204,7 +1198,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
         }
         NotesView::List => {
             // A row each: its colour (Windows 11's a band of it, the others' a dot), its title over its first line,
-            // when it was written; on chart paper ruled apart.
+            // when it was written (no rule between them: as the station's rows are not).
             let (most, scroll) = notes_scroll(scene, notes.len() as f32 * NOTE_ROW, tall);
             for (at, note) in notes.iter().enumerate() {
                 let y = top + at as f32 * NOTE_ROW - scroll;
@@ -1212,7 +1206,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                     continue;
                 }
                 frame.key(&format!("note.{}", note.number));
-                paint_note_row(frame, scene, note, (left, y, width, NOTE_ROW), lit(at), dotted && at + 1 < notes.len());
+                paint_note_row(frame, scene, note, (left, y, width, NOTE_ROW), lit(at));
                 frame.key("");
                 hits.extend(shown_in((left, y, width, NOTE_ROW, Hit::Note(note.number)), (left - 4.0, top, width + 8.0, tall)));
             }
@@ -1249,10 +1243,9 @@ fn paint_note_card(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (x, y, w,
     frame.text(&note.when, theme.small, faint, x + inner, when_y, w - inner - 10.0, Align::Start);
 }
 
-/// A note's row as the list shows it, in the box (`left`, `y`, `width`, `h`), `lit` under the pointer, `ruled` off
-/// below (chart paper's, but the last): its colour (Windows 11's a band of it, the others' a dot), its title over its
-/// first line, when it was written at its end.
-fn paint_note_row(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (left, y, width, h): (f32, f32, f32, f32), lit: bool, ruled: bool) {
+/// A note's row as the list shows it, in the box (`left`, `y`, `width`, `h`), `lit` under the pointer: its colour
+/// (Windows 11's a band of it, the others' a dot), its title over its first line, when it was written at its end.
+fn paint_note_row(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (left, y, width, h): (f32, f32, f32, f32), lit: bool) {
     let theme = scene.theme;
     if lit {
         frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, h - 2.0, plate_round(theme, GLASS_ROW_ROUND - 4.0, 4.0));
@@ -1263,9 +1256,6 @@ fn paint_note_row(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (left, y, 
         frame.fill_rounded(note_colour(note.colour), left, y + 7.0, 4.0, h - 14.0, 2.0);
     } else {
         note_dot(frame, note.colour, left, title_y + LINE / 2.0);
-    }
-    if ruled {
-        frame.fill(theme.rule, left + 15.0, y + h - 1.0, width - 15.0, 1.0);
     }
     let when_w = frame.measure(&note.when, theme.small);
     let x = left + if theme.skin == Skin::Fluent { 14.0 } else { 15.0 };
