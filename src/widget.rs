@@ -1170,10 +1170,17 @@ impl Content {
     /// Its buttons, as they stand in their row: the game's only with the readings (the game lane is theirs).
     fn buttons(&self) -> &'static [Button] {
         match self {
+            // (A game shown or not changes only the readings': the workbench's has nothing of it.)
+            Content::Readings(readings) if readings.workbench => &[Button::Settings, Button::Pin, Button::Through, Button::Close],
             Content::Readings(_) => &buttons::ALL,
             Content::Music(_) => &[Button::Full, Button::Settings, Button::Pin, Button::Through, Button::Close],
-            // (With readings in it, as theirs.)
-            Content::Merged(merged) => merged.parts.iter().find(|part| matches!(part, Content::Readings(_))).map_or(&[Button::Settings, Button::Pin, Button::Through, Button::Close], Content::buttons),
+            // (With the readings' in it, as theirs; else with the workbench's, as its.)
+            Content::Merged(merged) => merged
+                .parts
+                .iter()
+                .find(|part| matches!(part, Content::Readings(readings) if !readings.workbench))
+                .or_else(|| merged.parts.iter().find(|part| matches!(part, Content::Readings(_))))
+                .map_or(&[Button::Settings, Button::Pin, Button::Through, Button::Close], Content::buttons),
         }
     }
 }
@@ -3927,6 +3934,20 @@ mod tests {
         let merged = Content::Merged(Box::new(Merged::new(vec![Content::Music(MusicShown::new(music::LEAST)), note("a.md")], true, music::LEAST)));
         assert_eq!(merged.holding("note:a.md"), Some(Some(1)));
         assert_eq!(merged.holding("note:b.md"), None);
+    }
+
+    /// A widget of the workbench's (a note, the station) has no game button, a game shown changing nothing in it; one of
+    /// the readings' has, and so has one merged with readings, whatever else is in it.
+    #[test]
+    fn only_the_readings_have_a_game_button() {
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let lanes = |workbench: bool| Content::Readings(Readings { workbench, ..Readings::new(choice.clone()) });
+        let game = |content: &Content| content.buttons().contains(&Button::Game);
+        assert!(!game(&lanes(true)));
+        assert!(game(&lanes(false)));
+        let merged = |parts: Vec<Content>| Content::Merged(Box::new(Merged::new(parts, true, music::LEAST)));
+        assert!(!game(&merged(vec![Content::Music(MusicShown::new(music::LEAST)), lanes(true)])));
+        assert!(game(&merged(vec![lanes(true), lanes(false)])));
     }
 
     /// One lane alone kept under a form of its own, read back as that lane and its form; a whole panel's form as it
