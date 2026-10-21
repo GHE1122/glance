@@ -203,15 +203,25 @@ pub fn ask(ask: Ask) {
     }
 }
 
+#[cfg(all(test, feature = "studio"))]
+thread_local! {
+    /// What this thread's pictures pretend (see `pretend`): each test's its own, as tests run side by side.
+    static PRETENDED: std::cell::RefCell<Option<Arc<Shown>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// What the station shows now.
 pub fn shown() -> Arc<Shown> {
+    #[cfg(all(test, feature = "studio"))]
+    if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
+        return pretended;
+    }
     SHOWN.lock().unwrap().clone().unwrap_or_default()
 }
 
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(all(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
-    *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false }));
+    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false })));
 }
 
 /// `given` opened as Explorer opens it: each file (a folder in Explorer), or a web address in the browser.
