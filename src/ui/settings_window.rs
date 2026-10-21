@@ -163,6 +163,20 @@ static WINDOW: AtomicIsize = AtomicIsize::new(0);
 /// The window the settings pour into their place on while they do (see `pour_away`): in front in their stead, the panel
 /// and the widgets giving way to it.
 static POURING: AtomicIsize = AtomicIsize::new(0);
+/// The place the window was asked from (see `show`), while it is open, pouring back into it included.
+static ASKED_FROM: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
+
+/// The place the settings, open, were asked from (physical px: the button they pour back into as they close), if they
+/// were from one.
+pub fn asked_from() -> Option<RECT> {
+    *ASKED_FROM.lock().unwrap()
+}
+
+/// For tests: as if the settings were open, asked from `place` (none: closed).
+#[cfg(test)]
+pub fn pretend_asked_from(place: Option<RECT>) {
+    *ASKED_FROM.lock().unwrap() = place;
+}
 /// Its thread is making it: asked again meanwhile, no second one is made.
 static OPENING: AtomicBool = AtomicBool::new(false);
 /// Its thread, kept a while before it is opened and after it is closed (see `run`).
@@ -419,6 +433,7 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
     let made = gfx::current().ok().and_then(|gfx| make(gfx, Some(asked.place)));
     crate::perf::mark(|| "settings made".into());
     if let Some(hwnd) = made {
+        *ASKED_FROM.lock().unwrap() = asked.place;
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
         // (What plays, looked at only while something on the screen can show it: at once, for the previews.)
         crate::playing::look_now();
@@ -1819,6 +1834,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_CLOSE if with_ui(|ui| ui.pour_away()).unwrap_or(false) => LRESULT(0),
         WM_DESTROY => {
             POURING.store(0, Ordering::Release);
+            *ASKED_FROM.lock().unwrap() = None;
             crate::app().controller.settings_front(None);
             // The shortcut, if let go while a new one was taken, is taken up again.
             crate::tray::hold_hotkey(false);
