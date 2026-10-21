@@ -2075,7 +2075,15 @@ impl<'a> Panel<'a> {
             self.capturing = None;
         }
         self.skin = skin;
-        self.live = config.live && self.skin.sees_backdrop();
+        let live = config.live && self.skin.sees_backdrop();
+        // No longer live: its scene let go of, and the desktop's capture with it where no other holds it (kept, it held
+        // the desktop's whole size of the card's memory with nothing shown live; opened, the panel takes what is behind
+        // it once, as one never live does).
+        if self.live && !live {
+            self.backdrop = None;
+            self.capturing = None;
+        }
+        self.live = live;
         drop(config);
         // What is shown, and how, changed: it is laid out anew. The
         // process list's order (sorted from the panel itself) changes no

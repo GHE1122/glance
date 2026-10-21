@@ -605,6 +605,7 @@ impl Feed {
         let _ = session.SetIsCursorCaptureEnabled(false);
         let _ = session.SetMinUpdateInterval(live_span());
         session.StartCapture().ok()?;
+        crate::perf::mark(|| format!("desktop feed made {}x{}", size.Width, size.Height));
         Some(Feed { shell, pool, session, seldom: false, shared, scenes: 0 })
     }
 
@@ -645,6 +646,7 @@ impl Feed {
         let held = self.shared.latest.lock().unwrap().take();
         close(held);
         let _ = self.pool.Close();
+        crate::perf::mark(|| "desktop feed ended".into());
     }
 }
 
@@ -670,6 +672,7 @@ fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device) -> O
     let feed = feed.as_mut()?;
     let layer = feed.layer(window, area)?;
     feed.scenes += 1;
+    crate::perf::mark(|| format!("desktop feed held by {}", feed.scenes));
     Some(layer)
 }
 
@@ -682,6 +685,7 @@ fn let_go_of_feed(shell: HWND) {
     let mut feed = FEED.lock().unwrap();
     let Some(held) = feed.as_mut().filter(|feed| feed.shell == shell) else { return };
     held.scenes = held.scenes.saturating_sub(1);
+    crate::perf::mark(|| format!("desktop feed held by {}", held.scenes));
     if held.scenes == 0 {
         if let Some(old) = feed.take() {
             old.end();

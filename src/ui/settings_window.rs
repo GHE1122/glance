@@ -183,6 +183,8 @@ const FOLLOW: u32 = WM_APP + 40;
 const TO_OVERLAY: u32 = WM_APP + 41;
 /// (Measuring only: see `procedure`.)
 const PERF_TURN: u32 = WM_APP + 90;
+/// (Measuring: the live backdrop's switch pressed, as a press on it presses it; see `perf`.)
+const PERF_LIVE: u32 = WM_APP + 91;
 /// Asked to turn to the workbench's page.
 const TO_WORKBENCH: u32 = WM_APP + 42;
 
@@ -1549,6 +1551,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 crate::perf::mark(|| format!("settings turn {} {}", wparam.0, lparam.0));
                 ui.tab = TABS[lparam.0 as usize % TABS.len()];
                 ui.turn_to(PAGES[wparam.0 % PAGES.len()]);
+            });
+            LRESULT(0)
+        }
+        PERF_LIVE if crate::perf::on() => {
+            with_ui(|ui| {
+                ui.flip(Switch::Live);
+                crate::perf::mark(|| format!("settings live {}", ui.settings.live_backdrop));
             });
             LRESULT(0)
         }
