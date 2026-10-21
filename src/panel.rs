@@ -4123,7 +4123,7 @@ pub(crate) fn opens_drive(name: &str, lang: Lang) -> String {
 /// What is said under `hit` as the pointer comes over it (`hits` as last drawn): what a press on it does, for what
 /// says so (a drive's row; the line that switches players); a thing's whole name, where it shows shortened.
 pub(crate) fn says(hit: Hit, lang: Lang, hits: &[crate::ui::view::HitBox]) -> Option<String> {
-    if let Some(name) = crate::ui::view::named(hits, hit) {
+    if let Some(name) = crate::ui::view::named(hits, hit, lang) {
         return Some(name);
     }
     match hit {

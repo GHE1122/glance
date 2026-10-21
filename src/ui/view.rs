@@ -677,13 +677,8 @@ impl Lately {
     }
 }
 
-thread_local! {
-    /// The whole names of the things whose names were last shown shortened (by what a press on each finds).
-    static NAMES: std::cell::RefCell<Vec<(Hit, String)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 /// `name` (the whole of it) shown as `shown` for what `hit` finds: where it was shortened and `hit`'s box was just put
-/// in `hits` (it shows), a mark after it that its name is shortened there, and its whole name kept (see `named`).
+/// in `hits` (it shows), a mark after it that its name is shortened there (see `named`).
 fn name_shown(hits: &mut Vec<HitBox>, hit: Hit, name: &str, shown: &str) {
     if shown == name {
         return;
@@ -693,21 +688,22 @@ fn name_shown(hits: &mut Vec<HitBox>, hit: Hit, name: &str, shown: &str) {
         return;
     }
     hits.push((x, y, w, h, Hit::Shortened));
-    NAMES.with(|names| {
-        let mut names = names.borrow_mut();
-        names.retain(|(kept, _)| *kept != hit);
-        names.push((hit, name.to_string()));
-    });
 }
 
 /// The whole name of what `hit` finds, where `hits` (as last drawn) show it shortened: said under it as the pointer
-/// comes over it.
-pub fn named(hits: &[HitBox], hit: Hit) -> Option<String> {
+/// comes over it. (Its name as it is now, in `lang`: of the thing on the station, come lately or kept at hand that it
+/// finds. None is kept of the names shown.)
+pub fn named(hits: &[HitBox], hit: Hit, lang: Lang) -> Option<String> {
     let shortened = hits.windows(2).any(|pair| pair[0].4 == hit && pair[1].4 == Hit::Shortened && (pair[0].0, pair[0].1, pair[0].2, pair[0].3) == (pair[1].0, pair[1].1, pair[1].2, pair[1].3));
     if !shortened {
         return None;
     }
-    NAMES.with(|names| names.borrow().iter().find(|(kept, _)| *kept == hit).map(|(_, name)| name.clone()))
+    match hit {
+        Hit::Shelf(id) | Hit::Copied(id) => crate::station::run::shown().items.iter().find(|item| item.id == id).map(|item| Tile::of(item, &crate::station::folder::Folder::own(), lang, 0).label),
+        Hit::Recent(key) => crate::station::recent::shown().iter().find(|came| came.key == key).map(|came| Lately::of(came, lang, 0).label),
+        Hit::App(number) => crate::station::apps::numbered(number).map(|app| app.name),
+        _ => None,
+    }
 }
 
 /// How the station's things are laid out: as `ShelfView` says, or (a small lane) in one row of pictures, named.
@@ -6004,7 +6000,8 @@ six".into()));
         assert!(!gliding_drawn());
     }
 
-    /// A thing on the station whose name does not fit says its whole name as the pointer comes over it, in every view;
+    /// A thing on the station whose name does not fit says its whole name as the pointer comes over it, in every view
+    /// (its name as the station holds it now, none kept of what was drawn: renamed, it says its new name, gone, none);
     /// one whose name fits says nothing, and a press on either still finds it.
     #[test]
     fn a_shortened_name_is_said_whole() {
@@ -6014,17 +6011,32 @@ six".into()));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
         let long = "Bliss_v2.1.1_(Chocapic13_Shaders_edit).zip";
-        let tiles = vec![
-            Tile { id: 1, label: long.into(), about: String::new(), face: Face::Link, pinned: false },
-            Tile { id: 2, label: "a.md".into(), about: String::new(), face: Face::Link, pinned: false },
-        ];
+        let saved = |id: u64, name: &str| crate::station::shelf::Item {
+            id,
+            what: crate::station::shelf::What::Saved { file: format!("{id}.zip"), name: name.into() },
+            added_ms: 0,
+            pinned: false,
+            copied: false,
+            stays_here: false,
+            own_bytes: 0,
+        };
+        let held = vec![saved(1, long), saved(2, "a.md")];
+        crate::station::run::pretend(held.clone(), ShelfView::Cards);
+        let folder = crate::station::folder::Folder::own();
+        let tiles: Vec<Tile> = held.iter().map(|item| Tile::of(item, &folder, Lang::En, 0)).collect();
         for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large), Shows::Row] {
             let mut hits = Vec::new();
             paint_shelf(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &tiles, shows, STATION_TALL, None, false, &mut hits);
-            assert_eq!(named(&hits, Hit::Shelf(1)).as_deref(), Some(long), "{shows:?}");
-            assert_eq!(named(&hits, Hit::Shelf(2)), None, "{shows:?}");
+            assert_eq!(named(&hits, Hit::Shelf(1), Lang::En).as_deref(), Some(long), "{shows:?}");
+            assert_eq!(named(&hits, Hit::Shelf(2), Lang::En), None, "{shows:?}");
             let (x, y, w, h, _) = *hits.iter().find(|hit| hit.4 == Hit::Shelf(1)).unwrap();
             assert_eq!(hits.iter().find(|(hx, hy, hw, hh, _)| x + w / 2.0 >= *hx && x + w / 2.0 < hx + hw && y + h / 2.0 >= *hy && y + h / 2.0 < hy + hh).map(|hit| hit.4), Some(Hit::Shelf(1)), "{shows:?}");
+            let renamed = format!("{long}.renamed");
+            crate::station::run::pretend(vec![saved(1, &renamed), saved(2, "a.md")], ShelfView::Cards);
+            assert_eq!(named(&hits, Hit::Shelf(1), Lang::En), Some(renamed), "{shows:?}");
+            crate::station::run::pretend(vec![saved(2, "a.md")], ShelfView::Cards);
+            assert_eq!(named(&hits, Hit::Shelf(1), Lang::En), None, "{shows:?}");
+            crate::station::run::pretend(held.clone(), ShelfView::Cards);
         }
     }
 
