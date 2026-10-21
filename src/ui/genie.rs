@@ -20,7 +20,7 @@ use super::gfx::{Frame, Gfx, Surface};
 use super::window::Window;
 
 /// How long the window takes to pour out of its place, or back into it.
-pub const LASTS: Duration = Duration::from_millis(360);
+pub const LASTS: Duration = Duration::from_millis(250);
 
 /// Of the way from the whole window (0) into its place (1): how far its sides have bent into the funnel by then
 /// (they bend first), and how far it has slid along it (it slides from a while after they begin to bend).
