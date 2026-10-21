@@ -916,6 +916,59 @@ fn pad_of(layout: Layout, shows: &Shows) -> f32 {
     shows.inset.map_or(pad(layout), |inset| inset as f32)
 }
 
+/// What a strip `w` wide (DIPs, `pad` inside its edges, its words from `start`: past its cover, or, `centred`, the
+/// words in its middle with no cover) ends its row with, showing `shows`: where its keys go and where its spectrum
+/// does (from, how wide), each only where it fits in its row after where its words begin (a strip narrower than they
+/// need shows its cover and its words alone: they reached out of its left edge, over its cover); where its words end;
+/// and, centred, how far in from either side they keep (clear of the keys, kept showing or come with the pointer).
+/// (The keys' plates inside its padding, not their glyphs alone: as low as it is, a plate under the pointer reached
+/// its edge, and the keys looked pushed to its end.)
+fn strip_ends(w: f32, start: f32, pad: f32, shows: &Shows, centred: bool) -> StripEnds {
+    let keys_wide = 3.0 * CONTROL + 2.0 * KEY_GAP;
+    let mut end = w - pad;
+    let mut ends = StripEnds { keys: None, spectrum: None, end, side: 0.0 };
+    if centred {
+        // The words clear of the keys at either side, in the middle: as wide on each side as the keys are.
+        let side = keys_wide + 14.0;
+        if w - 2.0 * (pad + side) >= 0.0 {
+            ends.keys = Some(if shows.controls { end - keys_wide } else { pad });
+            ends.side = side;
+        }
+        return ends;
+    }
+    // (With the room kept between it and the words.)
+    let fits = |end: f32, taken: f32| end - taken >= start;
+    if shows.controls {
+        if fits(end, keys_wide + 10.0) {
+            ends.keys = Some(end - keys_wide);
+            end -= keys_wide + 10.0;
+            if shows.spectrum && fits(end, 80.0) {
+                ends.spectrum = Some((end - 70.0, 70.0));
+                end -= 80.0;
+            }
+        }
+    } else {
+        // The spectrum where the keys come with the pointer (as wide as they are, or a little wider).
+        let wide = keys_wide.max(84.0);
+        if fits(end, wide + 12.0) {
+            ends.spectrum = shows.spectrum.then_some((end - wide, wide));
+            ends.keys = Some(end - keys_wide);
+            end -= wide + 12.0;
+        }
+    }
+    ends.end = end;
+    ends
+}
+
+/// What a strip's row ends with (see `strip_ends`).
+#[derive(Debug, PartialEq)]
+struct StripEnds {
+    keys: Option<f32>,
+    spectrum: Option<(f32, f32)>,
+    end: f32,
+    side: f32,
+}
+
 /// Each layout's room inside its edge, and the corners of its ground (DIPs).
 fn pad(layout: Layout) -> f32 {
     match layout {
@@ -1395,42 +1448,30 @@ impl Drawing<'_> {
         let pad = pad_of(Layout::Strip, self.shows);
         let at = self.placed(Layout::Strip);
         let (accent, tint) = (self.accent, self.tint);
-        let keys_wide = 3.0 * CONTROL + 2.0 * KEY_GAP;
         let row = (h - CONTROL) / 2.0;
         let centred = self.edged && !self.shows.cover;
         let shown_in = self.music.controls_shown();
-        let mut end = w - pad;
-        // (The keys' plates inside its padding, not their glyphs alone: as low as it is, a plate under the pointer
-        // reached its edge, and the keys looked pushed to its end.)
-        if self.shows.controls {
-            self.keys(end - keys_wide, KEY_GAP, row, 1.0);
-            end -= keys_wide + 10.0;
-            if self.shows.spectrum && !centred {
-                spectrum(self.frame, self.moment, (accent, tint), (end - 70.0, h / 2.0 + 10.0, 70.0, 20.0), 0.85);
-                end -= 80.0;
+        let ends = strip_ends(w, at.left, pad, self.shows, centred);
+        if let Some((x, wide)) = ends.spectrum {
+            let alpha = if self.shows.controls { 0.85 } else { 1.0 - shown_in };
+            if alpha > 0.0 {
+                spectrum(self.frame, self.moment, (accent, tint), (x, h / 2.0 + 10.0, wide, 20.0), alpha);
             }
-        } else if centred {
-            if shown_in > 0.0 {
-                self.keys(pad, KEY_GAP, row, shown_in);
+        }
+        if let Some(x) = ends.keys {
+            let fade = if self.shows.controls { 1.0 } else { shown_in };
+            if fade > 0.0 {
+                self.keys(x, KEY_GAP, row, fade);
             }
-        } else {
-            let wide = keys_wide.max(84.0);
-            if shown_in < 1.0 && self.shows.spectrum {
-                spectrum(self.frame, self.moment, (accent, tint), (end - wide, h / 2.0 + 10.0, wide, 20.0), 1.0 - shown_in);
-            }
-            if shown_in > 0.0 {
-                self.keys(end - keys_wide, KEY_GAP, row, shown_in);
-            }
-            end -= wide + 12.0;
         }
         if centred {
             // Clear of the controls at either end, the words kept in the middle.
-            let side = if self.shows.controls { keys_wide + 14.0 } else { (keys_wide + 14.0) * shown_in };
+            let side = if self.shows.controls { ends.side } else { ends.side * shown_in };
             self.lines_centred(pad + side, w - pad - side, h);
             return;
         }
         let left = at.left;
-        let width = (end - left).max(0.0);
+        let width = (ends.end - left).max(0.0);
         let frame = self.frame;
         self.clip(left - 4.0, 0.0, width + 8.0, h);
         let (lines, now) = (self.moment.lines.clone(), self.moment.now);
@@ -2820,6 +2861,38 @@ mod tests {
         let between = |t: f64| units(sung_to(&spaced, t));
         assert!((between(10.0 + 0.9 * 0.75) - 1.5).abs() < 1e-6, "three quarters through the first part, the fill is half across its space");
         assert!((shared.last().unwrap().3 - (10.0 + 4.0 * 0.9)).abs() < 1e-9);
+    }
+
+    /// Whatever a strip's size, what ends its row (its keys, its spectrum) lies in it after where its words begin, never
+    /// over its cover nor out of its edge (a strip as small as a widget is let be showed its spectrum out past its left
+    /// edge, over its cover); its words never end before they begin.
+    #[test]
+    fn a_strip_ends_inside_itself() {
+        let keys_wide = 3.0 * CONTROL + 2.0 * KEY_GAP;
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        for shows in [all, Shows { controls: true, ..all }, Shows { cover: false, ..all }, Shows { cover: false, controls: true, ..all }] {
+            for centred in [false, true] {
+                let mut w = LEAST.0;
+                while w < 480.0 {
+                    for h in [LEAST.1, 72.0, STRIP_MOST] {
+                        let pad = pad_of(Layout::Strip, &shows);
+                        let start = if centred { pad } else { placed(Layout::Strip, (w, h), &shows).left };
+                        let ends = strip_ends(w, start, pad, &shows, centred);
+                        if let Some(x) = ends.keys {
+                            assert!(x >= start - 1e-3 && x + keys_wide <= w - pad + 1e-3, "keys at {x} in {w} x {h} from {start}: {ends:?}");
+                        }
+                        if let Some((x, wide)) = ends.spectrum {
+                            assert!(x >= start - 1e-3 && x + wide <= w - pad + 1e-3, "spectrum at {x} in {w} x {h} from {start}: {ends:?}");
+                        }
+                        assert!(centred || ends.end >= start - 1e-3 || ends.keys.is_none(), "{w} x {h}: {ends:?}");
+                        if centred {
+                            assert!(pad + ends.side <= w - pad - ends.side + 1e-3, "{w} x {h}: {ends:?}");
+                        }
+                    }
+                    w += 2.0;
+                }
+            }
+        }
     }
 
     #[test]
