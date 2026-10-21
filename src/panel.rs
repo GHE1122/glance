@@ -1338,9 +1338,12 @@ impl Controller {
                     }
                 }
             }
-            // Ctrl+V taken while the pointer is over a station (the panel's or a widget's), and only then: else it is
-            // every program's.
-            let over_station = cursor_position().is_some_and(|at| crate::station::run::areas().iter().filter(|(_, lands)| *lands == crate::station::run::Lands::Station).map(|(area, _)| area).any(|area| at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom));
+            // Ctrl+V taken while the pointer is over a station (the panel's or a widget's) where it shows, and only
+            // then: else it is every program's (the one over a widget covered by it among them).
+            let over_station = cursor_position().is_some_and(|at| {
+                let under = unsafe { windows::Win32::UI::WindowsAndMessaging::GetAncestor(windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(at), windows::Win32::UI::WindowsAndMessaging::GA_ROOT) };
+                crate::station::run::areas().iter().filter(|(window, _, lands)| *lands == crate::station::run::Lands::Station && *window == under).any(|(_, area, _)| at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom)
+            });
             if over_station != paste {
                 paste = over_station;
                 unsafe {

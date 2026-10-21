@@ -115,11 +115,11 @@ pub fn shows_at(window: HWND, areas: Vec<(windows::Win32::Foundation::RECT, Land
     held.extend(areas.into_iter().map(|(area, lands)| (window.0 as isize, area, lands)));
 }
 
-/// Where stations and quick launch are shown (screen px), each window's, of windows still shown.
-pub fn areas() -> Vec<(windows::Win32::Foundation::RECT, Lands)> {
+/// Where stations and quick launch are shown (screen px), by the windows still shown that show them.
+pub fn areas() -> Vec<(HWND, windows::Win32::Foundation::RECT, Lands)> {
     let mut held = AREAS.lock().unwrap();
     held.retain(|(of, ..)| unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(HWND(*of as *mut _)) }.as_bool());
-    held.iter().map(|(_, area, lands)| (*area, *lands)).collect()
+    held.iter().map(|(of, area, lands)| (HWND(*of as *mut _), *area, *lands)).collect()
 }
 
 /// Where what is dropped goes: onto the station, or into what is kept at hand (see `apps`).
