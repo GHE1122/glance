@@ -14,6 +14,10 @@
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 
+/// What of Markdown a note is read for, beyond CommonMark: to-dos and words struck through. One reading, for what is
+/// shown and for what the keys do to a note's words (see `edit`).
+pub const READ: Options = Options::ENABLE_TASKLISTS.union(Options::ENABLE_STRIKETHROUGH);
+
 /// How a stretch of words looks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Look {
@@ -110,7 +114,7 @@ pub fn looks(text: &str) -> Vec<(Range<usize>, Look)> {
     let units = Units::of(text);
     let mut looks = Vec::new();
     let mut quoted = 0usize;
-    for (event, range) in Parser::new_ext(text, Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH).into_offset_iter() {
+    for (event, range) in Parser::new_ext(text, READ).into_offset_iter() {
         let at = units.range(&range);
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
@@ -161,7 +165,7 @@ pub fn looks(text: &str) -> Vec<(Range<usize>, Look)> {
     }
     // A link's words in the accent, over their plain: found as the words a link holds.
     let mut in_link = Vec::new();
-    for (event, range) in Parser::new_ext(text, Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH).into_offset_iter() {
+    for (event, range) in Parser::new_ext(text, READ).into_offset_iter() {
         match event {
             Event::Start(Tag::Link { .. }) => in_link.push(()),
             Event::End(TagEnd::Link) => {
@@ -172,7 +176,7 @@ pub fn looks(text: &str) -> Vec<(Range<usize>, Look)> {
         }
     }
     // Code's words plain over its marks (in a fixed face already), after the marks' faintness.
-    for (event, range) in Parser::new_ext(text, Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH).into_offset_iter() {
+    for (event, range) in Parser::new_ext(text, READ).into_offset_iter() {
         if let Event::Code(code) = event {
             let at = units.range(&range);
             // (The code's words where they are within its backticks.)
@@ -263,7 +267,7 @@ impl Shown {
                 held.end = held.end.max(range.end);
             }
         };
-        for (event, range) in Parser::new_ext(text, Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH).into_offset_iter() {
+        for (event, range) in Parser::new_ext(text, READ).into_offset_iter() {
             match event {
                 Event::Start(tag) => {
                     hold(&mut open, &range);
@@ -400,7 +404,7 @@ fn addresses(text: &str) -> Vec<(Range<usize>, String)> {
     // at what may mark something: a `_`, a bracket).
     let mut runs: Vec<Range<usize>> = Vec::new();
     let mut in_link = 0usize;
-    for (event, range) in Parser::new_ext(text, Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH).into_offset_iter() {
+    for (event, range) in Parser::new_ext(text, READ).into_offset_iter() {
         match event {
             Event::Start(Tag::Link { .. } | Tag::Image { .. }) => in_link += 1,
             Event::End(TagEnd::Link | TagEnd::Image) => in_link = in_link.saturating_sub(1),
@@ -439,7 +443,7 @@ fn addresses(text: &str) -> Vec<(Range<usize>, String)> {
 /// The to-dos' boxes in `text` (`[ ]`, `[x]`: where each is, in UTF-16 units, and whether it is done).
 pub fn tasks(text: &str) -> Vec<(Range<usize>, bool)> {
     let units = Units::of(text);
-    Parser::new_ext(text, Options::ENABLE_TASKLISTS)
+    Parser::new_ext(text, READ)
         .into_offset_iter()
         .filter_map(|(event, range)| match event {
             Event::TaskListMarker(done) => Some((units.range(&range), done)),
@@ -479,7 +483,7 @@ pub fn plain_lines(text: &str) -> Vec<String> {
     let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1)).collect();
     let line_of = |offset: usize| starts.partition_point(|start| *start <= offset) - 1;
     let mut lines: Vec<(usize, String)> = Vec::new();
-    for (event, range) in Parser::new_ext(text, Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH).into_offset_iter() {
+    for (event, range) in Parser::new_ext(text, READ).into_offset_iter() {
         let words = match event {
             Event::Text(words) | Event::Code(words) | Event::Html(words) | Event::InlineHtml(words) => words,
             _ => continue,

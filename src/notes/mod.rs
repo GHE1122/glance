@@ -3,6 +3,7 @@
 //! holds them, read again as it changes (by Glance, or by another program, or by a sync); written by the page they
 //! are edited on (see `ui::beside`), as `store` says.
 
+pub mod edit;
 pub mod markdown;
 pub mod store;
 
