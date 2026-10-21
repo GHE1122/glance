@@ -1843,7 +1843,8 @@ fn pick(lang: Lang, zh: &'static str, en: &'static str) -> &'static str {
 }
 
 impl Ui {
-    /// Asked to close: poured into the place it was asked from (see `genie`), hidden meanwhile, and closed once it has.
+    /// Asked to close: poured into the place it was asked from where that is still seen, else into Glance's icon in the
+    /// tray (see `genie::back_into`), hidden meanwhile, and closed once it has.
     /// Whether it is (pouring already, it goes on). No longer the settings window open: asked for meanwhile, another
     /// is made once it is gone. Pouring out of its place still, that is done with first.
     fn pour_away(&mut self) -> bool {
@@ -1853,7 +1854,7 @@ impl Ui {
         if self.genie.take().is_some() {
             super::genie::reveal(self.hwnd);
         }
-        let Some(place) = super::genie::wanted(self.place) else { return false };
+        let Some(place) = super::genie::wanted(self.place).and_then(|place| super::genie::back_into(self.hwnd, place)) else { return false };
         if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(self.hwnd) }.as_bool() {
             return false;
         }

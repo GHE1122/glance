@@ -274,6 +274,53 @@ pub fn opening(gfx: &Gfx, window: HWND, place: RECT) -> Option<Genie> {
     genie
 }
 
+/// Where `window`, going, pours into, out of `place` as it came: there where it is still seen (one of Glance's own
+/// windows shows at its middle, a widget whose button it was, or it is the tray's icon), else into Glance's icon in the
+/// tray, where Glance stays (as a window put away goes into the Dock); none where neither is seen.
+pub fn back_into(window: HWND, place: RECT) -> Option<RECT> {
+    let icon = crate::tray::icon_place();
+    if icon == Some(place) || glance_shows_at(window, place) {
+        return Some(place);
+    }
+    icon
+}
+
+/// Whether one of Glance's own windows is what shows at the middle of `place` on the screen, `window` left out: the first
+/// window there from the top, shown and not cloaked, is this process's.
+fn glance_shows_at(window: HWND, place: RECT) -> bool {
+    use windows::Win32::Foundation::{LPARAM, POINT};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    use windows::Win32::Graphics::Gdi::PtInRect;
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible};
+    struct Looking {
+        left_out: HWND,
+        middle: POINT,
+        found: Option<HWND>,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, looking: LPARAM) -> windows::core::BOOL {
+        let looking = unsafe { &mut *(looking.0 as *mut Looking) };
+        if hwnd == looking.left_out || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return true.into();
+        }
+        let mut cloaked = 0u32;
+        let _ = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, 4) };
+        let mut rect = RECT::default();
+        if cloaked != 0 || unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() || !unsafe { PtInRect(&rect, looking.middle) }.as_bool() {
+            return true.into();
+        }
+        looking.found = Some(hwnd);
+        false.into()
+    }
+    let mut looking = Looking { left_out: window, middle: POINT { x: (place.left + place.right) / 2, y: (place.top + place.bottom) / 2 }, found: None };
+    // (Top-level windows from the top down: the first there is what shows.)
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut looking as *mut Looking as isize)) };
+    looking.found.is_some_and(|hwnd| {
+        let mut process = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process)) };
+        process == std::process::id()
+    })
+}
+
 /// `window`, hidden to pour out of its place, shown as it is (it has poured out, or could not).
 pub fn reveal(window: HWND) {
     cloak(window, false);
@@ -550,5 +597,35 @@ mod tests {
         }
         assert_eq!((alpha(20, 0), alpha(0, 15), alpha(8, 8), alpha(20, 15)), (255, 255, 255, 255));
         assert!((1..255).contains(&alpha(1, 3)), "{}", alpha(1, 3));
+    }
+
+    /// A window going pours back into its place where one of Glance's own windows still shows there (a widget whose
+    /// button it was), and where none does (the panel it came out of gone), not there: into the tray's icon, none here.
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn it_pours_back_where_its_place_is_still_seen() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP};
+        let widget = unsafe { CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, w!("STATIC"), w!(""), WS_POPUP, 0, 0, 60, 60, None, None, None, None) }.unwrap();
+        let button = RECT { left: 20, top: 20, right: 40, bottom: 40 };
+        unsafe {
+            let _ = ShowWindow(widget, SW_SHOWNOACTIVATE);
+        }
+        let shown = back_into(HWND::default(), button);
+        unsafe {
+            let _ = ShowWindow(widget, SW_HIDE);
+        }
+        let hidden = back_into(HWND::default(), button);
+        // (Itself left out, as the window going is: what shows under it counts.)
+        unsafe {
+            let _ = ShowWindow(widget, SW_SHOWNOACTIVATE);
+        }
+        let left_out = back_into(widget, button);
+        unsafe {
+            let _ = DestroyWindow(widget);
+        }
+        assert_eq!(shown, Some(button));
+        assert_eq!(hidden, None);
+        assert_eq!(left_out, None);
     }
 }

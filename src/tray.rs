@@ -248,6 +248,12 @@ pub fn open_menu(x: i32, y: i32, over_the_panel: bool) -> Option<(crate::ui::men
 }
 
 /// Where the icon is on the screen (physical px), if it shows.
+/// Where the icon is on the screen (physical px), if it shows (in the tray's overflow, its chevron's).
+pub(crate) fn icon_place() -> Option<RECT> {
+    let hwnd = WINDOW.load(Ordering::Acquire);
+    (hwnd != 0).then(|| icon_on_screen(HWND(hwnd as *mut _)))?
+}
+
 fn icon_on_screen(hwnd: HWND) -> Option<RECT> {
     use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
     let icon = NOTIFYICONIDENTIFIER { cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32, hWnd: hwnd, uID: ICON_ID, ..Default::default() };
