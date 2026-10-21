@@ -473,6 +473,13 @@ impl Controller {
         self.post(STICK_NOTES);
     }
 
+    /// The note `name`'s card on the desktop made `size` large (DIPs), as the page it is written in over it was sized
+    /// (see `ui::beside`).
+    pub fn size_note(&self, name: String, size: (f32, f32)) {
+        STUCK.lock().unwrap().push((name, OnDesk::Size(size)));
+        self.post(STICK_NOTES);
+    }
+
     /// The modules this machine has, in their default order.
     pub fn known_modules(&self) -> Vec<String> {
         // The game in front first, while there is one.
@@ -898,6 +905,7 @@ impl Controller {
                             OnDesk::Stick(at, size) => widgets.stick_note(&name, at, size),
                             OnDesk::Unstick => widgets.unstick_note(&name),
                             OnDesk::Move(dx, dy, done) => widgets.move_note(&name, dx, dy, done),
+                            OnDesk::Size(size) => widgets.size_note(&name, size),
                         }
                     }
                 }
@@ -1376,11 +1384,12 @@ impl Controller {
 static STUCK: std::sync::Mutex<Vec<(String, OnDesk)>> = std::sync::Mutex::new(Vec::new());
 
 /// What is asked of a note on the desktop: stuck there with its corner at a point (as large as the page it is stuck
-/// from, DIPs), taken away, or moved by so much (and kept where it is, once it is let go).
+/// from, DIPs), taken away, moved by so much (and kept where it is, once it is let go), or made so large (DIPs).
 enum OnDesk {
     Stick(POINT, Option<(f32, f32)>),
     Unstick,
     Move(i32, i32, bool),
+    Size((f32, f32)),
 }
 
 /// The overlay kept under `menu`, while one is up (see `Overlay::under_menu`).

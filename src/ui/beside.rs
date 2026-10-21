@@ -310,6 +310,8 @@ struct Beside {
     shown: bool,
     /// The note stuck on the desktop it is over hidden under it (see `draw`), shown again as it goes.
     hiding: bool,
+    /// Over a note stuck on the desktop: being sized by its edges (see `Sizing`).
+    sizing: Option<Sizing>,
     /// The kind listed's mark, sliding to it as another is chosen (glass's: see `view::glass_choice`).
     marks: super::thumb::Dots<Kinds>,
 }
@@ -378,6 +380,25 @@ struct Reads {
     shown: crate::notes::markdown::Shown,
     written: std::ops::RangeInclusive<usize>,
     folder: std::path::PathBuf,
+}
+
+/// The page `was` sized by its `edges` held (left, right, top, bottom) moved by `by` (physical px): those edges as
+/// far as that, the others where they were, no smaller than `least`, and within `work` (its screen's work area).
+fn sized_page(was: RECT, (l, r, t, b): (bool, bool, bool, bool), (dx, dy): (i32, i32), least: (i32, i32), work: RECT) -> RECT {
+    let mut page = was;
+    if l {
+        page.left = (was.left + dx).max(work.left).min(was.right - least.0);
+    }
+    if r {
+        page.right = (was.right + dx).min(work.right).max(was.left + least.0);
+    }
+    if t {
+        page.top = (was.top + dy).max(work.top).min(was.bottom - least.1);
+    }
+    if b {
+        page.bottom = (was.bottom + dy).min(work.bottom).max(was.top + least.1);
+    }
+    page
 }
 
 /// Where a to-do's box is drawn, in the room drawn for it from `left`, by its line's `baseline` (in the window: see
@@ -484,7 +505,18 @@ pub(crate) fn paint_stuck_note(frame: &dyn Canvas, theme: &Theme, lang: super::t
 enum NoteChoice {
     Colour(crate::notes::Colour),
     Stick,
+    /// Its card on the desktop, which the page is over, taken off it (the note kept).
+    Unstick,
     TakeAway,
+}
+
+/// Over a note stuck on the desktop, the page being sized by an edge (or a corner) held, the note along with it: the
+/// edges held (left, right, top, bottom), and where the pointer and the page were as it was taken (on the screen,
+/// physical px).
+struct Sizing {
+    edges: (bool, bool, bool, bool),
+    from: POINT,
+    page: RECT,
 }
 
 thread_local! {
@@ -774,6 +806,7 @@ fn show(opening: Opening) {
             moved_from: None,
             shown: false,
             hiding: false,
+            sizing: None,
             marks: super::thumb::Dots::new(),
         };
         let page = beside.page.clone();
@@ -1066,8 +1099,17 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             let (x, y) = point();
             with(|beside| {
                 let (x, y) = beside.on_page(x, y);
-                beside.hold(x, y)
+                if !beside.size_from(x, y) {
+                    beside.hold(x, y);
+                }
             });
+        }
+        // Over an edge that sizes it (over a note stuck on the desktop), the shape that says so.
+        WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT && with(|beside| beside.size_shape()).flatten().is_some() => {
+            if let Some(shape) = with(|beside| beside.size_shape()).flatten() {
+                unsafe { SetCursor(LoadCursorW(None, shape).ok()) };
+            }
+            return LRESULT(1);
         }
         WM_PAINT => {
             with(Beside::draw);
@@ -1076,6 +1118,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_MOUSEMOVE => {
             let (x, y) = point();
             with(|beside| {
+                if beside.sizing.is_some() {
+                    beside.size_to();
+                    return;
+                }
                 let (x, y) = beside.on_page(x, y);
                 beside.pointer = Some((x, y));
                 if let Some((_, from, moved)) = beside.holding.as_mut() {
@@ -1087,6 +1133,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_LBUTTONUP => {
             let (x, y) = point();
             let close = with(|beside| {
+                if beside.sizing.is_some() {
+                    beside.sized();
+                    return false;
+                }
                 let (x, y) = beside.on_page(x, y);
                 if beside.holding.is_some() { beside.let_go(x) } else { beside.press(x, y) }
             })
@@ -1107,6 +1157,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_CAPTURECHANGED => {
             with(|beside| {
+                beside.sized();
                 beside.holding = None;
                 beside.pressed = None;
                 beside.redraw();
@@ -1172,6 +1223,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // with it, as a window is by its title.
         WM_NCHITTEST => {
             let at = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
+            // (Its edges, over a note stuck on the desktop, size it: pressed as its own, not taken by its head.)
+            if with(|beside| beside.edges_on_screen(at).is_some()).unwrap_or(false) {
+                return LRESULT(HTCLIENT as isize);
+            }
             if with(|beside| beside.takes_by_head(at)).unwrap_or(false) {
                 return LRESULT(HTCAPTION as isize);
             }
@@ -1256,6 +1311,84 @@ impl Beside {
             writing.editor.place(words_box(room, wide, tall, self.scale));
         }
         self.redraw();
+    }
+
+    /// Over a note stuck on the desktop (kept in a file), the edges of its page a press at `at` (on the screen) would size,
+    /// as a widget's are (see `widget::edges_at`): none elsewhere.
+    fn edges_on_screen(&self, at: POINT) -> Option<(bool, bool, bool, bool)> {
+        self.over()?;
+        self.writing.as_ref()?.name.as_ref()?;
+        let mut client = at;
+        let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut client) };
+        let (x, y) = self.on_page(client.x as f32, client.y as f32);
+        let (w, h) = self.page_size(self.page_on_screen());
+        Some(crate::widget::edges_at(x, y, w, h)).filter(|(l, r, t, b)| *l || *r || *t || *b)
+    }
+
+    /// The pointer's shape over the edges it would size (or held by them), none elsewhere.
+    fn size_shape(&self) -> Option<windows::core::PCWSTR> {
+        let mut at = POINT::default();
+        let _ = unsafe { GetCursorPos(&mut at) };
+        let (l, r, t, b) = self.sizing.as_ref().map(|sizing| sizing.edges).or_else(|| self.edges_on_screen(at))?;
+        Some(match () {
+            _ if (l && t) || (r && b) => IDC_SIZENWSE,
+            _ if (r && t) || (l && b) => IDC_SIZENESW,
+            _ if l || r => IDC_SIZEWE,
+            _ => IDC_SIZENS,
+        })
+    }
+
+    /// A press at (`x`, `y`) DIPs on its page: over a note stuck on the desktop, on an edge that sizes it, taken by that
+    /// edge (see `Sizing`); whether it was.
+    fn size_from(&mut self, x: f32, y: f32) -> bool {
+        let (wide, tall) = self.page_size(self.page_on_screen());
+        if self.over().is_none() || self.writing.as_ref().is_none_or(|writing| writing.name.is_none()) {
+            return false;
+        }
+        let edges = crate::widget::edges_at(x, y, wide, tall);
+        if !(edges.0 || edges.1 || edges.2 || edges.3) {
+            return false;
+        }
+        let mut from = POINT::default();
+        let _ = unsafe { GetCursorPos(&mut from) };
+        self.sizing = Some(Sizing { edges, from, page: self.page_on_screen() });
+        // (Its corner followed by the note's as it moves: see `carry_note`.)
+        self.moved_from = Some(self.corner());
+        unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.hwnd) };
+        true
+    }
+
+    /// Sized as the pointer is now: the edges held as far as it has gone, the others where they were, no smaller than
+    /// a stuck note is made (`view::STUCK_NOTE_LEAST`) and within its screen's work area; the note's corner along.
+    fn size_to(&mut self) {
+        let Some(sizing) = &self.sizing else { return };
+        let mut at = POINT::default();
+        let _ = unsafe { GetCursorPos(&mut at) };
+        let (dx, dy) = (at.x - sizing.from.x, at.y - sizing.from.y);
+        let (l, r, t, b) = sizing.edges;
+        let least = ((super::view::STUCK_NOTE_LEAST.0 * self.scale).round() as i32, (super::view::STUCK_NOTE_LEAST.1 * self.scale).round() as i32);
+        let was = sizing.page;
+        let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = unsafe { GetMonitorInfoW(MonitorFromRect(&was, MONITOR_DEFAULTTONEAREST), &mut screen) };
+        let page = sized_page(was, (l, r, t, b), (dx, dy), least, screen.rcWork);
+        if page != self.page_on_screen() {
+            self.move_to(page);
+        }
+    }
+
+    /// Let go of the edges it was sized by: the note stuck on the desktop made as large as the page, its corner where
+    /// the page's is, and kept so.
+    fn sized(&mut self) {
+        let Some(sizing) = self.sizing.take() else { return };
+        if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == self.hwnd {
+            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+        }
+        self.carry_note(true);
+        let page = self.page_on_screen();
+        let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return };
+        if (page.right - page.left, page.bottom - page.top) != (sizing.page.right - sizing.page.left, sizing.page.bottom - sizing.page.top) {
+            crate::app().controller.size_note(name, self.page_size(page));
+        }
     }
 
     /// The note stuck on the desktop it is over (its widget's window), where it is over one.
@@ -1411,7 +1544,11 @@ impl Beside {
         // (Each colour a dot of it, as the note's own by its name.)
         let mut rows: Vec<(NoteChoice, &'static str, Mark, bool, bool)> = names.iter().map(|(colour, name)| (NoteChoice::Colour(*colour), *name, Mark::Colour(super::view::note_colour(*colour)), writing.colour == *colour, false)).collect();
         if writing.name.is_some() {
-            rows.push((NoteChoice::Stick, lang.pick("贴到桌面", "Stick on the desktop"), Mark::Icon(Icon::Pin), false, true));
+            // (Over its card on the desktop: that taken off it; else stuck there.)
+            match self.over() {
+                Some(_) => rows.push((NoteChoice::Unstick, lang.pick("从桌面取下", "Take off the desktop"), Mark::Icon(Icon::PinOff), false, true)),
+                None => rows.push((NoteChoice::Stick, lang.pick("贴到桌面", "Stick on the desktop"), Mark::Icon(Icon::Pin), false, true)),
+            }
             rows.push((NoteChoice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Mark::Icon(Icon::Close), false, false));
         }
         let items = rows.iter().map(|(_, label, mark, checked, rule_before)| Item { label, mark: Some(*mark), checked: *checked, rule_before: *rule_before }).collect();
@@ -1522,6 +1659,18 @@ impl Beside {
                 leave_for(&name);
                 crate::app().controller.stick_note(name, POINT { x: place.left + (24.0 * self.scale) as i32, y: place.top + (24.0 * self.scale) as i32 }, Some(self.page_size(place)));
                 false
+            }
+            // Its card taken off the desktop, the page gone with it (the note kept first: not kept, both stay, saying so).
+            // Not shown again as the page goes: it goes.
+            NoteChoice::Unstick => {
+                if !kept {
+                    self.redraw();
+                    return false;
+                }
+                let Some(name) = writing.name.clone() else { return false };
+                self.hiding = false;
+                crate::app().controller.unstick_note(name);
+                true
             }
             NoteChoice::TakeAway => {
                 // (What is written not kept, the page stays, saying so: taken away, the Recycle Bin had the note as it
@@ -2525,6 +2674,7 @@ otepad.exe"),
                             moved_from: None,
             shown: false,
             hiding: false,
+            sizing: None,
             marks: super::super::thumb::Dots::new(),
                         };
                         beside.search.put(&search.encode_utf16().collect::<Vec<_>>());
@@ -2625,6 +2775,7 @@ mod note_pictures {
                 moved_from: None,
                 shown: true,
                 hiding: false,
+            sizing: None,
                 marks: super::super::thumb::Dots::new(),
             };
             beside.writing.as_mut().unwrap().dress();
@@ -2682,6 +2833,23 @@ mod note_pictures {
 #[cfg(test)]
 mod tests {
     use super::goes_now;
+
+    /// A page over a note stuck on the desktop sized by an edge or a corner: the edges held follow the hand, the others
+    /// stay; it comes no smaller than a stuck note is made, and no further than its screen's work area.
+    #[test]
+    fn a_page_sized_by_its_edges_moves_those_alone_within_bounds() {
+        use windows::Win32::Foundation::RECT;
+        let rect = |left, top, right, bottom| RECT { left, top, right, bottom };
+        let (was, least, work) = (rect(100, 100, 460, 420), (220, 180), rect(0, 0, 1920, 1040));
+        // The right edge out, the bottom left corner in.
+        assert_eq!(super::sized_page(was, (false, true, false, false), (40, 30), least, work), rect(100, 100, 500, 420));
+        assert_eq!(super::sized_page(was, (true, false, false, true), (20, -40), least, work), rect(120, 100, 460, 380));
+        // Past the least: held there, from the edges not held.
+        assert_eq!(super::sized_page(was, (true, false, true, false), (300, 300), least, work), rect(240, 240, 460, 420));
+        // Past the work area: held at its edge.
+        assert_eq!(super::sized_page(was, (false, true, false, true), (2000, 2000), least, work), rect(100, 100, 1920, 1040));
+        assert_eq!(super::sized_page(was, (true, false, true, false), (-500, -500), least, work), rect(0, 0, 460, 420));
+    }
 
     /// A note's words, in every skin, light and dark: its faint marks (Markdown's) fainter than its words, not as solid
     /// (the box takes colours with no see-through: a faint ink given as one came out as the words' own).

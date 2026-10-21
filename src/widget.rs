@@ -101,7 +101,7 @@ const CORNER: f32 = 20.0;
 
 /// The edges a press at (`x`, `y`) on a widget `w` × `h` sizes: left,
 /// right, top, bottom.
-fn edges_at(x: f32, y: f32, w: f32, h: f32) -> (bool, bool, bool, bool) {
+pub(crate) fn edges_at(x: f32, y: f32, w: f32, h: f32) -> (bool, bool, bool, bool) {
     // (Past the band round its edge, over its shadow (which its window holds too): none, as a press there takes
     // nothing, nor the pointer's shape says one would.)
     if x < -EDGE || y < -EDGE || x > w + EDGE || y > h + EDGE {
@@ -1366,6 +1366,17 @@ impl Widgets {
         if done {
             self.save();
         }
+    }
+
+    /// The widget the note `name` is stuck on the desktop as made `size` large (its own DIPs), as the page it is written
+    /// in over it was sized: laid out again for it (see `view::STUCK_NOTE`), its corner where it is, and kept so.
+    pub fn size_note(&mut self, name: &str, size: (f32, f32)) {
+        let only = format!("{}{name}", view::STUCK_NOTE_LANE);
+        let Some(widget) = self.list.iter_mut().find(|widget| widget.content.holding(&only).is_some()) else { return };
+        let Some(readings) = widget.content.readings_mut() else { return };
+        readings.choice.extra = (size.0 - view::STUCK_NOTE.0, size.1 - view::STUCK_NOTE.1);
+        widget.next_frame = Instant::now();
+        self.save();
     }
 
     /// The widget the note `name` is stuck on the desktop as (alone, or merged with another), raised in front; whether
