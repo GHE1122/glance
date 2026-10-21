@@ -4,10 +4,11 @@ beside the monitor, the sizes it takes, the record and the lines lit as they
 are sung, the full screen, the clear background and its switches, and where
 its lyrics come from and where to get it.
 
-    python studio/xhs_music.py FRAMES EDGES FONT OUT-FOLDER
+    python studio/xhs_music.py FRAMES EDGES FULL FONT OUT-FOLDER
 
 EDGES holds the stills of the page with music and the monitor at the
 screen's two edges (xhs-music-edges.json: a wider screen, for both to fit).
+FULL holds the full screen as a wide screen shows it (xhs-music-full.json).
 """
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
 sys.path.insert(0, str(Path(__file__).parent))
-from compose import ACCENT, Fonts, mark  # noqa: E402
+from compose import ACCENT, Fonts, mark, shadowed  # noqa: E402
 from xhs import DIM, H, MARGIN, SOFT, W, WHITE, card, finish, heading, write  # noqa: E402
 
 SCALE = 2.0
@@ -133,10 +134,68 @@ def page_stage(frames, fonts, bare):
     return finish(page, layer)
 
 
+def maximize(draw, x, y, size, fill):
+    """Lucide's maximize icon (four corners) in a `size` box at `x`, `y`."""
+    k = size / 24
+    width = max(2, round(2 * k))
+    for path in (((8, 3), (5, 3), (3, 5), (3, 8)), ((21, 8), (21, 5), (19, 3), (16, 3)),
+                 ((3, 16), (3, 19), (5, 21), (8, 21)), ((16, 21), (19, 21), (21, 19), (21, 16))):
+        draw.line([(x + px * k, y + py * k) for px, py in path], fill=fill, width=width, joint="curve")
+
+
+def monitor(page, screen, top):
+    """`screen` shown on a monitor centred at `top`: a thin bezel, a neck and a foot, and the screen's light
+    spilling under it."""
+    sw, sh = screen.size
+    bezel = 14
+    left = (W - sw) // 2 - bezel
+    right, bottom = left + sw + 2 * bezel, top + sh + 2 * bezel
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    tint = tuple(int(v) for v in np.asarray(screen.convert("RGB")).reshape(-1, 3).mean(axis=0) * 1.8)
+    ImageDraw.Draw(glow).ellipse((left - 40, top + 60, right + 40, bottom + 120), fill=tint + (150,))
+    page.alpha_composite(glow.filter(ImageFilter.GaussianBlur(90)))
+    body = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(body)
+    middle = W // 2
+    draw.polygon([(middle - 70, bottom - 4), (middle + 70, bottom - 4), (middle + 90, bottom + 110), (middle - 90, bottom + 110)], fill=(30, 28, 40, 255))
+    draw.rounded_rectangle((middle - 230, bottom + 100, middle + 230, bottom + 126), radius=13, fill=(40, 38, 52, 255))
+    draw.rounded_rectangle((left, top, right, bottom), radius=26, fill=(14, 13, 20, 255), outline=(70, 66, 88, 255), width=2)
+    page.alpha_composite(shadowed(body, blur=24, strength=0.7))
+    rounded = Image.new("L", screen.size, 0)
+    ImageDraw.Draw(rounded).rounded_rectangle((0, 0, sw - 1, sh - 1), radius=12, fill=255)
+    screen = screen.convert("RGBA")
+    screen.putalpha(rounded)
+    page.alpha_composite(screen, (left + bezel, top + bezel))
+    return bottom + 126
+
+
 def page_full(frames, fonts, bare):
-    page = still(frames, "full").convert("RGBA")
+    # The ground: the full screen's own smoke, blurred and darkened.
+    page = still(frames, "full").filter(ImageFilter.GaussianBlur(40)).convert("RGBA")
+    shade(page, 0, H, 0.55)
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    heading(layer, fonts, "全屏歌词", "烟雾取封面的颜色，跟着节拍流动。\n点组件右上角的全屏按钮进入，按 Esc 退出。")
+    draw = ImageDraw.Draw(layer)
+    y = heading(layer, fonts, "全屏歌词", "烟雾取封面的颜色，跟着节拍流动。\n唱到的字放大发光，下一句在下面等着。")
+    # The full screen as a screen shows it: wide.
+    wide = Image.open(FULL / "full-wide" / "00001.png").convert("RGB")
+    sw = W - 2 * 60 - 28
+    wide = wide.resize((sw, round(sw * wide.height / wide.width)), Image.LANCZOS)
+    y = monitor(page, wide, int(y) + 70)
+    # How to go in and out.
+    top = H - 84 - 290
+    gap = 24
+    half = (W - 2 * MARGIN + 40 - gap) // 2
+    title, body = fonts.get(44, b"Bold"), fonts.get(34, b"Regular")
+    for i, (said, more) in enumerate((("进入", "点组件右上角的\n全屏按钮"), ("退出", "按 Esc 键\n回到原来的组件"))):
+        x = MARGIN - 20 + i * (half + gap)
+        card(layer, (x, top, x + half, top + 290), radius=36)
+        draw.rounded_rectangle((x + 40, top + 44, x + 132, top + 136), radius=24, fill=(255, 255, 255, 235))
+        if i == 0:
+            maximize(draw, x + 62, top + 66, 48, (24, 22, 36, 255))
+        else:
+            draw.text((x + 86, top + 90), "Esc", font=fonts.get(32, b"Bold"), anchor="mm", fill=(24, 22, 36, 255))
+        draw.text((x + 160, top + 90), said, font=title, anchor="lm", fill=WHITE)
+        write(draw, (x + 40, top + 176), more, body, SOFT, spacing=1.4)
     return finish(page, layer)
 
 
@@ -202,11 +261,12 @@ PAGES = [page_cover, page_edges, page_sizes, page_stage, page_full, page_clear, 
 
 
 EDGES = None
+FULL = None
 
 
 def main():
-    global EDGES
-    frames, EDGES, font, out = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
+    global EDGES, FULL
+    frames, EDGES, FULL, font, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], Path(sys.argv[5])
     out.mkdir(parents=True, exist_ok=True)
     fonts = Fonts(font)
     bare = still(frames, "bare")
