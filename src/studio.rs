@@ -153,6 +153,27 @@ struct MusicShot {
     full: bool,
     #[serde(default)]
     serif: Option<String>,
+    /// What the widget shows, as the music's switches say (as they are at first if absent).
+    #[serde(default)]
+    shows: MusicSwitches,
+}
+
+/// The music's switches (see `ui::music::Shows`), each as it is at first unless said.
+#[derive(Deserialize)]
+#[serde(default)]
+struct MusicSwitches {
+    cover: bool,
+    title: bool,
+    translation: bool,
+    spectrum: bool,
+    controls: bool,
+    clear: bool,
+}
+
+impl Default for MusicSwitches {
+    fn default() -> Self {
+        MusicSwitches { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false }
+    }
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -226,7 +247,8 @@ fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, deskto
     crate::playing::pretend(crate::playing::Now { timeline: None, players: 1, title: music.title.clone(), artist: music.artist.clone(), album: String::new(), app: lang.pick("音乐", "Music").into(), playing: true, volume: Some(60), muted: false, sung: None });
     let px = script.scale;
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
-    let shows = MusicShows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+    let on = &music.shows;
+    let shows = MusicShows { cover: on.cover, title: on.title, translation: on.translation, spectrum: on.spectrum, controls: on.controls, clear: on.clear, inset: None };
     // Sliding out of its edge as a panel does, where the shot says when (its look's entrance, out of the edge it is at).
     let entrance = Theme::new(Skin::named(&shot.skin), true).entrance;
     let outward = if shot.edge.as_deref() == Some("left") { -1.0 } else { 1.0 };
