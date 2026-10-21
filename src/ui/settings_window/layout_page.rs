@@ -624,8 +624,10 @@ impl Ui {
 }
 
 /// Where edge `edge` of a screen drawn at `r` takes a drop: `deep` into it from a side, `deep_top` from its top
-/// (the top's between the sides').
+/// (the top's between the sides'), each at most a third of the screen (one drawn narrow, standing up, keeps a top
+/// between its sides).
 fn zone_of(r: Rect, edge: Edge, deep: f32, deep_top: f32) -> Rect {
+    let (deep, deep_top) = (deep.min(r.w / 3.0), deep_top.min(r.h / 3.0));
     match edge {
         Edge::Left => Rect { x: r.x, y: r.y, w: deep, h: r.h },
         Edge::Right => Rect { x: r.x + r.w - deep, y: r.y, w: deep, h: r.h },
@@ -670,5 +672,27 @@ fn edge_glow(frame: &Frame, r: Rect, edge: Edge, reach: f32, color: Color, stren
         dc.FillRectangle(&rect(band.x, band.y, band.w, band.h), &brush);
         dc.PopLayer();
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each edge of a screen drawn takes a drop in a zone of its own, however narrow the screen is drawn: a screen
+    /// standing up keeps a top between its sides, none of them meeting.
+    #[test]
+    fn every_edge_takes_a_drop_however_narrow() {
+        for r in [Rect { x: 0.0, y: 0.0, w: 400.0, h: 225.0 }, Rect { x: 10.0, y: 20.0, w: 150.0, h: 266.0 }, Rect { x: 0.0, y: 0.0, w: 60.0, h: 100.0 }] {
+            let zones = EDGES.map(|edge| zone_of(r, edge, ZONE_LARGE, ZONE_TOP_LARGE));
+            for (edge, zone) in EDGES.iter().zip(&zones) {
+                assert!(zone.w > 0.0 && zone.h > 0.0, "{edge:?} of {r:?}: {zone:?}");
+            }
+            for (at, a) in zones.iter().enumerate() {
+                for b in &zones[at + 1..] {
+                    assert!(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y, "{a:?} meets {b:?}");
+                }
+            }
+        }
     }
 }
