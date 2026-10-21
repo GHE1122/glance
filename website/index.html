@@ -14,7 +14,7 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="preload" href="assets/fonts/archivo-600.woff2" as="font" type="font/woff2" crossorigin>
 <script src="assets/lang.js?v=1"></script>
-<link rel="stylesheet" href="assets/site.css?v=15">
+<link rel="stylesheet" href="assets/site.css?v=16">
 <script src="assets/site.js?v=8" defer></script>
 <script src="assets/demo.js?v=7" defer></script>
 <script src="assets/widget.js?v=4" defer></script>
@@ -28,6 +28,7 @@
     <a class="mark" href="./" aria-label="Glance 首页"><img src="assets/img/icon.svg" alt="" width="32" height="32">Glance</a>
     <nav class="nav" aria-label="页面导航">
       <a class="sec" href="#features">功能</a>
+      <a class="sec" href="#workbench">工作台</a>
       <a class="sec" href="#faq">常见问题</a>
       <a class="sec" href="#changelog">更新记录</a>
       <a class="src" href="https://github.com/lulu-loopp/glance" rel="noopener">GitHub</a>
@@ -77,7 +78,7 @@
         <li class="feature">
           <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M17 8v8"/><path d="M8 12h5m0 0-2-2m2 2-2 2"/></svg></div>
           <h3>推一下屏幕边缘就出来</h3>
-          <p>鼠标推到屏幕右边缘，面板滑出；移开就收回。要稍微用点力推才会打开，贴边滚动、拖窗口都不会误触。推哪一边、推多大力都能改。也可以按 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>G</kbd>，在鼠标旁边打开。</p>
+          <p>鼠标推到屏幕右边缘，面板滑出；移开就收回。要稍微用点力推才会打开，贴边滚动、拖窗口都不会误触。推哪一边、推多大力都能改。每条边还可以放不同的组件，比如右边放监控、左边放工作台，在设置的“布局”里拖过去就行。也可以按 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>G</kbd>，在鼠标旁边打开。</p>
         </li>
         <li class="feature">
           <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="11" height="11" rx="2.5"/><rect x="10" y="10" width="11" height="11" rx="2.5"/></svg></div>
@@ -155,13 +156,44 @@
     </div>
   </section>
 
+  <section id="workbench">
+    <div class="wrap">
+      <p class="eyebrow">工作台和音乐</p>
+      <h2>不只是监控</h2>
+      <p class="sub">0.4 起，Glance 多了两个组件：放随手要用的东西的“工作台”，和跟着歌词走的“音乐”。和监控一样，可以放在任意一条屏幕边缘，也能拖出来放在桌面上。</p>
+
+      <ul class="features pairs">
+        <li class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></div>
+          <h3>中转站：先放这儿，用时再拖走</h3>
+          <p>文件、图片、文字、链接，拖进中转站或者粘贴进来，临时放着，要用的时候再拖到别的程序里。“最近复制”记下剪贴板里来过的东西，可以暂停。“最近文件”列出刚下载、刚保存的文件。双击打开，右键固定，放久了会自己清走。</p>
+        </li>
+        <li class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15.5 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2V8.5L15.5 3Z"/><path d="M15 3v6h6"/></svg></div>
+          <h3>便签，写的就是 Markdown</h3>
+          <p>每条便签都是“文档\Glance 便签”里的一个 .md 文件，换个编辑器也能打开。标题、加粗、待办方框、链接都按排好的样子显示，方框点一下就勾上，链接点一下就打开。只有光标所在的那一行才露出 Markdown 符号。便签可以贴到桌面上，直接在上面写。</p>
+        </li>
+        <li class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+          <h3>快捷启动</h3>
+          <p>常用的程序、文件、文件夹和网址排在一起，点一下就开。可以从开始菜单的全部程序里挑，从最近用过的里加，也可以直接拖进来，拖动就能调整顺序。</p>
+        </li>
+        <li class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+          <h3>音乐：歌词跟着唱</h3>
+          <p>正在播放的歌：封面、进度、音量，歌词一句一句跟着走，有逐字时间的会一个字一个字亮起来。网易云音乐、QQ 音乐、酷狗和 LRCLIB 一起找歌词。拉大是一张转着的唱片和频谱，也可以全屏。</p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
   <section class="band" id="quiet">
     <div class="wrap">
       <p class="eyebrow">小巧安静</p>
       <h2>开着它，电脑感觉不到</h2>
       <p class="sub">用 Windows 自带的 Direct2D 原生绘制，没有内嵌浏览器，也没有后台常驻的一堆服务。</p>
       <dl class="stats">
-        <div><dt>约 1 MB</dt><dd>整个程序就一个小小的 exe</dd></div>
+        <div><dt>约 4 MB</dt><dd>整个程序就一个小小的 exe</dd></div>
         <div><dt>≈ 1%</dt><dd>面板收起时的 CPU 占用（单个核心），内存约 110 MB</dd></div>
         <div><dt>已签名</dt><dd>安装包和程序都带作者的数字签名（Weiyi Shi）</dd></div>
         <div><dt>自动更新</dt><dd>有新版本时托盘会提示，只安装签名一致的新版</dd></div>
@@ -317,7 +349,7 @@
   <section class="again" id="download">
     <div class="wrap">
       <h2>下载 Glance</h2>
-      <p class="sub">免费，一个 4 MB 左右的安装包，一分钟装好。</p>
+      <p class="sub">免费，一个 7 MB 左右的安装包，一分钟装好。</p>
       <div class="phone" role="note">
         <p><strong>这是 Windows 电脑上的软件</strong>，手机上装不了。复制网址，到电脑上打开下载。</p>
         <span class="url" data-url>本页网址</span>

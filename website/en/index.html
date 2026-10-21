@@ -13,7 +13,7 @@
 <link rel="icon" href="../favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <link rel="preload" href="../assets/fonts/archivo-600.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="../assets/site.css?v=15">
+<link rel="stylesheet" href="../assets/site.css?v=16">
 <script src="../assets/site.js?v=8" defer></script>
 <script src="../assets/demo.js?v=7" defer></script>
 <script src="../assets/widget.js?v=4" defer></script>
@@ -27,6 +27,7 @@
     <a class="mark" href="./" aria-label="Glance home"><img src="../assets/img/icon.svg" alt="" width="32" height="32">Glance</a>
     <nav class="nav" aria-label="Page">
       <a class="sec" href="#features">Features</a>
+      <a class="sec" href="#workbench">Workbench</a>
       <a class="sec" href="#faq">Questions</a>
       <a class="sec" href="#changelog">What's new</a>
       <a class="src" href="https://github.com/lulu-loopp/glance" rel="noopener">GitHub</a>
@@ -75,7 +76,7 @@
         <li class="feature">
           <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M17 8v8"/><path d="M8 12h5m0 0-2-2m2 2-2 2"/></svg></div>
           <h3>Push the screen's edge</h3>
-          <p>Push the pointer against the right edge and the panel slides out; move away and it's gone. It takes a deliberate push, so scroll bars and dragged windows at the edge don't set it off. The edge and the push are yours to choose. Or press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>G</kbd> to open it at the pointer.</p>
+          <p>Push the pointer against the right edge and the panel slides out; move away and it's gone. It takes a deliberate push, so scroll bars and dragged windows at the edge don't set it off. The edge and the push are yours to choose, and each edge can hold its own components (the monitor on the right, the workbench on the left): drag them there on the Layout page of the settings. Or press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>G</kbd> to open it at the pointer.</p>
         </li>
         <li class="feature">
           <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="11" height="11" rx="2.5"/><rect x="10" y="10" width="11" height="11" rx="2.5"/></svg></div>
@@ -153,13 +154,44 @@
     </div>
   </section>
 
+  <section id="workbench">
+    <div class="wrap">
+      <p class="eyebrow">Workbench and music</p>
+      <h2>More than a monitor</h2>
+      <p class="sub">From 0.4, Glance has two more components: a Workbench for the things you reach for, and Music that follows the lyrics. Like the monitor, each can sit on any screen edge, or be dragged out onto the desktop.</p>
+
+      <ul class="features pairs">
+        <li class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></div>
+          <h3>The station: park it, drag it out later</h3>
+          <p>Drop or paste files, pictures, text and links onto the station and they wait there until you drag them into another program. <em>Recently copied</em> keeps what passed through the clipboard, and can be paused. <em>Recent files</em> lists what was just downloaded or saved. Double-click to open, right-click to pin, and what sits too long is cleared away.</p>
+        </li>
+        <li class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15.5 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2V8.5L15.5 3Z"/><path d="M15 3v6h6"/></svg></div>
+          <h3>Notes, written in Markdown</h3>
+          <p>Every note is a .md file in <code>Documents\Glance 便签</code>, so any editor opens it too. Headings, bold, to-do boxes and links show as they read. Tick a box with a click, open a link with a click. The Markdown marks appear only on the line you are writing. A note can be stuck on the desktop and written in right there.</p>
+        </li>
+        <li class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+          <h3>Quick launch</h3>
+          <p>Programs, files, folders and web links you use often, side by side, a click away. Pick them from every program in the Start menu, add them from what you used lately, or drag them in, then drag to reorder.</p>
+        </li>
+        <li class="feature">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+          <h3>Music that sings along</h3>
+          <p>What is playing, with its cover, position and volume, and lyrics that follow the song line by line, word by word where the timing is known. Lyrics are looked up on NetEase Cloud Music, QQ Music, Kugou and LRCLIB at once. Made large it becomes a spinning record with a spectrum, and it can go full screen.</p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
   <section class="band" id="quiet">
     <div class="wrap">
       <p class="eyebrow">Small and quiet</p>
       <h2>Your PC won't notice it</h2>
       <p class="sub">Drawn natively with Direct2D, as Windows draws itself: no browser inside, no services running in the background.</p>
       <dl class="stats">
-        <div><dt>~1 MB</dt><dd>The whole program is one small executable</dd></div>
+        <div><dt>~4 MB</dt><dd>The whole program is one small executable</dd></div>
         <div><dt>≈ 1%</dt><dd>Of one CPU core while the panel is hidden, in about 110 MB of memory</dd></div>
         <div><dt>Signed</dt><dd>The installer and the program carry the author's signature (Weiyi Shi)</dd></div>
         <div><dt>Updates</dt><dd>The tray says when there's a new version; only one signed the same way installs</dd></div>
@@ -315,7 +347,7 @@
   <section class="again" id="download">
     <div class="wrap">
       <h2>Download Glance</h2>
-      <p class="sub">Free, a 4 MB installer, and a minute to set up.</p>
+      <p class="sub">Free, a 7 MB installer, and a minute to set up.</p>
       <div class="phone" role="note">
         <p><strong>Glance is a Windows app</strong>; it won't install on a phone. Copy the address and open it on your PC.</p>
         <span class="url" data-url>this page's address</span>
