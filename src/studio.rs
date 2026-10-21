@@ -143,7 +143,8 @@ struct MusicShot {
     length: f64,
     #[serde(default)]
     from: f64,
-    /// The widget: where it is and how large (DIPs on the screen) and how opaque, key by key, eased between them.
+    /// The widget: where it is and how large (DIPs on the screen) and how opaque, key by key, eased between them;
+    /// sliding in and away as the shot's `slide_in` and `slide_out` say, out of its `edge`, as a panel does.
     #[serde(default)]
     keys: Vec<MusicKey>,
     /// The full screen instead, over the whole frame, its lines in the serif face in the file named (else in YaHei,
@@ -226,6 +227,9 @@ fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, deskto
     let px = script.scale;
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
     let shows = MusicShows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+    // Sliding out of its edge as a panel does, where the shot says when (its look's entrance, out of the edge it is at).
+    let entrance = Theme::new(Skin::named(&shot.skin), true).entrance;
+    let outward = if shot.edge.as_deref() == Some("left") { -1.0 } else { 1.0 };
     let mut widget = Music::default();
     let mut full = crate::fullscreen::Shown::new(std::time::Instant::now());
     let mut smoke = if music.full { Some(crate::ui::smoke::Smoke::new(gfx).map_err(|e| e.to_string())?) } else { None };
@@ -244,7 +248,16 @@ fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, deskto
             let smoke = &*smoke;
             gfx.draw_offscreen((script.width, script.height), px, |frame| full.paint(frame, (sw, sh), Some(smoke), position, now))
         } else {
-            let key = music_key(&music.keys, t);
+            let mut key = music_key(&music.keys, t);
+            if shot.slide_in.is_some() {
+                let (shift, opacity) = motion(shot, t);
+                let travel = match entrance {
+                    Entrance::Beyond(extra) => key.w + extra,
+                    Entrance::Slide(distance) => distance,
+                };
+                key.x += outward * shift * travel;
+                key.opacity *= opacity;
+            }
             gfx.draw_offscreen((script.width, script.height), px, |frame| {
                 if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
                     unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };

@@ -5,15 +5,17 @@ vertical H.264 MP4.
 
     python studio/music_video.py FRAMES SONG-FOLDER FONT OUT.mp4 [--preview T ...]
 
-FRAMES holds the studio's shots (music-widget, music-full), SONG-FOLDER the
+FRAMES holds the studio's shots (monitor, music-widget, music-full), SONG-FOLDER the
 song (see song.py), FONT a variable CJK font with Bold and Regular
 instances. --preview writes the frame at each T seconds as a PNG beside
 OUT instead of the video.
 
-The widget grows as the song goes (a strip, a player, a card, the stage
-with its record), each turn with a soft whoosh, then the camera falls into
-it and the full screen takes over; on the last bar the screen blurs back
-behind Glance's mark and where to find it.
+It begins with the Glance people know, the monitor sliding out of the
+right edge and away, and then what is new: music sliding out of the left
+edge. Taken onto the desktop, it grows as the song goes (a strip, a player,
+a card, the stage with its record), each turn with a soft whoosh, then the
+camera falls into it and the full screen takes over. On the last bar the
+screen blurs back behind Glance's mark, what is new and where to find it.
 """
 import json
 import subprocess
@@ -39,19 +41,25 @@ END = 10 * BAR
 # Where the full screen's frames begin in the song (see music-shots.json).
 FULL_FROM = 20.0
 
-# Captions: (from, to, title, subtitle), seconds into the song.
+# When the music's frames take over from the monitor's (see music-shots.json: the monitor gone, music sliding in).
+MUSIC_FROM = 4.4
+
+# Captions: (from, to, title, subtitle), seconds into the song. The second says what is new, marked so.
 CAPTIONS = [
-    (0.7, 2 * BAR + 0.2, "Glance 音乐", "歌词跟着歌声\n一个字一个字亮起来"),
-    (2 * BAR + 0.9, 4 * BAR, "拉高一点", "封面、歌名和频谱\n一起出来"),
-    (4 * BAR + 0.9, 6 * BAR, "再大一点", "前后几句歌词\n跟着歌一起滚动"),
-    (6 * BAR + 0.9, FALL[0], "够宽就放唱片", "唱片随着播放转动"),
+    (0.35, 3.75, "Glance", "鼠标推到屏幕边缘\n系统监控滑出来"),
+    (4.0, 7.9, "0.4 新增：音乐", "从屏幕另一边滑出\n歌词跟着歌声走"),
+    (8.2, 10.5, "拖到桌面上", "大小随意调"),
+    (10.8, 13.4, "拉高一点", "封面、歌名和频谱\n一起出来"),
+    (13.8, 16.0, "再大一点", "前后几句歌词\n跟着歌一起滚动"),
+    (16.4, FALL[0], "够宽就放唱片", "唱片随着播放转动"),
     (FALL[1] + 0.3, END - 0.1, "全屏歌词", "烟雾取封面的颜色\n跟着节拍流动"),
 ]
+NEW = (4.0, 7.9)
 # The widget's keys as the studio has them (DIPs), for where the camera falls.
 STAGE = (20, 500, 560, 360)
 # Sounds: whooshes as the widget grows and as the camera falls; a soft pop as it first shows.
-WHOOSHES = [(2 * BAR - 0.35, 0.8, 0.5), (4 * BAR - 0.35, 0.8, 0.5), (6 * BAR - 0.35, 0.8, 0.5), (FALL[0] - 0.25, 1.1, 0.9)]
-POPS = [(0.75, 0.55)]
+WHOOSHES = [(0.15, 0.7, 0.45), (3.5, 0.7, 0.4), (4.25, 0.8, 0.55), (7.9, 1.1, 0.5), (10.0, 0.8, 0.4), (12.8, 0.8, 0.4), (15.4, 0.8, 0.4), (FALL[0] - 0.25, 1.1, 0.9)]
+POPS = [(4.5, 0.7)]
 
 
 class Shot:
@@ -95,8 +103,9 @@ def end_card(fonts, frame, t):
         logo.putalpha(logo.getchannel("A").point(lambda a: int(a * logo_alpha)))
         layer.alpha_composite(logo, ((W - size) // 2, 560))
     lines = [("Glance", fonts.get(120, b"Bold"), (255, 255, 255), 900, 0.9),
-             ("glancepc.com", fonts.get(64, b"Bold"), ACCENT, 1060, 1.3),
-             ("免费 · 开源 · Windows 10/11", fonts.get(44, b"Regular"), (226, 230, 240), 1170, 1.6)]
+             ("0.4 新增：音乐", fonts.get(52, b"Bold"), (255, 255, 255), 1050, 1.2),
+             ("glancepc.com", fonts.get(64, b"Bold"), ACCENT, 1150, 1.5),
+             ("免费 · 开源 · Windows 10/11", fonts.get(44, b"Regular"), (226, 230, 240), 1260, 1.8)]
     for text, font, colour, y, at in lines:
         a = ease_out((since - at) / 0.5)
         if a <= 0:
@@ -108,8 +117,30 @@ def end_card(fonts, frame, t):
     return out.convert("RGB")
 
 
-def frame_at(fonts, widget, full, t):
-    if t < FALL[0]:
+def new_badge(fonts, t):
+    """A small "NEW" mark over the caption that says what is new, popping in and leaving with it."""
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    start, stop = NEW
+    a = ease_out((t - start - 0.5) / 0.3) * (1 - ease((t - (stop - 0.3)) / 0.3))
+    if a <= 0:
+        return layer
+    draw = ImageDraw.Draw(layer)
+    font = fonts.get(34, b"Bold")
+    text = "NEW"
+    width = draw.textlength(text, font=font)
+    grow = 0.85 + 0.15 * ease_out((t - start - 0.5) / 0.25)
+    w, h = (width + 36) * grow, 50 * grow
+    x, y = MARGIN, 200
+    draw.rounded_rectangle((x, y, x + w, y + h), radius=h / 2, fill=ACCENT + (int(255 * a),))
+    small = fonts.get(int(34 * grow), b"Bold")
+    draw.text((x + (w - draw.textlength(text, font=small)) / 2, y + h / 2), text, font=small, anchor="lm", fill=(255, 255, 255, int(255 * a)))
+    return layer
+
+
+def frame_at(fonts, monitor, widget, full, t):
+    if t < MUSIC_FROM:
+        frame = monitor.at(t)
+    elif t < FALL[0]:
         frame = widget.at(t)
     elif t < FALL[1]:
         p = ease((t - FALL[0]) / (FALL[1] - FALL[0]))
@@ -121,7 +152,9 @@ def frame_at(fonts, widget, full, t):
     out = frame.convert("RGBA")
     for start, stop, title, subtitle in CAPTIONS:
         if start <= t < stop:
-            out.alpha_composite(kinetic(fonts, title, subtitle, t - start, stop - start, W - 2 * MARGIN, 250, size=92))
+            out.alpha_composite(kinetic(fonts, title, subtitle, t - start, stop - start, W - 2 * MARGIN, 270, size=92))
+    if NEW[0] <= t < NEW[1]:
+        out.alpha_composite(new_badge(fonts, t))
     return out.convert("RGB")
 
 
@@ -177,10 +210,10 @@ def soundtrack(song_folder, out):
 def main():
     frames, song_folder, font, out = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
     fonts = Fonts(font)
-    widget, full = Shot(frames / "music-widget"), Shot(frames / "music-full")
+    monitor, widget, full = Shot(frames / "monitor"), Shot(frames / "music-widget"), Shot(frames / "music-full")
     if "--preview" in sys.argv:
         for t in map(float, sys.argv[sys.argv.index("--preview") + 1:]):
-            frame_at(fonts, widget, full, t).save(out.with_name(f"{out.stem}-{t:05.2f}.png"))
+            frame_at(fonts, monitor, widget, full, t).save(out.with_name(f"{out.stem}-{t:05.2f}.png"))
         return
     audio = out.with_suffix(".wav")
     soundtrack(song_folder, audio)
@@ -194,7 +227,7 @@ def main():
     ], stdin=subprocess.PIPE)
     count = int(LENGTH * FPS)
     for index in range(count):
-        encode.stdin.write(frame_at(fonts, widget, full, index / FPS).tobytes())
+        encode.stdin.write(frame_at(fonts, monitor, widget, full, index / FPS).tobytes())
         if index % 150 == 0:
             print(f"{index}/{count}", flush=True)
     encode.stdin.close()
