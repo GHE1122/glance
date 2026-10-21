@@ -19,9 +19,9 @@ const FILE: &str = "settings.json";
 pub fn saved(dir: &Path) -> bool {
     dir.join(FILE).is_file()
 }
-/// Larger than this, a settings file is not one Glance wrote.
+/// Larger than this, a settings file is not one Glance wrote (it writes none larger: see `Settings::save`).
 #[cfg(windows)]
-const MOST: u64 = 1 << 20;
+const MOST: u64 = 16 << 20;
 /// The settings file as it was, where it did not read whole (see `Settings::load`).
 #[cfg(windows)]
 pub const UNREAD: &str = "settings.unread.json";
@@ -943,6 +943,15 @@ impl Settings {
     /// never follows a link someone put in the user's folder (see `elevation::read_in_place`).
     pub fn load(dir: &Path) -> Self {
         let kept = crate::elevation::read_in_place(dir, FILE, MOST);
+        // (One there not read at all, as not one Glance wrote (too large, not text, a link): put aside as it is, as the
+        // next save writes over it.)
+        if kept.is_none() && saved(dir) {
+            let aside = crate::elevation::put_aside_in_place(dir, FILE, UNREAD);
+            crate::journal::note(match aside {
+                Ok(()) => format!("settings: the file not read (not one Glance writes); put aside as {UNREAD}"),
+                Err(error) => format!("settings: the file not read (not one Glance writes), nor put aside ({error})"),
+            });
+        }
         // With none kept, this is where Glance begins here.
         let begins = kept.is_none().then(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs() / 86400));
         let mut settings = match kept {
@@ -1015,9 +1024,14 @@ impl Settings {
         }
     }
 
+    /// Saved in `dir`, whole or not at all; never larger than Glance reads (see `load`): such settings are not saved.
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
+        let text = serde_json::to_string_pretty(self).unwrap();
+        if text.len() as u64 > MOST {
+            return Err(std::io::Error::new(std::io::ErrorKind::FileTooLarge, format!("{} bytes, more than Glance reads", text.len())));
+        }
         crate::elevation::ensure_folder(dir)?;
-        crate::elevation::write_in_place(dir, FILE, serde_json::to_string_pretty(self).unwrap().as_bytes())
+        crate::elevation::write_in_place(dir, FILE, text.as_bytes())
     }
 }
 
@@ -1190,6 +1204,17 @@ mod tests {
         let settings = Settings::load(&dir);
         assert_eq!(settings.skin, "glass");
         assert_eq!(std::fs::read(dir.join(UNREAD)).unwrap(), broken);
+        // One not read at all (too large to be one Glance wrote): put aside, not written over by the next save.
+        let large = format!(r#"{{ "skin": "glass", "x": "{}" }}"#, "x".repeat(MOST as usize));
+        crate::elevation::write_in_place(&dir, FILE, large.as_bytes()).unwrap();
+        let settings = Settings::load(&dir);
+        assert_eq!(settings.skin, Settings::default().skin);
+        assert!(std::fs::read(dir.join(UNREAD)).unwrap() == large.as_bytes(), "put aside as it was");
+        assert!(!saved(&dir));
+        // And Glance writes none such.
+        let wide = Settings { skin: "x".repeat(MOST as usize), ..Settings::default() };
+        assert_eq!(wide.save(&dir).unwrap_err().kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(!saved(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

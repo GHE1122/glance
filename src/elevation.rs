@@ -1071,6 +1071,13 @@ pub fn read_bytes_in_place(folder: &Path, name: &str, most: u64) -> Option<Vec<u
     (bytes.len() as u64 <= most).then_some(bytes)
 }
 
+/// Renames `name` in `folder` as `aside` (in place of one there), for Glance running elevated: the folder held and
+/// checked to be where its path says (see `read_in_place`); a link there renamed itself, never followed.
+pub fn put_aside_in_place(folder: &Path, name: &str, aside: &str) -> std::io::Result<()> {
+    let _held = held_where_it_says(folder).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not where its path says"))?;
+    std::fs::rename(folder.join(name), folder.join(aside))
+}
+
 /// Writes `contents` as `name` in `folder`, for Glance running elevated: the
 /// folder held and checked by handle to be where its path says, the bytes
 /// written to a new file there (a new file follows no link) checked by
