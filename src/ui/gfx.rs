@@ -1681,6 +1681,8 @@ impl<'a> Frame<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32) {
         use crate::notes::markdown::{line_heights, Shown, BOX_IN, BOX_RISE, BOX_ROOM, BOX_SIDE, NONE_WRITTEN};
+        // (Clipped and let go of whatever fails in between: the clip left on, the whole frame was lost.)
+        Canvas::clip(self, x, y, width, height);
         let drawn = (|| -> Result<()> {
             let wide: Vec<u16> = text.encode_utf16().collect();
             let factory: IDWriteFactory = self.gfx.write.cast()?;
@@ -1702,7 +1704,6 @@ impl<'a> Frame<'a> {
             let nothing: IDWriteInlineObject = Room { width: 0.0 }.into();
             let room: IDWriteInlineObject = Room { width: BOX_ROOM * size }.into();
             let (left, top) = self.on_pixel(x, y);
-            Canvas::clip(self, x, y, width, height);
             // Each line laid out on its own, as tall as it is set, under the one before.
             let mut down = 0.0;
             for (line, tall) in line_heights(text, size * per) {
@@ -1744,12 +1745,15 @@ impl<'a> Frame<'a> {
                 for range in boxes.iter().filter_map(|boxed| on_line(&(boxed.marks.start..boxed.room + 1))) {
                     unsafe { layout.SetInlineObject(&room, range)? };
                 }
-                // Its words' baseline as far above its foot as they reach below it laid out as they come (on its first
-                // line), in whole pixels.
-                let mut first = [DWRITE_LINE_METRICS::default()];
+                // The rows it is laid out on (a line too long for its room wrapped onto more than one: asked for its
+                // first row alone, DirectWrite said there was not room for them and nothing after it was drawn).
                 let mut count = 0;
-                unsafe { layout.GetLineMetrics(Some(&mut first), &mut count)? };
-                let below = ((first[0].height - first[0].baseline) * per).round() / per;
+                let _ = unsafe { layout.GetLineMetrics(None, &mut count) };
+                let mut lines = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
+                unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count)? };
+                // Its words' baseline as far above its foot as they reach below it laid out as they come (on its first
+                // row), in whole pixels.
+                let below = ((lines[0].height - lines[0].baseline) * per).round() / per;
                 let tall = tall / per;
                 unsafe {
                     layout.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, tall, tall - below)?;
@@ -1757,8 +1761,6 @@ impl<'a> Frame<'a> {
                 }
                 // Each to-do's box in its room, by its line's baseline (each line `tall`, its baseline `tall - below`
                 // down it).
-                let mut lines = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
-                unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count)? };
                 let line_of = |at: usize| {
                     let mut end = 0;
                     lines.iter().position(|line| {
@@ -1780,9 +1782,9 @@ impl<'a> Frame<'a> {
                 unsafe { layout.GetMetrics(&mut metrics)? };
                 down += metrics.lineCount.max(1) as f32 * tall;
             }
-            Canvas::unclip(self);
             Ok(())
         })();
+        Canvas::unclip(self);
         if let Err(error) = drawn {
             self.fail(error);
         }
@@ -2331,6 +2333,34 @@ mod tests {
             };
             let (alone, tabbed) = (first("X"), first("	X"));
             assert!((tabbed - alone - super::super::editor::TAB_PIXELS).abs() <= 1.0, "at {scale}: after a tab at {tabbed}, alone at {alone}");
+        }
+    }
+
+    /// A note's words drawn as its face with a line too long for its room: that line wrapped onto rows enough, the
+    /// lines after it drawn under them, and nothing failed. (A note stuck on the desktop showed its lines only as far as
+    /// the first one that wrapped, and its frame was lost.)
+    #[test]
+    #[cfg(feature = "studio")]
+    fn a_note_s_line_too_long_for_its_room_wraps_and_what_follows_is_drawn() {
+        use super::super::canvas::{Color, Family, Font, Inks};
+        let gfx = super::Gfx::new().expect("graphics");
+        let white = Color::hex(0xffffff, 1.0);
+        let inks = Inks { words: white, faint: white, accent: white };
+        let (wide, tall) = (200u32, 300u32);
+        let long = "English first 你好世界我们再见 then English again and on";
+        for text in [format!("first\n{long}\nlast\n"), format!("# Head\n- [ ] {long}\nlast")] {
+            let mut failed = None;
+            let pixels = gfx
+                .draw_offscreen((wide, tall), 1.0, |frame| {
+                    frame.markdown(&text, Font::new(Family::YaHei, 15.0, 400.0), inks, 0.0, 0.0, wide as f32, tall as f32);
+                    failed = frame.failed.borrow().clone();
+                })
+                .expect("drawn");
+            assert!(failed.is_none(), "{text:?}: {failed:?}");
+            // Rows with ink, one under another: the first line, the long one on two or more, the last.
+            let inked = |y: u32| (0..wide).any(|x| pixels[((y * wide + x) * 4 + 3) as usize] > 0);
+            let rows = (0..tall).filter(|&y| inked(y) && (y == 0 || !inked(y - 1))).count();
+            assert!(rows >= 4, "{text:?}: {rows} rows drawn");
         }
     }
 
