@@ -93,7 +93,7 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
     }
     rows.push((Choice::Pin, if item.pinned { lang.pick("取消固定", "Unpin") } else { lang.pick("固定", "Pin") }, Icon::Pin, false));
     rows.push((Choice::Remove, lang.pick("移除", "Remove"), Icon::Close, true));
-    let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
+    let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, mark: Some(crate::ui::menu::Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
     let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
 }
@@ -153,7 +153,7 @@ pub fn recent_menu(file: recent::Key, at: windows::Win32::Foundation::POINT, ove
         (RecentChoice::CopyPath, lang.pick("复制路径", "Copy its path"), Icon::Clipboard, false),
         (RecentChoice::Hide, lang.pick("不再列出这个文件夹", "List this folder no more"), Icon::Close, true),
     ];
-    let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
+    let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, mark: Some(crate::ui::menu::Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
     let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
 }
@@ -194,7 +194,7 @@ pub fn app_menu(at: u16, point: windows::Win32::Foundation::POINT, over_the_pane
         rows.push((AppChoice::Show, lang.pick("打开文件所在的位置", "Open its location"), Icon::Panel, false));
     }
     rows.push((AppChoice::Remove, lang.pick("从快捷 App 移除", "Take off quick launch"), Icon::Close, true));
-    let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
+    let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, mark: Some(crate::ui::menu::Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
     let menu = Menu::open_at(items, look, point, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect(), app))
 }
@@ -247,7 +247,7 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
             let filter = if let Tab::Recent(filter) = tab { filter } else { Default::default() };
             pages.push((Tab::Recent(filter), lang.pick("最近文件", "Recent"), Icon::File));
         }
-        let items = pages.iter().map(|(page, label, icon)| Item { label, icon: Some(*icon), checked: page.page() == tab.page(), rule_before: false }).collect();
+        let items = pages.iter().map(|(page, label, icon)| Item { label, mark: Some(crate::ui::menu::Mark::Icon(*icon)), checked: page.page() == tab.page(), rule_before: false }).collect();
         let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
         return Some((menu, pages.into_iter().map(|(page, ..)| HeadChoice::Page(page)).collect()));
     }
@@ -274,7 +274,7 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
         ],
     });
     rows.push((HeadChoice::Settings, lang.pick("中转站设置", "Station settings"), Icon::Settings, false, true));
-    let items = rows.iter().map(|(_, label, icon, checked, rule_before)| Item { label, icon: Some(*icon), checked: *checked, rule_before: *rule_before }).collect();
+    let items = rows.iter().map(|(_, label, icon, checked, rule_before)| Item { label, mark: Some(crate::ui::menu::Mark::Icon(*icon)), checked: *checked, rule_before: *rule_before }).collect();
     let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
 }

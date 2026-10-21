@@ -3905,7 +3905,7 @@ fn menu_choices(full: bool) -> Vec<WidgetChoice> {
 /// not; what plays over the whole screen, where it shows that.
 pub(crate) fn menu_items(lang: Lang, pinned: bool, through: bool, above: bool, full: bool) -> Vec<crate::ui::menu::Item<'static>> {
     use crate::ui::menu::Item;
-    let item = |zh, en, icon, checked, rule_before| Item { label: lang.pick(zh, en), icon: Some(icon), checked, rule_before };
+    let item = |zh, en, icon, checked, rule_before| Item { label: lang.pick(zh, en), mark: Some(crate::ui::menu::Mark::Icon(icon)), checked, rule_before };
     menu_choices(full)
         .into_iter()
         .map(|choice| match choice {

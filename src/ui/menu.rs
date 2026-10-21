@@ -46,11 +46,21 @@ enum Drawn {
     Frosted(super::glass::Frosted),
 }
 
-/// One choice: what it says, its icon, whether it is on (ticked), and
+/// What stands before a choice: an icon, or a colour, as a dot of it (a note's colours: an icon said nothing of which).
+#[derive(Clone, Copy)]
+pub enum Mark {
+    Icon(Icon),
+    Colour(Color),
+}
+
+/// How large a colour's dot is across (DIPs): as a note's dot by its name, a little smaller than an icon.
+const DOT: f32 = 12.0;
+
+/// One choice: what it says, what stands before it, whether it is on (ticked), and
 /// whether a rule sets it off from the choices before it.
 pub struct Item<'a> {
     pub label: &'a str,
-    pub icon: Option<Icon>,
+    pub mark: Option<Mark>,
     pub checked: bool,
     pub rule_before: bool,
 }
@@ -360,8 +370,10 @@ impl Sheet {
                 frame.fill_rounded(colours.highlight, INSET, *top, width - 2.0 * INSET, ROW, highlight_radius);
             }
             let middle = top + ROW / 2.0;
-            if let Some(icon) = item.icon {
-                frame.icon(icon, Point { x: INSET + 16.0, y: middle }, ICON, colours.icon);
+            match item.mark {
+                Some(Mark::Icon(icon)) => frame.icon(icon, Point { x: INSET + 16.0, y: middle }, ICON, colours.icon),
+                Some(Mark::Colour(colour)) => frame.fill_circle(colour, Point { x: INSET + 16.0, y: middle }, DOT / 2.0),
+                None => {}
             }
             let (ink_top, ink_bottom) = frame.ink(item.label, look.font());
             frame.text(item.label, look.font(), colours.text, TEXT_LEFT, middle - (ink_top + ink_bottom) / 2.0, width - TEXT_LEFT - 36.0, Align::Start);
@@ -452,6 +464,28 @@ impl Colours {
 mod tests {
     use super::*;
 
+    /// A choice marked by a colour (a note's) shows a dot of that colour where an icon stands, round, in every look.
+    #[test]
+    fn a_colour_s_choice_shows_a_dot_of_it() {
+        use super::super::theme::Skin;
+        let gfx = gfx::Gfx::new().expect("graphics");
+        let pink = Color::hex(0xEE556D, 1.0);
+        let items = vec![Item { label: "粉色", mark: Some(Mark::Colour(pink)), checked: false, rule_before: false }];
+        for look in [Look { skin: None, dark: false }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, false)] {
+            let sheet = Sheet::new(&gfx, &items, look);
+            let (w, h) = (sheet.width.ceil() as u32, sheet.height.ceil() as u32);
+            let pixels = gfx.draw_offscreen((w, h), 1.0, |frame| sheet.paint(frame, &items, look, None, false)).expect("drawn");
+            let at = |x: f32, y: f32| {
+                let i = ((y as u32 * w + x as u32) * 4) as usize;
+                (pixels[i + 2], pixels[i + 1], pixels[i])
+            };
+            let middle = sheet.tops[0] + ROW / 2.0;
+            // Its middle the colour; a corner of the icon's square (outside the round dot) not.
+            assert_eq!(at(INSET + 16.0, middle), (0xEE, 0x55, 0x6D), "{look:?}");
+            assert_ne!(at(INSET + 16.0 - DOT / 2.0 + 0.5, middle - DOT / 2.0 + 0.5), (0xEE, 0x55, 0x6D), "{look:?}: not round");
+        }
+    }
+
     /// A menu in each look, light and dark, a row lit (`cargo test --features studio --lib -- --ignored menu_looks`
     /// writes `target/looks/menus.png`).
     #[test]
@@ -463,10 +497,10 @@ mod tests {
         }
         let gfx = gfx::Gfx::new().expect("graphics");
         let items = vec![
-            Item { label: "小卡片", icon: Some(Icon::LayoutGrid), checked: false, rule_before: false },
-            Item { label: "大卡片", icon: Some(Icon::Image), checked: false, rule_before: false },
-            Item { label: "列表", icon: Some(Icon::List), checked: true, rule_before: false },
-            Item { label: "清空中转站", icon: None, checked: false, rule_before: true },
+            Item { label: "小卡片", mark: Some(Mark::Icon(Icon::LayoutGrid)), checked: false, rule_before: false },
+            Item { label: "大卡片", mark: Some(Mark::Icon(Icon::Image)), checked: false, rule_before: false },
+            Item { label: "列表", mark: Some(Mark::Icon(Icon::List)), checked: true, rule_before: false },
+            Item { label: "清空中转站", mark: None, checked: false, rule_before: true },
         ];
         let looks = [Look { skin: None, dark: false }, Look::of(Skin::Glass, false), Look::of(Skin::Paper, false), Look { skin: None, dark: true }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, true)];
         let sheets: Vec<Sheet> = looks.iter().map(|look| Sheet::new(&gfx, &items, *look)).collect();

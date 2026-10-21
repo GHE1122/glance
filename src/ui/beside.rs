@@ -1222,16 +1222,17 @@ impl Beside {
     /// The note's menu, at its button.
     fn note_menu(&self, at: POINT) {
         use crate::notes::Colour;
-        use super::menu::{Item, Menu};
+        use super::menu::{Item, Mark, Menu};
         let Some(writing) = &self.writing else { return };
         let lang = self.lang;
         let names = [(Colour::Blue, lang.pick("蓝色", "Blue")), (Colour::Yellow, lang.pick("黄色", "Yellow")), (Colour::Green, lang.pick("绿色", "Green")), (Colour::Pink, lang.pick("粉色", "Pink")), (Colour::Purple, lang.pick("紫色", "Purple")), (Colour::Grey, lang.pick("灰色", "Grey"))];
-        let mut rows: Vec<(NoteChoice, &'static str, Icon, bool, bool)> = names.iter().map(|(colour, name)| (NoteChoice::Colour(*colour), *name, Icon::Image, writing.colour == *colour, false)).collect();
+        // (Each colour a dot of it, as the note's own by its name.)
+        let mut rows: Vec<(NoteChoice, &'static str, Mark, bool, bool)> = names.iter().map(|(colour, name)| (NoteChoice::Colour(*colour), *name, Mark::Colour(super::view::note_colour(*colour)), writing.colour == *colour, false)).collect();
         if writing.name.is_some() {
-            rows.push((NoteChoice::Stick, lang.pick("贴到桌面", "Stick on the desktop"), Icon::Pin, false, true));
-            rows.push((NoteChoice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Icon::Close, false, false));
+            rows.push((NoteChoice::Stick, lang.pick("贴到桌面", "Stick on the desktop"), Mark::Icon(Icon::Pin), false, true));
+            rows.push((NoteChoice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Mark::Icon(Icon::Close), false, false));
         }
-        let items = rows.iter().map(|(_, label, icon, checked, rule_before)| Item { label, icon: Some(*icon), checked: *checked, rule_before: *rule_before }).collect();
+        let items = rows.iter().map(|(_, label, mark, checked, rule_before)| Item { label, mark: Some(*mark), checked: *checked, rule_before: *rule_before }).collect();
         if let Some(menu) = Menu::open_at(items, super::menu::Look::of(self.theme.skin, self.theme.dark), at, false, false) {
             MENU.with(|held| *held.borrow_mut() = Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect())));
         }
