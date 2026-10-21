@@ -316,6 +316,13 @@ impl Menu {
         self.sheet.tops.iter().position(|top| y >= *top && y < top + ROW)
     }
 
+    /// Where the choice `row` is on the screen (physical px).
+    pub fn row_on_screen(&self, row: usize) -> Option<RECT> {
+        let top = *self.sheet.tops.get(row)?;
+        let px = |dips: f32| (dips * self.scale).round() as i32;
+        Some(RECT { left: self.rect.left + px(SHADOW), top: self.rect.top + px(SHADOW + top), right: self.rect.left + px(SHADOW + self.sheet.width), bottom: self.rect.top + px(SHADOW + top + ROW) })
+    }
+
     fn inside(&self, x: i32, y: i32) -> bool {
         let (x, y) = (x as f32 / self.scale - SHADOW, y as f32 / self.scale - SHADOW);
         x >= 0.0 && x <= self.sheet.width && y >= 0.0 && y <= self.sheet.height

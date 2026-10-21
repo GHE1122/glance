@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
@@ -95,13 +95,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 // Version 4: where to put the menu, in the WPARAM.
                 WM_CONTEXTMENU => menu(hwnd, (wparam.0 & 0xFFFF) as u16 as i16 as i32, ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32),
                 // A notification of ours (a new version) clicked.
-                NIN_BALLOONUSERCLICK => crate::show_settings(),
+                NIN_BALLOONUSERCLICK => crate::show_settings(icon_on_screen(hwnd)),
                 _ => {}
             }
             LRESULT(0)
         }
         SHOW_SETTINGS => {
-            crate::show_settings();
+            crate::show_settings(None);
             LRESULT(0)
         }
         FOLLOW_SETTINGS => {
@@ -241,20 +241,28 @@ pub fn open_menu(x: i32, y: i32, over_the_panel: bool) -> Option<(crate::ui::men
     MENU_UP.store(true, Ordering::Relaxed);
     show_tip(false);
     let Some(menu) = Menu::open_at(items, crate::ui::menu::Look::system(), POINT { x, y }, true, over_the_panel) else {
-        chosen(None, &[]);
+        chosen(None, &[], None);
         return None;
     };
     Some((menu, choices.into_iter().map(|(choice, ..)| choice).collect()))
 }
 
-/// The icon's menu gone, `choice` chosen in it (of `choices`, as `open_menu` gave them), if one was: done.
-pub fn chosen(choice: Option<usize>, choices: &[usize]) {
+/// Where the icon is on the screen (physical px), if it shows.
+fn icon_on_screen(hwnd: HWND) -> Option<RECT> {
+    use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
+    let icon = NOTIFYICONIDENTIFIER { cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32, hWnd: hwnd, uID: ICON_ID, ..Default::default() };
+    unsafe { Shell_NotifyIconGetRect(&icon) }.ok()
+}
+
+/// The icon's menu gone, `choice` chosen in it (of `choices`, as `open_menu` gave them, at `place` on the screen), if
+/// one was: done.
+pub fn chosen(choice: Option<usize>, choices: &[usize], place: Option<RECT>) {
     MENU_UP.store(false, Ordering::Relaxed);
     show_tip(true);
     match choice.map_or(0, |i| choices[i]) {
         OPEN => crate::app().controller.open_from_tray(),
         RECALL => crate::app().controller.recall_widget(),
-        SETTINGS => crate::show_settings(),
+        SETTINGS => crate::show_settings(place),
         CHECK => crate::update::check_now(crate::update::Asker::Tray),
         QUIT => crate::quit(),
         _ => {}

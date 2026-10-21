@@ -1754,12 +1754,12 @@ impl Widgets {
         match widget.release(now, cancelled) {
             Released::Closed => self.put_away_at(index),
             Released::Changed => {}
-            Released::Settings => {
+            Released::Settings(place) => {
                 // (What its button said goes with the settings coming.)
                 if self.list[index].tip.take().is_some() {
                     crate::ui::tip::hide();
                 }
-                crate::show_settings();
+                crate::show_settings(place);
                 return;
             }
             Released::Full => {
@@ -2156,7 +2156,8 @@ enum Released {
     Nothing,
     Changed,
     Closed,
-    Settings,
+    /// Its settings' button pressed, where it is on the screen (physical px).
+    Settings(Option<RECT>),
     /// Its music asked to be shown over the whole of its screen.
     Full,
     /// One of its station's head's buttons pressed: its menu asked for.
@@ -2617,6 +2618,14 @@ impl Widget {
         }
     }
 
+    /// Where its button `button` is on the screen (physical px), while it is offered.
+    fn button_on_screen(&self, button: Button) -> Option<RECT> {
+        let px = self.contact.scale * self.zoom;
+        let (middle, _) = self.offered().into_iter().find(|(_, offered)| *offered == button)?;
+        let (x, y, half) = (self.at.x as f32 + middle.x * px, self.at.y as f32 + middle.y * px, BUTTON / 2.0 * px);
+        Some(RECT { left: (x - half).round() as i32, top: (y - half).round() as i32, right: (x + half).round() as i32, bottom: (y + half).round() as i32 })
+    }
+
     fn button_at(&self, x: f32, y: f32) -> Option<Button> {
         self.offered().into_iter().find(|(c, _)| (c.x - x).hypot(c.y - y) <= BUTTON / 2.0 + 2.0).map(|(_, b)| b)
     }
@@ -2917,7 +2926,7 @@ impl Widget {
                             Released::Changed
                         }
                         Some(Button::Close) => Released::Closed,
-                        Some(Button::Settings) => Released::Settings,
+                        Some(Button::Settings) => Released::Settings(self.button_on_screen(Button::Settings)),
                         Some(Button::Full) => Released::Full,
                         Some(Button::Game) => {
                             press_game();

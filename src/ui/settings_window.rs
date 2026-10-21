@@ -164,18 +164,26 @@ static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static OPENING: AtomicBool = AtomicBool::new(false);
 /// Its thread, kept a while before it is opened and after it is closed (see `run`).
 static THREAD: std::sync::Mutex<Kept> = std::sync::Mutex::new(Kept::None);
-/// Told to its thread, kept while the window is not up: the window made, at the page `WPARAM` names (see `To::told`).
+/// Told to its thread, kept while the window is not up: the window made, at the page `WPARAM` names (see `To::told`),
+/// poured out of the place `LPARAM` tells (see `genie::told`).
 const AGAIN: u32 = WM_APP + 43;
 /// How long its thread is kept, its graphics device made, with no window up: the gear pointed at and not pressed,
 /// the window closed and not opened again.
 const KEPT_FOR: Duration = Duration::from_secs(10);
 
-/// The window's thread: none; being started (and asked for the window meanwhile, at a page: see `open_at`); going,
-/// by its id.
+/// The window's thread: none, being started (and asked for the window meanwhile: see `open_at`), or going, by its id.
 enum Kept {
     None,
-    Starting(Option<Option<To>>),
+    Starting(Option<Asked>),
     Running(u32),
+}
+
+/// The window as it is asked for: at a page (none: the one last shown), poured out of the place it was asked from
+/// (see `genie`: none, shown at once).
+#[derive(Clone, Copy)]
+struct Asked {
+    to: Option<To>,
+    place: Option<RECT>,
 }
 /// What other threads tell the window: settings changed elsewhere, to be taken up (see `follow_settings`); the
 /// overlay's page asked for (see `open_at_overlay`).
@@ -198,12 +206,12 @@ pub fn is_seen() -> bool {
     hwnd != 0 && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(HWND(hwnd as *mut _)) }.as_bool()
 }
 
-/// Brings the settings window up, from any thread: raised if it is open,
-/// else made, by the panel's thread.
-pub fn show() {
+/// Brings the settings window up, from any thread: raised if it is open, else made, by the panel's thread, poured
+/// out of `place` (the button it is asked from, physical px: see `genie`), or, with none, shown at once.
+pub fn show(place: Option<RECT>) {
     let hwnd = WINDOW.load(Ordering::Acquire);
     if hwnd == 0 {
-        crate::app().controller.open_settings();
+        crate::app().controller.open_settings(place);
         return;
     }
     let hwnd = HWND(hwnd as *mut _);
@@ -224,19 +232,19 @@ pub fn hwnd() -> Option<HWND> {
 
 /// thread of its own, which carries it till it is closed (see `run`): moved or sized by hand, the system holds that
 /// thread in a loop of its own till it is let go, and the panel, the widgets and the lyrics go on meanwhile. Open,
-/// it is raised.
-pub fn open() {
-    open_at(None);
+/// it is raised. Poured out of `place` (see `show`).
+pub fn open(place: Option<RECT>) {
+    open_at(Asked { to: None, place });
 }
 
 /// Opens the window (as `open`) at the overlay's page: from the overlay's menu.
-pub fn open_at_overlay() {
-    open_at(Some(To::Overlay));
+pub fn open_at_overlay(place: Option<RECT>) {
+    open_at(Asked { to: Some(To::Overlay), place });
 }
 
 /// Opens the window (as `open`) at the workbench's page: from the station's menu.
-pub fn open_at_workbench() {
-    open_at(Some(To::Workbench));
+pub fn open_at_workbench(place: Option<RECT>) {
+    open_at(Asked { to: Some(To::Workbench), place });
 }
 
 /// A page the window is opened at, other than the one last shown.
@@ -244,6 +252,13 @@ pub fn open_at_workbench() {
 enum To {
     Overlay,
     Workbench,
+}
+
+impl Asked {
+    /// As `AGAIN` tells it.
+    fn of_told(msg: &MSG) -> Asked {
+        Asked { to: To::of_told(msg.wParam.0), place: super::genie::of_told(msg.lParam.0) }
+    }
 }
 
 impl To {
@@ -265,8 +280,9 @@ impl To {
     }
 }
 
-fn open_at(to: Option<To>) {
+fn open_at(asked: Asked) {
     crate::perf::mark(|| "settings asked".into());
+    let to = asked.to;
     if let Some(hwnd) = hwnd() {
         let message = match to {
             Some(To::Overlay) => Some(TO_OVERLAY),
@@ -276,7 +292,7 @@ fn open_at(to: Option<To>) {
         if let Some(message) = message {
             let _ = unsafe { PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0)) };
         }
-        return show();
+        return show(None);
     }
     if OPENING.swap(true, Ordering::AcqRel) {
         return;
@@ -284,11 +300,11 @@ fn open_at(to: Option<To>) {
     let mut kept = THREAD.lock().unwrap();
     match &mut *kept {
         // (Its thread going: told. Starting: told as it starts. None: one started, asked.)
-        Kept::Running(thread) if unsafe { windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(*thread, AGAIN, WPARAM(To::told(to)), LPARAM(0)) }.is_ok() => {}
-        Kept::Starting(asked) => *asked = Some(to),
+        Kept::Running(thread) if unsafe { windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(*thread, AGAIN, WPARAM(To::told(to)), LPARAM(super::genie::told(asked.place))) }.is_ok() => {}
+        Kept::Starting(meanwhile) => *meanwhile = Some(asked),
         _ => {
             *kept = Kept::None;
-            if !start(&mut kept, Some(to)) {
+            if !start(&mut kept, Some(asked)) {
                 OPENING.store(false, Ordering::Release);
             }
         }
@@ -305,8 +321,8 @@ pub fn prepare() {
     }
 }
 
-/// The window's thread started, asked for the window at a page (`asked`; none: only made ready); whether it was.
-fn start(kept: &mut Kept, asked: Option<Option<To>>) -> bool {
+/// The window's thread started, asked for the window (`asked`, or with none only made ready): whether it was.
+fn start(kept: &mut Kept, asked: Option<Asked>) -> bool {
     *kept = Kept::Starting(None);
     let started = std::thread::Builder::new().name("settings".into()).spawn(move || run(asked)).is_ok();
     if !started {
@@ -318,7 +334,7 @@ fn start(kept: &mut Kept, asked: Option<Option<To>>) -> bool {
 /// The window's thread: its graphics device made; the window made (`asked`, or as it is asked for: see `AGAIN`), and
 /// drawn whenever it is due, between the messages that arrive, till it is gone; again as it is asked for, the thread
 /// kept a while (`KEPT_FOR`) with no window up, then gone, its device with it.
-fn run(mut asked: Option<Option<To>>) {
+fn run(mut asked: Option<Asked>) {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
@@ -358,9 +374,9 @@ fn run(mut asked: Option<Option<To>>) {
 }
 
 /// What the window's thread is told to do with no window up, its messages seen to (`msg` to take them in) till it is:
-/// the window made, at a page (see `AGAIN`); none, told of nothing for `KEPT_FOR` (the thread no longer kept: asked
-/// for meanwhile, another is started), or told to end.
-fn told(msg: &mut MSG) -> Option<Option<To>> {
+/// the window made, as it is asked for (see `AGAIN`). None, told of nothing for `KEPT_FOR` (the thread no longer kept:
+/// asked for meanwhile, another is started), or told to end.
+fn told(msg: &mut MSG) -> Option<Asked> {
     let until = Instant::now() + KEPT_FOR;
     loop {
         while unsafe { PeekMessageW(msg, None, 0, 0, PM_REMOVE) }.as_bool() {
@@ -368,7 +384,7 @@ fn told(msg: &mut MSG) -> Option<Option<To>> {
                 return None;
             }
             if msg.message == AGAIN && msg.hwnd.is_invalid() {
-                return Some(To::of_told(msg.wParam.0));
+                return Some(Asked::of_told(msg));
             }
             unsafe {
                 let _ = TranslateMessage(msg);
@@ -381,7 +397,7 @@ fn told(msg: &mut MSG) -> Option<Option<To>> {
             // whatever is looked for, it ends.)
             let mut kept = THREAD.lock().unwrap();
             if unsafe { PeekMessageW(msg, None, AGAIN, AGAIN, PM_REMOVE) }.as_bool() && msg.message == AGAIN {
-                return Some(To::of_told(msg.wParam.0));
+                return Some(Asked::of_told(msg));
             }
             if matches!(*kept, Kept::Running(thread) if thread == unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
                 *kept = Kept::None;
@@ -393,11 +409,11 @@ fn told(msg: &mut MSG) -> Option<Option<To>> {
     }
 }
 
-/// The window made, at the page `to` (none: the one last shown), and up till it is gone; its thread to go on (not told
-/// to end, the window made), with the window asked for again meanwhile, at a page, as it went (see `AGAIN`), if it was.
-fn up(to: Option<To>) -> Option<Option<Option<To>>> {
+/// The window made, as it is `asked` for, and up till it is gone. Its thread to go on (not told to end, the window
+/// made), with the window asked for again meanwhile, as it went (see `AGAIN`), if it was.
+fn up(asked: Asked) -> Option<Option<Asked>> {
     crate::perf::mark(|| "settings to make".into());
-    let made = gfx::current().ok().and_then(|gfx| make(gfx, true));
+    let made = gfx::current().ok().and_then(|gfx| make(gfx, Some(asked.place)));
     crate::perf::mark(|| "settings made".into());
     if let Some(hwnd) = made {
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
@@ -407,7 +423,7 @@ fn up(to: Option<To>) -> Option<Option<Option<To>>> {
     OPENING.store(false, Ordering::Release);
     // (Not made: the thread ends, and what it made of it with it.)
     made?;
-    match to {
+    match asked.to {
         Some(To::Overlay) => to_overlay(),
         Some(To::Workbench) => to_workbench(),
         None => {}
@@ -421,7 +437,7 @@ fn up(to: Option<To>) -> Option<Option<Option<To>>> {
             }
             // (Asked for as it went, its window destroyed and its thread not done with it: made again after.)
             if msg.message == AGAIN && msg.hwnd.is_invalid() {
-                again = Some(To::of_told(msg.wParam.0));
+                again = Some(Asked::of_told(&msg));
                 continue;
             }
             unsafe {
@@ -533,6 +549,32 @@ static MINIMIZED: AtomicBool = AtomicBool::new(false);
 /// Draws the window if a frame is due, and says when the next one is; `None`
 /// while there is no window.
 fn tick(now: Instant) -> Option<Duration> {
+    // Pouring out of its place, or into it: the next frame of that, the window shown as it has poured out, or closed as
+    // it has poured in (outside its state, which its closing takes).
+    let poured = with_ui(|ui| {
+        let genie = ui.genie.as_mut()?;
+        if genie.draw(&ui.gfx, now) {
+            return Some(None);
+        }
+        let opened = genie.opening();
+        if opened {
+            super::genie::reveal(ui.hwnd);
+            let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
+        }
+        ui.genie = None;
+        Some(Some((opened, ui.hwnd)))
+    })
+    .flatten();
+    match poured {
+        Some(None) => return Some(Duration::ZERO),
+        Some(Some((false, hwnd))) => {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+            }
+            return with_ui(|_| Duration::ZERO);
+        }
+        _ => {}
+    }
     with_ui(|ui| {
         // The screens changed (see WM_DISPLAYCHANGE): as they are now.
         if SCREENS_OWED.swap(false, Ordering::AcqRel) {
@@ -1159,6 +1201,11 @@ const PHONE_ASKED_EVERY: Duration = Duration::from_millis(1500);
 
 struct Ui {
     hwnd: HWND,
+    /// The place it was asked from (physical px: see `show`), poured back into as it closes.
+    place: Option<RECT>,
+    /// Pouring out of its place, or into it, while it does (see `genie`): into it, it is hidden, and closed once it is
+    /// done.
+    genie: Option<super::genie::Genie>,
     gfx: Rc<Gfx>,
     /// Counted as shown on its device while it is (see `life`).
     showing: Option<crate::ui::life::Showing>,
@@ -1340,7 +1387,8 @@ impl Lives for Ui {
 }
 
 /// Makes the window, draws its first frame, and shows it (unless not `shown`: for pictures of it, drawn off screen).
-fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
+/// The window made and drawn, and, `shown` (poured out of the place given, if one is: see `genie`), shown.
+fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>) -> Option<HWND> {
     let (work, scale) = crate::panel::work_area_at_cursor()?;
     let scale = scale as f32;
     unsafe {
@@ -1404,8 +1452,12 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
         // (Taken out first: locked twice in the one statement below, it waited on itself.)
         let switches_read = SWITCHES_READ.lock().unwrap().unwrap_or((false, false));
         let netease = crate::netease::found(false);
+        let place = shown.flatten();
+        let pours = super::genie::wanted(place);
         let mut ui = Ui {
             hwnd,
+            place,
+            genie: None,
             gfx,
             surface,
             mica,
@@ -1501,9 +1553,14 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
         ui.restyle();
         crate::perf::mark(|| "settings dressed".into());
         ui.draw(Instant::now());
+        let gfx = ui.gfx.clone();
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
-        if !shown {
+        if shown.is_none() {
             return Some(hwnd);
+        }
+        // Poured out of its place: hidden as it is shown, then pictured (see `genie`).
+        if pours.is_some() {
+            super::genie::hide_to_open(hwnd);
         }
         // Glance started hidden (by the scheduler, an installer, a script)
         // has the system apply that to the first window of its own it
@@ -1513,6 +1570,14 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
         let _ = SetForegroundWindow(hwnd);
+        if let Some(place) = pours {
+            match super::genie::opening(&gfx, hwnd, place) {
+                Some(genie) => {
+                    with_ui(|ui| ui.genie = Some(genie));
+                }
+                None => super::genie::reveal(hwnd),
+            }
+        }
         Some(hwnd)
     }
 }
@@ -1736,6 +1801,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             crate::app().controller.settings_front(Some(hwnd));
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
+        // Closed: poured into the place it was asked from first, if it was, and closed once it has (see `tick`).
+        WM_CLOSE if with_ui(|ui| ui.pour_away()).unwrap_or(false) => LRESULT(0),
         WM_DESTROY => {
             crate::app().controller.settings_front(None);
             // The shortcut, if let go while a new one was taken, is taken up again.
@@ -1771,6 +1838,26 @@ fn pick(lang: Lang, zh: &'static str, en: &'static str) -> &'static str {
 }
 
 impl Ui {
+    /// Asked to close: poured into the place it was asked from (see `genie`), hidden meanwhile, and closed once it has.
+    /// Whether it is (pouring already, it goes on). No longer the settings window open: asked for meanwhile, another
+    /// is made once it is gone. Pouring out of its place still, that is done with first.
+    fn pour_away(&mut self) -> bool {
+        if self.genie.as_ref().is_some_and(|genie| !genie.opening()) {
+            return true;
+        }
+        if self.genie.take().is_some() {
+            super::genie::reveal(self.hwnd);
+        }
+        let Some(place) = super::genie::wanted(self.place) else { return false };
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(self.hwnd) }.as_bool() {
+            return false;
+        }
+        let Some(genie) = super::genie::closing(&self.gfx, self.hwnd, place) else { return false };
+        self.genie = Some(genie);
+        WINDOW.store(0, Ordering::Release);
+        true
+    }
+
     /// Follows the theme and the language now chosen.
     fn restyle(&mut self) {
         // Following the backdrop is the panel's; the window follows the system then.
@@ -5435,7 +5522,7 @@ mod pictures {
             ], crate::settings::ShelfView::Cards);
         }
         let gfx = gfx::held().unwrap();
-        let hwnd = make(gfx.clone(), false).unwrap();
+        let hwnd = make(gfx.clone(), None).unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/settings", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         let shown = [

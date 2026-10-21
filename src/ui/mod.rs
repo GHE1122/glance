@@ -10,6 +10,7 @@ pub mod buttons;
 pub mod canvas;
 pub mod editor;
 #[cfg(windows)]
+pub mod genie;
 pub mod gfx;
 pub mod life;
 pub mod forms;

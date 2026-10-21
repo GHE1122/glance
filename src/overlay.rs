@@ -648,8 +648,12 @@ impl Overlay {
     }
 
     /// One of its buttons pressed: what is asked for, where it is another's to do.
-    pub fn bar_press(&mut self) -> Option<Choice> {
+    pub fn bar_press(&mut self) -> Option<(Choice, RECT)> {
         let button = self.bar_button_at(cursor()?)?;
+        // (Where the button is on the screen.)
+        let middle = self.bar_middles()[buttons::ALL.iter().position(|one| *one == button).unwrap()];
+        let half = (buttons::SIZE / 2.0 * self.dpi).round() as i32;
+        let place = RECT { left: middle.x - half, top: middle.y - half, right: middle.x + half, bottom: middle.y + half };
         if self.tip.take().is_some() {
             crate::ui::tip::hide();
         }
@@ -669,6 +673,7 @@ impl Overlay {
             // (Not among its buttons: the music's.)
             Button::Full => None,
         }
+        .map(|choice| (choice, place))
     }
 
     /// The edges of it the pointer at `at` is on, if it is near them.
