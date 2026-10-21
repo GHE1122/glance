@@ -383,7 +383,15 @@ struct Hint {
     window: Window,
     surface: Option<Surface>,
     /// Where and how it was last drawn: drawn again only when that changes.
-    drawn: Option<(RECT, bool, u32, Option<[u32; 3]>)>,
+    drawn: Option<(RECT, bool, u32, Option<Ground>)>,
+}
+
+/// A widget's own colour, its hint drawn in it (see `paint_hint`): a ground of its own (what plays, its colour and
+/// corners), or a colour of its own its skin's hint is drawn in (a note's).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Ground {
+    Own([f32; 3]),
+    Tint(Color),
 }
 
 /// The desktop the panel had taken, lent to a widget torn off it: its
@@ -1168,6 +1176,18 @@ impl Content {
 
     /// How far its lists are scrolled: its readings' (merged, the first readings part's).
     /// Whether it is, or holds, the single lane `only` (see `Readings::only`): which of its parts, where merged.
+    /// Its own colour, its hint drawn in it: what plays, its ground's, a note, its own (`written`: as it is being written
+    /// in, else as it was last read).
+    fn ground(&self, written: Option<crate::notes::Colour>) -> Option<Ground> {
+        match self {
+            Content::Music(shown) => Some(Ground::Own(shown.music.ground_colour(shown.size))),
+            Content::Readings(Readings { only: Some(only), .. }) => only.strip_prefix(view::STUCK_NOTE_LANE).and_then(|name| {
+                written.or_else(|| crate::notes::shown().iter().find(|note| note.name == name).map(|note| note.colour)).map(|colour| Ground::Tint(view::note_colour(colour)))
+            }),
+            _ => None,
+        }
+    }
+
     fn holding(&self, only: &str) -> Option<Option<usize>> {
         match self {
             Content::Readings(readings) => (readings.only.as_deref() == Some(only)).then_some(None),
@@ -3482,7 +3502,7 @@ impl Widget {
     /// Shows where it would stick, as the skin draws it: `rect` (physical
     /// px), firmer once letting go would stick it there, `strength` as
     /// strong.
-    fn show_hint(&mut self, rect: RECT, firm: bool, strength: f32, theme: &Theme, ground: Option<[f32; 3]>) {
+    fn show_hint(&mut self, rect: RECT, firm: bool, strength: f32, theme: &Theme, ground: Option<Ground>) {
         if self.hint.is_none() {
             let Ok(mut window) = Window::new() else { return };
             window.set_click_through(true);
@@ -3493,7 +3513,7 @@ impl Widget {
             self.hint = Some(Hint { window, surface, drawn: None });
         }
         let Some(hint) = self.hint.as_mut() else { return };
-        let this = (rect, firm, strength.to_bits(), ground.map(|c| c.map(f32::to_bits)));
+        let this = (rect, firm, strength.to_bits(), ground);
         if hint.drawn == Some(this) {
             return;
         }
@@ -3877,11 +3897,7 @@ impl Widget {
                 let firm = away < STICK;
                 // In steps: drawn again as it changes visibly, not each frame.
                 let strength = if firm { 1.0 } else { ((0.25 + 0.5 * (1.0 - (away - STICK) / (HINT_SEEN - STICK))) * 20.0).round() / 20.0 };
-                // (A music widget with its own ground, in its own colour.)
-                let ground = match &self.content {
-                    Content::Music(shown) => Some(shown.music.ground_colour(shown.size)),
-                    _ => None,
-                };
+                let ground = self.content.ground(self.in_place.as_ref().map(|in_place| in_place.writing.colour));
                 self.show_hint(RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 }, firm, strength, &theme, ground);
             }
             None => self.hide_hint(),
@@ -4316,26 +4332,29 @@ impl Widget {
 
 /// Where a widget let go would stick, `size` DIPs from the canvas's origin,
 /// as `theme`'s skin draws it (or, a widget with a ground of its own, in that
-/// ground's colour and corners): firmer once letting go would stick it there,
+/// ground's colour and corners, one with a colour of its own, as Windows 11's
+/// is drawn but in that colour): firmer once letting go would stick it there,
 /// `strength` as strong.
-pub(crate) fn paint_hint(canvas: &dyn Canvas, theme: &Theme, (w, h): (f32, f32), firm: bool, strength: f32, ground: Option<[f32; 3]>) {
-    if let Some([r, g, b]) = ground {
+pub(crate) fn paint_hint(canvas: &dyn Canvas, theme: &Theme, (w, h): (f32, f32), firm: bool, strength: f32, ground: Option<Ground>) {
+    if let Some(Ground::Own([r, g, b])) = ground {
         let (fill, rim) = (Color { r, g, b, a: (if firm { 0.85 } else { 0.5 }) * strength }, Color::hex(0xFFFFFF, (if firm { 0.3 } else { 0.18 }) * strength));
         let radius = crate::ui::music::RADIUS;
         canvas.fill_rounded(fill, 0.5, 0.5, w - 1.0, h - 1.0, radius);
         canvas.stroke_rounded(Fill::Solid(rim), 0.0, 0.0, w, h, radius + 0.5, 1.0);
         return;
     }
-    let (fill, line, width, dashed) = match theme.skin {
+    let (fill, line, width, dashed) = match (theme.skin, ground) {
+        // Its own colour's wash under a hairline of it.
+        (_, Some(Ground::Tint(own))) => (own.alpha(if firm { 0.26 } else { 0.14 }), own.alpha(if firm { 1.0 } else { 0.45 }), 1.0, false),
         // A pencilled outline on the paper's own colour.
-        Skin::Paper => (theme.paper.alpha(if firm { 0.75 } else { 0.45 }), if firm { theme.text2 } else { theme.text3 }, 1.5, !firm),
+        (Skin::Paper, _) => (theme.paper.alpha(if firm { 0.75 } else { 0.45 }), if firm { theme.text2 } else { theme.text3 }, 1.5, !firm),
         // As Windows' own snap preview: the accent's wash under a hairline.
-        Skin::Fluent => {
+        (Skin::Fluent, _) => {
             let accent = theme.ink("cpu").trace;
             (accent.alpha(if firm { 0.26 } else { 0.14 }), accent.alpha(if firm { 1.0 } else { 0.45 }), 1.0, false)
         }
         // A pane of glass, its rim catching the light.
-        Skin::Glass => {
+        (Skin::Glass, _) => {
             let rim = if theme.dark { Color::hex(0xFFFFFF, 0.2) } else { Color::hex(0xFFFFFF, 0.7) };
             (theme.glass.alpha(if firm { 0.6 } else { 0.32 }), rim, 1.0, false)
         }
@@ -4447,6 +4466,22 @@ mod tests {
         let merged = Content::Merged(Box::new(Merged::new(vec![Content::Music(MusicShown::new(music::LEAST)), note("a.md")], true, music::LEAST)));
         assert_eq!(merged.holding("note:a.md"), Some(Some(1)));
         assert_eq!(merged.holding("note:b.md"), None);
+    }
+
+    /// Where a widget would stick, it is drawn in its own colour: a note's in the note's (as it is being written in, the
+    /// colour chosen there), what plays in its ground's, readings in none of their own (the skin's).
+    #[test]
+    #[cfg(feature = "studio")]
+    fn its_hint_is_drawn_in_its_own_colour() {
+        use crate::notes::{Colour, Note};
+        let _one = crate::pretending();
+        crate::notes::pretend(vec![Note { name: "a.md".into(), text: "a".into(), colour: Colour::Pink, stamp: Default::default() }]);
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let note = |name: &str| Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice.clone()) });
+        assert_eq!(note("a.md").ground(None), Some(Ground::Tint(view::note_colour(Colour::Pink))));
+        assert_eq!(note("a.md").ground(Some(Colour::Green)), Some(Ground::Tint(view::note_colour(Colour::Green))));
+        assert_eq!(Content::Readings(Readings::new(choice.clone())).ground(None), None);
+        assert!(matches!(Content::Music(MusicShown::new(music::LEAST)).ground(None), Some(Ground::Own(_))));
     }
 
     /// A note stuck on the desktop (its card the whole widget, to its edges): sized by its edges and corners, the pointer
