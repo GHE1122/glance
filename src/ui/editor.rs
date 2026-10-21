@@ -163,11 +163,15 @@ impl Editor {
         text.to_string().replace("\r\n", "\n").replace('\r', "\n")
     }
 
-    /// `text` written in it, in place of what was.
+    /// `text` written in it, in place of what was: given back as it was (see `text`).
     pub fn set_text(&self, text: &str) {
-        // (Each line break one carriage return, as the text services keep them: Windows' pairs as one too.)
+        // (Each line break one carriage return, as the text services keep them: Windows' pairs as one too. The last
+        // line break is the paragraph mark they end what is written with, given back as one by `text`: written as a
+        // line break too, it was a line more each time a note was opened and kept.)
+        let text = text.replace("\r\n", "\n");
+        let text = text.strip_suffix('\n').unwrap_or(&text);
         unsafe {
-            let _ = self.services.TxSetText(&HSTRING::from(text.replace("\r\n", "\n").replace('\n', "\r")));
+            let _ = self.services.TxSetText(&HSTRING::from(text.replace('\n', "\r")));
         }
         self.kept.changed.set(false);
     }
@@ -830,6 +834,16 @@ mod tests {
             // A file written on Windows: its line breaks one each, not two.
             editor.set_text("一\r\n二");
             assert_eq!(editor.text().trim_end(), "一\n二");
+            // A note's file given back as it was read, its last line break no line more (opened and kept again and
+            // again, it grew by one each time). One without a last line break given one, once.
+            for file in ["a\nb\n", "a\n\n", "a\n\nb\n", "\n", "一\r\n二\r\n"] {
+                editor.set_text(file);
+                assert_eq!(editor.text(), file.replace("\r\n", "\n"), "{file:?}");
+            }
+            editor.set_text("a\nb");
+            let once = editor.text();
+            editor.set_text(&once);
+            assert_eq!((once.as_str(), editor.text().as_str()), ("a\nb\n", "a\nb\n"));
             drop(editor);
             // Its text services, held here still, used after the box is gone: their host let go of, nothing faults.
             let _ = document.Range(0, 1).and_then(|range| range.GetText());
