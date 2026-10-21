@@ -4198,7 +4198,7 @@ impl Widget {
             // A note written in where it is: its card drawn by what writes it, where the card is now (its words' box
             // placed there, written as large as its scale makes them). Its card gone (the note taken off it, a part
             // torn out), given back.
-            if let Some(in_place) = in_place.as_deref_mut() {
+            if let Some(in_place) = in_place {
                 match pressed.as_ref().map_or(was_card, |(hits, from)| card_in(hits, *from, in_place.number, margin)) {
                     Some(card) => {
                         if in_place.styled != (px, theme.skin, theme.dark) {
