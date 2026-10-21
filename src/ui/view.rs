@@ -1025,8 +1025,10 @@ pub(crate) fn note_page(frame: &dyn Canvas, theme: &Theme, colour: crate::notes:
             // (Lighter than its card: over a page's breadth the card's own reads as a sheet of paint, the desktop frosted
             // under it no longer seen through; at half of it, it read as another colour.)
             // (No rim of its own: the sheet's is round it, the two a thick frame.)
+            // (In the dark, less of the pane of light under it than a card has: its words, the skin's light ones, read
+            // on it; with more, a light colour's page, yellow's, came to a middle grey no words read well on.)
             if let Some(light) = note_light(theme.dark) {
-                frame.fill_rounded(light.alpha(0.3), x, y, width, height, theme.radius);
+                frame.fill_rounded(light.alpha(0.2), x, y, width, height, theme.radius);
             }
             frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark) * 0.45), x, y, width, height, theme.radius);
         }

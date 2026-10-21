@@ -318,18 +318,27 @@ fn palette_for(theme: &Theme, colour: crate::notes::Colour, pixels: f32) -> supe
 
 /// The inks a note of colour `colour` is written in on its page (see `palette_for`), opaque.
 fn word_inks(theme: &Theme, colour: crate::notes::Colour) -> Inks {
-    let (text, _, faint) = super::view::note_inks(theme, colour);
-    let ground = match theme.skin {
-        Skin::Paper => theme.paper,
-        _ if theme.dark => Color::hex(0x26282E, 1.0),
-        _ => Color::hex(0xF5F6F8, 1.0),
-    };
+    // (The skin's own, as its head and foot are written: a card's own ink, glass's, is for its card's light pane, and
+    // on a page's, lighter over a page's breadth, it was dark on dark in the dark. Its colour is the page's tint.)
+    let _ = colour;
+    let (text, faint) = (theme.text, theme.text3);
+    let ground = page_under(theme);
     let opaque = |ink: Color| super::view::over(Color { a: 1.0, ..ground }, ink);
     let accent = match theme.skin {
         Skin::Paper => theme.text,
         _ => super::theme::accent(theme.dark),
     };
     Inks { words: opaque(text), faint: opaque(faint), accent: opaque(accent) }
+}
+
+/// What a note's page is reckoned to lie over, its inks made opaque over (the box takes colours with no see-through):
+/// the skin's sheet.
+fn page_under(theme: &Theme) -> Color {
+    match theme.skin {
+        Skin::Paper => theme.paper,
+        _ if theme.dark => Color::hex(0x26282E, 1.0),
+        _ => Color::hex(0xF5F6F8, 1.0),
+    }
 }
 
 /// How high a note's words are written (DIPs).
@@ -2323,6 +2332,40 @@ mod tests {
             for dark in [false, true] {
                 let palette = super::palette_for(&Theme::new(skin, dark), crate::notes::Colour::Blue, 15.0);
                 assert_ne!(palette.text.0, palette.faint.0, "{skin:?} {dark}");
+            }
+        }
+    }
+
+    /// A note's words on its page, in every skin, light and dark, every colour: as easily read as text is asked to be
+    /// (4.5 to 1 against what is under them, the page drawn over its sheet). On glass in the dark the card's own dark
+    /// ink, on a page's lighter pane, read at about 2 to 1.
+    #[test]
+    #[cfg(feature = "studio")]
+    fn a_note_s_words_read_on_its_page() {
+        use super::super::canvas::{Canvas, Color};
+        use super::super::theme::{Skin, Theme};
+        let luminance = |c: Color| {
+            let lin = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+        };
+        let gfx = super::gfx::Gfx::new().expect("graphics");
+        for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+            for dark in [false, true] {
+                let theme = Theme::new(skin, dark);
+                for colour in crate::notes::Colour::ALL {
+                    let pixels = gfx
+                        .draw_offscreen((40, 40), 1.0, |frame| {
+                            frame.fill(super::page_under(&theme), 0.0, 0.0, 40.0, 40.0);
+                            super::super::view::note_page(frame, &theme, colour, (0.0, 0.0, 40.0, 40.0));
+                        })
+                        .unwrap();
+                    let at = (20 * 40 + 20) * 4;
+                    let ground = Color { r: pixels[at + 2] as f32 / 255.0, g: pixels[at + 1] as f32 / 255.0, b: pixels[at] as f32 / 255.0, a: 1.0 };
+                    let words = super::word_inks(&theme, colour).words;
+                    let (a, b) = (luminance(ground), luminance(words));
+                    let contrast = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                    assert!(contrast >= 4.5, "{skin:?} dark {dark} {colour:?}: words {words:?} on {ground:?}, {contrast:.2} to 1");
+                }
             }
         }
     }
