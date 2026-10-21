@@ -18,6 +18,8 @@ pub struct Folder {
 }
 
 const SHELF: &str = "station.json";
+/// The folder where a kept file is given out under the name it came with (see `named`).
+const NAMED: &str = "named";
 /// The stream of a file that says where it came from (its "mark of the web"), which Windows, Office and browsers heed
 /// as they open it.
 const ZONE: &str = ":Zone.Identifier";
@@ -103,13 +105,41 @@ impl Folder {
         self.dir.join(Path::new(name).file_name().unwrap_or_default())
     }
 
+    /// The kept file `name` as it is given out (copied, opened, dragged off), under the name `shown` it came with (as a
+    /// name may hold it: see `os::file_name_of`): the same file, linked to by that name in a folder of its own beside
+    /// it, which goes with it. As Glance named it where nothing of `shown` is left; none where the link cannot be made.
+    pub fn named(&self, name: &str, shown: &str) -> Option<PathBuf> {
+        let own = self.path(name);
+        let shown = crate::os::file_name_of(shown, 120);
+        if shown.is_empty() {
+            return Some(own);
+        }
+        let link = self.named_dir(name).join(shown);
+        if !link.exists() {
+            std::fs::create_dir_all(link.parent()?).ok()?;
+            std::fs::hard_link(&own, &link).ok()?;
+        }
+        Some(link)
+    }
+
+    /// The folder holding the kept file `name` as it is given out (see `named`).
+    fn named_dir(&self, name: &str) -> PathBuf {
+        self.dir.join(NAMED).join(Path::new(name).file_name().unwrap_or_default())
+    }
+
+    /// The kept file `name` gone, and as it was given out (see `named`).
+    fn delete(&self, name: &str) {
+        let _ = std::fs::remove_dir_all(self.named_dir(name));
+        let _ = std::fs::remove_file(self.path(name));
+    }
+
     /// Removes the kept files `names` (one being dragged out, as it is let go).
     pub fn remove<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
         for name in names {
             if self.held.contains_key(name) {
                 self.doomed.insert(name.to_string());
             } else {
-                let _ = std::fs::remove_file(self.path(name));
+                self.delete(name);
             }
         }
     }
@@ -127,7 +157,7 @@ impl Folder {
         if *count == 0 {
             self.held.remove(name);
             if self.doomed.remove(name) {
-                let _ = std::fs::remove_file(self.path(name));
+                self.delete(name);
             }
         }
     }

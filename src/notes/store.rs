@@ -275,10 +275,10 @@ impl Folder {
         })
     }
 
-    /// A name for a new note, from its title (`title`, the words a name may not hold left out), or else from today's
-    /// date (`fallback`), not taken by another file.
+    /// A name for a new note, from its title (`title`, as a name may hold it: see `os::file_name_of`), or else from
+    /// today's date (`fallback`), not taken by another file.
     pub fn name_for(&self, title: &str, fallback: &str) -> String {
-        let cleaned: String = title.chars().filter(|c| !r#"\/:*?"<>|"#.contains(*c) && !c.is_control()).collect::<String>().trim().trim_end_matches('.').chars().take(60).collect();
+        let cleaned = crate::os::file_name_of(title, 60);
         let stem = if cleaned.is_empty() { fallback.to_string() } else { cleaned };
         self.free_name(&format!("{stem}.md"))
     }

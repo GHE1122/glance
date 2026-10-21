@@ -85,12 +85,11 @@ fn as_text_file(text: &str) -> Vec<(u32, Vec<u8>, i32)> {
     vec![(descriptor, described, -1), (contents_format, contents, 0)]
 }
 
-/// The name a text file of `text` is given: its first line (as much of it as a name holds, what a name may not hold
-/// left out), and ".txt"; "文本.txt" where nothing of it is left.
+/// The name a text file of `text` is given: its first line (as much of it as a name holds, as it may hold it: see
+/// `os::file_name_of`), and ".txt"; "文本.txt" where nothing of it is left.
 pub(crate) fn text_name(text: &str) -> String {
-    let first: String = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().chars().filter(|c| !matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control()).take(40).collect();
-    let first = first.trim().trim_end_matches('.').trim();
-    format!("{}.txt", if first.is_empty() { "文本" } else { first })
+    let first = crate::os::file_name_of(text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default(), 40);
+    format!("{}.txt", if first.is_empty() { "文本" } else { &first })
 }
 
 /// `bytes` in global memory of their own (to be handed over).

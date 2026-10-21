@@ -169,7 +169,7 @@ impl Keep {
     }
 
     /// What `item` gives as it is copied or dragged off: its text, its files (a file gone from where it was, its copy
-    /// where one is kept), or its picture.
+    /// where one is kept), or its picture. A file of its own goes by the name it came with (see `Folder::named`).
     pub fn content_of(&self, item: &Item) -> Option<Content> {
         Some(match &item.what {
             What::Text { text } => Content::Text(text.clone()),
@@ -179,13 +179,13 @@ impl Keep {
                     .iter()
                     .enumerate()
                     .map(|(at, path)| match kept.get(at).filter(|name| !name.is_empty() && !path.exists()) {
-                        Some(name) => self.folder.path(name),
-                        None => path.clone(),
+                        Some(name) => self.folder.named(name, &path.file_name().unwrap_or_default().to_string_lossy()),
+                        None => Some(path.clone()),
                     })
-                    .collect::<Vec<PathBuf>>(),
+                    .collect::<Option<Vec<PathBuf>>>()?,
             ),
             What::Picture { file } => Content::Png(std::fs::read(self.folder.path(file)).ok()?),
-            What::Saved { file, .. } => Content::Files(vec![self.folder.path(file)]),
+            What::Saved { file, name } => Content::Files(vec![self.folder.named(file, name)?]),
         })
     }
 
@@ -275,6 +275,7 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         let Some(Content::Files(given)) = keep.content_of(&item) else { panic!("files") };
         assert_eq!(std::fs::read(&given[0]).unwrap(), b"words");
+        assert_eq!(given[0].file_name().unwrap(), "a.txt", "given by the name it had");
         // Taken off: its copy goes with it.
         keep.remove(id);
         assert!(!given[0].exists());
@@ -322,6 +323,23 @@ mod tests {
         let id = keep.take(Content::Saved { name: "a.xlsm".into(), bytes: b"cells".to_vec() }, false, false, 1).unwrap();
         let What::Saved { file, .. } = &keep.shelf.get(id).unwrap().what else { panic!("saved") };
         assert_eq!(std::fs::read(stream_of(&keep.folder.path(file))).unwrap(), b"[ZoneTransfer]\r\nZoneId=3\r\n");
+    }
+
+    #[test]
+    fn a_file_given_with_no_path_goes_by_its_name() {
+        let mut keep = keep("named", Rules::default());
+        let id = keep.take(Content::Saved { name: "config.json".into(), bytes: b"{}".to_vec() }, false, false, 0).unwrap();
+        let item = keep.shelf.get(id).unwrap().clone();
+        let Some(Content::Files(given)) = keep.content_of(&item) else { panic!("files") };
+        assert_eq!(given[0].file_name().unwrap(), "config.json");
+        assert_eq!(std::fs::read(&given[0]).unwrap(), b"{}");
+        assert_eq!(keep.content_of(&item), Some(Content::Files(given.clone())), "given again as it was");
+        // A name that names a device: as Glance named it.
+        let id = keep.take(Content::Saved { name: "CON.txt".into(), bytes: b"x".to_vec() }, false, false, 1).unwrap();
+        let What::Saved { file, .. } = &keep.shelf.get(id).unwrap().what else { panic!("saved") };
+        assert_eq!(keep.content_of(&keep.shelf.get(id).unwrap().clone()), Some(Content::Files(vec![keep.folder.path(file)])));
+        keep.remove(item.id);
+        assert!(!given[0].exists() && !given[0].parent().unwrap().exists());
     }
 
     fn stream_of(path: &std::path::Path) -> PathBuf {
