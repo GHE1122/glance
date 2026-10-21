@@ -9,7 +9,7 @@
 use super::clipboard::{self, Busy, Content, Why};
 use super::drop::Dragged;
 use super::folder::Folder;
-use super::keep::Keep;
+use super::keep::{Keep, Refused};
 use super::shelf::Item;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -80,8 +80,8 @@ pub struct Shown {
     pub view: crate::settings::ShelfView,
     pub copies_view: crate::settings::ShelfView,
     pub recent_view: crate::settings::ShelfView,
-    /// What was last given could not be taken: no room but what is pinned holds.
-    pub full: bool,
+    /// Why what was last given could not be taken, where it could not.
+    pub refused: Option<Refused>,
     /// Something is dragged over a station, to be dropped; over what is kept at hand, to be kept there.
     pub over: bool,
     pub apps_over: bool,
@@ -211,7 +211,7 @@ pub fn shown() -> Arc<Shown> {
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(all(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
-    *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, full: false, over: false, apps_over: false }));
+    *SHOWN.lock().unwrap() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false }));
 }
 
 /// `given` opened as Explorer opens it: each file (a folder in Explorer), or a web address in the browser.
@@ -234,16 +234,30 @@ fn open(given: &Content) {
 
 /// `text` written as a text file to be opened (UTF-8, marked so; named by its first line, see `drag::text_name`), in a
 /// folder of Windows' temporary ones that is its own (one for each text: two of the same first line are two files).
+/// Opened before and changed since (written in, and saved), that file is left as it is: another holds the text.
 fn text_file(text: &str) -> Option<std::path::PathBuf> {
     use std::hash::{Hash, Hasher};
     let mut digest = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut digest);
     let folder = std::env::temp_dir().join("Glance").join("opened").join(format!("{:016x}", digest.finish()));
     std::fs::create_dir_all(&folder).ok()?;
-    let file = folder.join(super::drag::text_name(text));
+    let name = std::path::PathBuf::from(super::drag::text_name(text));
+    let stem = name.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = name.extension().unwrap_or_default().to_string_lossy();
     let contents: Vec<u8> = [0xEF, 0xBB, 0xBF].into_iter().chain(text.bytes()).collect();
-    std::fs::write(&file, contents).ok()?;
-    Some(file)
+    for again in 1u32.. {
+        let file = if again == 1 { folder.join(&name) } else { folder.join(format!("{stem} ({again}).{extension}")) };
+        match std::fs::read(&file) {
+            Ok(held) if held == contents => return Some(file),
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::write(&file, &contents).ok()?;
+                return Some(file);
+            }
+            Err(_) => return None,
+        }
+    }
+    unreachable!("a name is found")
 }
 
 /// `act` done with the shell (opening, showing in Explorer) on a thread of its own, a single-threaded apartment as the
@@ -593,7 +607,7 @@ impl Station {
     /// What it shows now, for the other threads, who are told.
     fn show(&self) {
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, full: self.keep.full, over: self.over, apps_over: self.apps_over };
+        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();
@@ -614,6 +628,13 @@ mod tests {
         assert_eq!(&held[..3], &[0xEF, 0xBB, 0xBF]);
         assert_eq!(std::str::from_utf8(&held[3..]).unwrap(), text);
         assert_eq!(super::text_file(text).unwrap(), file);
+        // Written in and saved, then opened again: what was saved is kept, the words open in a file beside it.
+        std::fs::write(&file, "改过的").unwrap();
+        let again = super::text_file(text).unwrap();
+        assert_eq!(again.file_name().unwrap().to_string_lossy(), "先看一下安装脚本的用法 (2).txt");
+        assert_eq!(std::str::from_utf8(&std::fs::read(&again).unwrap()[3..]).unwrap(), text);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "改过的");
+        assert_eq!(super::text_file(text).unwrap(), again);
         let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 }

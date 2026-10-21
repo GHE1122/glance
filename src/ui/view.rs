@@ -1684,8 +1684,12 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     let folder = crate::station::folder::Folder::own();
     let now = crate::station::now_ms();
     let tiles: Vec<Tile> = shown.items.iter().rev().filter(|item| !item.copied).map(|item| Tile::of(item, &folder, lang, now)).collect();
-    let said = if shown.full {
-        Some(lang.pick("空间已满：请取消一些固定，或在设置中调大上限", "No room left: unpin some, or allow more in the settings").to_string())
+    use crate::station::keep::Refused;
+    let said = if let Some(refused) = shown.refused {
+        Some(match refused {
+            Refused::Full => lang.pick("空间已满：请取消一些固定，或在设置中调大上限", "No room left: unpin some, or allow more in the settings"),
+            Refused::Unwritten => lang.pick("未能保存副本：请检查磁盘空间，并确认文件未被其他程序占用", "A copy could not be kept: check the disk's free space, and that no other program holds the file"),
+        }.to_string())
     } else if tiles.is_empty() {
         Some(lang.pick("把文件、图片或文字拖到这里", "Drag files, pictures or text here").to_string())
     } else {

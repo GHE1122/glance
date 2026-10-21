@@ -18,6 +18,11 @@ pub struct Folder {
 }
 
 const SHELF: &str = "station.json";
+/// The stream of a file that says where it came from (its "mark of the web"), which Windows, Office and browsers heed
+/// as they open it.
+const ZONE: &str = ":Zone.Identifier";
+/// What that stream says of a file from the Internet.
+const INTERNET: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
 
 impl Folder {
     /// The station's own folder in the user's local application data.
@@ -50,21 +55,25 @@ impl Folder {
         crate::elevation::write_in_place(&self.dir, SHELF, &serde_json::to_vec(shelf).expect("a shelf is written"))
     }
 
-    /// Keeps `bytes` in a file of its own, of the kind `extension` says (letters and digits, else none): its name.
-    pub fn keep(&self, bytes: &[u8], extension: &str) -> std::io::Result<String> {
-        self.written(extension, |file| std::io::Write::write_all(file, bytes))
+    /// Keeps `bytes` in a file of its own, of the kind `extension` says (letters and digits, else none), marked as from
+    /// the Internet where they are `untrusted`: its name.
+    pub fn keep(&self, bytes: &[u8], extension: &str, untrusted: bool) -> std::io::Result<String> {
+        self.written(extension, untrusted.then_some(INTERNET), |file| std::io::Write::write_all(file, bytes))
     }
 
-    /// Keeps a copy of the file at `path` in a file of its own, of its kind: its name.
+    /// Keeps a copy of the file at `path` in a file of its own, of its kind, marked where it came from as it is: its
+    /// name.
     pub fn keep_file(&self, path: &Path) -> std::io::Result<String> {
         let extension = path.extension().and_then(|extension| extension.to_str()).unwrap_or_default();
         let mut from = std::fs::File::open(path)?;
-        self.written(extension, |file| std::io::copy(&mut from, file).map(|_| ()))
+        // (None where it has no mark, or its drive keeps no streams.)
+        let zone = std::fs::read(stream(path)).ok();
+        self.written(extension, zone.as_deref(), |file| std::io::copy(&mut from, file).map(|_| ()))
     }
 
-    /// A new file of its own of the kind `extension` says (letters and digits, else none), as `write` writes it: its
-    /// name. (Not written whole: none.)
-    fn written(&self, extension: &str, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<String> {
+    /// A new file of its own of the kind `extension` says (letters and digits, else none), as `write` writes it, with
+    /// `zone` as where it came from: its name. (Not written whole: none.)
+    fn written(&self, extension: &str, zone: Option<&[u8]>, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<String> {
         std::fs::create_dir_all(&self.dir)?;
         let extension: String = extension.chars().filter(char::is_ascii_alphanumeric).take(8).collect::<String>().to_ascii_lowercase();
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -73,9 +82,11 @@ impl Folder {
             // (A new file: a name taken, the next.)
             match std::fs::OpenOptions::new().write(true).create_new(true).open(self.dir.join(&name)) {
                 Ok(mut file) => {
-                    if let Err(error) = write(&mut file) {
+                    let path = self.dir.join(&name);
+                    let written = write(&mut file).and_then(|()| zone.map_or(Ok(()), |zone| std::fs::write(stream(&path), zone)));
+                    if let Err(error) = written {
                         drop(file);
-                        let _ = std::fs::remove_file(self.dir.join(&name));
+                        let _ = std::fs::remove_file(&path);
                         return Err(error);
                     }
                     return Ok(name);
@@ -122,6 +133,13 @@ impl Folder {
     }
 }
 
+/// The stream of the file at `path` that says where it came from.
+fn stream(path: &Path) -> PathBuf {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(ZONE);
+    PathBuf::from(stream)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,8 +168,8 @@ mod tests {
     #[test]
     fn kept_files_are_named_by_glance() {
         let folder = folder("named");
-        let a = folder.keep(b"one", "PNG").unwrap();
-        let b = folder.keep(b"two", "../../evil\\x").unwrap();
+        let a = folder.keep(b"one", "PNG", false).unwrap();
+        let b = folder.keep(b"two", "../../evil\\x", false).unwrap();
         assert!(a.ends_with(".png"));
         assert_ne!(a, b);
         assert!(b.ends_with(".evilx") && !b.contains(['/', '\\']));
@@ -163,14 +181,14 @@ mod tests {
     #[test]
     fn a_file_dragged_out_goes_as_it_is_let_go() {
         let mut folder = folder("held");
-        let name = folder.keep(b"picture", "png").unwrap();
+        let name = folder.keep(b"picture", "png", false).unwrap();
         folder.hold(&name);
         folder.remove([name.as_str()]);
         assert!(folder.path(&name).exists(), "kept while the drag holds it");
         folder.let_go(&name);
         assert!(!folder.path(&name).exists());
         // Not held: removed at once.
-        let other = folder.keep(b"other", "png").unwrap();
+        let other = folder.keep(b"other", "png", false).unwrap();
         folder.remove([other.as_str()]);
         assert!(!folder.path(&other).exists());
     }
