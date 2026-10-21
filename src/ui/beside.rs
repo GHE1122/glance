@@ -570,11 +570,17 @@ fn placed(opening: &Opening) -> (RECT, f32) {
         let _ = GetMonitorInfoW(monitor, &mut screen);
         let _ = windows::Win32::UI::HiDpi::GetDpiForMonitor(monitor, windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI, &mut dpi, &mut unused);
     }
-    let room = screen.rcWork;
     let scale = dpi.max(96) as f32 / 96.0;
+    (placed_in(opening, screen.rcWork, scale), scale)
+}
+
+/// Where the page `opening` asks for is in `room` (a screen's work area, physical px) at `scale` (see `placed`): never
+/// wider or taller than the room (on a narrow screen at a large scale, a page beside the panel was wider than the
+/// screen, and placing it within it failed, ending Glance).
+fn placed_in(opening: &Opening, room: RECT, scale: f32) -> RECT {
     let (wide, gap) = ((WIDTH * scale).round() as i32, (GAP * scale).round() as i32);
     let least = (480.0 * scale) as i32;
-    let wide = if opening.side == Side::Over { (opening.by.right - opening.by.left).min(room.right - room.left) } else { wide };
+    let wide = if opening.side == Side::Over { opening.by.right - opening.by.left } else { wide }.min(room.right - room.left);
     let left_of = opening.by.left - gap - wide;
     let right_of = opening.by.right + gap;
     let (x, y, tall) = match opening.side {
@@ -598,7 +604,7 @@ fn placed(opening: &Opening) -> (RECT, f32) {
     };
     let x = x.clamp(room.left, room.right - wide);
     let y = y.clamp(room.top, room.bottom - tall);
-    (RECT { left: x, top: y, right: x + wide, bottom: y + tall }, scale)
+    RECT { left: x, top: y, right: x + wide, bottom: y + tall }
 }
 
 /// Where a note's words are written in its page's window (physical px), its page `wide` × `tall` past `room` (its
@@ -2382,6 +2388,22 @@ mod tests {
 
     /// A note's page opened over the note stuck on the desktop, to be written in where it is: just where it is, as large
     /// (made larger, a note stuck smaller than a page to write in grew as it was written in, and its words moved).
+    /// A page beside the panel on a narrow screen at a large scale (a portrait screen 1080 px wide at 350%, the page
+    /// 1260 px wide at it): within the screen, on every side, not ending Glance.
+    #[test]
+    fn a_page_is_never_wider_than_its_screen() {
+        use super::super::theme::Skin;
+        use super::{placed_in, Opening, Page, Side};
+        use windows::Win32::Foundation::RECT;
+        let room = RECT { left: 0, top: 0, right: 1080, bottom: 1920 };
+        let by = RECT { left: 700, top: 300, right: 1080, bottom: 900 };
+        for side in [Side::Left, Side::Right, Side::Below, Side::Over] {
+            let opening = Opening { page: Page::Note(Some("a.md".into())), by, side, skin: Skin::Paper, dark: false, folder: None, owner: 0 };
+            let page = placed_in(&opening, room, 3.5);
+            assert!(page.left >= room.left && page.right <= room.right && page.top >= room.top && page.bottom <= room.bottom, "{side:?}: {:?}", (page.left, page.top, page.right, page.bottom));
+        }
+    }
+
     #[test]
     fn a_note_s_page_over_it_is_just_where_it_is() {
         use super::super::theme::Skin;

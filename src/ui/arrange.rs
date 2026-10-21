@@ -419,13 +419,17 @@ impl Opening {
         let heights: Vec<Heights> = lanes.iter().map(|(_, heights)| *heights).collect();
         let ids: Vec<String> = lanes.iter().map(|(id, _)| id.to_string()).collect();
         let ladder = Ladder::new(theme, &heights, readings);
+        // As it is laid out itself: quick launch, at the panel's edge, as its rail.
+        let itself = |ids: Vec<String>, seen: Seen| {
+            let rail = ids.iter().position(|id| id == "apps");
+            let (layout, zoom) = arrange(theme, edge, heights.iter().map(|heights| heights[0]).collect(), work, columns, size, rail);
+            Opening { size: (layout.width(), layout.height()), layout, zoom, choice: None, lanes: ids, seen }
+        };
         let kept = match want {
-            Want::Itself => {
-                // (Quick launch, at the panel's edge, as its rail.)
-                let rail = ids.iter().position(|id| id == "apps");
-                let (layout, zoom) = arrange(theme, edge, heights.iter().map(|heights| heights[0]).collect(), work, columns, size, rail);
-                return Opening { size: (layout.width(), layout.height()), layout, zoom, choice: None, lanes: ids, seen };
-            }
+            Want::Itself => return itself(ids, seen),
+            // Nothing to show, no lane nor reading (every one switched off): no form to keep or choose, laid out as
+            // itself (the settings' preview of it took the first of no forms, and Glance ended).
+            _ if ladder.rungs.is_empty() => return itself(ids, seen),
             Want::Kept(choice) => ladder.keep(choice),
             Want::Room((width, height), shown) => ladder.choose((width / size, height / size), shown.map(|shown| Shown { taken: (shown.taken.0 / size, shown.taken.1 / size), ..shown })),
         };
@@ -744,6 +748,18 @@ mod tests {
         }
         let levels = sweep((0..680).map(|i| (1400.0 - 2.0 * i as f32, 440.0)).collect());
         assert!(levels.contains(&2), "{levels:?}");
+    }
+
+    /// Nothing to show (every lane and reading switched off), a form kept or room to fill: laid out, nothing in it.
+    #[test]
+    fn nothing_to_show_is_laid_out_still() {
+        let theme = Theme::new(Skin::Paper, false);
+        let corner = Choice { form: Form::Small(Small::Corner), scale: 1.0, extra: (0.0, 0.0) };
+        for want in [Want::Kept(corner), Want::Room((300.0, 200.0), None)] {
+            let opening = Opening::new(&theme, Edge::Right, &[], 0, (1600.0, 900.0), None, 1.0, want, Seen::default());
+            assert_eq!(opening.choice, None);
+            assert!(opening.lanes.is_empty());
+        }
     }
 
     #[test]

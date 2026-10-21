@@ -634,17 +634,28 @@ pub fn krc(text: &str) -> Vec<Line> {
         }
         let Some((head, rest)) = raw.strip_prefix('[').and_then(|after| after.split_once(']')) else { continue };
         let Some((start, length)) = head.split_once(',').and_then(|(a, b)| Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))) else { continue };
+        // (Times of a track only, as every other form's, see `LONGEST`: a line at no such time left out, in its place
+        // among the lines its translation's are matched to.)
+        let (Some(start), Some(length)) = (ms(start), ms(length)) else {
+            lines.push(None);
+            continue;
+        };
+        let Some(end) = seconds(start + length) else {
+            lines.push(None);
+            continue;
+        };
         let mut words = Vec::new();
         for part in rest.split('<').skip(1) {
             let Some((timing, sung)) = part.split_once('>') else { continue };
-            let mut numbers = timing.split(',').map(|number| number.trim().parse::<f64>());
-            let (Some(Ok(offset)), Some(Ok(lasts))) = (numbers.next(), numbers.next()) else { continue };
+            let mut numbers = timing.split(',').map(|number| number.trim().parse::<f64>().ok().and_then(ms));
+            let (Some(Some(offset)), Some(Some(lasts))) = (numbers.next(), numbers.next()) else { continue };
+            let (Some(at), Some(till)) = (seconds(start + offset), seconds(start + offset + lasts)) else { continue };
             if !sung.is_empty() {
-                words.push(Word { at: (start + offset) / 1000.0, end: (start + offset + lasts) / 1000.0, text: sung.to_string() });
+                words.push(Word { at, end: till, text: sung.to_string() });
             }
         }
         let text: String = words.iter().map(|word| word.text.as_str()).collect::<String>().trim().to_string();
-        lines.push((length > 0.0 && !text.is_empty()).then(|| Line { at: start / 1000.0, end: Some((start + length) / 1000.0), text, words, backing: None, translation: None }));
+        lines.push((length > 0.0 && !text.is_empty()).then(|| Line { at: start, end: Some(end), text, words, backing: None, translation: None }));
     }
     // (Its translation's lines, one for each of its lines, those left out too.)
     lines
@@ -1061,6 +1072,29 @@ mod tests {
         assert_eq!(base64_decoded("aGk="), Some(b"hi".to_vec()));
         assert_eq!(base64_decoded("aGk"), Some(b"hi".to_vec()));
         assert_eq!(base64_decoded("a"), None);
+    }
+
+    /// KRC with times no track has (a line at 1e300 ms, a word at as many past its line): the line left out in its place
+    /// (the translation's lines still each its own), the word left out; every time kept one of a track. (Taken as
+    /// they were, the next line's time from now could not be told as a duration, and Glance ended.)
+    #[test]
+    fn reads_kugou_times_of_a_track_only() {
+        let translation = r#"{"content":[{"language":0,"type":1,"lyricContent":[["One"],["Two"],["Three"]]}],"version":1}"#;
+        let language: String = {
+            const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            translation.as_bytes().chunks(3).flat_map(|chunk| {
+                let whole = chunk.iter().enumerate().fold(0u32, |whole, (at, byte)| whole | u32::from(*byte) << (16 - 8 * at));
+                (0..4).map(move |at| if at <= chunk.len() { DIGITS[(whole >> (18 - 6 * at) & 63) as usize] as char } else { '=' })
+            }).collect()
+        };
+        let text = format!("[language:{language}]
+[1000,1000]<0,500,0>一<1e300,500,0>坏
+[1e300,1000]<0,1000,0>二
+[3000,1000]<0,1000,0>三
+");
+        let lines = krc(&text);
+        assert_eq!(lines.iter().map(|line| (line.text.as_str(), line.translation.as_deref())).collect::<Vec<_>>(), vec![("一", Some("One")), ("三", Some("Three"))]);
+        assert!(lines.iter().all(|line| line.at <= LONGEST && line.end.is_some_and(|end| end <= LONGEST) && line.words.iter().all(|word| word.end <= LONGEST)));
     }
 
     /// Lyrics timed word by word taken first, wherever they are: Kugou's over NetEase's timed by line (with NetEase's
