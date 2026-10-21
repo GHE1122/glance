@@ -183,11 +183,12 @@ pub fn menu(lang: Lang, colour: crate::notes::Colour, named: bool, stuck: bool) 
     (items, rows.into_iter().map(|(choice, ..)| choice).collect())
 }
 
-/// How the note written shows away from the lines written on, for its words' box's messages (see `Writing::answer`),
-/// which come whatever its window is in the middle of: as it was last dressed, and the folder it is in.
+/// How the note written shows where it is not written at, for its words' box's messages (see `Writing::answer`), which
+/// come whatever its window is in the middle of: as it was last dressed, where it was written at then, and the folder it
+/// is in.
 struct Reads {
     shown: crate::notes::markdown::Shown,
-    written: std::ops::RangeInclusive<usize>,
+    at: crate::notes::markdown::At,
     folder: std::path::PathBuf,
 }
 
@@ -287,13 +288,13 @@ pub struct Writing {
     palette: Palette,
     pub unkept: bool,
     pub said: Option<String>,
-    /// How its Markdown shows away from the lines written on, as it was last dressed, and those lines (see
+    /// How its Markdown shows where it is not written at, as it was last dressed, and where it was written at then (see
     /// `notes::markdown::Shown`), the same for its box's messages (see `Reads`).
     shown: crate::notes::markdown::Shown,
-    written: std::ops::RangeInclusive<usize>,
+    at: crate::notes::markdown::At,
     reads: Rc<RefCell<Reads>>,
     /// What was chosen in it as it opened (the caret), and whether it has been written in or the caret moved since: till
-    /// then no line is written on, and it shows as the note did where it was pressed (its marks put away).
+    /// then it is written at nowhere, and it shows as the note did where it was pressed (its marks put away).
     opened_at: (i32, i32),
     pub touched: bool,
     /// Its box was given a key, or the input method's words, since this was last asked (see `touched`), and how deep its
@@ -334,8 +335,8 @@ impl Writing {
             unkept: false,
             said: None,
             shown: Default::default(),
-            written: crate::notes::markdown::NONE_WRITTEN,
-            reads: Rc::new(RefCell::new(Reads { shown: Default::default(), written: crate::notes::markdown::NONE_WRITTEN, folder: folder.path.clone() })),
+            at: None,
+            reads: Rc::new(RefCell::new(Reads { shown: Default::default(), at: None, folder: folder.path.clone() })),
             opened_at,
             touched: false,
             keyed: Rc::new(Cell::new(false)),
@@ -346,32 +347,28 @@ impl Writing {
         Some(writing)
     }
 
-    /// Its words dressed as their Markdown reads, its marks put away off the lines written on (those of the caret, or
-    /// of what is chosen, once it has been written in or the caret moved: see `touched`).
+    /// Its words dressed as their Markdown reads, its marks put away where it is not written at (see `at_now`).
     pub fn dress(&mut self) {
-        use crate::notes::markdown::{written_lines, Shown, NONE_WRITTEN};
         let text = self.editor.text();
-        let shown = Shown::of(&text);
-        let (from, to) = self.editor.selection();
-        let written = if self.touched { written_lines(&text, (from.max(0) as usize, to.max(0) as usize)) } else { NONE_WRITTEN };
-        let mut hidden = shown.hidden(&written);
-        hidden.extend(shown.boxes(&written).map(|boxed| boxed.marks.clone()));
-        let rooms: Vec<usize> = shown.boxes(&written).map(|boxed| boxed.room).collect();
-        self.editor.dress(&crate::notes::markdown::looks(&text), &hidden, &rooms, &self.palette);
-        if let Ok(mut reads) = self.reads.try_borrow_mut() {
-            *reads = Reads { shown: shown.clone(), written: written.clone(), folder: self.folder.clone() };
-        }
-        self.shown = shown;
-        self.written = written;
+        let shown = crate::notes::markdown::Shown::of(&text);
+        self.dress_as(shown, self.at_now(), &text);
     }
 
-    /// The lines written on now (see `dress`).
-    fn written_now(&self) -> std::ops::RangeInclusive<usize> {
-        let (from, to) = self.editor.selection();
-        match self.touched {
-            true => crate::notes::markdown::written_lines(&self.editor.text(), (from.max(0) as usize, to.max(0) as usize)),
-            false => crate::notes::markdown::NONE_WRITTEN,
+    /// Its words, `text`, dressed as `shown` reads them, written at `at`.
+    fn dress_as(&mut self, shown: crate::notes::markdown::Shown, at: crate::notes::markdown::At, text: &str) {
+        let (hidden, rooms) = shown.put_away(at);
+        self.editor.dress(&crate::notes::markdown::looks(text), &hidden, &rooms, &self.palette);
+        if let Ok(mut reads) = self.reads.try_borrow_mut() {
+            *reads = Reads { shown: shown.clone(), at, folder: self.folder.clone() };
         }
+        self.shown = shown;
+        self.at = at;
+    }
+
+    /// Where it is written at now: what is chosen, once it has been written in or the caret moved (see `touched`).
+    fn at_now(&self) -> crate::notes::markdown::At {
+        let (from, to) = self.editor.selection();
+        self.touched.then_some((from.max(0) as usize, to.max(0) as usize))
     }
 
     /// Its words written `pixels` high in `theme`'s inks (its window's scale changed, or its skin), dressed again so.
@@ -463,7 +460,7 @@ impl Writing {
             let ticked = (message == WM_LBUTTONDOWN && !editor.composing())
                 .then(|| {
                     let drawn = reads.try_borrow().ok().and_then(|reads| {
-                        reads.shown.boxes(&reads.written).find_map(|boxed| {
+                        reads.shown.boxes(reads.at).find_map(|boxed| {
                             let room = editor.character(boxed.room)?;
                             (point.x >= room.left && point.x < room.right && point.y >= room.top && point.y < room.bottom).then(|| (boxed.marks.end - 3..boxed.marks.end, boxed.done))
                         })
@@ -477,7 +474,7 @@ impl Writing {
             let link_under = |point: POINT| {
                 let at = editor.at(point);
                 let on = editor.character(at).is_some_and(|drawn| point.x >= drawn.left && point.x < drawn.right && point.y >= drawn.top && point.y < drawn.bottom);
-                reads.try_borrow().ok().filter(|_| on).and_then(|reads| reads.shown.link_at(at, &reads.written).map(|link| (link.to.clone(), reads.folder.clone())))
+                reads.try_borrow().ok().filter(|_| on).and_then(|reads| reads.shown.link_at(at, reads.at).map(|link| (link.to.clone(), reads.folder.clone())))
             };
             let followed = match (ticked.is_none(), message) {
                 (true, WM_LBUTTONDOWN) => link_under(point),
@@ -525,13 +522,17 @@ impl Writing {
     pub fn written(&mut self) -> bool {
         let composed = self.editor.take_composed();
         let changed = self.editor.take_changed();
-        // (Written in, or the caret moved: the lines it is on written on from now.)
+        // (Written in, or the caret moved: written at from now.)
         let keyed = self.keyed.replace(false);
         let touched = !self.touched && (keyed || composed || self.editor.selection() != self.opened_at);
         self.touched |= touched;
         let composing = self.editor.composing();
-        if composed || (!composing && (changed || touched || self.written_now() != self.written)) {
+        if composed || (!composing && (changed || touched)) {
             self.dress();
+        } else if !composing && self.shown.put_away(self.at_now()) != self.shown.put_away(self.at) {
+            // (The caret moved onto what was put away, or off it: shown as written, or put away, as the words were read.)
+            let text = self.editor.text();
+            self.dress_as(self.shown.clone(), self.at_now(), &text);
         }
         if changed {
             self.unkept = true;
@@ -663,7 +664,7 @@ impl Writing {
         let (left, top) = in_window(bounds.left as f32, bounds.top as f32);
         let (right, bottom) = in_window(bounds.right as f32, bounds.bottom as f32);
         frame.clip(left, top, right - left, bottom - top);
-        for boxed in self.shown.boxes(&self.written) {
+        for boxed in self.shown.boxes(self.at) {
             let (Some(room), Some(baseline)) = (self.editor.character(boxed.room), self.editor.baseline(boxed.room + 1)) else { continue };
             let (bx, by, side) = box_in(room.left, baseline, pixels);
             let (bx, by) = in_window(bx, by);
@@ -789,7 +790,7 @@ The quick brown fox, 1% low";
             let (on_face, on_page) = (lines(&face), lines(&page));
             let apart = on_face.len() != on_page.len() || on_face.iter().zip(&on_page).any(|(a, b)| a.abs_diff(*b) > 2);
             unlike.push((name, apart, on_face, on_page));
-            // Written on: the caret on its to-do's line, that line as it is written.
+            // Written at: the caret at its to-do's box, the box as it is written.
             writing.touched = true;
             let at = text.encode_utf16().position(|c| c == u16::from(b'-')).unwrap() as i32 + 3;
             writing.editor.select((at, at));

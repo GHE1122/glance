@@ -870,7 +870,7 @@ mod tests {
     #[test]
     #[ignore = "makes a window of this session's"]
     fn puts_marks_away_and_makes_room_for_a_box() {
-        use crate::notes::markdown::{Shown, BOX_ROOM, NONE_WRITTEN};
+        use crate::notes::markdown::{Shown, BOX_ROOM};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
             let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""), WS_POPUP, 0, 0, 400, 300, None, None, None, None).unwrap();
@@ -880,9 +880,9 @@ mod tests {
             let dress = |editor: &Editor| {
                 let text = editor.text();
                 let shown = Shown::of(&text);
-                let mut hidden = shown.hidden(&NONE_WRITTEN);
-                hidden.extend(shown.boxes(&NONE_WRITTEN).map(|boxed| boxed.marks.clone()));
-                let rooms: Vec<usize> = shown.boxes(&NONE_WRITTEN).map(|boxed| boxed.room).collect();
+                let mut hidden = shown.hidden(None);
+                hidden.extend(shown.boxes(None).map(|boxed| boxed.marks.clone()));
+                let rooms: Vec<usize> = shown.boxes(None).map(|boxed| boxed.room).collect();
                 editor.dress(&looks(&text), &hidden, &rooms, &palette);
             };
             // "买" at 6, "粗" at 10 (after "**").

@@ -1680,7 +1680,7 @@ impl<'a> Frame<'a> {
     /// services set a line exactly so tall.
     #[allow(clippy::too_many_arguments)]
     pub fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32) {
-        use crate::notes::markdown::{line_heights, Shown, BOX_IN, BOX_RISE, BOX_ROOM, BOX_SIDE, NONE_WRITTEN};
+        use crate::notes::markdown::{line_heights, Shown, BOX_IN, BOX_RISE, BOX_ROOM, BOX_SIDE};
         // (Clipped and let go of whatever fails in between: the clip left on, the whole frame was lost.)
         Canvas::clip(self, x, y, width, height);
         let drawn = (|| -> Result<()> {
@@ -1700,7 +1700,7 @@ impl<'a> Frame<'a> {
             // for by nothing; a to-do's list mark, box and the space after them by the room its box is drawn in, as
             // wide as the text services make that space where it is written.
             let shown = Shown::of(text);
-            let hidden = shown.hidden(&NONE_WRITTEN);
+            let hidden = shown.hidden(None);
             let nothing: IDWriteInlineObject = Room { width: 0.0 }.into();
             let room: IDWriteInlineObject = Room { width: BOX_ROOM * size }.into();
             let (left, top) = self.on_pixel(x, y);
@@ -1743,7 +1743,7 @@ impl<'a> Frame<'a> {
                 for range in hidden.iter().filter_map(on_line) {
                     unsafe { layout.SetInlineObject(&nothing, range)? };
                 }
-                let boxes: Vec<_> = shown.boxes(&NONE_WRITTEN).filter(|boxed| words.contains(&boxed.marks.start)).collect();
+                let boxes: Vec<_> = shown.boxes(None).filter(|boxed| words.contains(&boxed.marks.start)).collect();
                 for range in boxes.iter().filter_map(|boxed| on_line(&(boxed.marks.start..boxed.room + 1))) {
                     unsafe { layout.SetInlineObject(&room, range)? };
                 }

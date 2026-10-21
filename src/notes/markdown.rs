@@ -6,10 +6,11 @@
 //! mark shows as it will read: a heading larger, emphasis bold or slanted, code in a fixed face, a link in the accent
 //! (a web address written out one too), a quote and a done task faint.
 //!
-//! Away from the lines being written on (those the caret or what is chosen is on: all of them, in a note not being
-//! written in), its marks are put away as it reads (see `Shown`): a heading's `#`, emphasis's, code's and a link's
-//! marks hidden, a to-do's list mark and box drawn as a box to tick, a link's words pressed to follow it. A list's and a
-//! quote's marks stay, faint: they are what shows it is one.
+//! Where it is not written at (all of it, in a note not being written in), its marks are put away as it reads (see
+//! `Shown`): a heading's `#`, emphasis's, code's and a link's marks hidden, a to-do's list mark and box drawn as a box
+//! to tick, a link's words pressed to follow it. What the caret touches (the heading, the bold words, the link it is in
+//! or at the end of: see `At`) shows as written, marks and all, so the caret is never in what is put away. A list's
+//! and a quote's marks stay, faint: they are what shows it is one.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
@@ -191,32 +192,53 @@ pub fn looks(text: &str) -> Vec<(Range<usize>, Look)> {
     looks
 }
 
-/// How a note shows away from the lines being written on (see the head of this file): what of it is put away there,
-/// where (in UTF-16 units, as the text services count, each line break one), each on the line it is on.
+/// How a note shows where it is not written at (see the head of this file): what of it is put away, where (in UTF-16
+/// units, as the text services count, each line break one), each with all of what it marks (its span: see `At`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Shown {
-    /// Its marks hidden: a heading's `#`, emphasis's, code's, a link's (all but its words).
-    pub marks: Vec<(Range<usize>, usize)>,
+    /// Its marks hidden: a heading's `#`, emphasis's, code's, a link's (all but its words). Each with the heading's,
+    /// emphasis's, code's or link's span.
+    pub marks: Vec<(Range<usize>, Range<usize>)>,
     pub boxes: Vec<Boxed>,
     pub links: Vec<Linked>,
 }
 
 /// A to-do drawn as a box to tick: its list's mark and its box (`- [ ]`), put away, and the space after them, the room
-/// the box is drawn in (`BOX_ROOM` wide), done or not, on its line.
+/// the box is drawn in (`BOX_ROOM` wide), done or not. Its span is its marks and its room (not where its words begin).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Boxed {
     pub marks: Range<usize>,
     pub room: usize,
     pub done: bool,
-    pub line: usize,
 }
 
-/// A link: its words, where it goes, its line. (A web address written out: its words where it goes.)
+impl Boxed {
+    fn span(&self) -> Range<usize> {
+        self.marks.start..self.room + 1
+    }
+}
+
+/// A link: its words, where it goes, all of it (its span). (A web address written out: its words where it goes, and
+/// its span.)
 #[derive(Clone, Debug, PartialEq)]
 pub struct Linked {
     pub words: Range<usize>,
     pub to: String,
-    pub line: usize,
+    pub span: Range<usize>,
+}
+
+/// Where a note is written at: what is chosen in it (from, to: UTF-16 units, the caret where they are one). None: a
+/// note shown, not written in. What of its Markdown it touches shows as written, marks and all: what the caret is in or
+/// at either end of (a to-do's box not where its words begin), what is chosen over any of.
+pub type At = Option<(usize, usize)>;
+
+/// Whether `at` touches `span` (see `At`): the caret at its end too where `closed`.
+fn touches(span: &Range<usize>, at: At, closed: bool) -> bool {
+    match at {
+        None => false,
+        Some((from, to)) if from == to => span.start <= from && (from < span.end || closed && from == span.end),
+        Some((from, to)) => from.min(to) < span.end && span.start < from.max(to),
+    }
 }
 
 /// How wide the room a to-do's box is drawn in is, its words' size over (the box in it, `BOX_SIDE` of their size,
@@ -227,28 +249,25 @@ pub const BOX_SIDE: f32 = 0.9;
 pub const BOX_IN: f32 = 0.08;
 pub const BOX_RISE: f32 = 0.36;
 
-/// No line being written on: a note shown, not written in.
-pub const NONE_WRITTEN: std::ops::RangeInclusive<usize> = 1..=0;
-
 impl Shown {
     pub fn of(text: &str) -> Shown {
         let units = Units::of(text);
-        let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1)).collect();
-        let line_of = |byte: usize| starts.partition_point(|start| *start <= byte) - 1;
         let mut shown = Shown::default();
+        // (All of what is marked, but the line breaks it ends with.)
+        let span = |bytes: &Range<usize>| units.range(&(bytes.start..bytes.start + text[bytes.clone()].trim_end_matches(['\n', '\r']).len()));
         // (Pieces of `bytes` on one line each: no line break put away, two lines never made one.)
-        let hide = |shown: &mut Shown, bytes: Range<usize>| {
+        let hide = |shown: &mut Shown, bytes: Range<usize>, of: &Range<usize>| {
             let mut from = bytes.start;
             for (at, c) in text[bytes.clone()].char_indices() {
                 if c == '\n' || c == '\r' {
                     if from < bytes.start + at {
-                        shown.marks.push((units.range(&(from..bytes.start + at)), line_of(from)));
+                        shown.marks.push((units.range(&(from..bytes.start + at)), span(of)));
                     }
                     from = bytes.start + at + c.len_utf8();
                 }
             }
             if from < bytes.end {
-                shown.marks.push((units.range(&(from..bytes.end)), line_of(from)));
+                shown.marks.push((units.range(&(from..bytes.end)), span(of)));
             }
         };
         // Each open container whose marks are put away, as far as what it holds reaches (its first and last held); a
@@ -282,7 +301,7 @@ impl Shown {
                     };
                     if let Tag::Link { dest_url, .. } = &tag {
                         // (Its words found as it ends.)
-                        shown.links.push(Linked { words: 0..0, to: dest_url.to_string(), line: line_of(range.start) });
+                        shown.links.push(Linked { words: 0..0, to: dest_url.to_string(), span: span(&range) });
                     }
                     open.push(Open { hides, range, held: None });
                 }
@@ -290,8 +309,8 @@ impl Shown {
                     let Some(closed) = open.pop() else { continue };
                     // (One holding nothing is left as written: put away, nothing of it would show.)
                     if let (true, Some(held)) = (closed.hides, &closed.held) {
-                        hide(&mut shown, closed.range.start..held.start);
-                        hide(&mut shown, held.end..closed.range.end);
+                        hide(&mut shown, closed.range.start..held.start, &closed.range);
+                        hide(&mut shown, held.end..closed.range.end, &closed.range);
                     }
                     if matches!(end, TagEnd::Link) {
                         if let Some(link) = shown.links.last_mut() {
@@ -305,16 +324,16 @@ impl Shown {
                     let written = &text[range.clone()];
                     let ticks = written.len() - written.trim_start_matches('`').len();
                     if !code.is_empty() && written.len() > 2 * ticks {
-                        hide(&mut shown, range.start..range.start + ticks);
-                        hide(&mut shown, range.end - ticks..range.end);
+                        hide(&mut shown, range.start..range.start + ticks, &range);
+                        hide(&mut shown, range.end - ticks..range.end, &range);
                     }
                 }
                 Event::TaskListMarker(done) => {
                     hold(&mut open, &range);
                     // (Its box drawn in the space after it: none, it is left as written.)
                     let from = item.unwrap_or(range.start);
-                    if text[range.end..].starts_with(' ') && line_of(from) == line_of(range.end) {
-                        shown.boxes.push(Boxed { marks: units.range(&(from..range.end)), room: units.range(&(range.end..range.end + 1)).start, done, line: line_of(from) });
+                    if text[range.end..].starts_with(' ') && !text[from..range.end].contains('\n') {
+                        shown.boxes.push(Boxed { marks: units.range(&(from..range.end)), room: units.range(&(range.end..range.end + 1)).start, done });
                     }
                 }
                 _ => hold(&mut open, &range),
@@ -322,24 +341,32 @@ impl Shown {
         }
         shown.links.retain(|link| !link.words.is_empty());
         for (words, to) in addresses(text) {
-            shown.links.push(Linked { words: units.range(&words), to, line: line_of(words.start) });
+            shown.links.push(Linked { words: units.range(&words), to, span: units.range(&words) });
         }
         shown
     }
 
-    /// Its marks hidden where their line is not one being written on (`written`).
-    pub fn hidden(&self, written: &std::ops::RangeInclusive<usize>) -> Vec<Range<usize>> {
-        self.marks.iter().filter(|(_, line)| !written.contains(line)).map(|(range, _)| range.clone()).collect()
+    /// Its marks hidden where what they mark is not written at (`at`).
+    pub fn hidden(&self, at: At) -> Vec<Range<usize>> {
+        self.marks.iter().filter(|(_, span)| !touches(span, at, true)).map(|(range, _)| range.clone()).collect()
     }
 
-    /// Its to-dos drawn as boxes: those not on a line being written on.
-    pub fn boxes<'a>(&'a self, written: &'a std::ops::RangeInclusive<usize>) -> impl Iterator<Item = &'a Boxed> + 'a {
-        self.boxes.iter().filter(move |boxed| !written.contains(&boxed.line))
+    /// Its to-dos drawn as boxes: those not written at.
+    pub fn boxes(&self, at: At) -> impl Iterator<Item = &Boxed> + '_ {
+        self.boxes.iter().filter(move |boxed| !touches(&boxed.span(), at, false))
     }
 
-    /// The link whose words are at `at` (UTF-16 units), where they show as it reads (not on a line being written on).
-    pub fn link_at(&self, at: usize, written: &std::ops::RangeInclusive<usize>) -> Option<&Linked> {
-        self.links.iter().find(|link| link.words.contains(&at) && !written.contains(&link.line))
+    /// What is put away where it is written at `at`: its marks hidden, and its to-dos' marks (each drawn as a box in
+    /// its room, the rooms given too).
+    pub fn put_away(&self, at: At) -> (Vec<Range<usize>>, Vec<usize>) {
+        let mut hidden = self.hidden(at);
+        hidden.extend(self.boxes(at).map(|boxed| boxed.marks.clone()));
+        (hidden, self.boxes(at).map(|boxed| boxed.room).collect())
+    }
+
+    /// The link whose words are at `unit` (UTF-16 units), where they show as it reads (it not written at: `at`).
+    pub fn link_at(&self, unit: usize, at: At) -> Option<&Linked> {
+        self.links.iter().find(|link| link.words.contains(&unit) && !touches(&link.span, at, true))
     }
 }
 
@@ -373,27 +400,6 @@ pub fn line_heights(text: &str, words: f32) -> Vec<(Range<usize>, f32)> {
         start = end;
     }
     lines
-}
-
-/// The lines (counted from 0) of `text` that the stretch `from`..`to` (UTF-16 units, as the text services count:
-/// each line break one) is on: being written on.
-pub fn written_lines(text: &str, (from, to): (usize, usize)) -> std::ops::RangeInclusive<usize> {
-    let mut line = 0;
-    let (mut first, mut last) = (None, 0);
-    let (from, to) = (from.min(to), from.max(to));
-    for (unit, c) in text.encode_utf16().enumerate().chain(std::iter::once((usize::MAX, 0))) {
-        if first.is_none() && unit >= from {
-            first = Some(line);
-        }
-        if unit >= to {
-            last = line;
-            break;
-        }
-        if c == u16::from(b'\n') {
-            line += 1;
-        }
-    }
-    first.unwrap_or(line)..=last.max(first.unwrap_or(line))
 }
 
 /// The web addresses written out in `text`, not as a link's (`http://`, `https://`), each where it is (bytes) and
@@ -513,32 +519,52 @@ mod tests {
         assert_eq!(line_heights("", 15.0), vec![(0..0, 24.0)]);
     }
 
-    /// Away from the lines written on, a heading's `#`, emphasis's, code's and a link's marks are put away, a list's and
-    /// a quote's not; a to-do is a box in its list's mark's place; a link, and a web address written out, followed from
-    /// its words. On a line written on, all is as written.
+    /// In a note not written in, a heading's `#`, emphasis's, code's and a link's marks are put away, a list's and a
+    /// quote's not; a to-do is a box in its list's mark's place; a link, and a web address written out, followed from
+    /// its words.
     #[test]
-    fn puts_away_marks_off_the_lines_written_on() {
+    fn puts_away_marks_in_a_note_not_written_in() {
         let text = "## 本周 ##\n**粗**与*斜*、`code`、~~删~~\n- [ ] 买牛奶\n- [x] 完成\n> 引\n[链接](https://a.b/c) 见 https://x.y/z?q=1。\n标题\n===";
         let units: Vec<u16> = text.encode_utf16().collect();
         let of = |range: &Range<usize>| String::from_utf16(&units[range.clone()]).unwrap();
         let shown = Shown::of(text);
-        let hidden: Vec<String> = shown.hidden(&NONE_WRITTEN).iter().map(of).collect();
+        let hidden: Vec<String> = shown.hidden(None).iter().map(of).collect();
         assert_eq!(hidden, ["## ", " ##", "**", "**", "*", "*", "`", "`", "~~", "~~", "[", "](https://a.b/c)"]);
-        let boxes: Vec<(String, String, bool)> = shown.boxes(&NONE_WRITTEN).map(|boxed| (of(&boxed.marks), of(&(boxed.room..boxed.room + 1)), boxed.done)).collect();
+        let boxes: Vec<(String, String, bool)> = shown.boxes(None).map(|boxed| (of(&boxed.marks), of(&(boxed.room..boxed.room + 1)), boxed.done)).collect();
         assert_eq!(boxes, [("- [ ]".to_string(), " ".to_string(), false), ("- [x]".to_string(), " ".to_string(), true)]);
         let links: Vec<(String, &str)> = shown.links.iter().map(|link| (of(&link.words), link.to.as_str())).collect();
         assert_eq!(links, [("链接".to_string(), "https://a.b/c"), ("https://x.y/z?q=1".to_string(), "https://x.y/z?q=1")]);
-        // The second line written on (the caret in it): its marks as written, the others' put away still.
-        let written = written_lines(text, (12, 12));
-        assert_eq!(written, 1..=1);
-        assert_eq!(shown.hidden(&written).iter().map(of).collect::<Vec<_>>(), ["## ", " ##", "[", "](https://a.b/c)"]);
-        // What is chosen over three lines: each written on; the caret at a line's end, that line.
-        let third = units.iter().position(|&c| c == u16::from(b'-')).unwrap();
-        assert_eq!(written_lines(text, (12, third + 2)), 1..=2);
-        assert_eq!(written_lines(text, (third - 1, third - 1)), 1..=1);
-        assert_eq!(shown.boxes(&(2..=2)).count(), 1);
+    }
+
+    /// Written in, what the caret is in or at either end of shows as written, marks and all, the rest put away still:
+    /// the bold the caret is in (not the slanted words beside it), the heading the caret is on, a link the caret is in
+    /// (not followed then). What is chosen over any of a stretch shows it. A to-do's box stays drawn with the caret
+    /// where its words begin, shows as written with the caret before that.
+    #[test]
+    fn shows_as_written_what_the_caret_touches() {
+        let text = "## 本周 ##\n**粗**与*斜*\n- [ ] 买\n[链接](https://a.b/c)";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let of = |range: &Range<usize>| String::from_utf16(&units[range.clone()]).unwrap();
+        let at = |what: &str| text[..text.find(what).unwrap()].encode_utf16().count();
+        let shown = Shown::of(text);
+        let hidden = |at: At| shown.hidden(at).iter().map(of).collect::<Vec<_>>();
+        let caret = |unit: usize| Some((unit, unit));
+        // In the bold (粗), at its end (after its `**`): its marks as written.
+        assert_eq!(hidden(caret(at("粗"))), ["## ", " ##", "*", "*", "[", "](https://a.b/c)"]);
+        assert_eq!(hidden(caret(at("与"))), ["## ", " ##", "*", "*", "[", "](https://a.b/c)"]);
+        // At the slanted words' start, not the bold's end: theirs.
+        assert_eq!(hidden(caret(at("*斜"))), ["## ", " ##", "**", "**", "[", "](https://a.b/c)"]);
+        // On the heading.
+        assert_eq!(hidden(caret(at("周"))), ["**", "**", "*", "*", "[", "](https://a.b/c)"]);
+        // What is chosen from the bold's words into the slanted's.
+        assert_eq!(hidden(Some((at("粗"), at("斜")))), ["## ", " ##", "[", "](https://a.b/c)"]);
+        // Chosen up to the bold's start, not over it.
+        assert_eq!(hidden(Some((at("周"), at("**粗")))), ["**", "**", "*", "*", "[", "](https://a.b/c)"]);
         let link = shown.links[0].words.start;
-        assert!(shown.link_at(link, &NONE_WRITTEN).is_some() && shown.link_at(link, &(5..=5)).is_none());
+        assert!(shown.link_at(link, caret(at("粗"))).is_some() && shown.link_at(link, caret(at("接"))).is_none());
+        assert_eq!(shown.boxes(caret(at("买"))).count(), 1);
+        assert_eq!(shown.boxes(caret(at(" 买"))).count(), 0);
+        assert_eq!(shown.boxes(caret(at("- ["))).count(), 0);
     }
 
     /// A web address ends where a sentence does, or where words in another script go on after it.
