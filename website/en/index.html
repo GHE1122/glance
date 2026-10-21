@@ -13,17 +13,16 @@
 <link rel="icon" href="../favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <link rel="preload" href="../assets/fonts/archivo-600.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="../assets/site.css?v=18">
-<link rel="stylesheet" href="../assets/bench.css?v=1">
-<link rel="stylesheet" href="../assets/desk.css?v=2">
+<link rel="stylesheet" href="../assets/site.css?v=20">
+<link rel="stylesheet" href="../assets/bench.css?v=2">
+<link rel="stylesheet" href="../assets/desk.css?v=3">
 <script src="../assets/site.js?v=10" defer></script>
-<script src="../assets/demo.js?v=8" defer></script>
-<script src="../assets/widget.js?v=5" defer></script>
+<script src="../assets/demo.js?v=10" defer></script>
 <script src="../assets/overlay.js?v=4" defer></script>
-<script src="../assets/bench.js?v=2" defer></script>
+<script src="../assets/bench.js?v=3" defer></script>
 <script src="../assets/music.js?v=2" defer></script>
 <script src="../assets/full.js?v=1" defer></script>
-<script src="../assets/desk.js?v=2" defer></script>
+<script src="../assets/desk.js?v=3" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -76,7 +75,7 @@
     <div class="wrap">
       <p class="eyebrow">Demo</p>
       <h2>Try it on this screen</h2>
-      <p class="sub">A simulated desktop, with the panels and widgets drawn as Glance draws them. It plays through on its own. Move the pointer onto it to push its edges yourself, drag and size the music widget, or open the full screen lyrics.</p>
+      <p class="sub">A simulated desktop, with the panels and widgets drawn as Glance draws them. It plays through on its own. Move the pointer onto it to push its edges yourself, drag and size the music widget, or open the full screen lyrics. Switch between the three looks below it.</p>
       <div class="vdesk" data-desk role="region" aria-label="Glance in use">
         <div class="screen">
           <div class="taskbar"></div>
@@ -91,6 +90,7 @@
       <div class="desk-bar">
         <p class="desk-say" data-say aria-live="polite"></p>
         <div class="desk-tools">
+          <div class="seg" role="group" aria-label="Look" data-looks><button type="button" data-look="paper" aria-pressed="false">Chart paper</button><button type="button" data-look="glass" aria-pressed="true">Frosted glass</button><button type="button" data-look="win11" aria-pressed="false">Windows 11</button></div>
           <div class="seg" role="group" aria-label="Parts of the demo" data-chapters><button type="button" aria-pressed="false">Monitor</button><button type="button" aria-pressed="false">Workbench</button><button type="button" aria-pressed="false">Music</button><button type="button" aria-pressed="false">Full screen</button></div>
           <button class="desk-sound" type="button" aria-pressed="false" data-sound><svg class="off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/></svg><svg class="on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/></svg><span>Sound</span></button>
         </div>
@@ -146,28 +146,6 @@
           <p>A small app on your phone, paired by scanning a code, turns the PC's screens and case lights off, sets its volume and brightness, skips a song, and shows how warm it runs; night mode does it all at once while the PC keeps downloading. It works only on your own network and goes through no server. <a href="../app/">Get the phone app</a></p>
         </li>
       </ul>
-
-      <div class="looks">
-        <div class="looks-text">
-          <div>
-            <h3>Three looks, and a widget</h3>
-            <p>Chart paper, frosted glass, Windows 11. The panel below is laid out as Glance draws it, readings running: try another look. Switch to the widget and drag an edge or a corner to see it lay itself out for the room; hold its middle to move it, and let go near an edge to stick it there as a slim bar.</p>
-          </div>
-          <div class="segs">
-          <div class="seg" role="group" aria-label="Panel or widget" data-shape>
-          <button type="button" data-shape="panel" aria-pressed="true">Panel</button>
-          <button type="button" data-shape="widget" aria-pressed="false">Widget</button>
-          </div>
-          <div class="seg" role="group" data-looks>
-          <button type="button" data-look="paper" aria-pressed="false">Chart paper</button>
-          <button type="button" data-look="glass" aria-pressed="true">Frosted glass</button>
-          <button type="button" data-look="win11" aria-pressed="false">Windows 11</button>
-          </div>
-          </div>
-        </div>
-        <div class="stage" data-demo></div>
-        <div class="stage desk" data-widget aria-label="A widget to size" hidden></div>
-      </div>
 
       <div class="looks">
         <div class="looks-text">

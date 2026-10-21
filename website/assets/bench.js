@@ -1,25 +1,36 @@
-// Glance's workbench drawn in the page, as its glass skin draws it in the dark:
-// quick launch as a rail at the panel's edge, the time, the station and the
-// notes beside it, holding the made-up things Glance's studio films it with.
-// Laid out in Glance's DIPs at panel size 1 (view.rs: the lanes' padding, heads,
-// blocks and the rail's cells), at its natural size; where it stands is the
-// page's to say (see desk.js).
+// Glance's workbench drawn in the page, as each of its skins draws it in the
+// dark (the page's look: html[data-look]): quick launch as a rail at the
+// panel's edge, the time, the station and the notes beside it, holding the
+// made-up things Glance's studio films it with. Laid out in Glance's DIPs at
+// panel size 1 (view.rs: the lanes' padding, heads, blocks and the rail's
+// cells), at its natural size, and laid out anew as the look changes. Where it
+// stands is the page's to say (see desk.js).
 (function () {
   "use strict";
 
   var SVG = "http://www.w3.org/2000/svg";
 
   // ---- Glance's measures (DIPs) ----
-  var PAD_X = 18, PAD_TOP = 14, PAD_BOTTOM = 14;
   var HEAD = 17, HEAD_GAP = 8, SHELF_GAP = 6, LINE = 16;
-  var GAP = 8, COLUMN = 356, RAIL_W = 60;
+  var COLUMN = 356, RAIL_W = 60;
   var PLOT = 40, STATION_TALL = 284, NOTES_TALL = 250;
   var RAIL_CELL = 46, RAIL_SIDE = 32, BUTTON = 32, BUTTON_GAP = 4, RAIL_FOOT = 8 + 2 * BUTTON + BUTTON_GAP;
   var TILE_W = 72, TILE_GAP = 8, PLATE = 0.74, CARD_WORDS = 5 + 2 * LINE, CARDS_LEAD = 4;
-  var NOTE_STRIP = 30, NOTE_ROW = 40, NOTE_CARD = 104, NOTE_CARDS_GAP = 8, NOTE_REACH = 12;
+  var NOTE_STRIP = 30, NOTE_ROW = 40, NOTE_CARD = 104, NOTE_CARDS_GAP = 8;
   var MEDIA_ROW = 24, TAB_H = 24;
-  var FIGURE = 40, FIGURE_LINE = 0.84;
   var MINUTE = 60000, DAY = 24 * 60 * MINUTE;
+
+  // ---- what each look lays out differently, as its skin's theme has it in the dark (theme.rs `paper`, `glass`,
+  // `fluent`): a lane's padding, the gap between the lanes and beside the rail, the room round them all (top, sides,
+  // bottom), the time's figure (its size, and its line as a share of it), the titles' size, the station's tabs' room
+  // round their names and the gap between them (view.rs `paint_tabs`) ----
+  var LOOKS = {
+    paper: { padX: 18, padTop: 12, padBottom: 12, gap: 0, outer: [0, 0, 0], figure: 42, figureLine: 0.84, title: 13, tabPad: 0, tabGap: 16 },
+    glass: { padX: 18, padTop: 14, padBottom: 14, gap: 8, outer: [0, 0, 0], figure: 40, figureLine: 0.84, title: 13, tabPad: 8, tabGap: 2 },
+    win11: { padX: 16, padTop: 10, padBottom: 12, gap: 0, outer: [10, 6, 6], figure: 34, figureLine: 0.86, title: 14, tabPad: 8, tabGap: 2 }
+  };
+  // Chart paper's sheet and ink (theme.rs `paper`), and Windows 11's note card's sheet (view.rs `fluent_note_ground`).
+  var PAPER = [20, 35, 31], PAPER_INK = [231, 238, 231], FLUENT_NOTE = [40, 42, 46];
 
   // Lucide's paths, as Glance keeps them (src/ui/icons.rs).
   var ICONS = {
@@ -37,14 +48,16 @@
     settings: ["M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915",
       "M15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z"],
     link: ["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71", "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"],
-    clipboard: ["M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z", "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"]
+    clipboard: ["M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z", "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"],
+    file: ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z", "M14 2v4a2 2 0 0 0 2 2h4"]
   };
 
-  // A note's colours on glass: its tint, the ink written on it (view.rs `note_glass`), and its mark in a list.
+  // A note's colours on glass: its tint, the ink written on it (view.rs `note_glass`), and its mark (view.rs
+  // `note_colour`): its dot, its band, a little of it in a Windows 11 card.
   var COLOURS = {
-    blue: { tint: "55,105,245", ink: "24,66,142", mark: "#5b8def" },
-    yellow: { tint: "242,247,102", ink: "90,94,18", mark: "#e8b64a" },
-    green: { tint: "104,189,129", ink: "31,94,51", mark: "#4fbf82" }
+    blue: { tint: "55,105,245", ink: "24,66,142", mark: [91, 141, 239] },
+    yellow: { tint: "242,247,102", ink: "90,94,18", mark: [232, 182, 74] },
+    green: { tint: "104,189,129", ink: "31,94,51", mark: [79, 191, 130] }
   };
 
   // ---- the words, in each language (Glance's own) ----
@@ -123,10 +136,19 @@
     b.setAttribute("aria-label", label);
     return b;
   }
-  function piece(cls, height) {
+  function piece(cls, width, height) {
     var p = el("div", "gb-piece " + cls);
+    p.style.width = width + "px";
     p.style.height = height + "px";
     return p;
+  }
+  // A colour ([r, g, b]) for CSS, at `alpha` where one is given.
+  function rgb(c, alpha) {
+    return alpha == null ? "rgb(" + c.join(",") + ")" : "rgba(" + c.join(",") + "," + alpha + ")";
+  }
+  // `b` laid `k` over `a` (view.rs `over`).
+  function mix(a, b, k) {
+    return a.map(function (v, i) { return Math.round(v + (b[i] - v) * k); });
   }
 
   // How long ago `then` was at `now` (ms), as Glance says it (text.rs `since`): just now; minutes ago, within the hour;
@@ -198,100 +220,177 @@
     var ages = { shelf: [], notes: [] };
     var root = el("div", "gb");
     root.setAttribute("lang", lang === "en" ? "en" : "zh-CN");
+    // The page and the notes' view shown, kept as it is laid out anew for another look.
+    var shown = 0, notesShown = 0;
+    // The look it is laid out for, its measures, and what each part is laid out with (made anew with the look).
+    var look, t, glass, column, left, width, row, tall, height;
+    var figure, date, tabs, pill, tabButtons, view, probe, page, station, room, shows, showPill, showButtons;
 
-    // ---- the lanes' heights, as their blocks add up (view.rs `Block::height`) ----
-    var head = HEAD + HEAD_GAP;
-    var tall = {
-      time: PAD_TOP + head + PLOT + PAD_BOTTOM,
-      station: PAD_TOP + head + SHELF_GAP + STATION_TALL + PAD_BOTTOM,
-      notes: PAD_TOP + head + SHELF_GAP + NOTES_TALL + PAD_BOTTOM
-    };
-    var height = tall.time + GAP + tall.station + GAP + tall.notes;
+    // ---- the look's ways, as view.rs draws each skin's ----
+    // How round a note's card is (view.rs `note_radius`).
+    function noteRadius(small) {
+      return glass ? (small ? 10 : 12) : 6;
+    }
+    // How round a thing's plate is, its smaller side `small` (view.rs `face_round`).
+    function faceRound(small) {
+      return glass ? Math.max(4, Math.min(10, small / 5)) : look === "win11" ? 4 : 3;
+    }
+    // What is written on a note's card (view.rs `note_inks`): on glass the tint's ink, else the sheet's own.
+    function inks(colour) {
+      if (!glass) return { title: "var(--gb-text)", words: "var(--gb-text2)", faint: "var(--gb-text3)" };
+      var c = COLOURS[colour].ink;
+      return { title: "rgb(" + c + ")", words: "rgba(" + c + ",0.84)", faint: "rgba(" + c + ",0.7)" };
+    }
+    // A note's colour as a dot, its middle `middle` down from `y`, its left at `x` (view.rs `note_dot`), and the room it
+    // takes before its title.
+    function dot(host, colour, x, middle) {
+      var d = place(el("i", "gb-dot"), x, middle - 3.5);
+      d.style.background = rgb(COLOURS[colour].mark);
+      host.appendChild(d);
+      return 15;
+    }
+
+    // ---- laid out for the look ----
+    function build() {
+      look = document.documentElement.getAttribute("data-look");
+      t = LOOKS[look];
+      glass = look === "glass";
+      root.textContent = "";
+      ages = { shelf: [], notes: [] };
+      // The lanes' column beside the rail, inside the room round them all (view.rs `Layout::lanes`).
+      column = COLUMN - 2 * t.outer[1];
+      left = t.padX;
+      width = column - 2 * t.padX;
+      // A head's title's line (view.rs `paint_lane`, the head).
+      row = t.padTop + (HEAD - t.title) / 2 - 1;
+      // The lanes' heights, as their blocks add up (view.rs `Block::height`, `Lane::height`).
+      var head = HEAD + HEAD_GAP;
+      tall = {
+        time: t.padTop + head + PLOT + t.padBottom,
+        station: t.padTop + head + SHELF_GAP + STATION_TALL + t.padBottom,
+        notes: t.padTop + head + SHELF_GAP + NOTES_TALL + t.padBottom
+      };
+      height = tall.time + t.gap + tall.station + t.gap + tall.notes;
+      root.style.padding = t.outer[0] + "px " + t.outer[1] + "px " + t.outer[2] + "px";
+      root.style.gap = t.gap + "px";
+
+      rail();
+      var col = el("div", "gb-col");
+      col.style.width = column + "px";
+      col.style.gap = t.gap + "px";
+      root.appendChild(col);
+      col.appendChild(timeLane());
+      col.appendChild(stationLane());
+      col.appendChild(notesLane());
+
+      // (Till the page has laid the names out: about where the title's words' ink stands.)
+      layHead(row + 0.7 * t.title, row + 1.08 * t.title);
+      showPage(shown);
+      showNotes(notesShown);
+      tick();
+      measureInk();
+    }
+
+    // A lane's head: its title, and what is said after it, small.
+    function headline(lane, title) {
+      var h = place(el("div", "gb-headline"), left, row);
+      h.style.right = left + "px";
+      h.appendChild(el("span", "title", title));
+      var aside = el("span", "small");
+      h.appendChild(aside);
+      lane.appendChild(h);
+      return aside;
+    }
 
     // ---- quick launch, as the rail along the panel's edge ----
-    var rail = piece("gb-rail", height);
-    rail.setAttribute("role", "group");
-    rail.setAttribute("aria-label", w.quick);
-    var apps = place(el("div", "gb-apps"), 0, 8, RAIL_W, height - 16 - RAIL_FOOT);
-    ["folder", "browser", "calculator", "notebook", "terminal"].forEach(function (kind, at) {
-      var b = button("gb-app", w.apps[at]);
-      b.title = w.apps[at];
-      place(b, (RAIL_W - RAIL_CELL) / 2, at * RAIL_CELL);
-      b.appendChild(art(kind, RAIL_SIDE));
-      apps.appendChild(b);
-    });
-    // The place to add more: a plus in a dashed round.
-    var adder = button("gb-adder", w.add);
-    var inset = (RAIL_CELL - RAIL_SIDE) / 2;
-    place(adder, inset + (RAIL_W - RAIL_CELL) / 2, 5 * RAIL_CELL + inset);
-    var ring = RAIL_SIDE * 0.92, round = RAIL_SIDE * 0.26, ringAt = (RAIL_SIDE - ring) / 2;
-    var dashed = svg("svg", { width: RAIL_SIDE, height: RAIL_SIDE, "aria-hidden": "true", "class": "ic" });
-    dashed.style.left = "0px"; dashed.style.top = "0px";
-    dashed.appendChild(svg("rect", { x: ringAt, y: ringAt, width: ring, height: ring, rx: round, fill: "none", stroke: "currentColor", "stroke-width": 1.2, "stroke-dasharray": "2.4 2.4", "stroke-linecap": "butt" }));
-    adder.appendChild(dashed);
-    var plus = icon("add", RAIL_SIDE / 2, RAIL_SIDE / 2, RAIL_SIDE * 0.45);
-    plus.setAttribute("class", "ic plus");
-    adder.appendChild(plus);
-    apps.appendChild(adder);
-    rail.appendChild(apps);
-    // Its foot: the pin and the settings, as the bar has them.
-    [["pin", w.pin], ["settings", w.settings]].forEach(function (b, at) {
-      var foot = button("gb-btn gb-foot", b[1]);
-      place(foot, (RAIL_W - BUTTON) / 2, height - 8 - (RAIL_FOOT - 8) + at * (BUTTON + BUTTON_GAP));
-      foot.appendChild(icon(b[0], BUTTON / 2, BUTTON / 2, 16));
-      rail.appendChild(foot);
-    });
-    root.appendChild(rail);
-
-    var col = el("div", "gb-col");
-    root.appendChild(col);
+    function rail() {
+      var bar = piece("gb-rail", RAIL_W, height);
+      bar.setAttribute("role", "group");
+      bar.setAttribute("aria-label", w.quick);
+      var apps = place(el("div", "gb-apps"), 0, 8, RAIL_W, height - 16 - RAIL_FOOT);
+      ["folder", "browser", "calculator", "notebook", "terminal"].forEach(function (kind, at) {
+        var b = button("gb-app", w.apps[at]);
+        b.title = w.apps[at];
+        place(b, (RAIL_W - RAIL_CELL) / 2, at * RAIL_CELL);
+        b.appendChild(art(kind, RAIL_SIDE));
+        apps.appendChild(b);
+      });
+      // The place to add more: a plus in a dashed ring, its corners rounded as the skin rounds a small square
+      // (view.rs `paint_adder`).
+      var adder = button("gb-adder", w.add);
+      var inset = (RAIL_CELL - RAIL_SIDE) / 2;
+      place(adder, inset + (RAIL_W - RAIL_CELL) / 2, 5 * RAIL_CELL + inset);
+      var ring = RAIL_SIDE * 0.92, round = glass ? RAIL_SIDE * 0.26 : look === "win11" ? 4 : 6, ringAt = (RAIL_SIDE - ring) / 2;
+      var dashed = svg("svg", { width: RAIL_SIDE, height: RAIL_SIDE, "aria-hidden": "true", "class": "ic" });
+      dashed.style.left = "0px"; dashed.style.top = "0px";
+      dashed.appendChild(svg("rect", { x: ringAt, y: ringAt, width: ring, height: ring, rx: round, fill: "none", stroke: "currentColor", "stroke-width": 1.2, "stroke-dasharray": "2.4 2.4", "stroke-linecap": "butt" }));
+      adder.appendChild(dashed);
+      var plus = icon("add", RAIL_SIDE / 2, RAIL_SIDE / 2, RAIL_SIDE * 0.45);
+      plus.setAttribute("class", "ic plus");
+      adder.appendChild(plus);
+      apps.appendChild(adder);
+      bar.appendChild(apps);
+      // Its foot: the pin and the settings, as the bar has them.
+      [["pin", w.pin], ["settings", w.settings]].forEach(function (b, at) {
+        var foot = button("gb-btn gb-foot", b[1]);
+        place(foot, (RAIL_W - BUTTON) / 2, height - 8 - (RAIL_FOOT - 8) + at * (BUTTON + BUTTON_GAP));
+        foot.appendChild(icon(b[0], BUTTON / 2, BUTTON / 2, 16));
+        bar.appendChild(foot);
+      });
+      root.appendChild(bar);
+    }
 
     // ---- the time: its name and the day, the time of day standing on the lane's foot ----
-    var time = piece("gb-lane", tall.time);
-    var timeHead = el("div", "gb-headline");
-    timeHead.appendChild(el("span", "title", w.time));
-    var date = el("span", "small");
-    timeHead.appendChild(date);
-    time.appendChild(timeHead);
-    var figure = el("div", "gb-figure");
-    // (Its line box FIGURE_LINE of its size, on the bottom of the readout's room: view.rs `text_on_line`.)
-    var line = FIGURE * FIGURE_LINE;
-    figure.style.top = (PAD_TOP + head + PLOT - line) + "px";
-    time.appendChild(figure);
-    col.appendChild(time);
+    function timeLane() {
+      var lane = piece("gb-lane", column, tall.time);
+      date = headline(lane, w.time);
+      figure = el("div", "gb-figure");
+      // (Its line box `figureLine` of its size, on the bottom of the readout's room: view.rs `text_on_line`.)
+      var line = t.figure * t.figureLine;
+      place(figure, left, t.padTop + HEAD + HEAD_GAP + PLOT - line);
+      figure.style.fontSize = t.figure + "px";
+      figure.style.lineHeight = line + "px";
+      lane.appendChild(figure);
+      return lane;
+    }
 
     // ---- the station ----
-    var station = piece("gb-lane", tall.station);
-    var tabs = el("div", "gb-tabs");
-    tabs.setAttribute("role", "tablist");
-    var pill = el("div", "gb-pill");
-    tabs.appendChild(pill);
-    var pages = [{ name: w.station, count: "5" }, { name: w.copied, count: "" }];
-    var tabButtons = pages.map(function (page, at) {
-      var b = el("button", "gb-tab");
-      b.type = "button";
-      b.setAttribute("role", "tab");
-      b.appendChild(el("span", "n", page.name));
-      if (page.count) b.appendChild(el("span", "c", page.count));
-      b.addEventListener("click", function () { showPage(at); });
-      tabs.appendChild(b);
-      return b;
-    });
-    station.appendChild(tabs);
-    var view = button("gb-view", w.view);
-    view.appendChild(icon("grid", MEDIA_ROW / 2, 0, 16));
-    view.appendChild(icon("chevron", MEDIA_ROW + 3, 0.5, 10));
-    station.appendChild(view);
-    // (The ink of the pages' names, measured where the page has laid them out: the pill and the view button stand about
-    // its middle, as Glance's do; see `paint_tabs`.)
-    var probe = text(w.inkProbe, "title", PAD_X, PAD_TOP + (HEAD - 13) / 2 - 1);
-    probe.style.visibility = "hidden";
-    station.appendChild(probe);
-    var page = el("div", "gb-page");
-    station.appendChild(page);
-    col.appendChild(station);
+    function stationLane() {
+      station = piece("gb-lane", column, tall.station);
+      var headTall = t.padTop + HEAD + HEAD_GAP;
+      tabs = place(el("div", "gb-tabs"), left - t.tabPad, 0, null, headTall);
+      tabs.style.gap = t.tabGap + "px";
+      tabs.setAttribute("role", "tablist");
+      pill = el("div", "gb-pill");
+      tabs.appendChild(pill);
+      var pages = [{ name: w.station, count: "5" }, { name: w.copied, count: "" }];
+      tabButtons = pages.map(function (one, at) {
+        var b = el("button", "gb-tab");
+        b.type = "button";
+        b.setAttribute("role", "tab");
+        b.style.height = headTall + "px";
+        b.style.padding = row + "px " + t.tabPad + "px 0";
+        b.appendChild(el("span", "n", one.name));
+        if (one.count) b.appendChild(el("span", "c", one.count));
+        b.addEventListener("click", function () { showPage(at); });
+        tabs.appendChild(b);
+        return b;
+      });
+      station.appendChild(tabs);
+      view = place(button("gb-view", w.view), left + width - (MEDIA_ROW + 12), 0, MEDIA_ROW + 12, headTall);
+      view.appendChild(icon("grid", MEDIA_ROW / 2, 0, 16));
+      view.appendChild(icon("chevron", MEDIA_ROW + 3, 0.5, 10));
+      station.appendChild(view);
+      // (The ink of the pages' names, measured where the page has laid them out: the pill and the view button stand
+      // about its middle, the mark under the chosen one so far under its foot, as Glance's do (see `paint_tabs`).)
+      probe = text(w.inkProbe, "title", left, row);
+      probe.style.visibility = "hidden";
+      station.appendChild(probe);
+      page = place(el("div", "gb-page"), left - 4, headTall + SHELF_GAP - 2, width + 8, STATION_TALL + 4);
+      station.appendChild(page);
+      return station;
+    }
 
-    var shown = 0;
     function showPage(at) {
       shown = at;
       tabButtons.forEach(function (b, i) { b.setAttribute("aria-selected", i === at ? "true" : "false"); });
@@ -300,11 +399,15 @@
       ages.shelf = [];
       if (at === 0) shelf(); else copies();
     }
+    // The chosen page's mark, as the skin marks what is chosen (view.rs `glass_choice`, `choice_mark`): glass's a pill
+    // round it, Windows 11's a short bar of its accent under its middle, chart paper's a line of ink under all of it.
     function placePill() {
       var b = tabButtons[shown];
       if (!b.offsetWidth) return;
-      pill.style.left = b.offsetLeft + "px";
-      pill.style.width = b.offsetWidth + "px";
+      var x = b.offsetLeft, wide = b.offsetWidth;
+      if (look === "win11") { x += wide / 2 - 8; wide = 16; }
+      pill.style.left = x + "px";
+      pill.style.width = wide + "px";
     }
     function measureInk() {
       if (!probe.offsetHeight) return;
@@ -318,12 +421,13 @@
       var style = getComputedStyle(probe);
       ctx.font = style.fontWeight + " " + style.fontSize + " " + style.fontFamily;
       var m = ctx.measureText(w.inkProbe);
-      layHead(PAD_TOP + (HEAD - 13) / 2 - 1 + baseline + (m.actualBoundingBoxDescent - m.actualBoundingBoxAscent) / 2);
+      layHead(row + baseline + (m.actualBoundingBoxDescent - m.actualBoundingBoxAscent) / 2, row + baseline + m.actualBoundingBoxDescent);
     }
-    // The pill and the view button about `middle`, the middle of the names' ink.
-    function layHead(middle) {
+    // The pill and the view button about `middle`, the middle of the names' ink, the mark under them so far under
+    // `foot`, the ink's foot (view.rs `paint_tabs`).
+    function layHead(middle, foot) {
       station.style.setProperty("--gb-row", (middle - TAB_H / 2) + "px");
-      pill.style.top = (middle - TAB_H / 2) + "px";
+      pill.style.top = (glass ? middle - TAB_H / 2 : foot + 4) + "px";
       Array.prototype.forEach.call(view.querySelectorAll(".ic"), function (s, i) {
         var size = i ? 10 : 16;
         s.style.top = (middle + (i ? 0.5 : 0) - size / 2) + "px";
@@ -340,7 +444,6 @@
       { face: "picture", name: w.things.picture, kind: w.file, ago: 300 }
     ];
     function shelf() {
-      var width = COLUMN - 2 * PAD_X;
       var across = Math.max(1, Math.min(4, Math.floor((width + TILE_GAP) / (TILE_W + 24 + TILE_GAP))));
       var cw = (width - (across - 1) * TILE_GAP) / across;
       var plate = cw * PLATE;
@@ -349,6 +452,8 @@
       things.forEach(function (thing, at) {
         // (Within the page's clip, which reaches 4 past the room's sides and 2 above it.)
         var tile = place(el("div", "gb-tile"), 4 + (at % across) * (cw + gapX), 2 + CARDS_LEAD + Math.floor(at / across) * (ch + TILE_GAP), cw, ch);
+        // (Under the pointer, a plate round it, concentric with its face's on glass: view.rs `plate_round`.)
+        if (glass) tile.style.setProperty("--gb-round", (faceRound(Math.min(cw, plate)) + 4) + "px");
         var face = place(el("div", "gb-face"), 0, 0, cw, plate);
         tile.appendChild(face);
         paintFace(face, thing, cw, plate);
@@ -367,7 +472,7 @@
     // another file's icon standing on the card; how many more files are with it; a pin where it is pinned.
     function paintFace(face, thing, fw, fh) {
       var small = Math.min(fw, fh);
-      var radius = Math.max(4, Math.min(10, small / 5));
+      var radius = faceRound(small);
       var plate = function () {
         var p = el("div", "gb-plate");
         p.style.borderRadius = radius + "px";
@@ -407,9 +512,9 @@
         var lines = Math.floor((fh - 10) / step);
         thing.text.split("\n").filter(function (l) { return l.trim(); }).slice(0, lines).forEach(function (words, at) {
           var room = fw - 10 - (at === 0 && thing.pinned ? 14 : 0);
-          var t = text(words.trim(), "", 5, 5 + at * step, room);
-          t.style.fontSize = size + "px";
-          p.appendChild(t);
+          var said = text(words.trim(), "", 5, 5 + at * step, room);
+          said.style.fontSize = size + "px";
+          p.appendChild(said);
         });
       }
       if (thing.pinned && small >= 40) {
@@ -421,56 +526,64 @@
     // What was copied lately: nothing yet.
     function copies() {
       var middle = 2 + STATION_TALL / 2;
-      var mark = icon("clipboard", 4 + (COLUMN - 2 * PAD_X) / 2, middle - 12, 22);
+      var mark = icon("clipboard", 4 + width / 2, middle - 12, 22);
       mark.style.color = "var(--gb-text3)";
       page.appendChild(mark);
       var said = text(w.copiedEmpty, "small gb-empty", 4, middle + 4);
-      said.style.width = (COLUMN - 2 * PAD_X) + "px";
+      said.style.width = width + "px";
       page.appendChild(said);
     }
 
     // ---- the notes ----
-    var notesLane = piece("gb-lane", tall.notes);
-    var notesHead = el("div", "gb-headline");
-    notesHead.appendChild(el("span", "title", w.notes));
-    notesHead.appendChild(el("span", "small", String(w.notesHeld.length)));
-    notesLane.appendChild(notesHead);
-    var left = PAD_X, width = COLUMN - 2 * PAD_X;
-    var buttonTop = PAD_TOP + (HEAD - MEDIA_ROW) / 2;
-    var cell = MEDIA_ROW + 2;
-    var x0 = left + width - MEDIA_ROW - 8 - (3 * cell + 4);
-    var shows = place(el("div", "gb-shows"), x0 + 2, buttonTop, 3 * cell, MEDIA_ROW);
-    shows.setAttribute("role", "group");
-    var showPill = el("div", "gb-pill");
-    showPill.style.top = "0px";
-    shows.appendChild(showPill);
-    var showButtons = ["layers", "grid", "list"].map(function (name, at) {
-      var b = button("gb-show", w.shows[at]);
-      b.title = w.shows[at];
-      b.style.left = (at * cell) + "px";
-      b.appendChild(icon(name, cell / 2, MEDIA_ROW / 2, 16));
-      b.addEventListener("click", function () { showNotes(at); });
-      shows.appendChild(b);
-      return b;
-    });
-    notesLane.appendChild(shows);
-    var newNote = button("gb-btn gb-new", w.newNote);
-    newNote.appendChild(icon("add", MEDIA_ROW / 2, MEDIA_ROW / 2, 15));
-    notesLane.appendChild(newNote);
-    // (The notes' clip: room either side and under for the cards' shadows.)
-    var notesTop = PAD_TOP + head + SHELF_GAP;
-    var room = place(el("div", "gb-notes"), left - NOTE_REACH, notesTop - 2, width + 2 * NOTE_REACH, NOTES_TALL + NOTE_REACH);
-    notesLane.appendChild(room);
-    col.appendChild(notesLane);
+    // (Glass's cards' shadows reach past them: room for them either side, and under (view.rs `paint_notes`).)
+    var reach;
+    function notesLane() {
+      var lane = piece("gb-lane", column, tall.notes);
+      headline(lane, w.notes).textContent = String(w.notesHeld.length);
+      var buttonTop = t.padTop + (HEAD - MEDIA_ROW) / 2;
+      var cell = MEDIA_ROW + 2;
+      var x0 = left + width - MEDIA_ROW - 8 - (3 * cell + 4);
+      shows = place(el("div", "gb-shows"), x0 + 2, buttonTop, 3 * cell, MEDIA_ROW);
+      shows.setAttribute("role", "group");
+      showPill = el("div", "gb-pill");
+      shows.appendChild(showPill);
+      showButtons = ["layers", "grid", "list"].map(function (name, at) {
+        var b = button("gb-show", w.shows[at]);
+        b.title = w.shows[at];
+        b.style.left = (at * cell) + "px";
+        b.appendChild(icon(name, cell / 2, MEDIA_ROW / 2, 16));
+        b.addEventListener("click", function () { showNotes(at); });
+        shows.appendChild(b);
+        return b;
+      });
+      lane.appendChild(shows);
+      var newNote = place(button("gb-btn gb-new", w.newNote), left + width - MEDIA_ROW, buttonTop, MEDIA_ROW, MEDIA_ROW);
+      newNote.appendChild(icon("add", MEDIA_ROW / 2, MEDIA_ROW / 2, 15));
+      lane.appendChild(newNote);
+      reach = glass ? 12 : 4;
+      var notesTop = t.padTop + HEAD + HEAD_GAP + SHELF_GAP;
+      room = place(el("div", "gb-notes"), left - reach, notesTop - 2, width + 2 * reach, NOTES_TALL + reach);
+      lane.appendChild(room);
+      return lane;
+    }
 
     // The notes, the last written first.
     var notes = w.notesHeld;
-    var notesShown = 0;
     function showNotes(at) {
       notesShown = at;
       showButtons.forEach(function (b, i) { b.setAttribute("aria-pressed", i === at ? "true" : "false"); });
-      showPill.style.left = (at * cell) + "px";
-      showPill.style.width = cell + "px";
+      // The view shown marked as the station's page is (view.rs `paint_lane`, the notes' head): on glass a pill round
+      // it, else a mark under it (`choice_mark`, its bar 14 long, chart paper's line 4 in from its ends).
+      var cell = MEDIA_ROW + 2;
+      if (glass) {
+        showPill.style.left = (at * cell) + "px";
+        showPill.style.width = cell + "px";
+        showPill.style.top = "0px";
+      } else {
+        showPill.style.left = (look === "win11" ? at * cell + cell / 2 - 7 : at * cell + 4) + "px";
+        showPill.style.width = (look === "win11" ? 14 : cell - 8) + "px";
+        showPill.style.top = (MEDIA_ROW + 1) + "px";
+      }
       paintNotes();
     }
     // A note's coloured glass: a pane of white under its tint (in the dark), as view.rs `note_card_fill` lays it.
@@ -478,14 +591,14 @@
       var c = COLOURS[colour].tint;
       return "linear-gradient(rgba(" + c + ",0.58),rgba(" + c + ",0.58)),rgba(255,255,255,0.55)";
     }
-    function inks(colour) {
-      var c = COLOURS[colour].ink;
-      return { title: "rgb(" + c + ")", words: "rgba(" + c + ",0.84)", faint: "rgba(" + c + ",0.7)" };
-    }
-    // A card at (x, y), w × h, in the notes' room; over it, frosted, the plain panes of `below` (each {colour, x, y, w, h}).
+    // A card at (x, y), w × h, in the notes' room, as the skin draws it (view.rs `note_card_ground`): glass's of the
+    // note's coloured glass, over it, frosted, the plain panes of `below` (each {colour, x, y, w, h}). Windows 11's its
+    // sheet a little of the colour, a band of it along its top. Chart paper's its paper.
     function card(note, x, y, cw, chh, small, below) {
-      var c = place(el("div", "gb-card" + (small ? " small" : "")), x + NOTE_REACH, y + 2, cw, chh);
-      if (below && below.length) {
+      var c = place(el("div", "gb-card"), x + reach, y + 2, cw, chh);
+      c.style.borderRadius = noteRadius(small) + "px";
+      c.style.setProperty("--mark", COLOURS[note.colour].mark.join(","));
+      if (glass && below && below.length) {
         var under = place(el("div", "under"), 0, 0, cw, chh);
         below.forEach(function (b) {
           var pane = place(el("div"), b.x - x, b.y - y, b.w, b.h);
@@ -495,8 +608,15 @@
         c.appendChild(under);
       }
       var tint = el("div", "tint");
-      tint.style.background = ground(note.colour);
+      if (glass) tint.style.background = ground(note.colour);
+      else if (look === "win11") tint.style.backgroundColor = rgb(mix(FLUENT_NOTE, COLOURS[note.colour].mark, 0.16), 0.94);
+      else tint.style.backgroundColor = rgb(mix(PAPER, PAPER_INK, 0.08));
       c.appendChild(tint);
+      if (look === "win11") {
+        var band = el("div", "band");
+        band.style.background = rgb(COLOURS[note.colour].mark);
+        c.appendChild(band);
+      }
       return c;
     }
     function paintNotes() {
@@ -507,11 +627,15 @@
       else list();
       sayAges();
     }
-    // The others' strips stacked over the last written, each narrower the farther back it lies; the last written whole.
+    // (Under Windows 11's band, what is on its card a little lower.)
+    function banded() { return look === "win11" ? 2 : 0; }
+    // The others' strips stacked over the last written (on glass and chart paper each narrower the farther back it
+    // lies), the last written whole.
     function deck() {
       var others = notes.length - 1;
       var stack = Math.min(others * NOTE_STRIP, Math.max(0, NOTES_TALL - NOTE_CARD));
-      var radius = 12, foot = radius + 6, recede = radius * 2 / 3;
+      var radius = noteRadius(false), foot = radius + 6;
+      var recede = glass ? radius * 2 / 3 : look === "paper" ? 8 : 0;
       var stripY = function (at) { return (at - 1) * NOTE_STRIP; };
       var across = function (at) {
         var back = recede * Math.max(0, (stack - stripY(at)) / NOTE_STRIP);
@@ -520,59 +644,75 @@
       var plain = function (at) { var a = across(at); return { colour: notes[at].colour, x: a.x, y: stripY(at), w: a.w, h: NOTE_STRIP + foot }; };
       for (var at = 1; at <= others; at++) {
         if (stripY(at) > stack) break;
-        // Up to the pane lying on it: under that it is seen only through it, frosted.
-        var covered = at + 1 < notes.length ? stripY(at + 1) : stack;
-        var clip = place(el("div", "gb-clip"), 0, 0, width + 2 * NOTE_REACH, covered + 2);
         var a = across(at);
         var below = [];
         for (var b = 1; b < at; b++) below.push(plain(b));
         var strip = card(notes[at], a.x, stripY(at), a.w, NOTE_STRIP + foot, false, below);
         strip.classList.add("strip");
         var ink = inks(notes[at].colour);
-        var row = el("div", "gb-strip ink");
+        var line = el("div", "gb-strip ink");
+        line.style.top = ((NOTE_STRIP - LINE) / 2 + banded()) + "px";
+        if (look === "paper") dot(line, notes[at].colour, 14, LINE / 2);
         var title = el("b", null, notes[at].title);
         title.style.color = ink.title;
+        if (look === "paper") title.style.marginLeft = "15px";
         var when = el("span");
         when.style.color = ink.faint;
         ages.notes.push([when, notes[at].ago, ""]);
-        row.appendChild(title);
-        row.appendChild(when);
-        strip.appendChild(row);
+        line.appendChild(title);
+        line.appendChild(when);
+        strip.appendChild(line);
         strip.title = notes[at].title;
-        clip.appendChild(strip);
-        room.appendChild(clip);
+        // On glass, up to the pane lying on it: under that it is seen only through it, frosted.
+        if (glass) {
+          var covered = at + 1 < notes.length ? stripY(at + 1) : stack;
+          var clip = place(el("div", "gb-clip"), 0, 0, width + 2 * reach, covered + 2);
+          clip.appendChild(strip);
+          room.appendChild(clip);
+        } else room.appendChild(strip);
       }
       var shownStrips = [];
       for (var s = 1; s <= others && stripY(s) <= stack; s++) shownStrips.push(plain(s));
       var first = card(notes[0], 0, stack, width, NOTES_TALL - stack, false, shownStrips);
       var fi = inks(notes[0].colour);
-      var x = 16, top = 14, words = width - x - 14;
-      var said = text("", "small ink", x, top + 1, words);
-      said.style.color = fi.faint;
+      // (view.rs `paint_front_note`: before when it was written, chart paper's dot, Windows 11's a note's mark.)
+      var x = glass ? 16 : 14, top = (glass ? 14 : 12) + banded(), words = width - x - 14;
+      var lead = 0;
+      if (look === "paper") lead = dot(first, notes[0].colour, x, top + LINE / 2);
+      else if (look === "win11") {
+        var mark = icon("file", x + 6, top + LINE / 2, 12);
+        mark.style.color = "var(--gb-text3)";
+        first.appendChild(mark);
+        lead = 18;
+      }
+      var said = text("", "small ink", x + lead, top + 1, words - lead);
+      said.style.color = look === "win11" ? "var(--gb-text2)" : fi.faint;
       ages.notes.push([said, notes[0].ago, ""]);
       first.appendChild(said);
+      var size = t.title + 1;
       var heading = text(notes[0].title, "ink", x, top + LINE + 6, words);
-      heading.style.cssText += ";font-size:14px;font-weight:700;color:" + fi.title;
+      heading.style.cssText += ";font-size:" + size + "px;font-weight:700;color:" + fi.title;
       first.appendChild(heading);
       notes[0].lines.forEach(function (l, i) {
-        var y = top + LINE + 6 + 14 * 1.4 + 4 + i * (LINE + 4);
+        var y = top + LINE + 6 + size * 1.4 + 4 + i * (LINE + 4);
         if (y + LINE > NOTES_TALL - stack - 8) return;
-        var t = text(l, "ink", x, y, words);
-        t.style.color = fi.words;
-        first.appendChild(t);
+        var lt = text(l, "ink", x, y, words);
+        lt.style.color = fi.words;
+        first.appendChild(lt);
       });
       room.appendChild(first);
     }
-    // Two across, each its title, its first lines and when it was written.
+    // Two across, each its title (after its dot, on chart paper), its first lines and when it was written.
     function cards() {
       var cw = (width - NOTE_CARDS_GAP) / 2;
       notes.forEach(function (note, at) {
         var c = card(note, (at % 2) * (cw + NOTE_CARDS_GAP), Math.floor(at / 2) * (NOTE_CARD + NOTE_CARDS_GAP), cw, NOTE_CARD, true);
         var ink = inks(note.colour);
-        var inner = 13, top = 10, wordsW = cw - inner - 10, whenY = NOTE_CARD - LINE - 8;
-        var t = text(note.title, "ink", inner, top, wordsW);
-        t.style.cssText += ";font-weight:700;color:" + ink.title;
-        c.appendChild(t);
+        var inner = glass ? 13 : 11, top = 10 + banded(), wordsW = cw - inner - 10, whenY = NOTE_CARD - LINE - 8;
+        var lead = look === "paper" ? dot(c, note.colour, inner, top + LINE / 2) : 0;
+        var tt = text(note.title, "ink", inner + lead, top, wordsW - lead);
+        tt.style.cssText += ";font-weight:700;color:" + ink.title;
+        c.appendChild(tt);
         note.lines.forEach(function (l, i) {
           var y = top + LINE + 6 + i * (LINE + 1);
           if (y + LINE > whenY - 2) return;
@@ -588,15 +728,18 @@
         room.appendChild(c);
       });
     }
-    // A row each: its colour's dot, its title over its first line, when it was written at its end.
+    // A row each: its colour (Windows 11's a band of it, the others' a dot), its title over its first line, when it was
+    // written at its end.
     function list() {
       notes.forEach(function (note, at) {
-        var r = place(el("div", "gb-row"), NOTE_REACH, 2 + at * NOTE_ROW, width, NOTE_ROW);
-        var dot = el("div", "dot");
-        dot.style.background = COLOURS[note.colour].mark;
-        dot.style.top = (4 + LINE / 2 - 3.5) + "px";
-        r.appendChild(dot);
+        var r = place(el("div", "gb-row"), reach, 2 + at * NOTE_ROW, width, NOTE_ROW);
+        if (look === "win11") {
+          var band = place(el("div", "band"), 0, 7, 4, NOTE_ROW - 14);
+          band.style.background = rgb(COLOURS[note.colour].mark);
+          r.appendChild(band);
+        } else dot(r, note.colour, 0, (note.lines.length ? 4 : (NOTE_ROW - LINE) / 2) + LINE / 2);
         var words = el("div", "words");
+        words.style.left = (look === "win11" ? 14 : 15) + "px";
         var lines = el("div", "lines");
         lines.appendChild(el("div", null, note.title));
         if (note.lines.length) lines.appendChild(el("div", null, note.lines[0]));
@@ -624,24 +767,21 @@
       date.textContent = w.date(now);
       sayAges();
     }
-    tick();
+    build();
     setTimeout(function step() {
       tick();
       setTimeout(step, 1000 - (Date.now() % 1000) + 5);
     }, 1000 - (made % 1000) + 5);
 
-    // (Till the page has laid the names out: about where 13 DIP words' ink stands.)
-    layHead(PAD_TOP + (HEAD - 13) / 2 - 1 + 9);
-    showPage(0);
-    showNotes(0);
-    // Laid out once it is on the page, and again as its faces come.
-    if (window.ResizeObserver) new ResizeObserver(measureInk).observe(tabs);
+    // Laid out once it is on the page, and again as its faces come, and anew as the look changes.
+    if (window.ResizeObserver) new ResizeObserver(function () { measureInk(); }).observe(root);
     if (document.fonts) {
       document.fonts.ready.then(measureInk);
       document.fonts.addEventListener("loadingdone", measureInk);
     }
+    new MutationObserver(build).observe(document.documentElement, { attributes: true, attributeFilter: ["data-look"] });
 
-    return { node: root, width: RAIL_W + GAP + COLUMN, height: height };
+    return { node: root };
   }
 
   // Where the site's assets are, from this script's own address.

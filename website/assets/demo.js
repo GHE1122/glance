@@ -200,11 +200,13 @@
     var updates = [];
     function lane(cls, col) { var l = el("section", "lane " + cls); cols[col].appendChild(l); return l; }
 
+    // Each lane in its ink on glass (theme.rs `glass`): the network's second trace its first's, fainter. The other
+    // looks draw them all in their one ink (site.css).
     // CPU
     var cpu = lane("cpu", 0);
     var ch = head(T.cpu, "AMD Ryzen 9 9950X");
     var cb = big();
-    var cc = chart("#5aa9ff");
+    var cc = chart("#3d9bff");
     var top = el("div", "top");
     top.appendChild(cb.node);
     top.appendChild(cc.node);
@@ -226,13 +228,13 @@
     var gpu = lane("gpu", 0);
     var gh = head(T.gpu, "NVIDIA GeForce RTX 5070 Ti");
     var gb = big();
-    var gc = chart("#41d27a");
+    var gc = chart("#30d158");
     var gtop = el("div", "top");
     gtop.appendChild(gb.node);
     gtop.appendChild(gc.node);
     var vline = el("div", "vram");
     vline.appendChild(el("span", "k", T.vram));
-    var vb = bar("#41d27a");
+    var vb = bar("#30d158");
     vline.appendChild(vb.node);
     var vt = el("span", "v");
     vline.appendChild(vt);
@@ -253,7 +255,7 @@
     var mem = lane("mem", 1);
     var mh = head(T.memory, "2 × 32 GB DDR5-6000");
     var mb = big();
-    var mc = chart("#ffad42");
+    var mc = chart("#ff9f0a");
     var mtop = el("div", "top");
     mtop.appendChild(mb.node);
     mtop.appendChild(mc.node);
@@ -276,8 +278,8 @@
     var uv = el("dd");
     legend.appendChild(uv);
     var nwrap = el("div", "pair");
-    var dc = chart("#c58bff");
-    var uc = chart("#5fd6e6");
+    var dc = chart("#c77dff");
+    var uc = chart("rgba(199, 125, 255, 0.55)");
     nwrap.appendChild(dc.node);
     nwrap.appendChild(uc.node);
     nrow.appendChild(legend);
@@ -340,16 +342,8 @@
   });
   if (!panels.length) return;
 
-  // What else draws the readings (the widget: see widget.js).
-  var others = [];
-  window.GlanceDemo = {
-    readings: R, el: el, svg: svg, chart: chart, words: T, rate: rate,
-    onTick: function (f) { others.push(f); }
-  };
-
   function refresh() {
     panels.forEach(function (p) { p.update(); });
-    others.forEach(function (f) { f(); });
   }
   // A minute of readings already behind the charts, as in a panel just opened.
   for (var i = 0; i < HISTORY; i++) step();

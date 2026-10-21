@@ -17,6 +17,9 @@
   var GD = window.GlanceDesk = window.GlanceDesk || {};
 
   var SW = 1440, SH = 900, BAR = 48, WORK = SH - BAR, GAP = 10;
+  // The gap between an edge's panel and the screen edge, in each look (theme.rs `inset`): chart paper's slab lies flush
+  // with it.
+  var INSET = { paper: 0, glass: 10, win11: 12 };
   // How long an edge's panel takes to slide out and back (s), and how long
   // the pointer may be away from it before it goes (ms), as Glance's.
   var SLIDE = 0.3, AWAY = 220;
@@ -187,10 +190,14 @@
     screen.style.transform = "scale(" + k + ")";
     if (full) full.resize();
   }
+  // (Placed by its left and top, not moved by a transform: a transform would make the edge a group of its own, and
+  // Windows 11's sheet's luminosity layer would blend with nothing under it but the sheet, not the desktop.)
   function placeEdge(side, p) {
     var el = edges[side], w = el.offsetWidth, h = el.offsetHeight, e = out(p);
-    var x = side === "right" ? SW - (w + GAP) * e : -w + (w + GAP) * e;
-    el.style.transform = "translate(" + x.toFixed(2) + "px," + Math.max(GAP, (WORK - h) / 2).toFixed(2) + "px)";
+    var inset = INSET[root.getAttribute("data-look")];
+    var x = side === "right" ? SW - (w + inset) * e : -w + (w + inset) * e;
+    el.style.left = x.toFixed(2) + "px";
+    el.style.top = Math.max(GAP, (WORK - h) / 2).toFixed(2) + "px";
     el.style.visibility = p > 0 ? "visible" : "hidden";
   }
   // Where a widget at `box` has its buttons' row, as Glance puts it (widget.rs `rack`): over its right end (under it,
@@ -353,8 +360,7 @@
     return { x: (e.clientX - r.left) / k, y: (e.clientY - r.top) / k };
   }
   function rectOf(el) {
-    var tr = new DOMMatrixReadOnly(getComputedStyle(el).transform);
-    return { x: tr.m41, y: tr.m42, w: el.offsetWidth, h: el.offsetHeight };
+    return { x: parseFloat(el.style.left), y: parseFloat(el.style.top), w: el.offsetWidth, h: el.offsetHeight };
   }
   function near(p, r, by) { return p.x >= r.x - by && p.x < r.x + r.w + by && p.y >= r.y - by && p.y < r.y + r.h + by; }
   function within(p, b) { return b && p.x >= b.x && p.x < b.x + b.w && p.y >= b.y && p.y < b.y + b.h; }
