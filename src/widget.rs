@@ -439,6 +439,17 @@ impl crate::ui::life::Lives for Widget {
     }
 }
 
+impl Widget {
+    /// What it keeps of the desktop behind it let go of (its skin does not see it): its scene, what was taken, what
+    /// is awaited (made again as a skin that sees it is chosen, as for one that never saw it).
+    fn unsee(&mut self) {
+        self.backdrop = None;
+        self.behind = None;
+        self.pending = None;
+        self.look_again = None;
+    }
+}
+
 struct Widget {
     window: Window,
     gfx: Rc<Gfx>,
@@ -1923,6 +1934,11 @@ impl Widgets {
             let through = widget.click_through && !widget.reached;
             widget.window.set_click_through(through);
             let hidden = widget.game_only && !playing;
+            // A skin that does not see the desktop (or what it shows is not in the skin): nothing of it kept, shown or
+            // hidden.
+            if !(look.skin.sees_backdrop() && widget.content.skinned()) {
+                widget.unsee();
+            }
             if hidden {
                 widget.window.hide();
                 // (Nothing behind it looked at meanwhile: as it shows again, again.)
@@ -3286,6 +3302,11 @@ impl Widget {
                 };
                 self.zoom = shown.zoom;
                 self.shown = shown.size;
+                // The workbench's sized by hand while still turning: the turn ends at once (see `turns_into`).
+                if readings.workbench && sized_to.is_some() && readings.morph.take().is_some() {
+                    readings.drawn.clear();
+                    readings.morph_layer.release();
+                }
                 // Another layout: what showed turns into it, from where it is now if
                 // it was still turning (see `turns_into`).
                 if let Some(last) = readings.last.take().filter(|last| turns_into(last, &shown, readings.workbench, sized_to.is_some(), &theme)) {
@@ -3443,9 +3464,7 @@ impl Widget {
         let sees = look.skin.sees_backdrop() && self.content.skinned();
         let live = look.live && sees;
         if !sees {
-            self.backdrop = None;
-            self.pending = None;
-            self.look_again = None;
+            self.unsee();
         }
         // A frame of it, come.
         self.collect(live, px);

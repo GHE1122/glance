@@ -832,9 +832,11 @@ fn stuck_note_tall(view: crate::settings::NotesView, card: &NoteCard) -> f32 {
 }
 
 /// How wide a note stuck on the desktop is made (see `stuck_note_lane`): as its card is in the panel's notes lane, in
-/// `skin`, as the notes show (`view`): one of the cards two across, or the lane's width.
+/// `skin`, as the notes show (`view`): one of the cards two across, or the lane's width (inside the panel's room round
+/// its lanes, and the lane's own, as `Layout::lanes` and `paint_lane` lay it out).
 pub fn stuck_note_width(skin: Skin, view: crate::settings::NotesView) -> f32 {
-    let inner = COLUMN_WIDTH - 2.0 * Theme::new(skin, false).pad_x;
+    let theme = Theme::new(skin, false);
+    let inner = COLUMN_WIDTH - 2.0 * theme.outer.1 - 2.0 * theme.pad_x;
     match view {
         crate::settings::NotesView::Cards => (inner - NOTE_CARDS_GAP) / 2.0,
         crate::settings::NotesView::List | crate::settings::NotesView::Deck => inner,
@@ -6470,9 +6472,11 @@ six".into()));
             for view in [NotesView::Cards, NotesView::List, NotesView::Deck] {
                 // In the panel's lane: where the note's card is, and what is drawn of it.
                 let lane = Lane { id: "notes".into(), blocks: vec![head("Notes", String::from("1"), "", false), Block::Notes { notes: vec![card(0)], view, tall: NOTES_TALL, alone: false }], ink: theme.ink("notes") };
+                // (Where the panel lays its one column's lane out, inside its room round its lanes.)
+                let area = Layout::with_columns(vec![lane.height(&theme)], 1, &theme).lanes()[0];
                 let mut hits = Vec::new();
                 let panel = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
-                paint_lane(&panel, &scene, &lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 500.0 }, 0.0, Pass::Content, &mut hits);
+                paint_lane(&panel, &scene, &lane, area, 0.0, Pass::Content, &mut hits);
                 let (x, y, w, h, _) = *hits.iter().find(|hit| hit.4 == Hit::Note(0)).expect("the note's card");
                 let drawn = panel.parts().into_iter().find(|part| part.key.as_deref() == Some("note.0")).expect("the card drawn").ops;
                 // Stuck on the desktop: its card the whole of it.

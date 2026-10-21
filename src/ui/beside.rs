@@ -108,6 +108,8 @@ enum Ask {
     Close,
     /// What it opened from as it is now: where (physical px), in which skin, light or dark.
     Follow(RECT, Skin, bool),
+    /// The skin chosen does not see the desktop: the scene kept from page to page let go of.
+    Unsee,
 }
 
 static ASKS: OnceLock<Mutex<Sender<Ask>>> = OnceLock::new();
@@ -192,6 +194,14 @@ pub fn follow(by: RECT, skin: Skin, dark: bool) {
     if is_up() && *asked != Some((by, skin, dark)) {
         *asked = Some((by, skin, dark));
         ask(Ask::Follow(by, skin, dark));
+    }
+}
+
+/// The skin chosen: one that does not see the desktop, the scene of what is behind the page that its thread keeps from
+/// page to page (see `Beside::look_behind`) let go of, the page up or not (where it has a thread yet).
+pub fn follow_skin(skin: Skin) {
+    if !skin.sees_backdrop() && ASKS.get().is_some() {
+        ask(Ask::Unsee);
     }
 }
 
@@ -404,6 +414,7 @@ fn run(asks: Receiver<Ask>) {
                     match ask {
                         Ask::Open(opening) => show(opening),
                         Ask::Close => gone(),
+                        Ask::Unsee => BEHIND.with(|held| *held.borrow_mut() = (None, None, None)),
                         // (Moved along; or opened again as it was, in the skin now, its room round it the skin's, or as
                         // large as it is to be.)
                         Ask::Follow(by, skin, dark) => {

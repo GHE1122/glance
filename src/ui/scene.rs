@@ -375,7 +375,7 @@ fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) ->
 /// The desktop's own window captured itself, for every scene that is to show it so (see the top): its capture's pool
 /// and session, whether it is taken only seldom (no layer shown: a live wallpaper would be taken each frame for no
 /// one), and what its frames meet. Made as first wanted, and kept while a scene holds a layer of it (scenes live as
-/// long as their windows, see `end_feed_unused`): a pool made anew keeps some of the card's memory till Glance ends
+/// long as their windows, see `let_go_of_feed`): a pool made anew keeps some of the card's memory till Glance ends
 /// (made larger only, as the desktop grows past it), and a session ended cannot be started again on the same pool
 /// (measured): it is slowed while unused, not ended.
 struct Feed {
@@ -384,6 +384,8 @@ struct Feed {
     session: GraphicsCaptureSession,
     seldom: bool,
     shared: Arc<FeedShared>,
+    /// How many scenes hold a layer of it (see `let_go_of_feed`).
+    scenes: usize,
 }
 
 /// How often what is behind is taken anew at most, for a live backdrop (the panel's, a widget's): thirty times a
@@ -603,7 +605,7 @@ impl Feed {
         let _ = session.SetIsCursorCaptureEnabled(false);
         let _ = session.SetMinUpdateInterval(live_span());
         session.StartCapture().ok()?;
-        Some(Feed { shell, pool, session, seldom: false, shared })
+        Some(Feed { shell, pool, session, seldom: false, shared, scenes: 0 })
     }
 
     /// Taken as often as it changes (`LIVE` at most) while a layer does not rest, seldom while none does (where the system can be
@@ -665,15 +667,22 @@ fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device) -> O
             *REFUSED.lock().unwrap() = Some(shell.0 as isize);
         }
     }
-    feed.as_mut()?.layer(window, area)
+    let feed = feed.as_mut()?;
+    let layer = feed.layer(window, area)?;
+    feed.scenes += 1;
+    Some(layer)
 }
 
-/// The feed ended where no scene holds a layer of it any longer (each scene gone, or let go of as its window's skin no
-/// longer shows the desktop): its frames are the desktop's whole size. (Scenes live as long as their windows, so it is
-/// not made again and again: see `Feed`.)
-fn end_feed_unused() {
+/// A scene's layer of the feed for the desktop's window `shell` let go of: the feed ended as no scene holds one any
+/// longer (each scene gone, or let go of as its window's skin no longer shows the desktop): its frames are the
+/// desktop's whole size. (Counted, not by the layers that are: the thread a frame comes on holds them a moment as it
+/// puts it in them, and a last let go of meanwhile left the feed for good. Scenes live as long as their windows, so it
+/// is not made again and again: see `Feed`. One of a feed made anew since, Explorer started again, is not counted.)
+fn let_go_of_feed(shell: HWND) {
     let mut feed = FEED.lock().unwrap();
-    if feed.as_ref().is_some_and(|feed| feed.shared.live_layers().is_empty()) {
+    let Some(held) = feed.as_mut().filter(|feed| feed.shell == shell) else { return };
+    held.scenes = held.scenes.saturating_sub(1);
+    if held.scenes == 0 {
         if let Some(old) = feed.take() {
             old.end();
         }
@@ -713,12 +722,14 @@ fn rest_layer(layer: &Layer) {
 
 /// `layer` emptied (the desktop shown as a thumbnail again, or its scene gone): nothing in it from now on.
 fn empty_layer(layer: &Layer) {
+    // (The feed's lock not taken under the layer's: a frame put in the layers takes them the other way round.)
+    let shared = FEED.lock().unwrap().as_ref().map(|feed| feed.shared.clone());
     {
         let mut held = layer.held.lock().unwrap();
         held.resting = true;
         held.surface = None;
-        if let Some(feed) = FEED.lock().unwrap().as_ref() {
-            let composer = feed.shared.composer.lock().unwrap();
+        if let Some(shared) = &shared {
+            let composer = shared.composer.lock().unwrap();
             unsafe {
                 let _ = held.visual.SetContent(None);
                 let _ = composer.0.Commit();
@@ -1098,10 +1109,10 @@ impl Scene {
 
     /// Its desktop's part let go of, and the window it was in (its layer first).
     fn let_desktop_go(&mut self) {
-        if let Some((window, layer, _)) = self.desktop.take() {
+        if let Some((window, layer, shell)) = self.desktop.take() {
             empty_layer(&layer);
             drop(layer);
-            end_feed_unused();
+            let_go_of_feed(shell);
             unsafe {
                 let _ = DestroyWindow(window);
             }
@@ -1661,7 +1672,7 @@ mod tests {
 
     /// The desktop's feed lives as long as a scene shows the desktop through it, and ends with the last (its frames are
     /// the whole desktop's: kept with no one to show them, a skin chosen that does not see the desktop held them till
-    /// Glance ended). Needs a desktop drawn apart from its window (a live wallpaper), as on the owner's PC.
+    /// Glance ended), the last let go of as a frame is put in the layers too. Needs a desktop drawn apart from its window (a live wallpaper), as on the owner's PC.
     /// `cargo test --lib -- --ignored --exact ui::scene::tests::the_feed_ends_with_the_last_scene_of_it --nocapture`.
     #[test]
     #[ignore = "captures this PC's desktop (needs a live wallpaper)"]
@@ -1682,8 +1693,11 @@ mod tests {
         assert!(FEED.lock().unwrap().is_some(), "the feed ended while a scene still shows the desktop through it");
         second.rest();
         assert!(FEED.lock().unwrap().is_some(), "the feed ended as its last scene rested");
+        // The last let go of while a frame is being put in the layers (the thread it comes on holds them a moment).
+        let in_hand = FEED.lock().unwrap().as_ref().map(|feed| feed.shared.live_layers()).unwrap_or_default();
         drop(second);
         assert!(FEED.lock().unwrap().is_none(), "the feed kept with no scene left to show it");
+        drop(in_hand);
         unsafe {
             let _ = DestroyWindow(over);
         }

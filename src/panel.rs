@@ -939,6 +939,9 @@ impl Controller {
                     for panel in panels.iter_mut() {
                         panel.restyle();
                     }
+                    if let Some(panel) = panels.first() {
+                        crate::ui::beside::follow_skin(panel.skin);
+                    }
                     draw_overlay(&mut overlay, &panels);
                     // An open settings window takes what was changed elsewhere.
                     settings_window::follow_settings();
@@ -2063,9 +2066,12 @@ impl<'a> Panel<'a> {
         if skin != self.skin && skin.sees_backdrop() && self.is_shown() {
             self.recapture = true;
         }
-        // A skin that does not see the desktop: its scene let go of (made again as one that does is chosen).
+        // A skin that does not see the desktop: its scene, what was taken with it, and a taking awaited let go of (made
+        // again as one that does is chosen, as a panel that never saw it has none).
         if !skin.sees_backdrop() {
             self.backdrop = None;
+            self.behind = None;
+            self.capturing = None;
         }
         self.skin = skin;
         self.live = config.live && self.skin.sees_backdrop();
