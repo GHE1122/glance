@@ -160,6 +160,9 @@ const COPIED_FOR: Duration = Duration::from_secs(2);
 
 /// The window, while it is open.
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
+/// The window the settings pour into their place on while they do (see `pour_away`): in front in their stead, the panel
+/// and the widgets giving way to it.
+static POURING: AtomicIsize = AtomicIsize::new(0);
 /// Its thread is making it: asked again meanwhile, no second one is made.
 static OPENING: AtomicBool = AtomicBool::new(false);
 /// Its thread, kept a while before it is opened and after it is closed (see `run`).
@@ -1614,7 +1617,13 @@ fn leave_the_front(hwnd: HWND) {
     unsafe {
         let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
     }
-    crate::app().controller.settings_front(None);
+    crate::app().controller.settings_front(pouring());
+}
+
+/// The window the settings pour away on, while they do.
+fn pouring() -> Option<HWND> {
+    let pouring = POURING.load(Ordering::Acquire);
+    (pouring != 0).then(|| HWND(pouring as *mut _))
 }
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -1809,6 +1818,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Closed: poured into the place it was asked from first, if it was, and closed once it has (see `tick`).
         WM_CLOSE if with_ui(|ui| ui.pour_away()).unwrap_or(false) => LRESULT(0),
         WM_DESTROY => {
+            POURING.store(0, Ordering::Release);
             crate::app().controller.settings_front(None);
             // The shortcut, if let go while a new one was taken, is taken up again.
             crate::tray::hold_hotkey(false);
@@ -1858,7 +1868,13 @@ impl Ui {
         if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(self.hwnd) }.as_bool() {
             return false;
         }
-        let Some(genie) = super::genie::closing(&self.gfx, self.hwnd, place) else { return false };
+        // (Over the panel and the widgets as it pours, into a button on one of them: they give way to it as they gave
+        // way to the window, till it is closed.)
+        let told = |pouring: HWND| {
+            POURING.store(pouring.0 as isize, Ordering::Release);
+            crate::app().controller.settings_front(Some(pouring));
+        };
+        let Some(genie) = super::genie::closing(&self.gfx, self.hwnd, place, told) else { return false };
         self.genie = Some(genie);
         WINDOW.store(0, Ordering::Release);
         true

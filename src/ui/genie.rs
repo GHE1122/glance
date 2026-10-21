@@ -327,12 +327,16 @@ pub fn reveal(window: HWND) {
 }
 
 /// `window`, shown, poured into `place` from now on, and hidden meanwhile, the front given to what was behind it
-/// (closed by its owner once it is done). None where it could not be (left as it was).
-pub fn closing(gfx: &Gfx, window: HWND, place: RECT) -> Option<Genie> {
+/// (closed by its owner once it is done), `told` the window it pours on as it shows. None where it could not be (left
+/// as it was).
+pub fn closing(gfx: &Gfx, window: HWND, place: RECT, told: impl FnOnce(HWND)) -> Option<Genie> {
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
     let (picture, shows) = picture_of(window)?;
     let genie = Genie::start(gfx, picture, shows, place, false)?;
+    // (What pours told of before the window is hidden: what gave way to the window gives way to it, as the window, gone
+    // from the front as it is hidden, gives way no more.)
+    told(genie.window.hwnd);
     // (Hidden only once what pours is on the screen in its place, without the system's animation of its hiding.)
     let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
     let off = windows::core::BOOL::from(true);
