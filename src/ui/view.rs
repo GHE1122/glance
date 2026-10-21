@@ -767,6 +767,8 @@ const NOTE_SMALL: f32 = 64.0;
 const NOTE_STRIP: f32 = 30.0;
 const NOTE_ROW: f32 = 40.0;
 const NOTE_CARD: f32 = 104.0;
+/// The gap between the cards, two across.
+const NOTE_CARDS_GAP: f32 = 8.0;
 /// How far a note's strip in the deck is lifted under the pointer (DIPs).
 const NOTE_LIFT: f32 = 3.0;
 
@@ -804,15 +806,39 @@ fn note_card(at: usize, note: &crate::notes::Note, lang: Lang, now: u64, lines: 
     }
 }
 
-/// A note stuck on the desktop (`name`, its file's): its card alone, as tall as its lines take (up to a while); none
-/// where the note is gone.
+/// A note stuck on the desktop (`name`, its file's): its card alone, as the notes show (see `crate::notes::view`) and
+/// as tall as there (the deck's last written as tall as its lines take, up to a while), and as wide (see
+/// `stuck_note_width`): pulled off the panel, it is the card it was. Made larger, it shows more of its lines. None where
+/// the note is gone.
 fn stuck_note_lane(name: &str, lang: Lang) -> Option<Vec<Block>> {
     let now = crate::station::now_ms();
     let shown = crate::notes::shown();
     let (at, note) = shown.iter().enumerate().find(|(_, note)| note.name == name)?;
     let card = note_card(at, note, lang, now, 14);
-    let tall = (60.0 + card.lines.len() as f32 * (LINE + 3.0) + 12.0).max(NOTE_CARD);
-    Some(vec![Block::Notes { notes: vec![card], view: crate::settings::NotesView::Deck, tall, alone: true }])
+    let view = crate::notes::view();
+    let tall = stuck_note_tall(view, &card);
+    Some(vec![Block::Notes { notes: vec![card], view, tall, alone: true }])
+}
+
+/// How tall a note stuck on the desktop is made (see `stuck_note_lane`): as its card is in the panel's notes lane, as
+/// the notes show (`view`): a card's, a row's; the deck's last written as tall as its lines take, up to a while.
+fn stuck_note_tall(view: crate::settings::NotesView, card: &NoteCard) -> f32 {
+    use crate::settings::NotesView;
+    match view {
+        NotesView::Cards => NOTE_CARD,
+        NotesView::List => NOTE_ROW,
+        NotesView::Deck => (60.0 + card.lines.len() as f32 * (LINE + 3.0) + 12.0).max(NOTE_CARD),
+    }
+}
+
+/// How wide a note stuck on the desktop is made (see `stuck_note_lane`): as its card is in the panel's notes lane, in
+/// `skin`, as the notes show (`view`): one of the cards two across, or the lane's width.
+pub fn stuck_note_width(skin: Skin, view: crate::settings::NotesView) -> f32 {
+    let inner = COLUMN_WIDTH - 2.0 * Theme::new(skin, false).pad_x;
+    match view {
+        crate::settings::NotesView::Cards => (inner - NOTE_CARDS_GAP) / 2.0,
+        crate::settings::NotesView::List | crate::settings::NotesView::Deck => inner,
+    }
 }
 
 /// A line of Markdown as plain words: its marks taken off (a heading's, a list's, a to-do's box, emphasis, code).
@@ -1044,12 +1070,25 @@ pub(crate) fn note_radius(theme: &Theme, small: bool) -> f32 {
 }
 
 /// The notes (see `Block::Notes`) from (`left`, `top`), `width` across, in room `tall` high, as `view` lays them out:
-/// pressed, each is opened beside.
+/// pressed, each is opened beside. `alone`: a note stuck on the desktop, its card (or its row) the whole room.
 #[allow(clippy::too_many_arguments)]
-fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), notes: &[NoteCard], view: crate::settings::NotesView, tall: f32, hits: &mut Vec<HitBox>) {
+fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), notes: &[NoteCard], view: crate::settings::NotesView, tall: f32, alone: bool, hits: &mut Vec<HitBox>) {
     use crate::settings::NotesView;
     let theme = scene.theme;
     let lang = scene.lang;
+    if let (true, Some(note)) = (alone, notes.first()) {
+        let lit = scene.hover == Some(Hit::Note(note.at));
+        match view {
+            NotesView::Cards => paint_note_card(frame, scene, note, (left, top, width, tall), lit),
+            NotesView::List => paint_note_row(frame, scene, note, (left, top, width, tall), lit, false),
+            NotesView::Deck => {
+                paint_front_note(frame, scene, note, (left, top, width, tall), lit, None, hits);
+                return;
+            }
+        }
+        hits.push((left, top, width, tall, Hit::Note(note.at)));
+        return;
+    }
     if notes.is_empty() {
         let middle = top + tall / 2.0;
         frame.icon(Icon::File, Point { x: left + width / 2.0, y: middle - 12.0 }, 20.0, theme.text3);
@@ -1161,28 +1200,17 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
         }
         NotesView::Cards => {
             let across = 2;
-            let gap = 8.0;
+            let gap = NOTE_CARDS_GAP;
             let card_w = (width - gap) / across as f32;
             let whole = notes.len().div_ceil(across) as f32 * (NOTE_CARD + gap) - gap;
             let (most, scroll) = notes_scroll(scene, whole, tall);
-            let radius = note_radius(theme, true);
             for (at, note) in notes.iter().enumerate() {
                 let (x, y) = (left + (at % across) as f32 * (card_w + gap), top + (at / across) as f32 * (NOTE_CARD + gap) - scroll);
                 if y + NOTE_CARD < top || y > top + tall {
                     continue;
                 }
                 frame.key(&format!("note.{}", note.at));
-                note_card_ground(frame, theme, note.colour, (x, y, card_w, NOTE_CARD), radius, lit(at), false, None);
-                let (title_ink, words, faint) = note_inks(theme, note.colour);
-                let inner = if theme.skin == Skin::Glass { 13.0 } else { 11.0 };
-                let head = y + 10.0 + banded;
-                let tx = x + inner + dot(frame, note, x + inner, head + LINE / 2.0);
-                let room = card_w - (tx - x) - 10.0;
-                frame.text(&fitted(frame, &note.title, bold(theme.body, 700.0), room), bold(theme.body, 700.0), title_ink, tx, head, room, Align::Start);
-                for (line_at, line) in note.lines.iter().take(2).enumerate() {
-                    frame.text(&fitted(frame, line, theme.small, card_w - inner - 10.0), theme.small, words, x + inner, head + LINE + 6.0 + line_at as f32 * (LINE + 1.0), card_w - inner - 10.0, Align::Start);
-                }
-                frame.text(&note.when, theme.small, faint, x + inner, y + NOTE_CARD - LINE - 8.0, card_w - inner - 10.0, Align::Start);
+                paint_note_card(frame, scene, note, (x, y, card_w, NOTE_CARD), lit(at));
                 frame.key("");
                 hits.extend(shown_in((x, y, card_w, NOTE_CARD, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, tall)));
             }
@@ -1200,28 +1228,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                     continue;
                 }
                 frame.key(&format!("note.{}", note.at));
-                if lit(at) {
-                    frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, NOTE_ROW - 2.0, plate_round(theme, GLASS_ROW_ROUND - 4.0, 4.0));
-                }
-                // (Its title over its first line; with none, in the row's middle, as when it was written is.)
-                let first = note.lines.first();
-                let title_y = if first.is_some() { y + 4.0 } else { y + (NOTE_ROW - LINE) / 2.0 };
-                if theme.skin == Skin::Fluent {
-                    frame.fill_rounded(note_colour(note.colour), left, y + 7.0, 4.0, NOTE_ROW - 14.0, 2.0);
-                } else {
-                    note_dot(frame, note.colour, left, title_y + LINE / 2.0);
-                }
-                if dotted && at + 1 < notes.len() {
-                    frame.fill(theme.rule, left + 15.0, y + NOTE_ROW - 1.0, width - 15.0, 1.0);
-                }
-                let when_w = frame.measure(&note.when, theme.small);
-                let x = left + if theme.skin == Skin::Fluent { 14.0 } else { 15.0 };
-                frame.text(&fitted(frame, &note.title, bold(theme.body, 600.0), width - 24.0 - when_w), bold(theme.body, 600.0), theme.text, x, title_y, width - 24.0 - when_w, Align::Start);
-                // (Short of when it was written, as the title is: under it, it ran on under the time.)
-                if let Some(first) = first {
-                    frame.text(&fitted(frame, first, theme.small, width - 24.0 - when_w), theme.small, theme.text3, x, y + 4.0 + LINE, width - 24.0 - when_w, Align::Start);
-                }
-                frame.text(&note.when, theme.small, theme.text3, left, y + (NOTE_ROW - LINE) / 2.0, width, Align::End);
+                paint_note_row(frame, scene, note, (left, y, width, NOTE_ROW), lit(at), dotted && at + 1 < notes.len());
                 frame.key("");
                 hits.extend(shown_in((left, y, width, NOTE_ROW, Hit::Note(note.at)), (left - 4.0, top, width + 8.0, tall)));
             }
@@ -1231,6 +1238,65 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
         }
     }
     frame.unclip();
+}
+
+/// A note's card as the cards show it, in the box (`x`, `y`, `w`, `h`), `lit` under the pointer: its colour's ground,
+/// its title (after its colour's dot, on chart paper), as many of its lines as fit over when it was written, at its
+/// foot (two, as tall as the cards are in the lane; more, stuck on the desktop and made taller).
+fn paint_note_card(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (x, y, w, h): (f32, f32, f32, f32), lit: bool) {
+    let theme = scene.theme;
+    note_card_ground(frame, theme, note.colour, (x, y, w, h), note_radius(theme, true), lit, false, None);
+    let (title_ink, words, faint) = note_inks(theme, note.colour);
+    let inner = if theme.skin == Skin::Glass { 13.0 } else { 11.0 };
+    // (Under Windows 11's band, a little lower.)
+    let head = y + 10.0 + if theme.skin == Skin::Fluent { 2.0 } else { 0.0 };
+    let lead = if theme.skin == Skin::Paper { note_dot(frame, note.colour, x + inner, head + LINE / 2.0) } else { 0.0 };
+    let title = Font { weight: 700.0, ..theme.body };
+    let room = w - inner - lead - 10.0;
+    frame.text(&fitted(frame, &note.title, title, room), title, title_ink, x + inner + lead, head, room, Align::Start);
+    let when_y = y + h - LINE - 8.0;
+    for (at, line) in note.lines.iter().enumerate() {
+        let line_y = head + LINE + 6.0 + at as f32 * (LINE + 1.0);
+        if line_y + LINE > when_y - 2.0 {
+            break;
+        }
+        frame.text(&fitted(frame, line, theme.small, w - inner - 10.0), theme.small, words, x + inner, line_y, w - inner - 10.0, Align::Start);
+    }
+    frame.text(&note.when, theme.small, faint, x + inner, when_y, w - inner - 10.0, Align::Start);
+}
+
+/// A note's row as the list shows it, in the box (`left`, `y`, `width`, `h`), `lit` under the pointer, `ruled` off
+/// below (chart paper's, but the last): its colour (Windows 11's a band of it, the others' a dot), its title over its
+/// first line, when it was written at its end (one line, as tall as the list's rows are; more, stuck on the desktop
+/// and made taller).
+fn paint_note_row(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (left, y, width, h): (f32, f32, f32, f32), lit: bool, ruled: bool) {
+    let theme = scene.theme;
+    if lit {
+        frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, h - 2.0, plate_round(theme, GLASS_ROW_ROUND - 4.0, 4.0));
+    }
+    // (Its title over its first line; with none, in the row's middle, as when it was written is.)
+    let title_y = if note.lines.is_empty() { y + (NOTE_ROW - LINE) / 2.0 } else { y + 4.0 };
+    if theme.skin == Skin::Fluent {
+        frame.fill_rounded(note_colour(note.colour), left, y + 7.0, 4.0, h - 14.0, 2.0);
+    } else {
+        note_dot(frame, note.colour, left, title_y + LINE / 2.0);
+    }
+    if ruled {
+        frame.fill(theme.rule, left + 15.0, y + h - 1.0, width - 15.0, 1.0);
+    }
+    let when_w = frame.measure(&note.when, theme.small);
+    let x = left + if theme.skin == Skin::Fluent { 14.0 } else { 15.0 };
+    let title = Font { weight: 600.0, ..theme.body };
+    frame.text(&fitted(frame, &note.title, title, width - 24.0 - when_w), title, theme.text, x, title_y, width - 24.0 - when_w, Align::Start);
+    // (Short of when it was written, as the title is: under it, it ran on under the time.)
+    for (at, line) in note.lines.iter().enumerate() {
+        let line_y = y + 4.0 + LINE + at as f32 * (LINE + 1.0);
+        if line_y + LINE > y + h - 4.0 {
+            break;
+        }
+        frame.text(&fitted(frame, line, theme.small, width - 24.0 - when_w), theme.small, theme.text3, x, line_y, width - 24.0 - when_w, Align::Start);
+    }
+    frame.text(&note.when, theme.small, theme.text3, left, y + (NOTE_ROW - LINE) / 2.0, width, Align::End);
 }
 
 /// The deck's last written note, whole, in the box (`x`, `y`, `w`, `h`), `lit` under the pointer, over what `below`
@@ -3460,7 +3526,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 paint_bench(frame, scene, ink, room, area, what, Shape::of((room.2, room.3)), hits);
             }
             (Block::Notes { notes, view, tall, alone }, Pass::Content) => {
-                paint_notes(frame, scene, (left, y + if *alone { 0.0 } else { SHELF_GAP }, width), notes, *view, *tall + spare, hits);
+                paint_notes(frame, scene, (left, y + if *alone { 0.0 } else { SHELF_GAP }, width), notes, *view, *tall + spare, *alone, hits);
             }
             (Block::Apps { apps, rows, named, over }, Pass::Content) => {
                 paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, *rows, *named, *over, hits);
@@ -6025,7 +6091,7 @@ six".into()));
         let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default() }).collect();
         for view in [crate::settings::NotesView::Deck, crate::settings::NotesView::Cards, crate::settings::NotesView::List] {
             let mut hits = Vec::new();
-            paint_notes(&Nothing, &scene, (0.0, top, width), &notes, view, NOTES_TALL, &mut hits);
+            paint_notes(&Nothing, &scene, (0.0, top, width), &notes, view, NOTES_TALL, false, &mut hits);
             within(&hits, top, NOTES_TALL, &format!("{view:?}"));
         }
         let apps: Vec<(String, String)> = (0..14).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
@@ -6372,7 +6438,7 @@ six".into()));
         let pressed = |scrolls: Scrolls| {
             let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
             let mut hits = Vec::new();
-            paint_notes(&Nothing, &scene, (0.0, 0.0, 320.0), &notes, crate::settings::NotesView::Deck, NOTES_TALL, &mut hits);
+            paint_notes(&Nothing, &scene, (0.0, 0.0, 320.0), &notes, crate::settings::NotesView::Deck, NOTES_TALL, false, &mut hits);
             hits.iter().filter_map(|hit| if let Hit::Note(at) = hit.4 { Some(at) } else { None }).collect::<Vec<_>>()
         };
         let at_top = pressed(Scrolls::default());
@@ -6384,6 +6450,43 @@ six".into()));
         }
         let at_end = pressed(scrolls);
         assert!(at_end.contains(&0) && at_end.contains(&12), "{at_end:?}");
+    }
+
+    /// A note pulled off the panel onto the desktop is the card it was there, as the notes show, in every skin: as wide
+    /// and as tall (the deck's, as wide), and drawn alike, each thing where it was on the card. (Drawn as the deck's
+    /// last written whatever the notes showed, and as wide as the lane, a card two across came off wider and shorter,
+    /// when it was written over its title.)
+    #[test]
+    fn a_note_stuck_on_the_desktop_is_the_card_it_was() {
+        use crate::settings::NotesView;
+        use crate::ui::morph::Recorder;
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let card = |at: u16| NoteCard { at, title: format!("Title {at}"), lines: vec!["first".into(), "second".into()], when: "11:58".into(), colour: Default::default() };
+        for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
+            let theme = Theme::new(skin, false);
+            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false };
+            for view in [NotesView::Cards, NotesView::List, NotesView::Deck] {
+                // In the panel's lane: where the note's card is, and what is drawn of it.
+                let lane = Lane { id: "notes".into(), blocks: vec![head("Notes", String::from("1"), "", false), Block::Notes { notes: vec![card(0)], view, tall: NOTES_TALL, alone: false }], ink: theme.ink("notes") };
+                let mut hits = Vec::new();
+                let panel = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+                paint_lane(&panel, &scene, &lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 500.0 }, 0.0, Pass::Content, &mut hits);
+                let (x, y, w, h, _) = *hits.iter().find(|hit| hit.4 == Hit::Note(0)).expect("the note's card");
+                let drawn = panel.parts().into_iter().find(|part| part.key.as_deref() == Some("note.0")).expect("the card drawn").ops;
+                // Stuck on the desktop: its card the whole of it.
+                assert!((stuck_note_width(skin, view) - w).abs() < 0.01, "{skin:?} {view:?}: {} wide, the card {w}", stuck_note_width(skin, view));
+                let tall = if view == NotesView::Deck { h } else { stuck_note_tall(view, &card(0)) };
+                assert!((tall - h).abs() < 0.01, "{skin:?} {view:?}: {tall} tall, the card {h}");
+                let stuck = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+                let mut stuck_hits = Vec::new();
+                paint_notes(&stuck, &scene, (x, y, w), &[card(0)], view, tall, true, &mut stuck_hits);
+                let stuck: Vec<crate::ui::morph::Op> = stuck.parts().into_iter().flat_map(|part| part.ops).collect();
+                assert_eq!(stuck, drawn, "{skin:?} {view:?}");
+                assert_eq!(stuck_hits.iter().filter(|hit| hit.4 == Hit::Note(0)).map(|hit| (hit.0, hit.1, hit.2, hit.3)).collect::<Vec<_>>(), vec![(x, y, w, h)]);
+            }
+        }
     }
 
     /// A lane given more room than its blocks take (its column taller): the notes' list at its foot goes down to the

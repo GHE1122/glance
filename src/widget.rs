@@ -1090,7 +1090,8 @@ impl Content {
         if self.bare() {
             (theme.pad_x, theme.pad_top, theme.pad_bottom) = (0.0, 0.0, 0.0);
             theme.outer = (0.0, 0.0, 0.0);
-            theme.radius = view::note_radius(&theme, false);
+            // (As round as its card is as the notes show: see `view::stuck_note_lane`.)
+            theme.radius = view::note_radius(&theme, crate::notes::view() == crate::settings::NotesView::Cards);
         }
         theme
     }
@@ -3225,6 +3226,8 @@ impl Widget {
         // rest, as the readings step); else laid out for what it shows, or
         // for the room it is sized to.
         let only_moved = matches!(self.drag, Some(Drag::Move { .. })) || self.fling.is_some();
+        // A note stuck on the desktop alone: designed as wide as its card is in the panel (see `view::stuck_note_width`).
+        let card_wide = self.content.bare().then(|| view::stuck_note_width(look.skin, crate::notes::view()));
         let sized_to = self.room.filter(|_| matches!(self.drag, Some(Drag::Size { .. })));
         match &mut self.content {
             Content::Readings(readings) => {
@@ -3240,6 +3243,10 @@ impl Widget {
                         };
                         // (Made shorter, its lists give way; its other lanes are as designed: see `view::Layout::giving`.)
                         let designed = view::Layout::with_columns(heights.iter().map(|(_, h)| h[0]).collect(), columns, &theme).giving(view::gives(&scene));
+                        let designed = match card_wide {
+                            Some(wide) => designed.clone().fitted((wide, designed.height())),
+                            None => designed,
+                        };
                         let least = (designed.width() - columns as f32 * (view::COLUMN_WIDTH - view::LANE_LEAST), designed.least_height());
                         let wanted = sized_to.unwrap_or((designed.width() + readings.choice.extra.0, designed.height() + readings.choice.extra.1));
                         let size = within(wanted, SHAPE_LEAST);
