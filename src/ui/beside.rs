@@ -678,6 +678,12 @@ fn show(opening: Opening) {
         };
         let page = beside.page.clone();
         let theme = beside.theme.clone();
+        // Over a note stuck on the desktop: the note left out of what is behind the page (and every scene) while the
+        // page is up, as it is hidden under it (see `draw`). Taken in, the page's glass showed the note's through it
+        // till what was behind was taken again, the two panes one over the other, lighter, for a moment.
+        if let Some(note) = beside.over() {
+            super::scene::leave_out(note, true);
+        }
         BESIDE.with(|cell| *cell.borrow_mut() = Some(beside));
         // A note: its words read, and a box for them where the page writes them.
         if let Page::Note(name) = page {
@@ -786,8 +792,11 @@ fn let_go(told: bool) {
     }
     if let Some(mut beside) = held {
         // (The note it was over shown again before it goes: nothing between.)
-        if let Some(note) = beside.over().filter(|_| beside.hiding) {
-            hide(note, false);
+        if let Some(note) = beside.over() {
+            if beside.hiding {
+                hide(note, false);
+            }
+            super::scene::leave_out(note, false);
         }
         // (The text services let go of before the window they write in.)
         EDITOR.with(|held| held.borrow_mut().take());

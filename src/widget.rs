@@ -1101,6 +1101,8 @@ impl Content {
         if self.bare() {
             (theme.pad_x, theme.pad_top, theme.pad_bottom) = (0.0, 0.0, 0.0);
             theme.outer = (0.0, 0.0, 0.0);
+            // (Its page alone, no lane ruled off under it: chart paper's rule ran under the page's foot, past its corners.)
+            theme.ruled = false;
         }
         theme
     }
@@ -3065,9 +3067,9 @@ impl Widget {
             return;
         }
         hint.drawn = Some(this);
-        // Above the widget, which may be large enough to cover it: see-through
-        // and letting the pointer through, it hides nothing that matters.
-        hint.window.place(rect);
+        // Just under the widget in hand, as Windows' own snap preview is under the window moved: over it, the hint's
+        // pane lay on the widget where the two met, which came out dimmed, lighter or darker, as it was picked up.
+        hint.window.place_under(rect, Some(self.window.hwnd));
         hint.window.show_in_place();
         let Some(surface) = hint.surface.as_mut() else { return };
         let scale = self.contact.scale;
@@ -3971,6 +3973,17 @@ mod tests {
         let merged = Content::Merged(Box::new(Merged::new(vec![Content::Music(MusicShown::new(music::LEAST)), note("a.md")], true, music::LEAST)));
         assert_eq!(merged.holding("note:a.md"), Some(Some(1)));
         assert_eq!(merged.holding("note:b.md"), None);
+    }
+
+    /// A note stuck on the desktop is its page alone, in every skin: nothing ruled off under it as chart paper rules a
+    /// lane (a line ran under the page, past its rounded corners).
+    #[test]
+    fn a_stuck_note_has_no_rule_under_it() {
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let note = Content::Readings(Readings { workbench: true, only: Some(format!("{}a.md", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
+        for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
+            assert!(!note.dressed(Theme::new(skin, false)).ruled, "{skin:?}");
+        }
     }
 
     /// A workbench widget sized by hand shows each layout the hand makes at once (turning behind the hand, its cards
