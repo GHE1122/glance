@@ -1412,7 +1412,7 @@ impl Beside {
         let mut rows: Vec<(NoteChoice, &'static str, Mark, bool, bool)> = names.iter().map(|(colour, name)| (NoteChoice::Colour(*colour), *name, Mark::Colour(super::view::note_colour(*colour)), writing.colour == *colour, false)).collect();
         if writing.name.is_some() {
             rows.push((NoteChoice::Stick, lang.pick("贴到桌面", "Stick on the desktop"), Mark::Icon(Icon::Pin), false, true));
-            rows.push((NoteChoice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Mark::Icon(Icon::Close), false, false));
+            rows.push((NoteChoice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Mark::Icon(Icon::Trash), false, false));
         }
         let items = rows.iter().map(|(_, label, mark, checked, rule_before)| Item { label, mark: Some(*mark), checked: *checked, rule_before: *rule_before }).collect();
         if let Some(menu) = Menu::open_at(items, super::menu::Look::of(self.theme.skin, self.theme.dark), at, false, false) {
