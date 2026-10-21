@@ -37,6 +37,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_LEADING,
     DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
     DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP, DWRITE_HIT_TEST_METRICS, IDWriteInlineObject, IDWriteInlineObject_Impl,
+    DWRITE_LINE_SPACING_METHOD_UNIFORM,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM};
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
@@ -1674,66 +1675,110 @@ impl<'a> Frame<'a> {
 
     /// Draws a note's words as the box they are written in does (see `Canvas::markdown`): laid out in a face of the
     /// font's family, each stretch's weight, slant, size, strike, face and ink set on it (the faces chosen by weight
-    /// and slant, as the text services choose them, slanted where the face has no italic).
+    /// and slant, as the text services choose them, slanted where the face has no italic); each line set as tall as
+    /// `markdown::line_heights` says, its words as far above its foot as they reach below their baseline, as the text
+    /// services set a line exactly so tall.
     #[allow(clippy::too_many_arguments)]
     pub fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32) {
+        use crate::notes::markdown::{line_heights, Shown, BOX_IN, BOX_RISE, BOX_ROOM, BOX_SIDE, NONE_WRITTEN};
         let drawn = (|| -> Result<()> {
             let wide: Vec<u16> = text.encode_utf16().collect();
             let factory: IDWriteFactory = self.gfx.write.cast()?;
             let weight = |bold: bool| if bold { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT(font.weight.round() as i32) };
             let (face, collection) = self.gfx.face(font.family);
             let format = unsafe { factory.CreateTextFormat(face, collection, weight(false), DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, font.size, w!("zh-cn"))? };
-            let layout = unsafe { factory.CreateTextLayout(&wide, &format, width.max(0.0), height.max(0.0))? };
-            unsafe { layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)? };
             let brush = |ink| unsafe { self.dc.CreateSolidColorBrush(&inks.of(ink).d2d(), None) };
             // (Each size made whole pixels high, as the text services make a face's height, a font's height in whole
             // pixels as Windows' fonts are asked for: else its words came out a little smaller, and its lines closer.)
             let per = self.axes().map_or(1.0, |(t, device)| t.M11 * device);
             let whole = |size: f32| (size * per).round().max(1.0) / per;
-            // (Tabs as far apart as the text services set them: else what follows one, and how lines wrap, moved.)
-            unsafe { layout.SetIncrementalTabStop(super::editor::TAB_PIXELS / per)? };
-            for (range, dress) in crate::notes::markdown::dressing(text) {
-                let range = DWRITE_TEXT_RANGE { startPosition: range.start as u32, length: (range.end - range.start) as u32 };
-                unsafe {
-                    layout.SetFontWeight(weight(dress.bold), range)?;
-                    layout.SetFontStyle(if dress.italic { DWRITE_FONT_STYLE_ITALIC } else { DWRITE_FONT_STYLE_NORMAL }, range)?;
-                    layout.SetFontSize(whole(font.size * dress.size), range)?;
-                    layout.SetStrikethrough(dress.struck, range)?;
-                    if dress.code {
-                        layout.SetFontFamilyName(&HSTRING::from(super::canvas::CODE_FACE), range)?;
-                    }
-                    layout.SetDrawingEffect(&brush(dress.ink)?, range)?;
-                }
-            }
+            let size = whole(font.size);
+            let dressing = crate::notes::markdown::dressing(text);
             // Its marks put away, as a note not being written in shows (see `notes::markdown::Shown`): each stood in
             // for by nothing; a to-do's list mark, box and the space after them by the room its box is drawn in, as
             // wide as the text services make that space where it is written.
-            use crate::notes::markdown::{Shown, BOX_IN, BOX_ROOM, BOX_SIDE, NONE_WRITTEN};
             let shown = Shown::of(text);
-            let stretch = |range: std::ops::Range<usize>| DWRITE_TEXT_RANGE { startPosition: range.start as u32, length: (range.end - range.start) as u32 };
-            let size = whole(font.size);
+            let hidden = shown.hidden(&NONE_WRITTEN);
             let nothing: IDWriteInlineObject = Room { width: 0.0 }.into();
             let room: IDWriteInlineObject = Room { width: BOX_ROOM * size }.into();
-            for range in shown.hidden(&NONE_WRITTEN) {
-                unsafe { layout.SetInlineObject(&nothing, stretch(range))? };
-            }
-            for boxed in shown.boxes(&NONE_WRITTEN) {
-                unsafe { layout.SetInlineObject(&room, stretch(boxed.marks.start..boxed.room + 1))? };
-            }
             let (left, top) = self.on_pixel(x, y);
             Canvas::clip(self, x, y, width, height);
-            unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: left, Y: top }, &layout, self.brush(inks.words), self.text_snap()) };
-            // Each to-do's box in its room, in the middle of its line's words (those after it).
-            for boxed in shown.boxes(&NONE_WRITTEN) {
-                let (mut at_x, mut at_y) = (0.0, 0.0);
-                let mut after = DWRITE_HIT_TEST_METRICS::default();
-                let mut start = DWRITE_HIT_TEST_METRICS::default();
-                unsafe {
-                    layout.HitTestTextPosition(boxed.room as u32 + 1, false, &mut at_x, &mut at_y, &mut after)?;
-                    layout.HitTestTextPosition(boxed.marks.start as u32, false, &mut at_x, &mut at_y, &mut start)?;
+            // Each line laid out on its own, as tall as it is set, under the one before.
+            let mut down = 0.0;
+            for (line, tall) in line_heights(text, size * per) {
+                if down >= height {
+                    break;
                 }
-                let side = BOX_SIDE * size;
-                super::canvas::task_box(self, inks, left + start.left + BOX_IN * size, top + after.top + after.height / 2.0 - side / 2.0, side, boxed.done);
+                // (Its words, without its line break: a `\r` before it too, as a file written on Windows has.)
+                let breaks = [u16::from(b'\n'), u16::from(b'\r')];
+                let end = (line.start..line.end).rev().find(|&at| !breaks.contains(&wide[at])).map_or(line.start, |at| at + 1);
+                let words = line.start..end;
+                // What of `range` (in its note) is on this line, as counted in the line.
+                let on_line = |range: &std::ops::Range<usize>| {
+                    let (from, to) = (range.start.max(words.start), range.end.min(words.end));
+                    (from < to).then(|| DWRITE_TEXT_RANGE { startPosition: (from - words.start) as u32, length: (to - from) as u32 })
+                };
+                let layout = unsafe { factory.CreateTextLayout(&wide[words.clone()], &format, width.max(0.0), f32::MAX)? };
+                unsafe {
+                    layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+                    // (Tabs as far apart as the text services set them: else what follows one, and how lines wrap, moved.)
+                    layout.SetIncrementalTabStop(super::editor::TAB_PIXELS / per)?;
+                }
+                for (range, dress) in &dressing {
+                    let Some(range) = on_line(range) else { continue };
+                    unsafe {
+                        layout.SetFontWeight(weight(dress.bold), range)?;
+                        layout.SetFontStyle(if dress.italic { DWRITE_FONT_STYLE_ITALIC } else { DWRITE_FONT_STYLE_NORMAL }, range)?;
+                        layout.SetFontSize(whole(font.size * dress.size), range)?;
+                        layout.SetStrikethrough(dress.struck, range)?;
+                        if dress.code {
+                            layout.SetFontFamilyName(&HSTRING::from(super::canvas::CODE_FACE), range)?;
+                        }
+                        layout.SetDrawingEffect(&brush(dress.ink)?, range)?;
+                    }
+                }
+                for range in hidden.iter().filter_map(on_line) {
+                    unsafe { layout.SetInlineObject(&nothing, range)? };
+                }
+                let boxes: Vec<_> = shown.boxes(&NONE_WRITTEN).filter(|boxed| words.contains(&boxed.marks.start)).collect();
+                for range in boxes.iter().filter_map(|boxed| on_line(&(boxed.marks.start..boxed.room + 1))) {
+                    unsafe { layout.SetInlineObject(&room, range)? };
+                }
+                // Its words' baseline as far above its foot as they reach below it laid out as they come (on its first
+                // line), in whole pixels.
+                let mut first = [DWRITE_LINE_METRICS::default()];
+                let mut count = 0;
+                unsafe { layout.GetLineMetrics(Some(&mut first), &mut count)? };
+                let below = ((first[0].height - first[0].baseline) * per).round() / per;
+                let tall = tall / per;
+                unsafe {
+                    layout.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, tall, tall - below)?;
+                    self.dc.DrawTextLayout(windows_numerics::Vector2 { X: left, Y: top + down }, &layout, self.brush(inks.words), self.text_snap());
+                }
+                // Each to-do's box in its room, by its line's baseline (each line `tall`, its baseline `tall - below`
+                // down it).
+                let mut lines = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
+                unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count)? };
+                let line_of = |at: usize| {
+                    let mut end = 0;
+                    lines.iter().position(|line| {
+                        end += line.length as usize;
+                        at < end
+                    })
+                };
+                for boxed in &boxes {
+                    let (mut at_x, mut at_y) = (0.0, 0.0);
+                    let mut start = DWRITE_HIT_TEST_METRICS::default();
+                    unsafe { layout.HitTestTextPosition((boxed.marks.start - words.start) as u32, false, &mut at_x, &mut at_y, &mut start)? };
+                    let side = BOX_SIDE * size;
+                    // (Its room on the line its marks begin: it stands in for them.)
+                    let line = line_of(boxed.marks.start - words.start).unwrap_or(0);
+                    let middle = top + down + line as f32 * tall + tall - below - BOX_RISE * size;
+                    super::canvas::task_box(self, inks, left + start.left + BOX_IN * size, middle - side / 2.0, side, boxed.done);
+                }
+                let mut metrics = DWRITE_TEXT_METRICS::default();
+                unsafe { layout.GetMetrics(&mut metrics)? };
+                down += metrics.lineCount.max(1) as f32 * tall;
             }
             Canvas::unclip(self);
             Ok(())

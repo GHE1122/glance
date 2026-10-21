@@ -216,10 +216,12 @@ pub struct Linked {
 }
 
 /// How wide the room a to-do's box is drawn in is, its words' size over (the box in it, `BOX_SIDE` of their size,
-/// `BOX_IN` from its start; the rest a gap before its words).
+/// `BOX_IN` from its start, its middle `BOX_RISE` over its words' baseline, as a Chinese character's is; the rest a gap
+/// before its words).
 pub const BOX_ROOM: f32 = 1.55;
 pub const BOX_SIDE: f32 = 0.9;
 pub const BOX_IN: f32 = 0.08;
+pub const BOX_RISE: f32 = 0.36;
 
 /// No line being written on: a note shown, not written in.
 pub const NONE_WRITTEN: std::ops::RangeInclusive<usize> = 1..=0;
@@ -335,6 +337,38 @@ impl Shown {
     pub fn link_at(&self, at: usize, written: &std::ops::RangeInclusive<usize>) -> Option<&Linked> {
         self.links.iter().find(|link| link.words.contains(&at) && !written.contains(&link.line))
     }
+}
+
+/// How far apart a note's lines are set, over the height of their words; a heading's, over the height of its own
+/// (larger: less room round it), where that sets it further apart than its words' would.
+pub const LEADING: f32 = 1.6;
+pub const HEADING_LEADING: f32 = 1.4;
+
+/// Each of `text`'s lines (UTF-16 units, its line break with it) and how tall it is set (whole pixels), its words
+/// `words` pixels high: the same however it is drawn (the text services as it is written, DirectWrite on its face),
+/// so its lines are where they were as one gives way to the other.
+pub fn line_heights(text: &str, words: f32) -> Vec<(Range<usize>, f32)> {
+    let headings: Vec<(usize, f32)> = looks(text)
+        .into_iter()
+        .filter_map(|(range, look)| match look {
+            Look::Heading(level) => Some((range.start, heading_size(level))),
+            _ => None,
+        })
+        .collect();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let units: Vec<u16> = text.encode_utf16().collect();
+    for (at, unit) in units.iter().enumerate().chain(std::iter::once((units.len(), &0))) {
+        if at < units.len() && *unit != u16::from(b'\n') {
+            continue;
+        }
+        let end = (at + 1).min(units.len());
+        let size = headings.iter().filter(|(heading, _)| (start..end.max(start + 1)).contains(heading)).map(|(_, size)| *size).fold(1.0, f32::max);
+        let height = (words * LEADING).max(words * size * HEADING_LEADING).round();
+        lines.push((start..end, height));
+        start = end;
+    }
+    lines
 }
 
 /// The lines (counted from 0) of `text` that the stretch `from`..`to` (UTF-16 units, as the text services count:
@@ -465,6 +499,15 @@ pub fn plain_lines(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each line set as far apart as its words are tall; a heading's as its own size asks, where that is more; the
+    /// empty line after a last line break too; in whole pixels.
+    #[test]
+    fn sets_each_line_as_tall_as_its_words_ask() {
+        let lines = line_heights("# 标题\n正文\n#### 小\n", 20.0);
+        assert_eq!(lines, vec![(0..5, (20.0 * 1.6 * HEADING_LEADING).round()), (5..8, 32.0), (8..15, 32.0), (15..15, 32.0)]);
+        assert_eq!(line_heights("", 15.0), vec![(0..0, 24.0)]);
+    }
 
     /// Away from the lines written on, a heading's `#`, emphasis's, code's and a link's marks are put away, a list's and
     /// a quote's not; a to-do is a box in its list's mark's place; a link, and a web address written out, followed from

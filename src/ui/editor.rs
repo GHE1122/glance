@@ -286,6 +286,14 @@ impl Editor {
                     Look::Plain => font.SetForeColor(color(palette.text)),
                 };
             }
+            // Each line set exactly as tall as `markdown::line_heights` says (as a note's face sets it). (tomLineSpaceExactly;
+            // points.)
+            const EXACTLY: i32 = 4;
+            for (range, height) in crate::notes::markdown::line_heights(&self.text(), pixels.round()) {
+                if let Ok(para) = document.Range(range.start as i32, range.end as i32).and_then(|range| range.GetPara()) {
+                    let _ = para.SetLineSpacing(EXACTLY, height * 0.75);
+                }
+            }
             for range in hidden {
                 if let Ok(font) = document.Range(range.start as i32, range.end as i32).and_then(|range| range.GetFont()) {
                     let _ = font.SetHidden(tomTrue.0);
@@ -321,6 +329,20 @@ impl Editor {
         let (_, bottom) = point(START | FOOT)?;
         let (right, _) = point(END)?;
         Some(RECT { left, top, right: right.max(left), bottom })
+    }
+
+    /// Where the baseline of the character at `at` (UTF-16 units) is (in the window, from its top). None where it is
+    /// not drawn.
+    pub fn baseline(&self, at: usize) -> Option<i32> {
+        // (tomStart; tomClientCoord; TA_BASELINE.)
+        const START: i32 = 32;
+        const IN_WINDOW: i32 = 256;
+        const BASELINE: i32 = 24;
+        let document = self.services.cast::<ITextDocument>().ok()?;
+        let range = unsafe { document.Range(at as i32, at as i32 + 1) }.ok()?;
+        let (mut x, mut y) = (0, 0);
+        unsafe { range.GetPoint(tomConstants(START | BASELINE | IN_WINDOW), &mut x, &mut y) }.ok()?;
+        Some(y)
     }
 
     /// Where among its words (in UTF-16 units) the point `point` (in the window) is.

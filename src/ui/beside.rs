@@ -83,6 +83,8 @@ const ROW: f32 = 40.0;
 const LETTER: f32 = 26.0;
 const FOOT: f32 = 48.0;
 const PAD: f32 = 16.0;
+/// The room a note's page leaves at its sides, round its words, its head's and its foot's (DIPs).
+const NOTE_PAD: f32 = 20.0;
 /// The gap between it and what it opens from (DIPs).
 const GAP: f32 = 8.0;
 /// How long a search may be.
@@ -378,12 +380,12 @@ struct Reads {
     folder: std::path::PathBuf,
 }
 
-/// Where a to-do's box is drawn, over the room `room` drawn for it (in the window: see `Editor::character`), its
-/// words `pixels` high: its left, its top and its side.
-fn box_in(room: RECT, pixels: f32) -> (f32, f32, f32) {
-    use crate::notes::markdown::{BOX_IN, BOX_SIDE};
+/// Where a to-do's box is drawn, in the room drawn for it from `left`, by its line's `baseline` (in the window: see
+/// `Editor::character`, `Editor::baseline`), its words `pixels` high: its left, its top and its side.
+fn box_in(left: i32, baseline: i32, pixels: f32) -> (f32, f32, f32) {
+    use crate::notes::markdown::{BOX_IN, BOX_RISE, BOX_SIDE};
     let side = BOX_SIDE * pixels;
-    (room.left as f32 + BOX_IN * pixels, (room.top + room.bottom) as f32 / 2.0 - side / 2.0, side)
+    (left as f32 + BOX_IN * pixels, baseline as f32 - BOX_RISE * pixels - side / 2.0, side)
 }
 
 /// What a note's words are written in on its page (`pixels` high), its colour `colour`: as its card's on the panel are
@@ -448,23 +450,23 @@ fn note_counted(text: &str, lang: super::text::Lang) -> String {
 #[allow(clippy::too_many_arguments)]
 fn note_face(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, said: &str, counted: Option<&str>, name: Option<&str>, (x, y, width, height): (f32, f32, f32, f32)) {
     super::view::note_page(frame, theme, colour, (x, y, width, height));
-    frame.fill_circle(super::view::note_colour(colour), Point { x: x + PAD + 5.0, y: y + 26.0 }, 5.0);
-    frame.text(said, theme.small, theme.text2, x + PAD + 18.0, y + 18.0, width - 2.0 * PAD - 80.0, Align::Start);
+    frame.fill_circle(super::view::note_colour(colour), Point { x: x + NOTE_PAD + 5.0, y: y + 26.0 }, 5.0);
+    frame.text(said, theme.small, theme.text2, x + NOTE_PAD + 18.0, y + 18.0, width - 2.0 * NOTE_PAD - 80.0, Align::Start);
     let bottom = y + height - FOOT;
-    frame.fill(theme.rule, x + PAD, bottom, width - 2.0 * PAD, 1.0);
+    frame.fill(theme.rule, x + NOTE_PAD, bottom, width - 2.0 * NOTE_PAD, 1.0);
     let Some(counted) = counted else { return };
-    frame.text(counted, theme.small, theme.text3, x + PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * PAD, Align::Start);
-    let room = width - 2.0 * PAD - frame.measure(counted, theme.small) - 16.0;
+    frame.text(counted, theme.small, theme.text3, x + NOTE_PAD, bottom + (FOOT - 16.0) / 2.0, width - 2.0 * NOTE_PAD, Align::Start);
+    let room = width - 2.0 * NOTE_PAD - frame.measure(counted, theme.small) - 16.0;
     // (Where it fits: shortened past a few letters, a name says nothing.)
     if let Some(name) = name.filter(|_| room >= 96.0) {
-        frame.text(name, theme.small, theme.text3, x + width - PAD - room, bottom + (FOOT - 16.0) / 2.0, room, Align::End);
+        frame.text(name, theme.small, theme.text3, x + width - NOTE_PAD - room, bottom + (FOOT - 16.0) / 2.0, room, Align::End);
     }
 }
 
 /// Where a note's words are written on its page `width` × `height` (DIPs, from its corner): under its head, over its
 /// foot (as `words_box` places its box).
 fn note_words(width: f32, height: f32) -> (f32, f32, f32, f32) {
-    (PAD, HEAD + 4.0, width - 2.0 * PAD, height - HEAD - 4.0 - FOOT)
+    (NOTE_PAD, HEAD + 4.0, width - 2.0 * NOTE_PAD, height - HEAD - 4.0 - FOOT)
 }
 
 /// A note stuck on the desktop, `width` × `height` from (`x`, `y`): its page as it is written in (see `paint_note`),
@@ -702,7 +704,7 @@ fn placed_in(opening: &Opening, room: RECT, scale: f32) -> RECT {
 /// Where a note's words are written in its page's window (physical px), its page `wide` × `tall` past `room` (its
 /// shadow's): under its head, over its foot.
 pub(super) fn words_box(room: i32, wide: i32, tall: i32, scale: f32) -> RECT {
-    RECT { left: room + (PAD * scale) as i32, top: room + ((HEAD + 4.0) * scale) as i32, right: room + wide - (PAD * scale) as i32, bottom: room + tall - (FOOT * scale) as i32 }
+    RECT { left: room + (NOTE_PAD * scale) as i32, top: room + ((HEAD + 4.0) * scale) as i32, right: room + wide - (NOTE_PAD * scale) as i32, bottom: room + tall - (FOOT * scale) as i32 }
 }
 
 /// The window `window` (of Glance's) kept off the screen (`hidden`) or shown again as it was, nothing else of it changed.
@@ -2020,7 +2022,7 @@ impl Beside {
         let lit = |at: (f32, f32, f32, f32), pointer: Option<(f32, f32)>| pointer.is_some_and(|(x, y)| x >= at.0 && x < at.0 + at.2 && y >= at.1 && y < at.1 + at.3);
         self.paint_ground(frame, (width, height));
         let Some(writing) = &self.writing else {
-            frame.text(lang.pick("没能打开编辑器", "The editor could not be opened"), theme.body, theme.text2, PAD, PAD, width - 2.0 * PAD, Align::Start);
+            frame.text(lang.pick("没能打开编辑器", "The editor could not be opened"), theme.body, theme.text2, NOTE_PAD, NOTE_PAD, width - 2.0 * NOTE_PAD, Align::Start);
             self.hits = hits;
             return;
         };
@@ -2033,8 +2035,8 @@ impl Beside {
         note_face(frame, &theme, writing.colour, &said, writing.said.is_none().then_some(counted.as_str()), writing.name.as_deref(), (0.0, 0.0, width, height));
         if let Some(said) = &writing.said {
             let bottom = height - FOOT;
-            let tall = frame.gfx.wrapped_height(said, theme.small, width - 2.0 * PAD).min(FOOT - 8.0);
-            frame.text_wrapped(said, theme.small, theme.signal, PAD, bottom + (FOOT - tall) / 2.0, width - 2.0 * PAD);
+            let tall = frame.gfx.wrapped_height(said, theme.small, width - 2.0 * NOTE_PAD).min(FOOT - 8.0);
+            frame.text_wrapped(said, theme.small, theme.signal, NOTE_PAD, bottom + (FOOT - tall) / 2.0, width - 2.0 * NOTE_PAD);
         }
         for (at, hit, icon) in [(width - PAD - 28.0, Hit::Close, Icon::Close), (width - PAD - 60.0, Hit::NoteMenu, Icon::Ellipsis)] {
             let place = (at, 12.0, 28.0, 28.0);
@@ -2062,8 +2064,8 @@ impl Beside {
         let (right, bottom) = self.on_page(bounds.right as f32, bounds.bottom as f32);
         frame.clip(left, top, right - left, bottom - top);
         for boxed in writing.shown.boxes(&writing.written) {
-            let Some(room) = editor.character(boxed.room) else { continue };
-            let (x, y, side) = box_in(room, pixels);
+            let (Some(room), Some(baseline)) = (editor.character(boxed.room), editor.baseline(boxed.room + 1)) else { continue };
+            let (x, y, side) = box_in(room.left, baseline, pixels);
             let (x, y) = self.on_page(x, y);
             super::canvas::task_box(frame, inks, x, y, side / self.scale, boxed.done);
         }

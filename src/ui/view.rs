@@ -6519,8 +6519,8 @@ six".into()));
                 let boxed = (page.left as f32 / scale, page.top as f32 / scale, (page.right - page.left) as f32 / scale, (page.bottom - page.top) as f32 / scale);
                 assert_eq!(words, Some((text.to_string(), super::super::beside::WORDS, boxed)), "{skin:?} {w}x{h}");
                 // Its dot, and when it was written after it.
-                assert!(ops.iter().any(|op| matches!(op, Op::Circle { centre, radius, .. } if (centre.x, centre.y, *radius) == (21.0, 26.0, 5.0))), "{skin:?} {w}x{h}: its dot");
-                assert!(ops.iter().any(|op| matches!(op, Op::Text { text, x, y, .. } if text.ends_with("修改") && (*x, *y) == (34.0, 18.0))), "{skin:?} {w}x{h}: when it was written");
+                assert!(ops.iter().any(|op| matches!(op, Op::Circle { centre, radius, .. } if (centre.x, centre.y, *radius) == (25.0, 26.0, 5.0))), "{skin:?} {w}x{h}: its dot");
+                assert!(ops.iter().any(|op| matches!(op, Op::Text { text, x, y, .. } if text.ends_with("修改") && (*x, *y) == (38.0, 18.0))), "{skin:?} {w}x{h}: when it was written");
                 assert_eq!(hits.iter().map(|hit| (hit.0, hit.1, hit.2, hit.3, hit.4)).collect::<Vec<_>>(), vec![(0.0, 0.0, w, h, Hit::Note(crate::notes::number_of("a.md")))], "{skin:?} {w}x{h}");
             }
         }
