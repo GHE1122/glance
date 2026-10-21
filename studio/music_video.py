@@ -1,21 +1,36 @@
-"""The music video: the studio's frames of the music widget and the music
-full screen (studio/music-shots.json), captioned, cut together on the
-song's bars, with the song under them and a few sounds of their own, as a
-vertical H.264 MP4.
+"""The music video: the studio's frames of the monitor, the music widget
+and the music full screen, captioned and cut together as a timeline says,
+with the song under them and a few sounds of their own, as a vertical
+H.264 MP4.
 
-    python studio/music_video.py FRAMES SONG-FOLDER FONT OUT.mp4 [--preview T ...]
+    python studio/music_video.py TIMELINE.json FRAMES FONT OUT.mp4 [--preview T ...]
 
-FRAMES holds the studio's shots (monitor, music-widget, music-full), SONG-FOLDER the
-song (see song.py), FONT a variable CJK font with Bold and Regular
+FRAMES holds the studio's shots (monitor, music-widget, music-full: see
+music-shots*.json), FONT a variable CJK font with Bold and Regular
 instances. --preview writes the frame at each T seconds as a PNG beside
 OUT instead of the video.
 
 It begins with the Glance people know, the monitor sliding out of the
 right edge and away, and then what is new: music sliding out of the left
-edge. Taken onto the desktop, it grows as the song goes (a strip, a player,
-a card, the stage with its record), each turn with a soft whoosh, then the
-camera falls into it and the full screen takes over. On the last bar the
-screen blurs back behind Glance's mark, what is new and where to find it.
+edge, marked new. Taken onto the desktop, it grows as the song goes (a
+strip, a player, a card, the stage with its record), each turn with a soft
+whoosh, then the camera falls into it and the full screen takes over. At
+the end the screen blurs back behind Glance's mark, what is new and where
+to find it.
+
+The timeline (times in seconds of the video, whose first frame is each
+shot's first):
+  audio       the song (a WAV), and `from`: where in it the video begins
+  seconds     how long the video is, the song fading in over `fade_in` and
+              out over the last `fade_out`
+  music_from  when the music's frames take over from the monitor's
+  fall        when the camera begins to fall into the widget, and when the
+              full screen has taken over; `stage` the widget's box then
+              (DIPs, as the studio's keys have it) at `scale` px a DIP
+  full_from   when the full screen's shot begins
+  end         when the end begins
+  captions    [from, to, title, subtitle], `new` the one marked new
+  whooshes    [at, seconds, loudness], `pops` [at, loudness]
 """
 import json
 import subprocess
@@ -27,39 +42,10 @@ import imageio_ffmpeg
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-from compose import ACCENT, MARGIN, Fonts, H, W, clamp01, ease, ease_out, kinetic, mark, shadowed
+from compose import ACCENT, MARGIN, Fonts, H, W, ease, ease_out, kinetic, mark, shadowed
 
 FPS = 30
 RATE = 48_000
-SCALE = 1.8
-# The song's bars (see song.py): 92 beats a minute, four beats a bar.
-BAR = 4 * 60 / 92
-LENGTH = 12 * BAR + 1.6
-# When the camera falls into the widget, when the full screen has taken over, and when the end begins.
-FALL = (7.9 * BAR, 8.0 * BAR + 0.15)
-END = 10 * BAR
-# Where the full screen's frames begin in the song (see music-shots.json).
-FULL_FROM = 20.0
-
-# When the music's frames take over from the monitor's (see music-shots.json: the monitor gone, music sliding in).
-MUSIC_FROM = 4.4
-
-# Captions: (from, to, title, subtitle), seconds into the song. The second says what is new, marked so.
-CAPTIONS = [
-    (0.35, 3.75, "Glance", "鼠标推到屏幕边缘\n系统监控滑出来"),
-    (4.0, 7.9, "0.4 新增：音乐", "从屏幕另一边滑出\n歌词跟着歌声走"),
-    (8.2, 10.5, "拖到桌面上", "大小随意调"),
-    (10.8, 13.4, "拉高一点", "封面、歌名和频谱\n一起出来"),
-    (13.8, 16.0, "再大一点", "前后几句歌词\n跟着歌一起滚动"),
-    (16.4, FALL[0], "够宽就放唱片", "唱片随着播放转动"),
-    (FALL[1] + 0.3, END - 0.1, "全屏歌词", "烟雾取封面的颜色\n跟着节拍流动"),
-]
-NEW = (4.0, 7.9)
-# The widget's keys as the studio has them (DIPs), for where the camera falls.
-STAGE = (20, 500, 560, 360)
-# Sounds: whooshes as the widget grows and as the camera falls; a soft pop as it first shows.
-WHOOSHES = [(0.15, 0.7, 0.45), (3.5, 0.7, 0.4), (4.25, 0.8, 0.55), (7.9, 1.1, 0.5), (10.0, 0.8, 0.4), (12.8, 0.8, 0.4), (15.4, 0.8, 0.4), (FALL[0] - 0.25, 1.1, 0.9)]
-POPS = [(4.5, 0.7)]
 
 
 class Shot:
@@ -75,9 +61,9 @@ class Shot:
         return Image.open(self.files[index]).convert("RGB")
 
 
-def fallen(frame, p):
+def fallen(cut, frame, p):
     """The frame as the camera falls into the stage: scaled about its middle till it covers the screen."""
-    x, y, w, h = (v * SCALE for v in STAGE)
+    x, y, w, h = (v * cut["scale"] for v in cut["stage"])
     cx, cy = x + w / 2, y + h / 2
     zoom = 1 + (max(W / w, H / h) * 1.1 - 1) * p
     # (Its middle drawn toward the screen's as it grows.)
@@ -87,15 +73,15 @@ def fallen(frame, p):
     return scaled.crop((left, top, left + W, top + H)).filter(ImageFilter.GaussianBlur(10 * p))
 
 
-def end_card(fonts, frame, t):
-    """The end: the screen blurred and darkened behind Glance's mark drawing its pulse, its name, where to find it
-    and what it is."""
-    p = ease((t - END) / 0.7)
+def end_card(cut, fonts, frame, t):
+    """The end: the screen blurred and darkened behind Glance's mark drawing its pulse, its name, what is new, where
+    to find it and what it is."""
+    since = t - cut["end"]
+    p = ease(since / 0.7)
     behind = frame.filter(ImageFilter.GaussianBlur(28 * p))
     behind = Image.blend(behind, Image.new("RGB", (W, H), (8, 6, 18)), 0.45 * p)
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
-    since = t - END
     size = 260
     logo = mark(size, ease_out((since - 0.2) / 1.0), ease_out((since - 1.1) / 0.4))
     logo_alpha = ease_out((since - 0.1) / 0.4)
@@ -117,44 +103,45 @@ def end_card(fonts, frame, t):
     return out.convert("RGB")
 
 
-def new_badge(fonts, t):
+def new_badge(cut, fonts, t):
     """A small "NEW" mark over the caption that says what is new, popping in and leaving with it."""
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    start, stop = NEW
+    start, stop = cut["new"]
     a = ease_out((t - start - 0.5) / 0.3) * (1 - ease((t - (stop - 0.3)) / 0.3))
     if a <= 0:
         return layer
     draw = ImageDraw.Draw(layer)
-    font = fonts.get(34, b"Bold")
+    grow = 0.85 + 0.15 * ease_out((t - start - 0.5) / 0.25)
+    font = fonts.get(int(34 * grow), b"Bold")
     text = "NEW"
     width = draw.textlength(text, font=font)
-    grow = 0.85 + 0.15 * ease_out((t - start - 0.5) / 0.25)
-    w, h = (width + 36) * grow, 50 * grow
+    w, h = width + 36 * grow, 50 * grow
     x, y = MARGIN, 200
     draw.rounded_rectangle((x, y, x + w, y + h), radius=h / 2, fill=ACCENT + (int(255 * a),))
-    small = fonts.get(int(34 * grow), b"Bold")
-    draw.text((x + (w - draw.textlength(text, font=small)) / 2, y + h / 2), text, font=small, anchor="lm", fill=(255, 255, 255, int(255 * a)))
+    draw.text((x + (w - width) / 2, y + h / 2), text, font=font, anchor="lm", fill=(255, 255, 255, int(255 * a)))
     return layer
 
 
-def frame_at(fonts, monitor, widget, full, t):
-    if t < MUSIC_FROM:
+def frame_at(cut, fonts, shots, t):
+    monitor, widget, full = shots
+    (fall_from, fall_to), full_from = cut["fall"], cut["full_from"]
+    if t < cut["music_from"]:
         frame = monitor.at(t)
-    elif t < FALL[0]:
+    elif t < fall_from:
         frame = widget.at(t)
-    elif t < FALL[1]:
-        p = ease((t - FALL[0]) / (FALL[1] - FALL[0]))
-        frame = Image.blend(fallen(widget.at(t), p), full.at(t - FULL_FROM), ease((p - 0.5) / 0.5))
+    elif t < fall_to:
+        p = ease((t - fall_from) / (fall_to - fall_from))
+        frame = Image.blend(fallen(cut, widget.at(t), p), full.at(t - full_from), ease((p - 0.5) / 0.5))
     else:
-        frame = full.at(t - FULL_FROM)
-    if t >= END:
-        return end_card(fonts, frame, t)
+        frame = full.at(t - full_from)
+    if t >= cut["end"]:
+        return end_card(cut, fonts, frame, t)
     out = frame.convert("RGBA")
-    for start, stop, title, subtitle in CAPTIONS:
+    for start, stop, title, subtitle in cut["captions"]:
         if start <= t < stop:
             out.alpha_composite(kinetic(fonts, title, subtitle, t - start, stop - start, W - 2 * MARGIN, 270, size=92))
-    if NEW[0] <= t < NEW[1]:
-        out.alpha_composite(new_badge(fonts, t))
+    if cut["new"][0] <= t < cut["new"][1]:
+        out.alpha_composite(new_badge(cut, fonts, t))
     return out.convert("RGB")
 
 
@@ -186,20 +173,33 @@ def pop(loud):
     return np.stack([tone, tone], axis=1)
 
 
-def soundtrack(song_folder, out):
-    with wave.open(str(song_folder / "song.wav")) as read:
+def soundtrack(cut, out):
+    """The song from `from` for the video's length, faded in and out, the sounds over it, its peaks no higher than
+    -1 dBFS."""
+    with wave.open(cut["audio"]) as read:
+        assert read.getframerate() == RATE, read.getframerate()
         song = np.frombuffer(read.readframes(read.getnframes()), dtype="<i2").astype(np.float64).reshape(-1, 2) / 32768
+    count = int(cut["seconds"] * RATE)
+    start = int(cut.get("from", 0.0) * RATE)
+    song = np.pad(song[start:start + count], ((0, max(0, count - (len(song) - start))), (0, 0)))[:count]
+    fade_in, fade_out = int(cut.get("fade_in", 0.0) * RATE), int(cut.get("fade_out", 0.0) * RATE)
+    if fade_in:
+        song[:fade_in] *= np.linspace(0, 1, fade_in)[:, None]
+    if fade_out:
+        song[-fade_out:] *= np.linspace(1, 0, fade_out)[:, None] ** 1.5
     sounds = np.zeros_like(song)
-    for index, (at, seconds, loud) in enumerate(WHOOSHES):
+    for index, (at, seconds, loud) in enumerate(cut["whooshes"]):
         made = whoosh(seconds, loud * 0.22, index)
-        start = int(at * RATE)
-        sounds[start:start + len(made)] += made[:len(sounds) - start]
-    for at, loud in POPS:
+        begin = int(at * RATE)
+        sounds[begin:begin + len(made)] += made[:len(sounds) - begin]
+    for at, loud in cut["pops"]:
         made = pop(loud * 0.3)
-        start = int(at * RATE)
-        sounds[start:start + len(made)] += made
+        begin = int(at * RATE)
+        sounds[begin:begin + len(made)] += made[:len(sounds) - begin]
     mixed = song + sounds
-    mixed *= 10 ** (-1 / 20) / max(np.abs(mixed).max(), 1e-9) if np.abs(mixed).max() > 10 ** (-1 / 20) else 1
+    most = 10 ** (-1 / 20)
+    if np.abs(mixed).max() > most:
+        mixed *= most / np.abs(mixed).max()
     with wave.open(str(out), "wb") as write:
         write.setnchannels(2)
         write.setsampwidth(2)
@@ -208,15 +208,16 @@ def soundtrack(song_folder, out):
 
 
 def main():
-    frames, song_folder, font, out = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
+    cut = json.load(open(sys.argv[1], encoding="utf-8"))
+    frames, font, out = Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
     fonts = Fonts(font)
-    monitor, widget, full = Shot(frames / "monitor"), Shot(frames / "music-widget"), Shot(frames / "music-full")
+    shots = Shot(frames / "monitor"), Shot(frames / "music-widget"), Shot(frames / "music-full")
     if "--preview" in sys.argv:
         for t in map(float, sys.argv[sys.argv.index("--preview") + 1:]):
-            frame_at(fonts, monitor, widget, full, t).save(out.with_name(f"{out.stem}-{t:05.2f}.png"))
+            frame_at(cut, fonts, shots, t).save(out.with_name(f"{out.stem}-{t:05.2f}.png"))
         return
     audio = out.with_suffix(".wav")
-    soundtrack(song_folder, audio)
+    soundtrack(cut, audio)
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     encode = subprocess.Popen([
         ffmpeg, "-y", "-loglevel", "error",
@@ -225,9 +226,9 @@ def main():
         "-c:v", "libx264", "-preset", "slow", "-crf", "17", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
         "-c:a", "aac", "-b:a", "256k", "-shortest", str(out),
     ], stdin=subprocess.PIPE)
-    count = int(LENGTH * FPS)
+    count = int(cut["seconds"] * FPS)
     for index in range(count):
-        encode.stdin.write(frame_at(fonts, monitor, widget, full, index / FPS).tobytes())
+        encode.stdin.write(frame_at(cut, fonts, shots, index / FPS).tobytes())
         if index % 150 == 0:
             print(f"{index}/{count}", flush=True)
     encode.stdin.close()

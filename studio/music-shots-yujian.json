@@ -1,0 +1,39 @@
+{
+  "width": 1080,
+  "height": 1920,
+  "scale": 1.8,
+  "fps": 30,
+  "wallpaper": "target/song/wallpaper.png",
+  "shots": [
+    {
+      "name": "monitor", "skin": "glass", "seconds": 6.4, "slide_in": 0.3, "slide_out": 5.5,
+      "load": [0.3, 0.55], "modules": ["cpu", "gpu:0", "memory", "network"]
+    },
+    {
+      "name": "music-widget", "skin": "glass", "seconds": 26.6, "edge": "left", "slide_in": 6.6,
+      "music": {
+        "lyrics": "target/yujian/lyrics.json", "heard": "target/yujian/heard.json", "cover": "target/yujian/cover.jpg",
+        "title": "遇见", "artist": "孙燕姿", "length": 209.76, "from": 152.6,
+        "keys": [
+          { "t": 0, "x": 12, "y": 333, "w": 380, "h": 400 },
+          { "t": 11.8, "x": 12, "y": 333, "w": 380, "h": 400 },
+          { "t": 12.8, "x": 40, "y": 620, "w": 520, "h": 72 },
+          { "t": 14.8, "x": 40, "y": 620, "w": 520, "h": 72 },
+          { "t": 15.8, "x": 40, "y": 560, "w": 520, "h": 196 },
+          { "t": 18.4, "x": 40, "y": 560, "w": 520, "h": 196 },
+          { "t": 19.4, "x": 100, "y": 480, "w": 400, "h": 380 },
+          { "t": 21.4, "x": 100, "y": 480, "w": 400, "h": 380 },
+          { "t": 22.4, "x": 20, "y": 500, "w": 560, "h": 360 }
+        ]
+      }
+    },
+    {
+      "name": "music-full", "skin": "glass", "seconds": 10.0, "panel": false,
+      "music": {
+        "lyrics": "target/yujian/lyrics.json", "heard": "target/yujian/heard.json", "cover": "target/yujian/cover.jpg",
+        "title": "遇见", "artist": "孙燕姿", "length": 209.76, "from": 177.6, "full": true,
+        "serif": "website/dl/NotoSerifSC-Black.otf"
+      }
+    }
+  ]
+}
