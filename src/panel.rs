@@ -1111,7 +1111,7 @@ impl Controller {
                     // On a thing on the station, its menu; else the widget's.
                     let panel_shown = panels.iter().any(Panel::is_shown);
                     menu = match widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
-                        Some(Hit::Shelf(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
+                        Some(Hit::Shelf(id) | Hit::Copied(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
                         Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
                         Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices, app)| (open, MenuFor::App(app, choices))),
                         _ => widgets.menu(msg.hwnd, panels[0].lang, panel_shown).map(|open| (open, MenuFor::Widget(msg.hwnd))),
@@ -1122,13 +1122,13 @@ impl Controller {
                 WM_RBUTTONUP if owner.is_some() => {
                     let hit = panels[owner.unwrap()].hit_at(lparam_point(msg.lParam));
                     let look = panels[owner.unwrap()].menu_look();
-                    if matches!(hit, Some(Hit::Shelf(_) | Hit::App(_) | Hit::Recent(_))) {
+                    if matches!(hit, Some(Hit::Shelf(_) | Hit::Copied(_) | Hit::App(_) | Hit::Recent(_))) {
                         // (Before `end_menu`, which forgets whose the menu up was.)
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                         menu_of = owner;
                     }
                     match hit {
-                        Some(Hit::Shelf(id)) => {
+                        Some(Hit::Shelf(id) | Hit::Copied(id)) => {
                             menu = cursor_position().and_then(|at| crate::station::menu(id, at, true, look)).map(|(open, choices)| (open, MenuFor::Station(id, choices, None)));
                             keep_menu_above(&menu, &mut overlay);
                         }
