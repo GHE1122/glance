@@ -1021,8 +1021,8 @@ impl Controller {
                             panel.app_dropped = Some((moving.clone(), to, Instant::now()));
                             crate::station::apps::change(move |apps| crate::station::apps::put_before(apps, &moving, before.as_deref()));
                         }
-                        (true, false, _, Some(from)) if over == Some(Hit::App(from as u16)) => {
-                            crate::station::pressed(Hit::App(from as u16));
+                        (true, false, _, Some(_)) if over == Some(Hit::App(crate::station::apps::number_of(&moving))) => {
+                            crate::station::pressed(Hit::App(crate::station::apps::number_of(&moving)));
                         }
                         _ => {}
                     }
@@ -1207,7 +1207,7 @@ impl Controller {
                 }
                 // A note stuck on the desktop pressed in the panel: the one stuck shown, not opened a second time.
                 WM_LBUTTONUP
-                    if owner.is_some_and(|at| panels[at].hit_at(lparam_point(msg.lParam)).and_then(|hit| if let Hit::Note(at) = hit { crate::notes::shown().get(usize::from(at)).map(|note| note.name.clone()) } else { None }).is_some_and(|name| widgets.raise_note(&name))) =>
+                    if owner.is_some_and(|at| panels[at].hit_at(lparam_point(msg.lParam)).and_then(|hit| if let Hit::Note(number) = hit { crate::notes::named(number) } else { None }).is_some_and(|name| widgets.raise_note(&name))) =>
                 {
                     panels[owner.unwrap()].dismiss();
                 }
@@ -2776,16 +2776,16 @@ impl<'a> Panel<'a> {
             return;
         }
         // On a note: pulled off, stuck on the desktop; else opened as it is let go (see `note_press`).
-        if let (Some(Hit::Note(at)), Some(from)) = (self.hit_at(client), cursor_position()) {
-            if let Some(note) = crate::notes::shown().get(usize::from(at)) {
-                self.note_press = Some((note.name.clone(), from));
+        if let (Some(Hit::Note(number)), Some(from)) = (self.hit_at(client), cursor_position()) {
+            if let Some(name) = crate::notes::named(number) {
+                self.note_press = Some((name, from));
                 unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd) };
             }
             return;
         }
         // On a thing kept at hand: moved among them, or opened (see `app_press`).
-        if let (Some(Hit::App(at)), Some(from)) = (self.hit_at(client), cursor_position()) {
-            let Some(target) = crate::station::apps::shown().get(usize::from(at)).map(|app| app.target.clone()) else { return };
+        if let (Some(Hit::App(number)), Some(from)) = (self.hit_at(client), cursor_position()) {
+            let Some(target) = crate::station::apps::numbered(number).map(|app| app.target) else { return };
             self.app_press = Some((target, from, false));
             self.app_over = None;
             unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd) };
@@ -3781,9 +3781,9 @@ impl<'a> Panel<'a> {
             Some(Hit::Tab(tab)) => self.tab = tab,
             Some(Hit::AddApp) => self.open_beside(crate::ui::beside::Page::Picker),
             Some(Hit::NewNote) => self.open_beside(crate::ui::beside::Page::Note(None)),
-            Some(Hit::Note(at)) => {
-                if let Some(note) = crate::notes::shown().get(usize::from(at)) {
-                    self.open_beside(crate::ui::beside::Page::Note(Some(note.name.clone())));
+            Some(Hit::Note(number)) => {
+                if let Some(name) = crate::notes::named(number) {
+                    self.open_beside(crate::ui::beside::Page::Note(Some(name)));
                 }
             }
             Some(Hit::Sort(sort)) if sort != self.drawn.processes.sort => {

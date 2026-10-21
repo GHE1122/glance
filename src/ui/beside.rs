@@ -520,6 +520,12 @@ fn run(asks: Receiver<Ask>) {
                                     beside.opening = Some(now);
                                     return None;
                                 }
+                                // (Kept first: kept apart, as a conflict's copy, it is that copy opened again. Not
+                                // kept, it stays as it is, saying so, as it would not go.)
+                                if !beside.keep() {
+                                    beside.redraw();
+                                    return None;
+                                }
                                 let page = match &beside.writing {
                                     Some(writing) => Page::Note(writing.name.clone()),
                                     None => beside.page.clone(),
@@ -752,18 +758,21 @@ fn show(opening: Opening) {
         found::look(move || {
             let _ = PostMessageW(Some(HWND(told as *mut _)), WM_TIMER, WPARAM(AGAIN), LPARAM(0));
         });
-        // What is dropped on it kept at hand, as on quick launch; while it is dragged over, the page says so.
-        let told = hwnd.0 as isize;
-        let target = crate::station::drop::Target::new(move |dragged| {
-            use crate::station::drop::Dragged;
-            let over = matches!(dragged, Dragged::Over(_));
-            let _ = PostMessageW(Some(HWND(told as *mut _)), DROPPING, WPARAM(usize::from(over)), LPARAM(0));
-            if matches!(dragged, Dragged::Dropped(_)) {
-                crate::station::run::caught(dragged, None, crate::station::run::Lands::Apps);
-            }
-        });
-        let _ = windows::Win32::System::Ole::RegisterDragDrop(hwnd, &target);
-        DROP_TARGET.with(|held| *held.borrow_mut() = Some(target));
+        // The choosing of programs: what is dropped on it kept at hand, as on quick launch; while it is dragged over,
+        // the page says so. (A note's page takes nothing dropped: what is dropped there is not to be kept at hand.)
+        if opening.page == Page::Picker {
+            let told = hwnd.0 as isize;
+            let target = crate::station::drop::Target::new(move |dragged| {
+                use crate::station::drop::Dragged;
+                let over = matches!(dragged, Dragged::Over(_));
+                let _ = PostMessageW(Some(HWND(told as *mut _)), DROPPING, WPARAM(usize::from(over)), LPARAM(0));
+                if matches!(dragged, Dragged::Dropped(_)) {
+                    crate::station::run::caught(dragged, None, crate::station::run::Lands::Apps);
+                }
+            });
+            let _ = windows::Win32::System::Ole::RegisterDragDrop(hwnd, &target);
+            DROP_TARGET.with(|held| *held.borrow_mut() = Some(target));
+        }
         let _ = SetTimer(Some(hwnd), BLINK, windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime(), None);
         let _ = SetTimer(Some(hwnd), FOLLOW, FOLLOW_MS, None);
         // Shown once drawn whole (see `Beside::shown`), or after a while drawn as it can be.
@@ -1086,7 +1095,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             // (A note opened again as it is now, from where it was read: one new when it opened and kept since, or
             // kept apart as a conflict's copy, by its name now; in its folder, whatever the settings name since.)
             let again = with(|beside| {
-                let _ = beside.keep();
+                // (Not kept, it stays as it is, saying so, as it would not go.)
+                if !beside.keep() {
+                    beside.redraw();
+                    return None;
+                }
                 let page = match &beside.writing {
                     Some(writing) => Page::Note(writing.name.clone()),
                     None => beside.page.clone(),
@@ -1326,7 +1339,9 @@ impl Beside {
     /// desktop where its page was put (as from its menu), its page gone (whether it is to go).
     fn carry_note(&mut self, done: bool) -> bool {
         let Some(from) = self.moved_from else { return false };
-        let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return false };
+        if self.writing.as_ref().is_none_or(|writing| writing.name.is_none()) {
+            return false;
+        }
         let to = self.corner();
         if !self.opening.as_ref().is_some_and(|opening| opening.side == Side::Over) {
             if !done {
@@ -1337,11 +1352,17 @@ impl Beside {
             if (to.x - from.x).abs() < far && (to.y - from.y).abs() < far {
                 return false;
             }
-            let _ = self.keep();
+            // (Kept first: kept apart, as a conflict's copy, it is that copy stuck. Not kept, it stays, saying so.)
+            if !self.keep() {
+                self.redraw();
+                return false;
+            }
+            let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return false };
             let place = self.page_on_screen();
             crate::app().controller.stick_note(name, POINT { x: place.left, y: place.top }, Some(self.page_size(place)));
             return true;
         }
+        let Some(name) = self.writing.as_ref().and_then(|writing| writing.name.clone()) else { return false };
         crate::app().controller.move_note(name, to.x - from.x, to.y - from.y, done);
         self.moved_from = if done { None } else { Some(to) };
         false

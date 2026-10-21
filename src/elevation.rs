@@ -412,6 +412,20 @@ fn hold(folder: &Path) -> Option<Held> {
     Held::open_to_hold(folder).filter(Held::is_folder)
 }
 
+/// Which folder `path` is (its volume's serial number and its number there): another made in its place, another.
+/// (Looked at only: opened sharing all, held not even for a moment against its being renamed.)
+pub fn folder_id(path: &Path) -> Option<(u32, u64)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
+    let opened = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)
+        .ok()?;
+    Held(opened).id()
+}
+
 /// Rights over a folder that would let someone change what is in it, or
 /// make it a link (setting a reparse point needs only to write attributes).
 const FOLDER_CHANGES: u32 = FILE_ADD_FILE.0

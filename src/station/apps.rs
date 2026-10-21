@@ -47,6 +47,18 @@ pub fn shown() -> Arc<Vec<App>> {
     SHOWN.lock().unwrap().clone().unwrap_or_default()
 }
 
+static NUMBERS: crate::numbered::Numbered = crate::numbered::Numbered::new();
+
+/// The number a press on what is kept at hand opening `target` names it by (see `numbered`).
+pub fn number_of(target: &str) -> u64 {
+    NUMBERS.of(target)
+}
+
+/// What is kept at hand that `number` stands for (see `number_of`): none where it is gone.
+pub fn numbered(number: u64) -> Option<App> {
+    shown().iter().find(|app| number_of(&app.target) == number).cloned()
+}
+
 /// The settings' list taken as what is kept at hand (as they are read, and each time they change).
 pub fn follow(apps: &[App]) {
     let mut shown = SHOWN.lock().unwrap();

@@ -36,6 +36,18 @@ pub fn shown() -> Arc<Vec<Note>> {
     SHOWN.lock().unwrap().clone().unwrap_or_default()
 }
 
+static NUMBERS: crate::numbered::Numbered = crate::numbered::Numbered::new();
+
+/// The number a press on the note `name` names it by (see `numbered`).
+pub fn number_of(name: &str) -> u64 {
+    NUMBERS.of(name)
+}
+
+/// The name of the note shown that `number` stands for (see `number_of`): none where it is gone.
+pub fn named(number: u64) -> Option<String> {
+    shown().iter().find(|note| number_of(&note.name) == number).map(|note| note.name.clone())
+}
+
 /// For pictures: as if the folder held these.
 #[cfg(all(test, feature = "studio"))]
 pub fn pretend(notes: Vec<Note>) {
@@ -131,8 +143,9 @@ fn follow() {
     loop {
         let folder = folder();
         // Followed before it is read: what changes while it is read is told after.
+        // (The same folder: one renamed away and another made in its place is not, nor followed as it.)
         let nearest = folder.path.ancestors().find(|path| path.is_dir()).map(std::path::Path::to_path_buf);
-        if watched.as_ref().map(|watch| &watch.path) != nearest.as_ref() {
+        if !watched.as_ref().is_some_and(|watch| nearest.as_deref().is_some_and(|nearest| watch.follows(nearest))) {
             watched = nearest.and_then(|path| Watch::start(path, &folder.path));
         }
         let notes = folder.notes();
@@ -163,6 +176,8 @@ fn follow() {
 /// the folder itself (renamed, or gone).
 struct Watch {
     path: PathBuf,
+    /// Which folder it is (see `elevation::folder_id`).
+    id: Option<(u32, u64)>,
     changed: windows::Win32::Foundation::HANDLE,
     above: Option<windows::Win32::Foundation::HANDLE>,
 }
@@ -172,14 +187,20 @@ impl Watch {
     fn start(path: PathBuf, notes: &std::path::Path) -> Option<Watch> {
         use windows::Win32::Storage::FileSystem::{FindFirstChangeNotificationW, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE};
         let what = if path == notes { FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_DIR_NAME } else { FILE_NOTIFY_CHANGE_DIR_NAME };
+        let id = crate::elevation::folder_id(&path);
         let wide = windows::core::HSTRING::from(path.as_os_str());
         let changed = unsafe { FindFirstChangeNotificationW(&wide, false, what) }.ok()?;
         let above = path.parent().filter(|_| path == notes).and_then(|above| unsafe { FindFirstChangeNotificationW(&windows::core::HSTRING::from(above.as_os_str()), false, FILE_NOTIFY_CHANGE_DIR_NAME) }.ok());
-        Some(Watch { path, changed, above })
+        Some(Watch { path, id, changed, above })
+    }
+
+    /// Whether it follows the folder at `path` now: that folder, not one renamed away with another made in its place.
+    fn follows(&self, path: &std::path::Path) -> bool {
+        self.path == path && self.id.is_some() && crate::elevation::folder_id(path) == self.id
     }
 
     /// Till the folder changes, or Glance asks for it to be read again; whether it is still followed (followed again
-    /// before it is read, see `follow`: one gone, even if another is made in its place, is not).
+    /// before it is read, see `follow`: one gone, or renamed and another made in its place, is not).
     fn wait(&self) -> bool {
         use windows::Win32::Foundation::WAIT_OBJECT_0;
         use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
@@ -237,6 +258,18 @@ mod tests {
             let notes = notes.clone();
             move || std::fs::write(notes.join("a.md"), "a note").unwrap()
         }));
+        assert!(watch.follows(&notes));
+        // Renamed away and another made in its place: told of, and not taken for it (followed afresh, see `follow`).
+        told_within(&watch, Box::new({
+            let (notes, old) = (notes.clone(), root.join("Glance Notes before"));
+            move || {
+                std::fs::rename(&notes, &old).unwrap();
+                std::fs::create_dir(&notes).unwrap();
+            }
+        }));
+        assert!(!watch.follows(&notes));
+        assert!(Watch::start(notes.clone(), &notes).unwrap().follows(&notes));
+        drop((above, watch));
         let _ = std::fs::remove_dir_all(&root);
         assert!(made >= Duration::from_millis(100) && made < Duration::from_secs(2), "{made:?}");
         assert!(written >= Duration::from_millis(100) && written < Duration::from_secs(2), "{written:?}");

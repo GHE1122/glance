@@ -37,8 +37,8 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
             std::thread::spawn(move || crate::app().change(|settings| settings.notes_view = view));
         }
         // What is kept at hand: opened.
-        Hit::App(at) => {
-            if let Some(app) = apps::shown().get(usize::from(at)) {
+        Hit::App(number) => {
+            if let Some(app) = apps::numbered(number) {
                 run::ask(run::Ask::Launch(app.target.clone()));
             }
         }
@@ -184,10 +184,10 @@ pub enum AppChoice {
 
 /// The menu of the thing kept at hand at `at` among them (a right click on it), at `point` on the screen: up, with
 /// what its rows do (where it is is shown only for what is on the disk).
-pub fn app_menu(at: u16, point: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<AppChoice>, apps::App)> {
+pub fn app_menu(number: u64, point: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<AppChoice>, apps::App)> {
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
-    let app = apps::shown().get(usize::from(at))?.clone();
+    let app = apps::numbered(number)?;
     let lang = crate::update::language();
     let mut rows = vec![(AppChoice::Open, lang.pick("打开", "Open"), Icon::File, false)];
     if app.location().is_some() {

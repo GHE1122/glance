@@ -2933,7 +2933,7 @@ impl Widget {
                                     let page = match hit {
                                         view::Hit::AddApp => Some(Page::Picker),
                                         view::Hit::NewNote => Some(Page::Note(None)),
-                                        view::Hit::Note(at) => crate::notes::shown().get(usize::from(at)).map(|note| Page::Note(Some(note.name.clone()))),
+                                        view::Hit::Note(number) => crate::notes::named(number).map(|name| Page::Note(Some(name))),
                                         _ => None,
                                     };
                                     // (A note stuck on the desktop, its own card pressed: written in where it is,
