@@ -337,11 +337,14 @@ impl Ui {
             }
             stroke_inside(frame, r, MAP_RADIUS * 2.0, palette.card_stroke);
             let digit = (index + 1).to_string();
+            // (At its foot, the taskbar's edge, which holds nothing: clear of the pills on its other edges. On a screen
+            // drawn too small for them, all of its marks smaller, apart.)
+            let size = marks_size(r);
+            let number = Font { size: number.size * size, ..number };
             let digit_w = frame.gfx.measure(&digit, number);
-            // (At its foot, the taskbar's edge, which holds nothing: clear of the pills on its other edges.)
-            let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h - 6.0 - 13.0);
-            fill(frame, palette.window.alpha(0.92), cx - 13.0, cy - 13.0, 26.0, 26.0, 13.0);
-            text_centred(frame, &digit, number, palette.text, cx - digit_w / 2.0, cy, digit_w + 1.0, Align::Start);
+            let round = number_at(r, size);
+            fill(frame, palette.window.alpha(0.92), round.x, round.y, round.w, round.h, round.h / 2.0);
+            text_centred(frame, &digit, number, palette.text, round.x + (round.w - digit_w) / 2.0, round.y + round.h / 2.0, digit_w + 1.0, Align::Start);
             let along = |px: i32, upright: bool| if upright { r.y + (px - m.top) as f32 * r.h / (m.bottom - m.top).max(1) as f32 } else { r.x + (px - m.left) as f32 * r.w / (m.right - m.left).max(1) as f32 };
             self.paint_zones(frame, palette, places, &screen.id, &monitors, index, r, &along, false, hovered);
             // The screen takes a press where its edges do not (they are found first).
@@ -471,12 +474,7 @@ impl Ui {
             let carried = self.carry.as_ref().filter(|carry| carry.moved).map(|carry| carry.part);
             let held = if over { carried.filter(|_| !large) } else { part.filter(|_| !showing) };
             if let Some(part) = held {
-                let (w, h) = if large { (self.chip_width(frame, part), CHIP) } else { (CHIP_SMALL, CHIP_SMALL) };
-                let rect = match edge {
-                    Edge::Left => Rect { x: r.x + 10.0, y: zone.y + (zone.h - h) / 2.0, w, h },
-                    Edge::Right => Rect { x: r.x + r.w - 10.0 - w, y: zone.y + (zone.h - h) / 2.0, w, h },
-                    Edge::Top => Rect { x: zone.x + (zone.w - w) / 2.0, y: r.y + 10.0, w, h },
-                };
+                let rect = if large { pill_at(r, zone, edge, (self.chip_width(frame, part), CHIP), PILL_IN) } else { small_pill_at(r, zone, edge, marks_size(r)) };
                 let lifted = self.carry.as_ref().is_some_and(|carry| carry.moved && carry.from.as_ref().is_some_and(|(s, e)| s == screen && *e == edge));
                 let pointed = hovered.as_ref().is_some_and(|target| matches!(target, Target::Chip(s, e, _) | Target::Unplace(s, e) if s == screen && *e == edge));
                 self.chip(frame, palette, part, rect, large, if lifted && !over { 0.35 } else { 1.0 }, large.then_some(pointed && !carrying));
@@ -507,7 +505,7 @@ impl Ui {
         fill(frame, Color::hex(0x000000, 0.14 * opacity), r.x, r.y + 1.0, r.w, r.h, r.h / 2.0);
         fill(frame, palette.window.alpha(0.92 * opacity), r.x, r.y, r.w, r.h, r.h / 2.0);
         if !large {
-            frame.icon(part_icon(part), Point { x: r.x + r.w / 2.0, y: r.y + r.h / 2.0 }, 12.0, ink);
+            frame.icon(part_icon(part), Point { x: r.x + r.w / 2.0, y: r.y + r.h / 2.0 }, 12.0 * r.h / CHIP_SMALL, ink);
             return;
         }
         frame.icon(part_icon(part), Point { x: r.x + 8.0 + 8.0, y: r.y + r.h / 2.0 }, 14.0, ink);
@@ -623,6 +621,48 @@ impl Ui {
     }
 }
 
+/// How far in from its edge a pill is drawn on a screen, and how large a small screen's number is.
+const PILL_IN: f32 = 10.0;
+const NUMBER: f32 = 26.0;
+const NUMBER_IN: f32 = 6.0;
+
+/// A pill `size` (wide, high) on edge `edge` of a screen drawn at `r`, `inside` in from it, at the middle of the edge's
+/// zone `zone`.
+fn pill_at(r: Rect, zone: Rect, edge: Edge, (w, h): (f32, f32), inside: f32) -> Rect {
+    match edge {
+        Edge::Left => Rect { x: r.x + inside, y: zone.y + (zone.h - h) / 2.0, w, h },
+        Edge::Right => Rect { x: r.x + r.w - inside - w, y: zone.y + (zone.h - h) / 2.0, w, h },
+        Edge::Top => Rect { x: zone.x + (zone.w - w) / 2.0, y: r.y + inside, w, h },
+    }
+}
+
+/// A small screen's pill on edge `edge` (see `pill_at`), its marks drawn `size` as large as they are.
+fn small_pill_at(r: Rect, zone: Rect, edge: Edge, size: f32) -> Rect {
+    pill_at(r, zone, edge, (CHIP_SMALL * size, CHIP_SMALL * size), PILL_IN * size)
+}
+
+/// Where a small screen's number is drawn, its marks `size` as large as they are: at its foot, in its middle.
+fn number_at(r: Rect, size: f32) -> Rect {
+    let side = NUMBER * size;
+    Rect { x: r.x + (r.w - side) / 2.0, y: r.y + r.h - NUMBER_IN * size - side, w: side, h: side }
+}
+
+/// How large a small screen drawn at `r` draws its marks (a pill on each edge that holds one, and its number): as large
+/// as they are, or as much smaller as keeps them all apart (a pill on each edge counted, so that they keep their size
+/// as one is put on an edge or taken off), down to half.
+fn marks_size(r: Rect) -> f32 {
+    let deep = ZONE_SMALL.min(r.w / 4.0);
+    let deep_top = ZONE_SMALL.min(r.h / 4.0);
+    let apart = |size: f32| {
+        let mut marks: Vec<Rect> = EDGES.iter().map(|&edge| small_pill_at(r, zone_of(r, edge, deep, deep_top), edge, size)).collect();
+        marks.push(number_at(r, size));
+        let gap = 2.0 * size;
+        let meet = |a: &Rect, b: &Rect| a.x < b.x + b.w + gap && b.x < a.x + a.w + gap && a.y < b.y + b.h + gap && b.y < a.y + a.h + gap;
+        marks.iter().enumerate().all(|(i, a)| marks[i + 1..].iter().all(|b| !meet(a, b)))
+    };
+    (0..=10).map(|step| 1.0 - step as f32 * 0.05).find(|&size| apart(size)).unwrap_or(0.5)
+}
+
 /// Where edge `edge` of a screen drawn at `r` takes a drop: `deep` into it from a side, `deep_top` from its top
 /// (the top's between the sides'), each at most a third of the screen (one drawn narrow, standing up, keeps a top
 /// between its sides).
@@ -678,6 +718,26 @@ fn edge_glow(frame: &Frame, r: Rect, edge: Edge, reach: f32, color: Color, stren
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small screen's marks, a pill on each edge and its number, never meet, however small the screen is drawn: on one
+    /// drawn large enough they keep their size, on a smaller one they are drawn smaller.
+    #[test]
+    fn a_small_screen_s_marks_never_meet() {
+        for r in [Rect { x: 0.0, y: 0.0, w: 300.0, h: 170.0 }, Rect { x: 5.0, y: 8.0, w: 120.0, h: 68.0 }, Rect { x: 0.0, y: 0.0, w: 90.0, h: 50.0 }, Rect { x: 0.0, y: 0.0, w: 60.0, h: 107.0 }] {
+            let size = marks_size(r);
+            let (deep, deep_top) = (ZONE_SMALL.min(r.w / 4.0), ZONE_SMALL.min(r.h / 4.0));
+            let mut marks: Vec<Rect> = EDGES.iter().map(|&edge| small_pill_at(r, zone_of(r, edge, deep, deep_top), edge, size)).collect();
+            marks.push(number_at(r, size));
+            for (at, a) in marks.iter().enumerate() {
+                assert!(a.x >= r.x && a.y >= r.y && a.x + a.w <= r.x + r.w && a.y + a.h <= r.y + r.h, "{a:?} out of {r:?}");
+                for b in &marks[at + 1..] {
+                    assert!(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y, "{a:?} meets {b:?} on {r:?} at {size}");
+                }
+            }
+        }
+        assert_eq!(marks_size(Rect { x: 0.0, y: 0.0, w: 300.0, h: 170.0 }), 1.0);
+        assert!(marks_size(Rect { x: 0.0, y: 0.0, w: 90.0, h: 50.0 }) < 1.0);
+    }
 
     /// Each edge of a screen drawn takes a drop in a zone of its own, however narrow the screen is drawn: a screen
     /// standing up keeps a top between its sides, none of them meeting.
