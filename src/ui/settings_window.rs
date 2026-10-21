@@ -119,9 +119,9 @@ const OVERLAY: &str = "overlay:";
 /// What the workbench's modules' rows are told from the readings' by: the start of their ids.
 const WORKBENCH: &str = "workbench:";
 
-/// A row inside a module's open card, and how far in from the card's edge
-/// its label starts: under the module's name, past the grip.
-const ITEM_ROW: f32 = 48.0;
+/// A row inside a module's open card (its name alone: as tall as Windows' own settings make such a row), and how far
+/// in from the card's edge its label starts: under the module's name, past the grip.
+const ITEM_ROW: f32 = 52.0;
 const ITEM_INSET: f32 = 12.0 + 20.0 + 12.0;
 /// Room at the right of a module's row for its chevron, after its switch.
 const CHEVRON_ROOM: f32 = 28.0;
@@ -1042,6 +1042,11 @@ enum Row {
 const GROUP: f32 = 28.0;
 /// How tall the monitor's tabs are, and how far below their names their marker is.
 const TABS_ROW: f32 = 48.0;
+/// How wide the bar under the tab shown is (as Windows' own), and how its ends move to another chosen: the end toward
+/// it, then the other.
+const TAB_MARK: f32 = 16.0;
+const TAB_MARK_LEADS: (Duration, Easing) = (Duration::from_millis(200), Easing(0.55, 0.55, 0.0, 1.0));
+const TAB_MARK_TRAILS: (Duration, Easing) = (Duration::from_millis(360), Easing(0.55, 0.55, 0.0, 1.0));
 /// How tall the code's own square is, in its row.
 const CODE: f32 = 176.0;
 
@@ -2035,7 +2040,11 @@ impl Ui {
                     (if after_heading { 8.0 } else { ROW_GAP }, if self.stacked(&options) { words + CHOICE_LINE * lines } else { words })
                 }
                 // Inside its module's card, right under the row above.
-                Row::Item(..) => (0.0, (self.words_height(&row) - ROW + ITEM_ROW).max(ITEM_ROW)),
+                // (With a word under its name, as tall as a card's row with one: as much room above and below them.)
+                Row::Item(..) => {
+                    let words = self.words_height(&row);
+                    (0.0, if words > 0.0 { words.max(ROW) } else { ITEM_ROW })
+                }
                 // Its choices under its name where they do not fit beside it.
                 Row::ModuleChoice(_, field) => {
                     let (name, options, _) = self.choices(*field);
@@ -4194,12 +4203,14 @@ impl Ui {
                     let title = Font::new(Family::SegoeDisplay, 28.0, 600.0);
                     text_centred(frame, self.page.name(lang), title, palette.text, left, y + 22.0, width, Align::Start);
                 }
-                // Each tab's name, the one shown marked under it in the accent, over a hairline the width of the list.
+                // Each tab's name, the one shown marked under its middle by a short bar in the accent, as Windows' own
+                // tabs are (a selector bar's).
                 Row::Tabs => {
                     let font = |shown: bool| Font::new(Family::Segoe, 14.0, if shown { 600.0 } else { 400.0 });
-                    // The first tab's name flush with the cards under it, the shown one underlined, no rule across.
+                    // The first tab's name flush with the cards under it, no rule across.
                     let base = y + row_height - 8.0;
                     let mut x = left;
+                    let mut middle = None;
                     for tab in TABS {
                         let name = tab.name(lang);
                         let shown = tab == self.tab;
@@ -4212,10 +4223,20 @@ impl Ui {
                         }
                         text_centred(frame, name, font(shown), if shown { palette.text } else { palette.text2 }, x, y + (row_height - 8.0) / 2.0, w + 12.0, Align::Start);
                         if shown {
-                            fill(frame, palette.selection, x, base - 2.0, w, 3.0, 1.5);
+                            middle = Some(x + w / 2.0);
                         }
                         self.targets.push((r, target));
                         x += w + 28.0;
+                    }
+                    // Another tab chosen, the bar goes to it as Windows' does: its end toward it first, stretching it,
+                    // its other end after, drawing it in again.
+                    if let Some(middle) = middle {
+                        let (to_left, to_right) = (middle - TAB_MARK / 2.0, middle + TAB_MARK / 2.0);
+                        let rightward = self.motion.get("tab-mark:left").is_some_and(|edge| to_left > edge.target());
+                        let (left_how, right_how) = if rightward { (TAB_MARK_TRAILS, TAB_MARK_LEADS) } else { (TAB_MARK_LEADS, TAB_MARK_TRAILS) };
+                        let from = self.animate("tab-mark:left".into(), to_left, left_how, now, false);
+                        let to = self.animate("tab-mark:right".into(), to_right, right_how, now, false);
+                        fill(frame, palette.selection, from, base - 2.0, to - from, 3.0, 1.5);
                     }
                 }
                 Row::Element(name) => {

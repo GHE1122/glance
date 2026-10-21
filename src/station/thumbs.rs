@@ -365,7 +365,8 @@ fn picture(path: &Path, side: u32, icon: bool) -> Option<Thumb> {
     }
 }
 
-/// A bitmap's pixels (32 bits, as the shell makes them: premultiplied BGRA), top row first.
+/// A bitmap's pixels (32 bits, BGRA), top row first, premultiplied as they are drawn: the shell makes them straight, each
+/// colour whole whatever its alpha (taken as premultiplied, an icon's soft edge came out light, a white rim round it).
 unsafe fn pixels_of(bitmap: HBITMAP) -> Option<Thumb> {
     unsafe {
         let mut described = BITMAP::default();
@@ -384,6 +385,12 @@ unsafe fn pixels_of(bitmap: HBITMAP) -> Option<Thumb> {
         // (A picture with no alpha of its own, as an icon of old may be, wholly opaque.)
         if described.bmBitsPixel != 32 || pixels.chunks_exact(4).all(|pixel| pixel[3] == 0) {
             pixels.chunks_exact_mut(4).for_each(|pixel| pixel[3] = 255);
+        }
+        for pixel in pixels.chunks_exact_mut(4) {
+            let alpha = u32::from(pixel[3]);
+            for colour in &mut pixel[..3] {
+                *colour = ((u32::from(*colour) * alpha + 127) / 255) as u8;
+            }
         }
         Some(Thumb { pixels, size: (w as u32, h as u32) })
     }
@@ -461,5 +468,21 @@ mod tests {
         let icon = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")), 48, false).expect("an icon");
         assert!(icon.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
         println!("picture {:?}, icon {:?}", picture.size, icon.size);
+    }
+
+    /// A program's icon, its edges soft, as it is drawn: premultiplied, no colour past its alpha (where one was, it was
+    /// drawn lighter than it is, a white rim round the icon).
+    #[test]
+    #[ignore = "asks this PC's shell"]
+    fn an_icon_s_soft_edges_are_drawn_as_soft() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let windows = std::env::var("SystemRoot").unwrap();
+        let icon = super::picture(&std::path::Path::new(&windows).join("explorer.exe"), 96, true).expect("its icon");
+        let soft = icon.pixels.chunks_exact(4).filter(|pixel| pixel[3] > 0 && pixel[3] < 255).count();
+        let past = icon.pixels.chunks_exact(4).filter(|pixel| pixel[..3].iter().any(|colour| *colour > pixel[3])).count();
+        assert!(soft > 0, "no soft edge to look at");
+        assert_eq!(past, 0, "of {soft} pixels at its soft edges, {past} have a colour past their alpha");
     }
 }

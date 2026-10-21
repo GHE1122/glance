@@ -175,7 +175,7 @@ pub fn menu(lang: Lang, colour: crate::notes::Colour, named: bool, stuck: bool) 
             true => rows.push((Choice::Unstick, lang.pick("从桌面取下", "Take off the desktop"), Mark::Icon(Icon::PinOff), false, true)),
             false => rows.push((Choice::Stick, lang.pick("贴到桌面", "Stick on the desktop"), Mark::Icon(Icon::Pin), false, true)),
         }
-        rows.push((Choice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Mark::Icon(Icon::Close), false, false));
+        rows.push((Choice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Mark::Icon(Icon::Trash), false, false));
     }
     let items = rows.iter().map(|(_, label, mark, checked, rule_before)| Item { label, mark: Some(*mark), checked: *checked, rule_before: *rule_before }).collect();
     (items, rows.into_iter().map(|(choice, ..)| choice).collect())
