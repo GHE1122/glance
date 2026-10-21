@@ -1448,7 +1448,7 @@ impl Controller {
     fn end_menu(&self, menu: &mut Option<(crate::ui::menu::Menu, MenuFor)>, choice: Option<usize>, panels: &mut [Panel], menu_of: &mut Option<usize>, widgets: &mut crate::widget::Widgets, overlay: &mut Option<Overlay>) {
         let Some((open, of)) = menu.take() else { return };
         let menu_panel = menu_of.take();
-        // (Where the choice was on the screen: what it opens comes out of there.)
+        // (Where the choice was on the screen: what it opens comes out of there, but for the tray icon's menu.)
         let place = choice.and_then(|row| open.row_on_screen(row));
         open.close();
         if let Some(overlay) = overlay.as_mut() {
@@ -1461,7 +1461,7 @@ impl Controller {
             panel.menu_closed();
         }
         match of {
-            MenuFor::Tray(choices) => crate::tray::chosen(choice, &choices, place),
+            MenuFor::Tray(choices) => crate::tray::chosen(choice, &choices),
             MenuFor::Widget(hwnd) => {
                 if let Some(crate::widget::WidgetChoice::Settings) = choice.and_then(|row| widgets.chose(hwnd, row)) {
                     crate::show_settings(place);

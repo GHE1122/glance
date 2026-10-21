@@ -241,13 +241,12 @@ pub fn open_menu(x: i32, y: i32, over_the_panel: bool) -> Option<(crate::ui::men
     MENU_UP.store(true, Ordering::Relaxed);
     show_tip(false);
     let Some(menu) = Menu::open_at(items, crate::ui::menu::Look::system(), POINT { x, y }, true, over_the_panel) else {
-        chosen(None, &[], None);
+        chosen(None, &[]);
         return None;
     };
     Some((menu, choices.into_iter().map(|(choice, ..)| choice).collect()))
 }
 
-/// Where the icon is on the screen (physical px), if it shows.
 /// Where the icon is on the screen (physical px), if it shows (in the tray's overflow, its chevron's).
 pub(crate) fn icon_place() -> Option<RECT> {
     let hwnd = WINDOW.load(Ordering::Acquire);
@@ -260,15 +259,15 @@ fn icon_on_screen(hwnd: HWND) -> Option<RECT> {
     unsafe { Shell_NotifyIconGetRect(&icon) }.ok()
 }
 
-/// The icon's menu gone, `choice` chosen in it (of `choices`, as `open_menu` gave them, at `place` on the screen), if
-/// one was: done.
-pub fn chosen(choice: Option<usize>, choices: &[usize], place: Option<RECT>) {
+/// The icon's menu gone, `choice` chosen in it (of `choices`, as `open_menu` gave them), if one was: done. (What it
+/// opens comes out of the icon, as the menu did, not the menu's row, gone as it opens.)
+pub fn chosen(choice: Option<usize>, choices: &[usize]) {
     MENU_UP.store(false, Ordering::Relaxed);
     show_tip(true);
     match choice.map_or(0, |i| choices[i]) {
         OPEN => crate::app().controller.open_from_tray(),
         RECALL => crate::app().controller.recall_widget(),
-        SETTINGS => crate::show_settings(place),
+        SETTINGS => crate::show_settings(icon_place()),
         CHECK => crate::update::check_now(crate::update::Asker::Tray),
         QUIT => crate::quit(),
         _ => {}
