@@ -81,7 +81,7 @@ fn part_word(part: Part, lang: Lang) -> &'static str {
 pub(super) fn part_icon(part: Part) -> Icon {
     match part {
         Part::Monitor => Icon::Gauge,
-        Part::Workbench => Icon::Briefcase,
+        Part::Workbench => Icon::PencilRuler,
         Part::Music => Icon::Music,
     }
 }
