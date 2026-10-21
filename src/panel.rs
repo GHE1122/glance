@@ -2063,6 +2063,10 @@ impl<'a> Panel<'a> {
         if skin != self.skin && skin.sees_backdrop() && self.is_shown() {
             self.recapture = true;
         }
+        // A skin that does not see the desktop: its scene let go of (made again as one that does is chosen).
+        if !skin.sees_backdrop() {
+            self.backdrop = None;
+        }
         self.skin = skin;
         self.live = config.live && self.skin.sees_backdrop();
         drop(config);

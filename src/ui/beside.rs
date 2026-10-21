@@ -1520,7 +1520,9 @@ impl Beside {
     /// as it is moved, and again a while after (what is behind changes); how frosted it is drawn, as what is behind
     /// asks. Its scene is its thread's, kept from page to page (one made anew keeps some of the card's memory).
     fn look_behind(&mut self) {
+        // (A skin that does not see the desktop: the scene kept for one that does let go of.)
         if self.theme.skin == Skin::Paper {
+            BEHIND.with(|held| held.borrow_mut().0 = None);
             return;
         }
         let page = self.page_on_screen();

@@ -374,9 +374,10 @@ fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) ->
 
 /// The desktop's own window captured itself, for every scene that is to show it so (see the top): its capture's pool
 /// and session, whether it is taken only seldom (no layer shown: a live wallpaper would be taken each frame for no
-/// one), and what its frames meet. Made once, as first wanted, and kept: a pool made anew keeps some of the card's
-/// memory till Glance ends (made larger only, as the desktop grows past it), and a session ended cannot be started
-/// again on the same pool (measured): it is slowed, not ended.
+/// one), and what its frames meet. Made as first wanted, and kept while a scene holds a layer of it (scenes live as
+/// long as their windows, see `end_feed_unused`): a pool made anew keeps some of the card's memory till Glance ends
+/// (made larger only, as the desktop grows past it), and a session ended cannot be started again on the same pool
+/// (measured): it is slowed while unused, not ended.
 struct Feed {
     shell: HWND,
     pool: Direct3D11CaptureFramePool,
@@ -652,6 +653,18 @@ fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device) -> O
         }
     }
     feed.as_mut()?.layer(window, area)
+}
+
+/// The feed ended where no scene holds a layer of it any longer (each scene gone, or let go of as its window's skin no
+/// longer shows the desktop): its frames are the desktop's whole size. (Scenes live as long as their windows, so it is
+/// not made again and again: see `Feed`.)
+fn end_feed_unused() {
+    let mut feed = FEED.lock().unwrap();
+    if feed.as_ref().is_some_and(|feed| feed.shared.live_layers().is_empty()) {
+        if let Some(old) = feed.take() {
+            old.end();
+        }
+    }
 }
 
 /// Whether a feed may be made for the desktop's window `shell` (none could before).
@@ -1075,6 +1088,7 @@ impl Scene {
         if let Some((window, layer, _)) = self.desktop.take() {
             empty_layer(&layer);
             drop(layer);
+            end_feed_unused();
             unsafe {
                 let _ = DestroyWindow(window);
             }
@@ -1630,6 +1644,36 @@ mod tests {
         CLOSE_DELAY_MS.store(0, Ordering::Relaxed);
         assert!(first, "no first frame read");
         assert!(second, "the frame wanted once the first was taken was never read");
+    }
+
+    /// The desktop's feed lives as long as a scene shows the desktop through it, and ends with the last (its frames are
+    /// the whole desktop's: kept with no one to show them, a skin chosen that does not see the desktop held them till
+    /// Glance ended). Needs a desktop drawn apart from its window (a live wallpaper), as on the owner's PC.
+    /// `cargo test --lib -- --ignored --exact ui::scene::tests::the_feed_ends_with_the_last_scene_of_it --nocapture`.
+    #[test]
+    #[ignore = "captures this PC's desktop (needs a live wallpaper)"]
+    fn the_feed_ends_with_the_last_scene_of_it() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        let over = over_all("GlanceFeedEndsOver");
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let area = RECT { left: 150, top: 150, right: 450, bottom: 350 };
+        let mut first = Scene::new(area, wake.clone(), &gfx).expect("scene");
+        let mut second = Scene::new(area, wake, &gfx).expect("scene");
+        first.arrange(area, over);
+        second.arrange(area, over);
+        assert!(FEED.lock().unwrap().is_some(), "no feed made: the desktop here is not drawn apart (no live wallpaper)");
+        drop(first);
+        assert!(FEED.lock().unwrap().is_some(), "the feed ended while a scene still shows the desktop through it");
+        second.rest();
+        assert!(FEED.lock().unwrap().is_some(), "the feed ended as its last scene rested");
+        drop(second);
+        assert!(FEED.lock().unwrap().is_none(), "the feed kept with no scene left to show it");
+        unsafe {
+            let _ = DestroyWindow(over);
+        }
     }
 
     /// A scene arranged at alternating places and sizes over a window that changes all the time (so frames keep
