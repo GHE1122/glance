@@ -162,6 +162,21 @@ const COPIED_FOR: Duration = Duration::from_secs(2);
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 /// Its thread is making it: asked again meanwhile, no second one is made.
 static OPENING: AtomicBool = AtomicBool::new(false);
+/// Its thread, kept a while before it is opened and after it is closed (see `run`).
+static THREAD: std::sync::Mutex<Kept> = std::sync::Mutex::new(Kept::None);
+/// Told to its thread, kept while the window is not up: the window made, at the page `WPARAM` names (see `To::told`).
+const AGAIN: u32 = WM_APP + 43;
+/// How long its thread is kept, its graphics device made, with no window up: the gear pointed at and not pressed,
+/// the window closed and not opened again.
+const KEPT_FOR: Duration = Duration::from_secs(10);
+
+/// The window's thread: none; being started (and asked for the window meanwhile, at a page: see `open_at`); going,
+/// by its id.
+enum Kept {
+    None,
+    Starting(Option<Option<To>>),
+    Running(u32),
+}
 /// What other threads tell the window: settings changed elsewhere, to be taken up (see `follow_settings`); the
 /// overlay's page asked for (see `open_at_overlay`).
 const FOLLOW: u32 = WM_APP + 40;
@@ -229,6 +244,25 @@ enum To {
     Workbench,
 }
 
+impl To {
+    /// As it is told to the window's thread (see `AGAIN`).
+    fn told(to: Option<To>) -> usize {
+        match to {
+            None => 0,
+            Some(To::Overlay) => 1,
+            Some(To::Workbench) => 2,
+        }
+    }
+
+    fn of_told(told: usize) -> Option<To> {
+        match told {
+            1 => Some(To::Overlay),
+            2 => Some(To::Workbench),
+            _ => None,
+        }
+    }
+}
+
 fn open_at(to: Option<To>) {
     crate::perf::mark(|| "settings asked".into());
     if let Some(hwnd) = hwnd() {
@@ -245,19 +279,120 @@ fn open_at(to: Option<To>) {
     if OPENING.swap(true, Ordering::AcqRel) {
         return;
     }
-    if std::thread::Builder::new().name("settings".into()).spawn(move || run(to)).is_err() {
-        OPENING.store(false, Ordering::Release);
+    let mut kept = THREAD.lock().unwrap();
+    match &mut *kept {
+        // (Its thread going: told. Starting: told as it starts. None: one started, asked.)
+        Kept::Running(thread) if unsafe { windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(*thread, AGAIN, WPARAM(To::told(to)), LPARAM(0)) }.is_ok() => {}
+        Kept::Starting(asked) => *asked = Some(to),
+        _ => {
+            *kept = Kept::None;
+            if !start(&mut kept, Some(to)) {
+                OPENING.store(false, Ordering::Release);
+            }
+        }
     }
 }
 
-/// The window's thread: makes it (on a graphics device of its own, given back as the thread ends), and draws it
-/// whenever it is due, between the messages that arrive, till it is gone.
-fn run(to: Option<To>) {
+/// The window's thread started, where none is (or is starting), its graphics device made, for the window to come up
+/// at once as it is opened (what takes longest as it is made, a good part of a tenth of a second): the gear under
+/// the pointer. Kept a while (see `KEPT_FOR`).
+pub fn prepare() {
+    let mut kept = THREAD.lock().unwrap();
+    if matches!(*kept, Kept::None) && hwnd().is_none() {
+        start(&mut kept, None);
+    }
+}
+
+/// The window's thread started, asked for the window at a page (`asked`; none: only made ready); whether it was.
+fn start(kept: &mut Kept, asked: Option<Option<To>>) -> bool {
+    *kept = Kept::Starting(None);
+    let started = std::thread::Builder::new().name("settings".into()).spawn(move || run(asked)).is_ok();
+    if !started {
+        *kept = Kept::None;
+    }
+    started
+}
+
+/// The window's thread: its graphics device made; the window made (`asked`, or as it is asked for: see `AGAIN`), and
+/// drawn whenever it is due, between the messages that arrive, till it is gone; again as it is asked for, the thread
+/// kept a while (`KEPT_FOR`) with no window up, then gone, its device with it.
+fn run(mut asked: Option<Option<To>>) {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
     let _ending = Ending;
+    // (Its message queue made before it is named: told at once, it has one to be told in.)
+    let mut msg = MSG::default();
+    unsafe {
+        let _ = PeekMessageW(&mut msg, None, 0, 0, windows::Win32::UI::WindowsAndMessaging::PM_NOREMOVE);
+    }
+    {
+        let mut kept = THREAD.lock().unwrap();
+        if let Kept::Starting(meanwhile) = &mut *kept {
+            asked = asked.or(meanwhile.take());
+        }
+        *kept = Kept::Running(unsafe { windows::Win32::System::Threading::GetCurrentThreadId() });
+    }
     crate::perf::mark(|| "settings thread".into());
+    let _ = gfx::current();
+    crate::perf::mark(|| "settings device".into());
+    loop {
+        let to = match asked.take() {
+            Some(to) => to,
+            None => match told(&mut msg) {
+                Some(to) => to,
+                None => return,
+            },
+        };
+        if !up(to) {
+            return;
+        }
+        // Closed: what its device holds given back, and given back again once the card is done with what the window
+        // let go of (see `Gfx::trim_when_idle`, on the timer its thread keeps while it is kept).
+        if let Ok(gfx) = gfx::current() {
+            gfx.trim_now_and_again();
+        }
+        crate::perf::mark(|| "settings gone".into());
+    }
+}
+
+/// What the window's thread is told to do with no window up, its messages seen to (`msg` to take them in) till it is:
+/// the window made, at a page (see `AGAIN`); none, told of nothing for `KEPT_FOR` (the thread no longer kept: asked
+/// for meanwhile, another is started), or told to end.
+fn told(msg: &mut MSG) -> Option<Option<To>> {
+    let until = Instant::now() + KEPT_FOR;
+    loop {
+        while unsafe { PeekMessageW(msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if msg.message == WM_QUIT {
+                return None;
+            }
+            if msg.message == AGAIN && msg.hwnd.is_invalid() {
+                return Some(To::of_told(msg.wParam.0));
+            }
+            unsafe {
+                let _ = TranslateMessage(msg);
+                DispatchMessageW(msg);
+            }
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            // (No longer told of: what was told before it is not, seen to now.)
+            let mut kept = THREAD.lock().unwrap();
+            if unsafe { PeekMessageW(msg, None, AGAIN, AGAIN, PM_REMOVE) }.as_bool() {
+                return Some(To::of_told(msg.wParam.0));
+            }
+            *kept = Kept::None;
+            return None;
+        }
+        let ms = left.as_micros().div_ceil(1000).min(u32::MAX as u128) as u32;
+        unsafe { MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT) };
+    }
+}
+
+/// The window made, at the page `to` (none: the one last shown), and up till it is gone; whether its thread goes on
+/// (not told to end).
+fn up(to: Option<To>) -> bool {
+    crate::perf::mark(|| "settings to make".into());
     let made = gfx::current().ok().and_then(|gfx| make(gfx, true));
     crate::perf::mark(|| "settings made".into());
     if let Some(hwnd) = made {
@@ -267,7 +402,7 @@ fn run(to: Option<To>) {
     }
     OPENING.store(false, Ordering::Release);
     if made.is_none() {
-        return;
+        return true;
     }
     match to {
         Some(To::Overlay) => to_overlay(),
@@ -278,15 +413,15 @@ fn run(to: Option<To>) {
     loop {
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             if msg.message == WM_QUIT {
-                return;
+                return false;
             }
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }
-        // Gone (closed): the thread with it.
-        let Some(due) = tick(Instant::now()) else { return };
+        // Gone (closed).
+        let Some(due) = tick(Instant::now()) else { return true };
         if !due.is_zero() {
             let ms = due.as_micros().div_ceil(1000).min(u32::MAX as u128) as u32;
             unsafe { MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT) };
@@ -295,14 +430,19 @@ fn run(to: Option<To>) {
 }
 
 /// The window's thread ending, however it ends: what it drew with let go of first, its window's, then its device (see
-/// `gfx::let_go`), not left to the thread's own end.
+/// `gfx::let_go`), not left to the thread's own end; no longer kept.
 struct Ending;
 
 impl Drop for Ending {
     fn drop(&mut self) {
+        let mut kept = THREAD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*kept, Kept::Running(thread) if thread == unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
+            *kept = Kept::None;
+        }
+        drop(kept);
         drop(UI.with(|ui| ui.borrow_mut().take()));
         gfx::let_go();
-        crate::perf::mark(|| "settings gone".into());
+        crate::perf::mark(|| "settings thread gone".into());
     }
 }
 
@@ -1235,7 +1375,9 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_MAINWINDOW as *const _ as *const _, 4);
             let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 });
         }
+        crate::perf::mark(|| "settings window".into());
         let surface = Some(Surface::new(&gfx, hwnd).ok()?);
+        crate::perf::mark(|| "settings surface".into());
         let app = crate::app();
         let settings = app.settings.lock().unwrap().clone();
         let prefs = Prefs::resolve(&settings.view, &app.controller.known_modules());
@@ -1338,12 +1480,14 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             drawn_size: None,
             largest: SIZES.1,
         };
+        crate::perf::mark(|| "settings state".into());
         ui.raise_more();
         if ui.remote_there {
             ui.ask_remote(|| None);
         }
         ui.read_stages();
         ui.restyle();
+        crate::perf::mark(|| "settings dressed".into());
         ui.draw(Instant::now());
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
         if !shown {

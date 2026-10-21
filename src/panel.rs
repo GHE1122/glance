@@ -3719,6 +3719,10 @@ impl<'a> Panel<'a> {
                 }
                 _ => self.unsay(),
             }
+            // (The gear under the pointer: the settings made ready, to come up at once as it is pressed.)
+            if hover == Some(Hit::Settings) {
+                crate::ui::settings_window::prepare();
+            }
             self.hover = hover;
             self.next_frame = Instant::now();
         }
