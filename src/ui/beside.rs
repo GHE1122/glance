@@ -272,6 +272,8 @@ struct Beside {
     /// Shown on the screen yet: not before it is first drawn whole (on glass and Windows 11, with the desktop behind it,
     /// see `ready`), else it came up as it was drawn, and a moment after changed (the desktop come in behind).
     shown: bool,
+    /// The note stuck on the desktop it is over hidden under it (see `draw`), shown again as it goes.
+    hiding: bool,
     /// The kind listed's mark, sliding to it as another is chosen (glass's: see `view::glass_choice`).
     marks: super::thumb::Dots<Kinds>,
 }
@@ -662,6 +664,7 @@ fn show(opening: Opening) {
             opening: Some(opening.clone()),
             moved_from: None,
             shown: false,
+            hiding: false,
             marks: super::thumb::Dots::new(),
         };
         let page = beside.page.clone();
@@ -774,7 +777,7 @@ fn let_go(told: bool) {
     }
     if let Some(mut beside) = held {
         // (The note it was over shown again before it goes: nothing between.)
-        if let Some(note) = beside.over() {
+        if let Some(note) = beside.over().filter(|_| beside.hiding) {
             hide(note, false);
         }
         // (The text services let go of before the window they write in.)
@@ -949,6 +952,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 beside.redraw();
             });
         }
+        // Closed as a window is (Alt+F4): gone as with Esc, its note kept first (destroyed as it is, nothing of it was).
+        WM_CLOSE => {
+            gone();
+        }
         WM_KEYDOWN => {
             let key = VIRTUAL_KEY(wparam.0 as u16);
             if key == VK_ESCAPE {
@@ -1097,12 +1104,6 @@ impl Beside {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetForegroundWindow(self.hwnd);
             let _ = SetFocus(Some(self.hwnd));
-        }
-        // Over a note stuck on the desktop: the note, as it is written in, its page alone (it is drawn as the page is,
-        // just where it is; under a page that lets the desktop through, glass's, it showed through it, the two panes
-        // one over the other another colour, its edge round the page's).
-        if let Some(note) = self.over() {
-            hide(note, true);
         }
         // (Told again as it comes in front: the panels come over it again, the front having taken it over them.)
         crate::app().controller.page_front(Some(self.hwnd));
@@ -1609,6 +1610,16 @@ impl Beside {
             self.surface = Some(surface);
             if !self.shown && self.ready() {
                 self.show_now();
+            }
+            // Over a note stuck on the desktop, shown and drawn: the note, as it is written in, its page alone (it is
+            // drawn as the page is, just where it is; under a page that lets the desktop through, glass's, it showed
+            // through it, the two panes one over the other another colour, its edge round the page's). Not before the
+            // page is drawn: shown as it is due, not drawn yet, it would leave nothing of the note.
+            if self.shown && !self.hiding {
+                if let Some(note) = self.over() {
+                    hide(note, true);
+                    self.hiding = true;
+                }
             }
         } else if let Err(error) = &drawn {
             // (Not drawn, it keeps its surface, and draws again on it; the device gone, it makes one anew on the next.)
@@ -2282,6 +2293,7 @@ otepad.exe"),
                             opening: None,
                             moved_from: None,
             shown: false,
+            hiding: false,
             marks: super::super::thumb::Dots::new(),
                         };
                         beside.search.put(&search.encode_utf16().collect::<Vec<_>>());

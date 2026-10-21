@@ -344,15 +344,14 @@ fn run(mut asked: Option<Option<To>>) {
                 None => return,
             },
         };
-        if !up(to) {
-            return;
-        }
+        let Some(again) = up(to) else { return };
         // Closed: what its device holds given back, and given back again once the card is done with what the window
         // let go of (see `Gfx::trim_when_idle`, on the timer its thread keeps while it is kept).
         if let Ok(gfx) = gfx::current() {
             gfx.trim_now_and_again();
         }
         crate::perf::mark(|| "settings gone".into());
+        asked = again;
     }
 }
 
@@ -376,12 +375,15 @@ fn told(msg: &mut MSG) -> Option<Option<To>> {
         }
         let left = until.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            // (No longer told of: what was told before it is not, seen to now.)
+            // (No longer told of: what was told before it is not, seen to now. Told to end meanwhile, which comes
+            // whatever is looked for, it ends.)
             let mut kept = THREAD.lock().unwrap();
-            if unsafe { PeekMessageW(msg, None, AGAIN, AGAIN, PM_REMOVE) }.as_bool() {
+            if unsafe { PeekMessageW(msg, None, AGAIN, AGAIN, PM_REMOVE) }.as_bool() && msg.message == AGAIN {
                 return Some(To::of_told(msg.wParam.0));
             }
-            *kept = Kept::None;
+            if matches!(*kept, Kept::Running(thread) if thread == unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
+                *kept = Kept::None;
+            }
             return None;
         }
         let ms = left.as_micros().div_ceil(1000).min(u32::MAX as u128) as u32;
@@ -389,9 +391,9 @@ fn told(msg: &mut MSG) -> Option<Option<To>> {
     }
 }
 
-/// The window made, at the page `to` (none: the one last shown), and up till it is gone; whether its thread goes on
-/// (not told to end).
-fn up(to: Option<To>) -> bool {
+/// The window made, at the page `to` (none: the one last shown), and up till it is gone; its thread to go on (not told
+/// to end, the window made), with the window asked for again meanwhile, at a page, as it went (see `AGAIN`), if it was.
+fn up(to: Option<To>) -> Option<Option<Option<To>>> {
     crate::perf::mark(|| "settings to make".into());
     let made = gfx::current().ok().and_then(|gfx| make(gfx, true));
     crate::perf::mark(|| "settings made".into());
@@ -401,19 +403,24 @@ fn up(to: Option<To>) -> bool {
         crate::playing::look_now();
     }
     OPENING.store(false, Ordering::Release);
-    if made.is_none() {
-        return true;
-    }
+    // (Not made: the thread ends, and what it made of it with it.)
+    made?;
     match to {
         Some(To::Overlay) => to_overlay(),
         Some(To::Workbench) => to_workbench(),
         None => {}
     }
     let mut msg = MSG::default();
+    let mut again = None;
     loop {
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             if msg.message == WM_QUIT {
-                return false;
+                return None;
+            }
+            // (Asked for as it went, its window destroyed and its thread not done with it: made again after.)
+            if msg.message == AGAIN && msg.hwnd.is_invalid() {
+                again = Some(To::of_told(msg.wParam.0));
+                continue;
             }
             unsafe {
                 let _ = TranslateMessage(&msg);
@@ -421,7 +428,7 @@ fn up(to: Option<To>) -> bool {
             }
         }
         // Gone (closed).
-        let Some(due) = tick(Instant::now()) else { return true };
+        let Some(due) = tick(Instant::now()) else { return Some(again) };
         if !due.is_zero() {
             let ms = due.as_micros().div_ceil(1000).min(u32::MAX as u128) as u32;
             unsafe { MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT) };
@@ -435,9 +442,12 @@ struct Ending;
 
 impl Drop for Ending {
     fn drop(&mut self) {
+        // (Still kept, it was told to end, or the window not made: asked for meanwhile, it is not made now, and may be
+        // asked for again.)
         let mut kept = THREAD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(*kept, Kept::Running(thread) if thread == unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
             *kept = Kept::None;
+            OPENING.store(false, Ordering::Release);
         }
         drop(kept);
         drop(UI.with(|ui| ui.borrow_mut().take()));

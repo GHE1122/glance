@@ -23,6 +23,9 @@ use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetCursor, SetForegroun
 /// The edit control's message asking which character is at a point (winuser.h's `EM_CHARFROMPOS`; the bindings leave it
 /// out): a rich edit box answers with the character's place.
 const EM_CHARFROMPOS: u32 = 0x00D7;
+/// How far apart the text services set tabs, in the pixels they draw in (their default, half an inch: 720 twips at
+/// 96 pixels an inch, whatever the screen's scale; see `new`).
+pub const TAB_PIXELS: f32 = 48.0;
 
 /// What the host keeps for the text services, and what they tell it.
 struct Kept {
@@ -617,6 +620,31 @@ mod tests {
             let _ = DestroyWindow(hwnd);
             assert!((caret.0 - right as i32).abs() <= 6, "caret at x {} where the words end at {right}", caret.0);
             assert!(caret.1 <= bottom as i32 && caret.1 + caret.3 >= bottom as i32 - 4, "caret at y {}..{} where the words' last line ends at {bottom}", caret.1, caret.1 + caret.3);
+        }
+    }
+
+    /// A tab: the words after it as far on as `TAB_PIXELS` says, as a note's face sets them (see `Frame::markdown`).
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn sets_tabs_as_far_apart_as_said() {
+        unsafe {
+            let _ = windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""), WS_POPUP, 0, 0, 800, 300, None, None, None, None).unwrap();
+            let editor = Editor::new(hwnd, RECT { left: 20, top: 30, right: 780, bottom: 280 }, "Segoe UI", 30.0, COLORREF(0)).expect("text services");
+            let mut ends = Vec::new();
+            for text in ["\tX", "\t\tX"] {
+                editor.set_text(text);
+                let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_SETFOCUS, WPARAM(0), LPARAM(0));
+                let document: ITextDocument = editor.services.cast().unwrap();
+                let tabs = text.matches('\t').count() as i32;
+                let _ = document.Range(tabs, tabs).unwrap().Select();
+                let _ = drawn(&editor, 800, 300);
+                ends.push(editor.caret().expect("a caret").0 - 20);
+            }
+            drop(editor);
+            let _ = DestroyWindow(hwnd);
+            assert!((ends[0] as f32 - TAB_PIXELS).abs() <= 1.0 && (ends[1] as f32 - 2.0 * TAB_PIXELS).abs() <= 1.0, "tabs end at {ends:?}");
         }
     }
 

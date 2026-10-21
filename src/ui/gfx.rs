@@ -1690,6 +1690,8 @@ impl<'a> Frame<'a> {
             // pixels as Windows' fonts are asked for: else its words came out a little smaller, and its lines closer.)
             let per = self.axes().map_or(1.0, |(t, device)| t.M11 * device);
             let whole = |size: f32| (size * per).round().max(1.0) / per;
+            // (Tabs as far apart as the text services set them: else what follows one, and how lines wrap, moved.)
+            unsafe { layout.SetIncrementalTabStop(super::editor::TAB_PIXELS / per)? };
             for (range, dress) in crate::notes::markdown::dressing(text) {
                 let range = DWRITE_TEXT_RANGE { startPosition: range.start as u32, length: (range.end - range.start) as u32 };
                 unsafe {
@@ -2211,6 +2213,26 @@ mod tests {
     /// A frame something of which failed as it was drawn is not had to be shown: what it was for shows what it
     /// showed. (Drawn straight onto its surface, a panel sized on a card short of memory showed its ground with a
     /// reading or two on it.)
+    /// A note's words drawn as its face (see `Frame::markdown`) with a tab in them: what follows it as far on as the
+    /// text services set it as the note is written in (`editor::TAB_PIXELS`, in the pixels drawn in, at any scale).
+    #[test]
+    #[cfg(feature = "studio")]
+    fn a_note_s_tabs_are_as_far_apart_as_its_editor_s() {
+        use super::super::canvas::{Color, Family, Font, Inks};
+        let gfx = super::Gfx::new().expect("graphics");
+        let white = Color::hex(0xffffff, 1.0);
+        let inks = Inks { words: white, faint: white, accent: white };
+        for scale in [1.0f32, 1.5, 2.0] {
+            let (wide, tall) = ((200.0 * scale) as u32, (40.0 * scale) as u32);
+            let first = |text: &str| {
+                let pixels = gfx.draw_offscreen((wide, tall), scale, |frame| frame.markdown(text, Font::new(Family::Segoe, 15.0, 400.0), inks, 0.0, 0.0, 200.0, 40.0)).expect("drawn");
+                (0..wide).find(|&x| (0..tall).any(|y| pixels[((y * wide + x) * 4 + 3) as usize] > 0)).expect("words drawn") as f32
+            };
+            let (alone, tabbed) = (first("X"), first("	X"));
+            assert!((tabbed - alone - super::super::editor::TAB_PIXELS).abs() <= 1.0, "at {scale}: after a tab at {tabbed}, alone at {alone}");
+        }
+    }
+
     /// A layer drawn while a window is sized by hand is painted again only where what it shows has changed: one that
     /// shows as it did (the settings' library, as the window around it is sized) is drawn from what it kept, one that
     /// changed is drawn straight where it shows, and none is kept for it till the sizing ends.
