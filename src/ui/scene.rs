@@ -531,13 +531,26 @@ fn desktop_rect(shell: HWND) -> RECT {
 }
 
 /// Whether Glance may capture without the border a capture is shown by (asked of the system once: a capture of the
-/// desktop's window with a border would ring every screen).
+/// desktop's window with a border would ring every screen). Asked and waited for on a thread of its own, in the
+/// multithreaded apartment, whichever thread wants it: the answer comes to the apartment it was asked from, and a
+/// thread in one of its own (a note's page's, for its text and what is dropped on it) that waits for it there takes no
+/// messages meanwhile, so it never came, and that thread hung (its page never shown) where it was the first to ask.
 fn borderless() -> bool {
     static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ASKED.get_or_init(|| {
-        use windows::Graphics::Capture::{GraphicsCaptureAccess, GraphicsCaptureAccessKind};
-        use windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
-        GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless).and_then(|asked| asked.join()).is_ok_and(|status| status == AppCapabilityAccessStatus::Allowed)
+        std::thread::Builder::new()
+            .name("glance: capture access".into())
+            .spawn(|| {
+                use windows::Graphics::Capture::{GraphicsCaptureAccess, GraphicsCaptureAccessKind};
+                use windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
+                unsafe {
+                    let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+                }
+                GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless).and_then(|asked| asked.join()).is_ok_and(|status| status == AppCapabilityAccessStatus::Allowed)
+            })
+            .ok()
+            .and_then(|asking| asking.join().ok())
+            .unwrap_or(false)
     })
 }
 

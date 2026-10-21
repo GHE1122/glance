@@ -180,6 +180,7 @@ pub fn up_for(window: HWND) -> bool {
 
 /// The page `opening` asks for opened (another up goes), on its thread (started when first asked).
 pub fn open(opening: Opening) {
+    crate::perf::mark(|| "beside asked".into());
     ask(Ask::Open(opening));
 }
 
@@ -531,7 +532,9 @@ fn show(opening: Opening) {
     if BESIDE.with(|cell| cell.try_borrow().map_or(true, |beside| beside.is_some())) {
         return;
     }
+    crate::perf::mark(|| "beside thread".into());
     let Ok(gfx) = gfx::current() else { return };
+    crate::perf::mark(|| "beside device".into());
     let showing = super::life::Showing::of(&gfx);
     let (page, scale) = placed(&opening);
     let (x, y, wide, tall) = (page.left, page.top, page.right - page.left, page.bottom - page.top);
@@ -542,6 +545,7 @@ fn show(opening: Opening) {
         let inset = theme.margin;
         let room_px = (inset * scale).round() as i32;
         let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP, w!("GlanceBeside"), &HSTRING::from("Glance"), WS_POPUP, x - room_px, y - room_px, wide + 2 * room_px, tall + 2 * room_px, None, None, None, None) else { return };
+        crate::perf::mark(|| "beside window".into());
         let square = DWMWCP_DONOTROUND;
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &square as *const _ as *const _, size_of_val(&square) as u32);
         // (Shown as it is drawn, at once: Windows' fade as it came up showed it all but clear a moment first.)
@@ -586,6 +590,7 @@ fn show(opening: Opening) {
         if let Page::Note(name) = page {
             let folder = opening.folder.clone().map_or_else(crate::notes::folder, crate::notes::folder_at);
             let read = name.as_ref().and_then(|name| folder.read(name));
+            crate::perf::mark(|| "beside note read".into());
             let shown = crate::notes::shown();
             let colour = match &name {
                 Some(name) => shown.iter().find(|note| &note.name == name).map(|note| note.colour).unwrap_or_default(),
@@ -596,6 +601,7 @@ fn show(opening: Opening) {
             let pixels = 15.0 * scale;
             let palette = palette_for(&theme, colour, pixels);
             if let Some(editor) = super::editor::Editor::new(hwnd, rect, &palette.face, pixels, palette.text) {
+                crate::perf::mark(|| "beside editor".into());
                 if let Some((text, _)) = &read {
                     editor.set_text(text);
                 }
@@ -606,6 +612,7 @@ fn show(opening: Opening) {
                 *WRITING.lock().unwrap() = name.clone();
                 let writing = Writing { folder: folder.path.clone(), name, stamp: read.map(|(_, stamp)| stamp), colour, written_ms, editor, palette, unkept: false, said: None };
                 writing.dress();
+                crate::perf::mark(|| "beside words dressed".into());
                 with(|beside| beside.writing = Some(writing));
             }
         }
@@ -638,7 +645,9 @@ fn show(opening: Opening) {
         let _ = SetTimer(Some(hwnd), FOLLOW, FOLLOW_MS, None);
         // Shown once drawn whole (see `Beside::shown`), or after a while drawn as it can be.
         let _ = SetTimer(Some(hwnd), SHOW, SHOW_WITHIN_MS, None);
+        crate::perf::mark(|| "beside set up".into());
         with(Beside::draw);
+        crate::perf::mark(|| "beside first drawn".into());
     }
 }
 
@@ -992,6 +1001,7 @@ impl Beside {
             return;
         }
         self.shown = true;
+        crate::perf::mark(|| "beside shown".into());
         unsafe {
             let _ = KillTimer(Some(self.hwnd), SHOW);
             let _ = ShowWindow(self.hwnd, SW_SHOW);
@@ -1526,13 +1536,17 @@ impl Beside {
             return;
         }
         let page = self.page_on_screen();
-        let told = self.hwnd.0 as isize;
         BEHIND.with(|held| {
             let mut held = held.borrow_mut();
             let (scene, taken, asked) = &mut *held;
             if scene.is_none() {
-                let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
-                    let _ = unsafe { PostMessageW(Some(HWND(told as *mut _)), WM_TIMER, WPARAM(AGAIN), LPARAM(0)) };
+                // (The page up as a frame comes, not the one it was made for: kept from page to page, it told the
+                // first, gone, and the next was drawn with what is behind it only as it was drawn again anyway.)
+                let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| {
+                    let page = PAGE.load(Ordering::Acquire);
+                    if page != 0 {
+                        let _ = unsafe { PostMessageW(Some(HWND(page as *mut _)), WM_TIMER, WPARAM(AGAIN), LPARAM(0)) };
+                    }
                 });
                 *scene = super::scene::Scene::new(page, wake, &self.gfx);
             }
@@ -2233,5 +2247,60 @@ mod tests {
         assert!(!goes_now(left, opened));
         assert!(goes_now(opened, opened));
         assert!(!goes_now(left, 0));
+    }
+}
+
+#[cfg(all(test, feature = "studio"))]
+mod timed {
+    use super::*;
+
+    /// How long a note's page takes to come up, from asked to shown, in each skin, the first time on its thread and
+    /// after, and that it does at once: its parts' marks written where GLANCE_PERF names (a note in a folder
+    /// of the test's own; the page shown on this PC's screen a moment each time). (On glass, the first page to want
+    /// the desktop, before any panel or widget did, hung as it asked whether it may be captured without a border; each
+    /// after the first waited for being drawn again anyway, what is behind it told to the first page, gone.)
+    /// `GLANCE_PERF=<file> cargo test --features studio --lib -- --ignored --exact ui::beside::timed::a_note_s_page_comes_up --nocapture`.
+    #[test]
+    #[ignore = "puts a note's page on this PC's screen"]
+    fn a_note_s_page_comes_up() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        crate::pictured(crate::metrics::Sampler::new().info, Vec::new());
+        let folder = std::env::temp_dir().join("glance-note-page-timed");
+        let _ = std::fs::create_dir_all(&folder);
+        std::fs::write(folder.join("a.md"), "# A note\nIts first line\nIts second\n- [ ] something to do\n").unwrap();
+        let wait = |done: &dyn Fn() -> bool| {
+            let began = std::time::Instant::now();
+            while !done() && began.elapsed() < std::time::Duration::from_secs(5) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            began.elapsed()
+        };
+        let shown = || {
+            let page = PAGE.load(Ordering::Acquire);
+            page != 0 && unsafe { IsWindowVisible(HWND(page as *mut _)).as_bool() }
+        };
+        let mut failed = false;
+        for skin in [Skin::Paper, Skin::Glass] {
+            let mut took = Vec::new();
+            for _ in 0..5 {
+                crate::perf::mark(|| format!("round {skin:?}"));
+                let began = std::time::Instant::now();
+                open(Opening { page: Page::Note(Some("a.md".into())), by: RECT { left: 200, top: 200, right: 400, bottom: 320 }, side: Side::Over, skin, dark: false, folder: Some(folder.clone()), owner: 0 });
+                wait(&shown);
+                took.push(began.elapsed().as_secs_f64() * 1000.0);
+                close();
+                wait(&|| !is_up());
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+            println!("{skin:?}: {}", took.iter().map(|ms| format!("{ms:.0} ms")).collect::<Vec<_>>().join(", "));
+            // The first within a second (its thread's device made first); the others as soon as what is behind them is
+            // taken, well before the page would be drawn again anyway, or would give up waiting for it (see
+            // `SHOW_WITHIN_MS`).
+            failed |= took[0] > 1000.0 || took[1..].iter().any(|ms| *ms > 200.0);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+        assert!(!failed, "a page was slow to be shown");
     }
 }
