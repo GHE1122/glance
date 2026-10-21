@@ -1,6 +1,5 @@
-// A Glance panel drawn in the page, running on made-up readings: it slides
-// out when the pointer is pushed against the window's right edge, as Glance
-// does at the screen's, and shows each of its looks in place.
+// A Glance panel drawn in the page, running on made-up readings: on the
+// desk (see desk.js), at its right edge, and in each of its looks in place.
 (function () {
   "use strict";
 
@@ -385,43 +384,4 @@
     window.addEventListener("resize", function () { look(root.getAttribute("data-look")); });
   }
   look("glass");
-
-  // ---- the edge: push the pointer against the window's right edge ----
-  var drawer = document.querySelector("[data-drawer]");
-  if (!drawer) return;
-  var hint = document.querySelector("[data-edge]");
-  var peek = document.querySelectorAll("[data-peek]");
-  var open = false, closing = null;
-
-  function setOpen(on) {
-    if (closing) { clearTimeout(closing); closing = null; }
-    if (on === open) return;
-    open = on;
-    drawer.classList.toggle("open", on);
-    drawer.setAttribute("aria-hidden", on ? "false" : "true");
-    if (hint) hint.classList.toggle("gone", on);
-  }
-
-  // At the edge, the pointer can go no further: as in Glance, that is the push.
-  document.addEventListener("pointermove", function (e) {
-    if (e.pointerType !== "mouse") return;
-    var edge = document.documentElement.clientWidth;
-    if (e.clientX >= edge - 3) { setOpen(true); return; }
-    if (!open) return;
-    var r = drawer.getBoundingClientRect();
-    var near = e.clientX >= r.left - 32 && e.clientY >= r.top - 32 && e.clientY <= r.bottom + 32;
-    if (near) { if (closing) { clearTimeout(closing); closing = null; } }
-    else if (!closing) closing = setTimeout(function () { setOpen(false); }, 220);
-  }, { passive: true });
-  document.documentElement.addEventListener("mouseleave", function (e) {
-    // Leaving through the right edge is the same push, when the browser fills the screen.
-    if (e.clientX >= document.documentElement.clientWidth - 3) setOpen(true);
-  });
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") setOpen(false); });
-  Array.prototype.forEach.call(peek, function (b) {
-    b.addEventListener("click", function (e) { e.stopPropagation(); setOpen(!open); });
-  });
-  document.addEventListener("click", function (e) {
-    if (open && !drawer.contains(e.target)) setOpen(false);
-  });
 })();

@@ -278,14 +278,6 @@
     mark();
   }
 
-  // The films stand still for those who asked for less motion, on their first frame.
-  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    Array.prototype.forEach.call(document.querySelectorAll(".film video"), function (video) {
-      video.removeAttribute("autoplay");
-      video.pause();
-    });
-  }
-
   // Each part of the page rises into place as it is scrolled to.
   if ("IntersectionObserver" in window) {
     var parts = document.querySelectorAll("section .wrap > *, .hero-text > *");

@@ -1,0 +1,60 @@
+/* The desk: a screen in the page (1440 × 900 DIPs, scaled to the page's
+   width), on which Glance is shown as it is used: the monitor at its right
+   edge, the workbench at its left, music at its top, torn onto the desktop,
+   sized, and full screen. Drawn and played by desk.js. */
+
+.desk-sec { padding-top: 24px; }
+.vdesk { position: relative; width: 100%; aspect-ratio: 1440 / 900; margin-top: 32px; border-radius: 18px; overflow: hidden;
+  border: 1px solid var(--glass-edge); background: #1a1440; box-shadow: var(--shadow); touch-action: pan-y;
+  -webkit-user-select: none; user-select: none; }
+.vdesk .screen { position: absolute; left: 0; top: 0; width: 1440px; height: 900px; transform-origin: 0 0; overflow: hidden;
+  background: #1a1440 url("img/desk-wall.webp") center / cover no-repeat; }
+.vdesk.live .screen { cursor: default; }
+
+/* The taskbar, as plain as a taskbar is: a few programs in its middle. */
+.vdesk .taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: 48px; display: flex; align-items: center; justify-content: center; gap: 6px;
+  background: rgba(24, 20, 48, 0.72); -webkit-backdrop-filter: blur(30px) saturate(150%); backdrop-filter: blur(30px) saturate(150%);
+  border-top: 1px solid rgba(255, 255, 255, 0.08); }
+.vdesk .taskbar i { display: block; width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; }
+.vdesk .taskbar i svg { width: 22px; height: 22px; }
+.vdesk .taskbar i:hover { background: rgba(255, 255, 255, 0.08); }
+
+/* What comes from an edge: placed and slid by desk.js. */
+.vdesk .edge { position: absolute; left: 0; top: 0; will-change: transform; }
+.vdesk .edge[data-at="right"] .gp { width: 704px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+
+/* The music widget: its canvas (its shadow drawn in it too), drawn by music.js. */
+.vdesk .mw { position: absolute; left: 0; top: 0; pointer-events: none; }
+.vdesk .mw canvas { display: block; width: 100%; height: 100%; }
+.vdesk .mw[hidden] { display: none; }
+
+/* The full screen, over everything, the taskbar too. */
+.vdesk .full { position: absolute; inset: 0; opacity: 0; visibility: hidden; }
+.vdesk .full.on { visibility: visible; }
+
+/* Esc pressed, as the desk plays it. */
+.vdesk .esc { position: absolute; left: 50%; bottom: 72px; padding: 14px 26px; border-radius: 14px; transform: translateX(-50%);
+  font: 600 26px/1 var(--sans); color: #1d1a33; background: rgba(250, 250, 255, 0.94);
+  box-shadow: 0 6px 0 rgba(170, 168, 200, 0.9), 0 12px 30px rgba(0, 0, 0, 0.4); opacity: 0; pointer-events: none; }
+
+/* The pointer, while the desk plays itself. */
+.vdesk .pointer { position: absolute; left: 0; top: 0; width: 26px; height: 38px; pointer-events: none; transform-origin: 0 0;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45)); }
+
+/* Under the desk: what is shown now, the parts to go to, and the sound. */
+.desk-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px 24px; margin-top: 18px; }
+.desk-say { flex: 1 1 22em; margin: 0; min-height: 1.75em; color: var(--ink-2); font-size: 15.5px; }
+.desk-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.desk-sound { appearance: none; display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 12px; cursor: pointer;
+  font: inherit; font-size: 14.5px; color: var(--ink-2); background: rgba(10, 12, 34, 0.25); border: 1px solid var(--glass-edge); }
+.desk-sound svg { width: 18px; height: 18px; flex: none; }
+.desk-sound[aria-pressed="true"] { color: var(--button-ink); background: var(--button); border-color: var(--button); font-weight: 600; }
+.desk-sound .on, .desk-sound[aria-pressed="true"] .off { display: none; }
+.desk-sound[aria-pressed="true"] .on { display: block; }
+
+/* The hero's way down to it. */
+.to-desk { display: inline-flex; align-items: center; gap: 8px; margin-top: 22px; color: var(--ink-2); font-size: 15px; text-decoration: none; }
+.to-desk svg { width: 18px; height: 18px; animation: to-desk 1.8s ease-in-out infinite; }
+.to-desk:hover { color: var(--ink); }
+@keyframes to-desk { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .to-desk svg { animation: none; } }

@@ -35,10 +35,7 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
-/* No scrollbar at the window's edge: the edge is where the panel comes from,
-   and the pointer pushed against it must meet the page, not a scrollbar. */
-html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; background: #2b2f5c; scrollbar-width: none; }
-html::-webkit-scrollbar { display: none; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; background: #2b2f5c; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
 body {
@@ -270,38 +267,6 @@ footer a { color: var(--ink-2); }
 /* ---------- the sources, in the header ---------- */
 @media (max-width: 520px) { .nav .src { display: none; } }
 
-/* ---------- the hero's hint toward the edge ---------- */
-.try { display: inline-flex; align-items: center; gap: 10px; margin: 36px 0 0; padding: 8px 16px;
-  border-radius: 999px; font-size: 14.5px; color: var(--ink-2); background: var(--glass);
-  border: 1px solid var(--glass-edge); }
-.try svg { width: 18px; height: 18px; animation: nudge 1.6s ease-in-out infinite; }
-@keyframes nudge { 0%, 100% { transform: none; } 50% { transform: translateX(5px); } }
-.peek { display: none; appearance: none; cursor: pointer; font: inherit; font-size: 15px; font-weight: 600;
-  margin: 32px auto 0; padding: 10px 22px; border-radius: 999px; color: var(--ink);
-  background: var(--glass-strong); border: 1px solid var(--line-strong); }
-/* Without a pointer to push, a button does it. */
-@media (hover: none) {
-  .try { display: none; }
-  .peek { display: block; }
-}
-
-/* The edge of the window, glowing until the panel comes out of it. */
-.edge-glow { position: fixed; z-index: 19; right: 0; top: 22vh; height: 56vh; width: 3px; border-radius: 2px;
-  background: linear-gradient(transparent, rgba(255, 255, 255, 0.95), transparent);
-  box-shadow: 0 0 22px 5px rgba(140, 190, 255, 0.55);
-  animation: glow 2.4s ease-in-out infinite; transition: opacity .3s; pointer-events: none; }
-.edge-glow.gone { opacity: 0; }
-@keyframes glow { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
-@media (hover: none) { .edge-glow { display: none; } }
-
-/* ---------- the panel at the edge ---------- */
-.drawer { position: fixed; z-index: 20; right: 12px; top: 50%; width: min(704px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
-  overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; transform: translate(calc(100% + 40px), -50%);
-  transition: transform .45s cubic-bezier(.2, .9, .25, 1); }
-.drawer::-webkit-scrollbar { display: none; }
-.drawer.open { transform: translate(0, -50%); }
-@media (prefers-reduced-motion: reduce) { .drawer { transition: none; } .edge-glow, .try svg { animation: none; } }
-
 /* ---------- the looks ---------- */
 .looks { margin-top: 80px; }
 .looks-text { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px 40px; margin-bottom: 28px; }
@@ -331,12 +296,6 @@ html[lang="en"] .looks-text h3 { font-weight: 600; letter-spacing: -0.015em; }
     radial-gradient(60% 60% at 0% 100%, #1f9bb0 0%, transparent 70%),
     #4a3f86;
   box-shadow: var(--shadow); }
-
-/* ---------- a film of Glance, drawn by its own code ---------- */
-.film { margin: 40px auto 8px; max-width: 880px; }
-.film video { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; border-radius: 20px;
-  border: 1px solid var(--glass-edge); background: #1d2340; box-shadow: var(--shadow); }
-.film figcaption { margin-top: 14px; color: var(--ink-2); font-size: 14.5px; text-align: center; }
 
 /* ---------- the overlay ---------- */
 /* The overlay over a soft dusk (drawn by overlay.js), in the colours of

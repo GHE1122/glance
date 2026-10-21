@@ -725,7 +725,8 @@
     var name = root.getAttribute("data-look");
     SKIN = SKINS[name === "win11" ? "fluent" : name === "paper" ? "paper" : "glass"];
     readTheme();
-    request();
+    // (Hidden, it is drawn in it when it is shown.)
+    if (!host.hidden) request();
   }
   new MutationObserver(look).observe(root, { attributes: true, attributeFilter: ["data-look"] });
 
@@ -737,7 +738,8 @@
 
   // ---- panel or widget: one switch, the looks for both ----
   var seg = document.querySelector("[data-shape]");
-  var stage = document.querySelector("[data-demo]");
+  // (The panel it stands in for is the one beside it, not the desk's.)
+  var stage = host.parentNode.querySelector(":scope > [data-demo]");
   function shape(name) {
     var widget = name === "widget";
     if (stage) stage.hidden = widget;
