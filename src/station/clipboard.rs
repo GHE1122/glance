@@ -25,7 +25,7 @@ use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, STREAM
 use std::os::windows::ffi::OsStrExt;
 use windows::Win32::Foundation::{GlobalFree, HANDLE};
 use windows::Win32::Graphics::Imaging::WICDecodeMetadataCacheOnDemand;
-use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
+use windows::Win32::System::DataExchange::{EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, RegisterClipboardFormatW, SetClipboardData};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
@@ -99,9 +99,10 @@ pub struct Busy;
 /// nothing the station keeps; `Busy` if another program holds it just now.
 pub fn read(owner: HWND, why: Why) -> Result<Option<Copied>, Busy> {
     unsafe {
-        OpenClipboard(Some(owner)).map_err(|_| Busy)?;
+        // (Not waited for: read again in a moment, see `run`.)
+        let opened = crate::clipboard::try_open(owner).ok_or(Busy)?;
         let read = read_open(why);
-        let _ = CloseClipboard();
+        drop(opened);
         let Some((taken, stays_here, sequence)) = read else { return Ok(None) };
         // (A picture read as the clipboard's was copied into a bitmap of Glance's; made a PNG now it is closed.)
         let content = match taken {
@@ -223,14 +224,14 @@ unsafe fn png(image: &IWICBitmapSource) -> windows::core::Result<Vec<u8>> {
 pub fn put(owner: HWND, content: &Content, stays_here: bool) -> Option<u32> {
     // Made before the clipboard is opened (a picture decoded): it is held no longer than it takes to hand it over.
     let formats = formats_of(content, stays_here)?;
+    let opened = crate::clipboard::open(owner)?;
     unsafe {
-        OpenClipboard(Some(owner)).ok()?;
         let _ = EmptyClipboard();
         let mut all = true;
         for (format, bytes) in &formats {
             all &= hand_over(*format, bytes);
         }
-        let _ = CloseClipboard();
+        drop(opened);
         all.then(|| GetClipboardSequenceNumber())
     }
 }

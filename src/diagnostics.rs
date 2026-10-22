@@ -4,7 +4,7 @@
 
 use windows::core::w;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
-use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+use windows::Win32::System::DataExchange::{EmptyClipboard, SetClipboardData};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 
@@ -196,10 +196,8 @@ fn readings(sample: &Sample, info: &StaticInfo) -> Vec<String> {
 pub fn copy(owner: HWND, text: &str) -> bool {
     let units: Vec<u16> = text.encode_utf16().chain([0]).collect();
     let bytes = units.len() * 2;
+    let Some(_opened) = crate::clipboard::open(owner) else { return false };
     unsafe {
-        if OpenClipboard(Some(owner)).is_err() {
-            return false;
-        }
         let placed = (|| {
             EmptyClipboard().ok()?;
             let memory = GlobalAlloc(GMEM_MOVEABLE, bytes).ok()?;
@@ -217,7 +215,6 @@ pub fn copy(owner: HWND, text: &str) -> bool {
             }
             Some(())
         })();
-        let _ = CloseClipboard();
         placed.is_some()
     }
 }
