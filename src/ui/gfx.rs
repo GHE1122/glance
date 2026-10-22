@@ -529,8 +529,9 @@ impl Gfx {
     }
 
     /// A note's `table` laid out (see `notes::table::lay`), its words in `family` `pixels` high (whole) at `per` pixels a
-    /// DIP, in `room` pixels across: in pixels. (Its words not to be laid out, none of them takes room.)
-    pub fn table_laid(&self, table: &crate::notes::table::Table, family: Family, pixels: f32, per: f32, room: f32) -> crate::notes::table::Laid {
+    /// DIP, in `room` pixels across: in pixels, each cell's words laid out in it to be drawn (see `Frame::table`). (Its
+    /// words not to be laid out, none of them takes room, and none is drawn.)
+    pub fn table_laid(&self, table: &crate::notes::table::Table, family: Family, pixels: f32, per: f32, room: f32) -> TableLaid {
         let measure = |words: &str, bold: bool, wide: Option<f32>| {
             let mut metrics = DWRITE_TEXT_METRICS::default();
             match self.cell(words, family, pixels, per, bold, wide, crate::notes::table::Align::Left).and_then(|layout| unsafe { layout.GetMetrics(&mut metrics) }) {
@@ -538,7 +539,40 @@ impl Gfx {
                 Err(_) => (0.0, 0.0),
             }
         };
-        crate::notes::table::lay(table, pixels, room, measure)
+        let laid = crate::notes::table::lay(table, pixels, room, measure);
+        let side = (crate::notes::table::PAD_SIDE * pixels).round();
+        let starts = |lengths: &[f32]| {
+            let mut at = 0.0;
+            let mut starts: Vec<f32> = lengths
+                .iter()
+                .map(|length| {
+                    let start = at;
+                    at += length;
+                    start
+                })
+                .collect();
+            starts.push(at);
+            starts
+        };
+        let cells = table
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(row, cells)| {
+                cells
+                    .iter()
+                    .enumerate()
+                    .zip(&laid.columns)
+                    .filter_map(|((column, cell), wide)| {
+                        let layout = self.cell(&cell.reads, family, pixels, per, row == 0, Some(wide - 1.0 - 2.0 * side), table.aligns[column]).ok()?;
+                        let mut metrics = DWRITE_TEXT_METRICS::default();
+                        unsafe { layout.GetMetrics(&mut metrics) }.ok()?;
+                        Some((column, layout, metrics.height * per))
+                    })
+                    .collect()
+            })
+            .collect();
+        TableLaid { columns_at: starts(&laid.columns), rows_at: starts(&laid.rows), laid, side, cells }
     }
 
     fn laid_out(&self, text: &str, font: Font, width: f32, align: Align, wrap: bool) -> IDWriteTextLayout {
@@ -979,6 +1013,18 @@ impl Drop for Moving<'_, '_> {
     fn drop(&mut self) {
         self.frame.set_moving(self.was);
     }
+}
+
+/// A note's table laid out to be drawn (see `Gfx::table_laid`, `Frame::table`): its columns' widths and its rows'
+/// heights, where each begins (and where the last ends), how far its cells' words are in from their sides, and each
+/// cell's words laid out (its column, and how tall they are), all in pixels.
+#[derive(Clone)]
+pub struct TableLaid {
+    pub laid: crate::notes::table::Laid,
+    columns_at: Vec<f32>,
+    rows_at: Vec<f32>,
+    side: f32,
+    cells: Vec<Vec<(usize, IDWriteTextLayout, f32)>>,
 }
 
 /// One frame being drawn onto a surface.
@@ -1746,7 +1792,7 @@ impl<'a> Frame<'a> {
             // Its tables laid out in its room (in pixels), their lines as tall as they take, and its rules.
             let pixels = size * per;
             let tables: Vec<_> = shown.tables_drawn(None).map(|table| (table, self.gfx.table_laid(table, font.family, pixels, per, (width * per).floor()))).collect();
-            let drawn: Vec<_> = tables.iter().map(|(table, laid)| (table.span.clone(), laid.height())).collect();
+            let drawn: Vec<_> = tables.iter().map(|(table, laid)| (table.span.clone(), laid.laid.height())).collect();
             let rules: Vec<_> = shown.rules_drawn(None).collect();
             // Each line laid out on its own, as tall as it is set, under the one before.
             let mut down = 0.0;
@@ -1754,8 +1800,8 @@ impl<'a> Frame<'a> {
                 if down >= height {
                     break;
                 }
-                if let Some((table, laid)) = tables.iter().find(|(table, _)| table.span.start == line.start) {
-                    self.table(table, laid, font.family, pixels, inks, left, top + down);
+                if let Some((_, laid)) = tables.iter().find(|(table, _)| table.span.start == line.start) {
+                    self.table(laid, inks, left, top + down, (y, y + height));
                 }
                 if rules.iter().any(|rule| rule.start == line.start) {
                     self.rule(inks, left, top + down, width, tall);
@@ -1842,44 +1888,37 @@ impl<'a> Frame<'a> {
         }
     }
 
-    /// Draws a note's `table` as `laid` out (see `Gfx::table_laid`), from (`x`, `y`) (DIPs, put on a whole pixel), its
-    /// words in `family` `pixels` high (whole), in its `inks`: its lines a pixel wide (`rule_ink`), its head's row tinted
-    /// and its words bold, each cell's words set in it as its column says, in the middle of its row's height. The same
-    /// for a note written in and one shown (see `Writing::paint`, `markdown`): pixel for pixel alike.
-    #[allow(clippy::too_many_arguments)]
-    pub fn table(&self, table: &crate::notes::table::Table, laid: &crate::notes::table::Laid, family: Family, pixels: f32, inks: Inks, x: f32, y: f32) {
-        use crate::notes::table::PAD_SIDE;
+    /// Draws a note's table as `laid` out (see `Gfx::table_laid`), from (`x`, `y`) (DIPs, put on a whole pixel), in its
+    /// `inks`: its lines a pixel wide (`rule_ink`), its head's row tinted and its words bold, each cell's words set in it
+    /// as its column says, in the middle of its row's height. Only its rows within `within` (from, to: DIPs down) are
+    /// drawn: those out of it would not show. The same for a note written in and one shown (see `Writing::paint`,
+    /// `markdown`): pixel for pixel alike.
+    pub fn table(&self, laid: &TableLaid, inks: Inks, x: f32, y: f32, within: (f32, f32)) {
         let per = self.axes().map_or(1.0, |(t, device)| t.M11 * device);
         let (left, top) = self.on_pixel(x, y);
-        let (width, height) = (laid.width(), laid.height());
-        let at = |lengths: &[f32], nth: usize| lengths[..nth].iter().sum::<f32>();
+        let (width, height) = (laid.laid.width(), laid.laid.height());
         let line = rule_ink(inks);
-        if let Some(head) = laid.rows.first() {
+        // (The rows that show: from the last beginning above `within`, to the first beginning below it.)
+        let rows = laid.laid.rows.len();
+        let first = laid.rows_at[..rows].partition_point(|start| top + start / per <= within.0).saturating_sub(1);
+        let last = laid.rows_at[..rows].partition_point(|start| top + start / per < within.1);
+        if let Some(head) = laid.laid.rows.first().filter(|_| first == 0) {
             self.fill(Color { a: HEAD_TINT, ..inks.faint }, left, top, width / per, (head + 1.0) / per);
         }
-        for column in 0..=laid.columns.len() {
-            self.fill(line, left + at(&laid.columns, column) / per, top, 1.0 / per, height / per);
+        let (from, to) = (laid.rows_at[first], laid.rows_at[last].min(height - 1.0) + 1.0);
+        for start in &laid.columns_at {
+            self.fill(line, left + start / per, top + from / per, 1.0 / per, (to - from) / per);
         }
-        for row in 0..=laid.rows.len() {
-            self.fill(line, left, top + at(&laid.rows, row) / per, width / per, 1.0 / per);
+        for start in &laid.rows_at[first..=last] {
+            self.fill(line, left, top + start / per, width / per, 1.0 / per);
         }
-        let side = (PAD_SIDE * pixels).round();
-        let drawn = (|| -> Result<()> {
-            for (row, cells) in table.rows.iter().enumerate() {
-                for ((column, cell), wide) in cells.iter().enumerate().zip(&laid.columns) {
-                    let layout = self.gfx.cell(&cell.reads, family, pixels, per, row == 0, Some(wide - 1.0 - 2.0 * side), table.aligns[column])?;
-                    let mut metrics = DWRITE_TEXT_METRICS::default();
-                    unsafe { layout.GetMetrics(&mut metrics)? };
-                    // (In the middle of its row, under the row's line, on a whole pixel.)
-                    let down = at(&laid.rows, row) + 1.0 + ((laid.rows[row] - 1.0 - metrics.height * per) / 2.0).round();
-                    let along = at(&laid.columns, column) + 1.0 + side;
-                    unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: left + along / per, Y: top + down / per }, &layout, self.brush(inks.words), self.text_snap()) };
-                }
+        for (row, cells) in laid.cells.iter().enumerate().take(last).skip(first) {
+            for (column, layout, tall) in cells {
+                // (In the middle of its row, under the row's line, on a whole pixel.)
+                let down = laid.rows_at[row] + 1.0 + ((laid.laid.rows[row] - 1.0 - tall) / 2.0).round();
+                let along = laid.columns_at[*column] + 1.0 + laid.side;
+                unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: left + along / per, Y: top + down / per }, layout, self.brush(inks.words), self.text_snap()) };
             }
-            Ok(())
-        })();
-        if let Err(error) = drawn {
-            self.fail(error);
         }
     }
 

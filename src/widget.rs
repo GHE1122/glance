@@ -4232,13 +4232,11 @@ impl Widget {
             if let Some(in_place) = in_place {
                 match pressed.as_ref().map_or(was_card, |(hits, from)| card_in(hits, *from, in_place.number, margin)) {
                     Some(card) => {
+                        // (Placed first: restyled, its tables are laid out in the room it has.)
+                        in_place.writing.place(words_rect(card, px));
                         if in_place.styled != (px, theme.skin, theme.dark) {
                             in_place.styled = (px, theme.skin, theme.dark);
                             in_place.writing.restyle(theme, crate::ui::note::WORDS * px);
-                        }
-                        let words = words_rect(card, px);
-                        if in_place.writing.editor.bounds() != words {
-                            in_place.writing.editor.place(words);
                         }
                         in_place.card = card;
                         frame.origin(0.0, 0.0);

@@ -329,35 +329,48 @@ impl Editor {
     /// Where the character at `at` (UTF-16 units) is drawn (in the window): from its left and its line's top to where
     /// the next begins and its line's foot. None where it is not drawn (scrolled out of the box).
     pub fn character(&self, at: usize) -> Option<RECT> {
-        // (tomStart, tomEnd; tomClientCoord: in the window, not on the screen; TA_BOTTOM.)
+        self.character_where(at, false)
+    }
+
+    /// As `character`, where it is drawn or would be (scrolled out of the box: above it or below it).
+    pub fn character_anywhere(&self, at: usize) -> Option<RECT> {
+        self.character_where(at, true)
+    }
+
+    fn character_where(&self, at: usize, anywhere: bool) -> Option<RECT> {
+        // (tomStart, tomEnd, TA_BOTTOM.)
         const START: i32 = 32;
         const END: i32 = 0;
-        const IN_WINDOW: i32 = 256;
         const FOOT: i32 = 8;
-        let document = self.services.cast::<ITextDocument>().ok()?;
-        let range = unsafe { document.Range(at as i32, at as i32 + 1) }.ok()?;
-        let point = |kind: i32| {
-            let (mut x, mut y) = (0, 0);
-            unsafe { range.GetPoint(tomConstants(kind | IN_WINDOW), &mut x, &mut y) }.ok().map(|()| (x, y))
-        };
-        let (left, top) = point(START)?;
-        let (_, bottom) = point(START | FOOT)?;
-        let (right, _) = point(END)?;
+        let (left, top) = self.point(at, START, anywhere)?;
+        let (_, bottom) = self.point(at, START | FOOT, anywhere)?;
+        let (right, _) = self.point(at, END, anywhere)?;
         Some(RECT { left, top, right: right.max(left), bottom })
     }
 
     /// Where the baseline of the character at `at` (UTF-16 units) is (in the window, from its top). None where it is
     /// not drawn.
     pub fn baseline(&self, at: usize) -> Option<i32> {
-        // (tomStart; tomClientCoord; TA_BASELINE.)
+        // (tomStart, TA_BASELINE.)
         const START: i32 = 32;
-        const IN_WINDOW: i32 = 256;
         const BASELINE: i32 = 24;
+        self.point(at, START | BASELINE, false).map(|(_, y)| y)
+    }
+
+    /// The point `kind` says of the character at `at` (UTF-16 units), in the window: where it is drawn, or where
+    /// `anywhere`, where it would be out of the box too. None where the text services say it is not (`S_FALSE`, the
+    /// point left unset).
+    fn point(&self, at: usize, kind: i32, anywhere: bool) -> Option<(i32, i32)> {
+        // (tomClientCoord: in the window, not on the screen. tomAllowOffClient: out of the box too.)
+        const IN_WINDOW: i32 = 256;
+        const OFF_BOX: i32 = 512;
         let document = self.services.cast::<ITextDocument>().ok()?;
         let range = unsafe { document.Range(at as i32, at as i32 + 1) }.ok()?;
         let (mut x, mut y) = (0, 0);
-        unsafe { range.GetPoint(tomConstants(START | BASELINE | IN_WINDOW), &mut x, &mut y) }.ok()?;
-        Some(y)
+        let kind = tomConstants(kind | IN_WINDOW | if anywhere { OFF_BOX } else { 0 });
+        // (Called through its table, its answer kept whole: the bindings' call takes S_FALSE for done.)
+        let answer = unsafe { (Interface::vtable(&range).GetPoint)(Interface::as_raw(&range), kind, &mut x, &mut y) };
+        (answer == windows::Win32::Foundation::S_OK).then_some((x, y))
     }
 
     /// Where among its words (in UTF-16 units) the point `point` (in the window) is.

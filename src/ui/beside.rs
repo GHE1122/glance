@@ -912,8 +912,8 @@ impl Beside {
         unsafe {
             let _ = SetWindowPos(self.hwnd, None, page.left - room, page.top - room, wide + 2 * room, tall + 2 * room, SWP_NOZORDER | SWP_NOACTIVATE);
         }
-        if let Some(writing) = &self.writing {
-            writing.editor.place(super::note::words_box(room, room, wide, tall, self.scale));
+        if let Some(writing) = &mut self.writing {
+            writing.place(super::note::words_box(room, room, wide, tall, self.scale));
         }
         self.redraw();
     }

@@ -229,28 +229,63 @@ struct Reads {
     at: crate::notes::markdown::At,
     folder: std::path::PathBuf,
     laid: Laid,
+    dressed: Rc<[u16]>,
 }
 
 /// A note's tables drawn laid out where it is written at (see `notes::markdown::Shown::tables_drawn`), each laid out in
 /// its words' box (pixels: see `Gfx::table_laid`).
-type Laid = Vec<(crate::notes::table::Table, crate::notes::table::Laid)>;
+type Laid = Vec<(crate::notes::table::Table, super::gfx::TableLaid)>;
+
+/// How what was dressed has moved in a note's words as they are now (the input method's words composed in them, not
+/// yet dressed: see `Writing::written`): the first unit that changed, the first after the change (as it was), and how
+/// much longer the words grew.
+struct Moved {
+    before: usize,
+    after: usize,
+    by: isize,
+}
+
+impl Moved {
+    /// From `was` (UTF-16 units, as dressed) to `now`.
+    fn between(was: &[u16], now: &[u16]) -> Moved {
+        let before = was.iter().zip(now).take_while(|(a, b)| a == b).count();
+        let after = was[before..].iter().rev().zip(now[before..].iter().rev()).take_while(|(a, b)| a == b).count();
+        Moved { before, after: was.len() - after, by: now.len() as isize - was.len() as isize }
+    }
+
+    /// Where the unit `at` of the words as dressed is now: before the change where it was, after it moved on with it,
+    /// in what changed nowhere.
+    fn at(&self, at: usize) -> Option<usize> {
+        if at < self.before {
+            Some(at)
+        } else if at >= self.after {
+            Some((at as isize + self.by) as usize)
+        } else {
+            None
+        }
+    }
+}
 
 /// The face a note's tables' words are written in, as its words are (see `palette_for`, `paint_stuck`).
 const TABLE_FAMILY: Family = Family::YaHei;
 
-/// The top of the line the character at `at` (UTF-16 units) is on in `editor` (in the window), found by its line's
-/// break (the line's words may be put away, and nowhere drawn: its break is drawn). None where it is not drawn.
-fn line_top(editor: &Editor, at: usize) -> Option<i32> {
-    let units: Vec<u16> = editor.text().encode_utf16().collect();
+/// The top of the line the character at `at` (UTF-16 units of `units`, its words) is on in `editor` (in the window),
+/// found by its line's break (the line's words may be put away, and nowhere drawn: its break is drawn), where it is
+/// drawn or would be (scrolled out of the box).
+fn line_top(editor: &Editor, units: &[u16], at: usize) -> Option<i32> {
     let end = (at..units.len()).find(|&unit| units[unit] == u16::from(b'\n'))?;
-    editor.character(end).map(|drawn| drawn.top)
+    editor.character_anywhere(end).map(|drawn| drawn.top)
 }
 
-/// The words of the cell of a table drawn laid out in `editor` (`laid`) that `point` (in the window) is on: none off them.
-fn cell_at(editor: &Editor, laid: &Laid, point: POINT) -> Option<std::ops::Range<usize>> {
+/// The words of the cell of a table drawn laid out in `editor` (`laid`, as its words were dressed: `dressed`) that
+/// `point` (in the window) is on: none off them.
+fn cell_at(editor: &Editor, laid: &Laid, dressed: &[u16], point: POINT) -> Option<std::ops::Range<usize>> {
     let left = editor.bounds().left;
+    let now: Vec<u16> = editor.text().encode_utf16().collect();
+    let moved = Moved::between(dressed, &now);
     laid.iter().find_map(|(table, laid)| {
-        let top = line_top(editor, table.span.start)?;
+        let top = line_top(editor, &now, moved.at(table.span.start)?)?;
+        let laid = &laid.laid;
         let (x, y) = ((point.x - left) as f32, (point.y - top) as f32);
         if x < 0.0 || y < 0.0 || x >= laid.width() || y >= laid.height() {
             return None;
@@ -265,7 +300,8 @@ fn cell_at(editor: &Editor, laid: &Laid, point: POINT) -> Option<std::ops::Range
             .unwrap_or(lengths.len() - 1)
         };
         let (row, column) = (nth(&laid.rows, y), nth(&laid.columns, x));
-        table.rows.get(row)?.get(column).map(|cell| cell.words.clone())
+        let words = table.rows.get(row)?.get(column)?.words.clone();
+        Some(moved.at(words.start)?..moved.at(words.end)?)
     })
 }
 
@@ -294,11 +330,11 @@ fn writes(key: VIRTUAL_KEY) -> bool {
 /// and out, Backspace takes an item's mark off, Alt+Up and Alt+Down move lines. Ctrl+B, Ctrl+I, Ctrl+Shift+X and Ctrl+E
 /// put on and take off bold, slanted, struck through and code, Ctrl+K makes a link (to the web address on the clipboard,
 /// `clipboard` asked only then, for its text), Ctrl+1 to 3 headings and Ctrl+0 none. Ctrl+V and Shift+Insert paste what is
-/// on the clipboard as Markdown (`clipboard` asked for it so: see `clipboard_pasted`, `edit::paste`: the text services'
-/// own paste would bring what a note's file does not keep). Ctrl with any
+/// on the clipboard as Markdown, words among others or blocks (`clipboard` asked for it so: see `clipboard_pasted`,
+/// `edit::paste`: the text services' own paste would bring what a note's file does not keep). Ctrl with any
 /// other key that writes is eaten but for choosing all, copying, cutting, undoing and redoing: the text services' own
 /// would dress the words in ways a note's file does not keep.
-fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, system: bool, clipboard: impl FnOnce(Taken) -> Option<String>) -> Option<Option<crate::notes::edit::Edit>> {
+fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, system: bool, clipboard: impl FnOnce(Taken) -> Option<crate::notes::edit::Pasted>) -> Option<Option<crate::notes::edit::Edit>> {
     use crate::notes::edit::{self, Marked};
     let caret = (chosen.0 == chosen.1).then_some(chosen.0);
     if system || held.alt {
@@ -319,7 +355,7 @@ fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, sys
         (VK_I, true, false) => marked(Marked::Italic),
         (VK_E, true, false) => marked(Marked::Code),
         (VK_X, true, true) => marked(Marked::Struck),
-        (VK_K, true, false) => Some(edit::link(text, chosen, clipboard(Taken::Text).as_deref().and_then(edit::web_address))),
+        (VK_K, true, false) => Some(edit::link(text, chosen, clipboard(Taken::Text).as_ref().and_then(|taken| edit::web_address(&taken.text)))),
         (VK_0 | VK_1 | VK_2 | VK_3, true, false) => Some(Some(edit::heading(text, chosen, (key.0 - VK_0.0) as u8))),
         (VK_V, true, false) => Some(clipboard(Taken::Pasted).map(|pasted| edit::paste(text, chosen, &pasted))),
         (VK_A | VK_C | VK_X | VK_Z | VK_Y, true, false) | (VK_Z, true, true) => None,
@@ -424,18 +460,25 @@ fn clipboard_text(owner: HWND) -> Option<String> {
 }
 
 /// What is on the clipboard, to be pasted into a note: its HTML (a web page's, Word's) as Markdown (see `notes::html`),
-/// else its text.
-fn clipboard_pasted(owner: HWND) -> Option<String> {
+/// else its text. A web address alone as its text is pasted as written (over words chosen, a link of them: see
+/// `edit::paste`), not as its HTML's link to it.
+fn clipboard_pasted(owner: HWND) -> Option<crate::notes::edit::Pasted> {
+    use crate::notes::edit::{web_address, Pasted};
     use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    let text = clipboard_text(owner);
+    let plain = |text: String| Pasted { text, blocks: false };
+    if text.as_deref().is_some_and(|text| web_address(text).is_some()) {
+        return text.map(plain);
+    }
     let html = unsafe { RegisterClipboardFormatW(windows::core::w!("HTML Format")) };
-    let written = clipboard_data(owner, html, 1).and_then(|bytes| crate::notes::html::fragment(&bytes)).map(|fragment| crate::notes::html::markdown(&fragment));
-    written.filter(|written| !written.is_empty()).or_else(|| clipboard_text(owner))
+    let written = clipboard_data(owner, html, 1).and_then(|bytes| crate::notes::html::pasted(&bytes));
+    written.filter(|written| !written.text.is_empty()).or_else(|| text.map(plain))
 }
 
 /// What is taken off the clipboard as `taken` says.
-fn clipboard(owner: HWND, taken: Taken) -> Option<String> {
+fn clipboard(owner: HWND, taken: Taken) -> Option<crate::notes::edit::Pasted> {
     match taken {
-        Taken::Text => clipboard_text(owner),
+        Taken::Text => clipboard_text(owner).map(|text| crate::notes::edit::Pasted { text, blocks: false }),
         Taken::Pasted => clipboard_pasted(owner),
     }
 }
@@ -458,8 +501,9 @@ pub struct Writing {
     /// `notes::markdown::Shown`), the same for its box's messages (see `Reads`).
     shown: crate::notes::markdown::Shown,
     at: crate::notes::markdown::At,
-    /// Its tables drawn laid out, as it was last dressed.
+    /// Its tables drawn laid out, as it was last dressed, and its words then (UTF-16 units).
     laid: Laid,
+    dressed: Rc<[u16]>,
     reads: Rc<RefCell<Reads>>,
     /// What was chosen in it as it opened (the caret), and whether it has been written in or the caret moved since: till
     /// then it is written at nowhere, and it shows as the note did where it was pressed (its marks put away).
@@ -512,7 +556,8 @@ impl Writing {
             shown: Default::default(),
             at: None,
             laid: Vec::new(),
-            reads: Rc::new(RefCell::new(Reads { shown: Default::default(), at: None, folder: folder.path.clone(), laid: Vec::new() })),
+            dressed: Rc::from([]),
+            reads: Rc::new(RefCell::new(Reads { shown: Default::default(), at: None, folder: folder.path.clone(), laid: Vec::new(), dressed: Rc::from([]) })),
             opened_at,
             touched: false,
             keyed: Rc::new(Cell::new(false)),
@@ -547,13 +592,27 @@ impl Writing {
             Some(Ok(gfx)) => tables.into_iter().map(|table| (table.clone(), gfx.table_laid(table, TABLE_FAMILY, pixels, per, (bounds.right - bounds.left) as f32))).collect(),
             _ => Vec::new(),
         };
-        let drawn: Vec<_> = self.laid.iter().map(|(table, laid)| (table.span.clone(), laid.height())).collect();
+        let drawn: Vec<_> = self.laid.iter().map(|(table, laid)| (table.span.clone(), laid.laid.height())).collect();
         self.editor.dress(&crate::notes::markdown::looks(text), &hidden, &rooms, &drawn, &self.palette);
+        self.dressed = text.encode_utf16().collect();
         if let Ok(mut reads) = self.reads.try_borrow_mut() {
-            *reads = Reads { shown: shown.clone(), at, folder: self.folder.clone(), laid: self.laid.clone() };
+            *reads = Reads { shown: shown.clone(), at, folder: self.folder.clone(), laid: self.laid.clone(), dressed: self.dressed.clone() };
         }
         self.shown = shown;
         self.at = at;
+    }
+
+    /// Its words' box put at `rect` (in its window): as wide as it was, as it is, else dressed again (its tables laid out
+    /// in the room it has now).
+    pub fn place(&mut self, rect: RECT) {
+        let was = self.editor.bounds();
+        if was == rect {
+            return;
+        }
+        self.editor.place(rect);
+        if rect.right - rect.left != was.right - was.left {
+            self.dress();
+        }
     }
 
     /// Where it is written at now: what is chosen, once it has been written in or the caret moved (see `touched`).
@@ -755,7 +814,7 @@ impl Writing {
             }
             // A table drawn laid out pressed on a cell: the caret at the end of its words (the table shown as written).
             if message == WM_LBUTTONDOWN && !editor.composing() {
-                let cell = reads.try_borrow().ok().and_then(|reads| cell_at(&editor, &reads.laid, point));
+                let cell = reads.try_borrow().ok().and_then(|reads| cell_at(&editor, &reads.laid, &reads.dressed, point));
                 if let Some(words) = cell {
                     editor.select((words.end as i32, words.end as i32));
                     return Some(Some(LRESULT(0)));
@@ -834,10 +893,20 @@ impl Writing {
         let composing = self.editor.composing();
         if composed || (!composing && (changed || touched)) {
             self.dress();
-        } else if !composing && self.shown.put_away(self.at_now()) != self.shown.put_away(self.at) {
-            // (The caret moved onto what was put away, or off it: shown as written, or put away, as the words were read.)
-            let text = self.editor.text();
-            self.dress_as(self.shown.clone(), self.at_now(), &text);
+        } else if !composing {
+            let at = self.at_now();
+            if self.shown.put_away(at) != self.shown.put_away(self.at) {
+                // (The caret moved onto what was put away, or off it: shown as written, or put away, as the words were
+                // read.)
+                let text = self.editor.text();
+                self.dress_as(self.shown.clone(), at, &text);
+            } else {
+                // (Nothing put away or shown anew: where it is written at kept, for what its links do.)
+                self.at = at;
+                if let Ok(mut reads) = self.reads.try_borrow_mut() {
+                    reads.at = at;
+                }
+            }
         }
         if changed {
             self.unkept = true;
@@ -969,18 +1038,22 @@ impl Writing {
         let (left, top) = in_window(bounds.left as f32, bounds.top as f32);
         let (right, bottom) = in_window(bounds.right as f32, bounds.bottom as f32);
         frame.clip(left, top, right - left, bottom - top);
+        // (Where what was dressed is now: the input method's words may be in them, not yet dressed.)
+        let now: Vec<u16> = self.editor.text().encode_utf16().collect();
+        let moved = Moved::between(&self.dressed, &now);
         for (table, laid) in &self.laid {
-            let Some(line) = line_top(&self.editor, table.span.start) else { continue };
+            let Some(line) = moved.at(table.span.start).and_then(|start| line_top(&self.editor, &now, start)) else { continue };
             let (x, y) = in_window(bounds.left as f32, line as f32);
-            frame.table(table, laid, TABLE_FAMILY, pixels.round(), inks, x, y);
+            frame.table(laid, inks, x, y, (top, bottom));
         }
         for rule in self.shown.rules_drawn(self.at) {
-            let Some(line) = self.editor.character(rule.end) else { continue };
+            let Some(line) = moved.at(rule.end).and_then(|end| self.editor.character(end)) else { continue };
             let (x, y) = in_window(bounds.left as f32, line.top as f32);
             frame.rule(inks, x, y, (bounds.right - bounds.left) as f32 / scale, (line.bottom - line.top) as f32);
         }
         for boxed in self.shown.boxes(self.at) {
-            let (Some(room), Some(baseline)) = (self.editor.character(boxed.room), self.editor.baseline(boxed.room + 1)) else { continue };
+            let Some(room) = moved.at(boxed.room) else { continue };
+            let (Some(room), Some(baseline)) = (self.editor.character(room), self.editor.baseline(room + 1)) else { continue };
             let (bx, by, side) = box_in(room.left, baseline, pixels);
             let (bx, by) = in_window(bx, by);
             super::canvas::task_box(frame, inks, bx, by, side / scale, boxed.done);
@@ -1071,6 +1144,54 @@ mod pictures {
         let text = "上面一行\n\n| 名称 | 数量 | 说明 |\n| :-- | :-: | --: |\n| 苹果 | 3 | 红的，很甜，放在厨房的篮子里面 |\n| pear | 12 |  |\n\n---\n下面一行\n> | 引 | 用 |\n> | - | - |";
         let apart = drawn_apart(text, "table");
         assert!(apart.iter().all(|(_, differ)| *differ == 0), "pixels apart at each scale: {apart:?}");
+    }
+
+    /// A table below its box's room is found where it would be (below the box, not at its top: the text services'
+    /// `S_FALSE`, its point unset, taken for none), what is not drawn is not found drawn, and the box made narrower lays
+    /// the table out again in the room it has.
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn a_table_out_of_the_box_and_the_box_made_narrower() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let text = format!("{}| 名称 | 说明 |\n| - | - |\n| 苹果 | 红的，很甜，放在厨房的篮子里面，还有很多别的水果 |\n", "行\n".repeat(60));
+        let folder = std::env::temp_dir().join(format!("glance-note-out-of-box-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.md"), &text).unwrap();
+        let (w, h) = super::super::view::STUCK_NOTE;
+        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, w as i32, h as i32, None, None, None, None) }.unwrap();
+        let theme = Theme::new(Skin::Fluent, true);
+        let mut writing = Writing::open(hwnd, words_box(0, 0, w as i32, h as i32, 1.0), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("a.md".into()), &theme, WORDS).unwrap();
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let start = writing.laid[0].0.span.start;
+        let bounds = writing.editor.bounds();
+        assert!(line_top(&writing.editor, &units, start).unwrap() >= bounds.bottom);
+        assert!(writing.editor.character(start).is_none());
+        let wide = writing.laid[0].1.laid.width();
+        let half = (bounds.right - bounds.left) / 2;
+        writing.place(RECT { right: bounds.left + half, ..bounds });
+        let narrower = writing.laid[0].1.laid.width();
+        assert!(narrower < wide && narrower <= half as f32, "{wide} to {narrower} in {half}");
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+        super::super::gfx::let_go();
+    }
+
+    /// What was dressed found where it is now, the input method's words composed before it, in it or after it.
+    #[test]
+    fn what_was_dressed_where_it_is_now() {
+        let units = |text: &str| text.encode_utf16().collect::<Vec<u16>>();
+        let moved = super::Moved::between(&units("a\n\n| h |"), &units("你好a\n\n| h |"));
+        assert_eq!((moved.at(0), moved.at(3)), (Some(2), Some(5)));
+        let moved = super::Moved::between(&units("ab\ncd"), &units("aXYb\ncd"));
+        assert_eq!((moved.at(0), moved.at(1), moved.at(3)), (Some(0), Some(3), Some(5)));
+        let moved = super::Moved::between(&units("abcd"), &units("aXd"));
+        assert_eq!((moved.at(0), moved.at(1), moved.at(2), moved.at(3)), (Some(0), None, None, Some(2)));
     }
 
     /// A note written, and as it is drawn not written in (stuck on the desktop), in each skin: each line's words
@@ -1224,9 +1345,10 @@ mod tests {
         let shift = Held { shift: true, ..none };
         let alt = Held { alt: true, ..none };
         let asked = std::cell::Cell::new(None);
+        let plain = |text: &str| crate::notes::edit::Pasted { text: text.into(), blocks: false };
         let clipboard = |taken| {
             asked.set(Some(taken));
-            Some("https://a.b".to_string())
+            Some(plain("https://a.b"))
         };
         let made = |text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held| pressed(text, chosen, key, held, held.alt, |_| None).map(|edit| edit.map(|edit| edit.with));
         assert_eq!(made("- a", (3, 3), VK_RETURN, none), Some(Some("\n- ".into())));
@@ -1262,7 +1384,7 @@ mod tests {
         let _ = pressed("ab", (1, 1), VK_V, ctrl, false, clipboard);
         assert_eq!(asked.get(), Some(super::Taken::Pasted));
         // Pasting: the clipboard's text, its line breaks `\n`, a web address over words a link, nothing with no text.
-        let pasted = |chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, on: Option<&str>| pressed("ab", chosen, key, held, false, |_| on.map(str::to_string)).map(|edit| edit.map(|edit| edit.with));
+        let pasted = |chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, on: Option<&str>| pressed("ab", chosen, key, held, false, |_| on.map(plain)).map(|edit| edit.map(|edit| edit.with));
         assert_eq!(pasted((1, 1), VK_V, ctrl, Some("x\r\ny")), Some(Some("x\ny".into())));
         assert_eq!(pasted((1, 1), VK_INSERT, shift, Some("x")), Some(Some("x".into())));
         assert_eq!(pasted((0, 2), VK_V, ctrl, Some("https://a.b")), Some(Some("[ab](https://a.b)".into())));

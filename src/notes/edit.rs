@@ -6,7 +6,7 @@
 //! the text services count them, each line break one (`\n`).
 
 use super::markdown::READ;
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Range, RangeInclusive};
 
@@ -113,13 +113,16 @@ struct List {
 }
 
 /// A note's words as these edits read them: its lines (each without its line break), its lists' items, its lists,
-/// its blocks of code, its block quotes and its headings underlined (all of each, the line under it too).
+/// its blocks of code (and those of them fenced), its block quotes, its tables and its headings underlined (all of
+/// each, the line under it too).
 struct Tree {
     lines: Vec<Range<usize>>,
     items: Vec<Item>,
     lists: Vec<List>,
     code: Vec<Range<usize>>,
+    fenced: Vec<Range<usize>>,
     quotes: Vec<Range<usize>>,
+    tables: Vec<Range<usize>>,
     underlined: Vec<Range<usize>>,
 }
 
@@ -182,7 +185,7 @@ impl Tree {
             start = at + 1;
         }
         lines.push(start..text.len());
-        let mut tree = Tree { lines, items: Vec::new(), lists: Vec::new(), code: Vec::new(), quotes: Vec::new(), underlined: Vec::new() };
+        let mut tree = Tree { lines, items: Vec::new(), lists: Vec::new(), code: Vec::new(), fenced: Vec::new(), quotes: Vec::new(), tables: Vec::new(), underlined: Vec::new() };
         let (mut items, mut lists, mut quotes) = (Vec::new(), Vec::new(), 0);
         let (written, put) = to_be_written(text);
         // (A byte of what was read where it is in `text`: within a word put, where it was put.)
@@ -224,7 +227,13 @@ impl Tree {
                 Event::End(TagEnd::Item) => {
                     items.pop();
                 }
-                Event::Start(Tag::CodeBlock(_)) => tree.code.push(range),
+                Event::Start(Tag::CodeBlock(kind)) => {
+                    if matches!(kind, CodeBlockKind::Fenced(_)) {
+                        tree.fenced.push(range.clone());
+                    }
+                    tree.code.push(range);
+                }
+                Event::Start(Tag::Table(_)) => tree.tables.push(range),
                 Event::Start(Tag::Heading { .. }) if !text[range.clone()].starts_with('#') => tree.underlined.push(range),
                 _ => {}
             }
@@ -279,10 +288,15 @@ impl Tree {
         self.line_of(item.marker)..=self.line_of(item.end - 1)
     }
 
-    /// Whether the line `index` is in a block of code.
+    /// Whether the line `index` is in a block of code (its fences' lines too, wherever on them a fence begins).
     fn in_code(&self, index: usize) -> bool {
         let line = &self.lines[index];
-        self.code.iter().any(|code| code.start <= line.start && line.start < code.end)
+        self.code.iter().any(|code| code.start <= line.end && line.start < code.end)
+    }
+
+    /// The innermost item whose lines line `index` is among.
+    fn item_holding(&self, index: usize) -> Option<usize> {
+        (0..self.items.len()).filter(|&item| self.lines_of(item).contains(&index)).last()
     }
 
     /// Where line `index`'s words begin: past a list's item's mark and its box, or past block quotes' marks and the
@@ -382,15 +396,24 @@ impl Rewrite {
 /// `rewrite` leaves it) moved along.
 ///
 /// The items of the lists touched are read as items still while they are numbered: a numbered list begun right under
-/// a paragraph is one only if it begins at one, so each is read with its number written as one (as many digits).
+/// a paragraph is one only if it begins at one, so each is read with its number written as one (as many digits). A
+/// list begun by items moved in under another item is numbered from one.
 fn numbered(text: &str, rewrite: &Rewrite, chosen: (usize, usize)) -> Edit {
+    numbered_carrying(text, rewrite, chosen, |_| None)
+}
+
+/// As `numbered`, `carried` saying where an item whose mark `rewrite` writes over is now (the byte of the text it
+/// leaves), where it is written anew: the same item still (a line moved past the lines moved).
+fn numbered_carrying(text: &str, rewrite: &Rewrite, chosen: (usize, usize), carried: impl Fn(usize) -> Option<usize>) -> Edit {
     let once = rewrite.apply(text);
     let before = Tree::of(text);
     let touches = |a: &Range<usize>, b: &Range<usize>| a.start <= b.end && b.start <= a.end;
     let removed = |byte: usize| rewrite.edits.iter().any(|(range, _)| range.contains(&byte));
     let touched: HashSet<usize> = (0..before.lists.len()).filter(|&list| rewrite.edits.iter().any(|(range, _)| touches(range, &before.lists[list].range))).collect();
-    // Each item of before where it now is: the list it was in, and where that list began.
-    let mut was: HashMap<usize, (usize, u64)> = HashMap::new();
+    // Each item of before where it now is: the list it was in, where that list began, and where the item it was in now
+    // is.
+    let now = |marker: usize| if removed(marker) { carried(marker) } else { Some(rewrite.map(marker)) };
+    let mut was: HashMap<usize, (usize, u64, Option<usize>)> = HashMap::new();
     let mut read = once.clone();
     for (index, list) in before.lists.iter().enumerate() {
         let began = match before.items[list.items[0]].mark {
@@ -399,11 +422,8 @@ fn numbered(text: &str, rewrite: &Rewrite, chosen: (usize, usize)) -> Edit {
         };
         for &item in &list.items {
             let item = &before.items[item];
-            if removed(item.marker) {
-                continue;
-            }
-            let at = rewrite.map(item.marker);
-            was.insert(at, (index, began));
+            let Some(at) = now(item.marker) else { continue };
+            was.insert(at, (index, began, item.parent.and_then(|parent| now(before.items[parent].marker))));
             if touched.contains(&index) {
                 let digits = item.mark_end - 1 - item.marker;
                 read.replace_range(at..at + digits, &format!("{}1", "0".repeat(digits - 1)));
@@ -420,11 +440,17 @@ fn numbered(text: &str, rewrite: &Rewrite, chosen: (usize, usize)) -> Edit {
         if matches!(first.mark, Mark::Bullet(_)) {
             continue;
         }
-        let reached = made.iter().any(|range| touches(range, &list.range)) || list.items.iter().any(|item| was.get(&after.items[*item].marker).is_some_and(|(list, _)| touched.contains(list)));
+        let reached = made.iter().any(|range| touches(range, &list.range)) || list.items.iter().any(|item| was.get(&after.items[*item].marker).is_some_and(|(list, ..)| touched.contains(list)));
         if !reached {
             continue;
         }
-        let mut number = was.get(&first.marker).map_or_else(|| written(first), |(_, began)| *began);
+        let parent = first.parent.map(|parent| after.items[parent].marker);
+        let mut number = match was.get(&first.marker) {
+            // (Moved in under another item: a list begun.)
+            Some((.., under)) if parent.is_some() && parent != *under => 1,
+            Some((_, began, _)) => *began,
+            None => written(first),
+        };
         for &index in &list.items {
             let item = &after.items[index];
             if matches!(item.mark, Mark::Bullet(_)) {
@@ -651,9 +677,13 @@ pub fn move_lines(text: &str, chosen: (usize, usize), up: bool) -> Option<Edit> 
         rewrite.put(tree.lines[first].start..tree.lines[first].start, format!("{other}\n"));
         other.len() as isize + 1
     };
-    // (What is chosen moves with the lines, a choice ending at the start of the line after them to their end.)
+    // (What is chosen moves with the lines, a choice ending at the start of the line after them to their end. The
+    // line passed is written anew on their other side: its items the same items still.)
     let shift = |at: usize| (byte(text, at).min(tree.lines[last].end) as isize + by) as usize;
-    Some(numbered(text, &rewrite, (shift(chosen.0), shift(chosen.1))))
+    let passed_at = tree.lines[passed].start;
+    let written_at = if up { tree.lines[last].end - (tree.lines[first].start - passed_at) + 1 } else { tree.lines[first].start };
+    let carried = |marker: usize| tree.lines[passed].contains(&marker).then(|| written_at + marker - passed_at);
+    Some(numbered_carrying(text, &rewrite, (shift(chosen.0), shift(chosen.1)), carried))
 }
 
 /// A heading of `level` (1 to 3, 0: none, a line of words) made of the lines chosen: their `#` marks written anew (a
@@ -668,10 +698,13 @@ pub fn heading(text: &str, chosen: (usize, usize), level: u8) -> Edit {
     let mut index = first;
     while index <= last {
         if let Some(underlined) = tree.underlined.iter().find(|heading| heading.start <= tree.lines[index].end && tree.lines[index].start < heading.end) {
-            // (Its words, the line under it taken away.)
+            // (Its words on one line, the line under it taken away.)
             let (top, under) = (tree.line_of(underlined.start), tree.line_of(underlined.end - 1));
             let words = tree.words_of(text, top);
             rewrite.put(words..words, marks.as_str());
+            for line in top + 1..under {
+                rewrite.put(tree.lines[line - 1].end..tree.words_of(text, line), " ");
+            }
             rewrite.put(tree.lines[under - 1].end..tree.lines[under].end, "");
             index = under + 1;
             continue;
@@ -825,7 +858,8 @@ pub fn link(text: &str, chosen: (usize, usize), to: Option<&str>) -> Option<Edit
     Some(edit(text, &rewrite.apply(text), (caret, caret)))
 }
 
-/// `words` with the square brackets in it that pair with none escaped (`\[`), those already escaped left.
+/// `words` with the square brackets in it that pair with none escaped (`\[`), those already escaped left, a backslash
+/// at its end that escapes nothing escaped (it would escape the bracket after it).
 fn unpaired_escaped(words: &str) -> String {
     let chars: Vec<char> = words.chars().collect();
     let mut open = Vec::new();
@@ -845,13 +879,17 @@ fn unpaired_escaped(words: &str) -> String {
         at += 1;
     }
     unpaired.extend(open);
-    chars.iter().enumerate().fold(String::new(), |mut out, (at, &c)| {
+    let mut out = chars.iter().enumerate().fold(String::new(), |mut out, (at, &c)| {
         if unpaired.contains(&at) {
             out.push('\\');
         }
         out.push(c);
         out
-    })
+    });
+    if (words.len() - words.trim_end_matches('\\').len()) % 2 == 1 {
+        out.push('\\');
+    }
+    out
 }
 
 /// Where a link goes, as written in its parentheses.
@@ -889,60 +927,179 @@ pub enum Block {
     Code,
 }
 
-/// `block` inserted where the caret is (`chosen`'s end): on its line where it is blank, else on lines of its own after
-/// it, a blank line between it and the words before and after it (a to-do's after another item, under it). The caret
-/// where its words are to be written: the to-do's, the table's first head, the code's line (after the rule, the line
-/// after it).
+/// `block` inserted where the caret is (`chosen`'s end), on lines of its own (see `placed`). A to-do in a list's item
+/// is another item after it (and what is under it), as far in and marked as it is. The caret where its words are to
+/// be written: the to-do's, the table's first head, the code's line (after the rule, the line after it).
 pub fn insert(text: &str, chosen: (usize, usize), block: Block) -> Edit {
-    let tree = Tree::of(text);
-    let caret = byte(text, chosen.0.max(chosen.1));
-    // (In code, after the code: put in it, it would be code.)
-    let index = match tree.code.iter().find(|code| code.start <= caret && caret < code.end) {
-        Some(code) => tree.line_of(code.end - 1),
-        None => tree.line_of(caret),
-    };
-    let line = tree.lines[index].clone();
-    let words = |other: usize| other < tree.lines.len() && !text[tree.lines[other].clone()].trim().is_empty();
-    let item = |other: usize| other < tree.lines.len() && tree.on_line(other).next().is_some();
-    let blank = !words(index);
-    // Words right before it and right after it, each a blank line apart from it: but a to-do among a list's items,
-    // which goes on the list.
-    let before = if blank { index > 0 && words(index - 1) } else { true };
-    let after = words(index + 1);
-    let todo = block == Block::Todo;
-    let gap_before = before && !(todo && item(if blank { index.wrapping_sub(1) } else { index }));
-    let gap_after = after && !(todo && item(index + 1));
-    // (Its words, and how far into them the caret goes. A rule with nothing after it, a line made after it to go on.)
+    let at = byte(text, chosen.0.max(chosen.1));
+    if block == Block::Todo {
+        if let Some(made) = todo_after_item(text, at) {
+            return made;
+        }
+    }
     let (written, into) = match block {
         Block::Todo => ("- [ ] ", 6),
         Block::Table => ("|  |  |\n| --- | --- |\n|  |  |", 2),
-        Block::Rule if gap_after => ("---", 4),
         Block::Rule => ("---\n", 4),
         Block::Code => ("```\n\n```", 4),
     };
-    let opened = format!("{}{}", if blank { "" } else { "\n" }, if gap_before { "\n" } else { "" });
-    let with = format!("{opened}{written}{}", if gap_after { "\n" } else { "" });
+    let (after, caret) = placed(text, at, written, into, block == Block::Todo, block == Block::Table, false);
+    edit(text, &after, (caret, caret))
+}
+
+/// A to-do put after the list's item the byte `at` is in (after what is under it too), as far in as it and marked as
+/// it is (numbered one more, those after it numbered on). None where `at` is in no item.
+fn todo_after_item(text: &str, at: usize) -> Option<Edit> {
+    let tree = Tree::of(text);
+    let found = tree.item_holding(tree.line_of(at))?;
+    let item = &tree.items[found];
+    let mark = match item.mark {
+        Mark::Bullet(c) => c.to_string(),
+        Mark::Number(n, after) => format!("{}{after}", (n + 1).min(LARGEST)),
+    };
+    let end = tree.lines[*tree.lines_of(found).end()].end;
+    let begun = format!("\n{}{mark} [ ] ", opening(text, item.marker));
+    let mut rewrite = Rewrite::default();
+    rewrite.put(end..end, begun.as_str());
+    let caret = end + begun.len();
+    Some(numbered(text, &rewrite, (caret, caret)))
+}
+
+/// How a line under line `index` of `text` begins, in what holds that line: block quotes' marks as written, the spaces
+/// in from the mark of the item it is in.
+fn continued(text: &str, tree: &Tree, index: usize) -> String {
+    let line = tree.lines[index].clone();
+    match tree.item_holding(index) {
+        Some(item) => opening(text, tree.items[item].column),
+        None => {
+            let quotes = tree.quotes.iter().filter(|quote| quote.start <= line.end && line.start < quote.end).count();
+            opening(text, line.start + quoted(&text[line.clone()], quotes))
+        }
+    }
+}
+
+/// `block` (its lines, `\n` between them) put on lines of its own where the byte `at` of `text` is: on its line where
+/// nothing is written on it past its marks (in place of nothing, its first line after an item's mark), else after it
+/// (after all of what it is in where that cannot be split: a block of code, a table, a heading underlined, code whose
+/// fence is not closed closed first). Where `split`, words after `at` on its line are put on a line of their own
+/// first, the block between them and those before. Each of its lines begun as what holds that line begins its lines
+/// (block quotes' marks, the spaces in from an item's mark), a blank line between it and words before and after it
+/// (none between a `todo` and an item next to it), after a `table` two line breaks at least (what is written right
+/// under it would be its row). The text made, and the byte in it `into` (a byte of `block`) is.
+fn placed(text: &str, at: usize, block: &str, into: usize, todo: bool, table: bool, split: bool) -> (String, usize) {
+    let tree = Tree::of(text);
+    let caret_line = tree.lines[tree.line_of(at)].clone();
+    let holds = |range: &&Range<usize>| range.start <= caret_line.end && caret_line.start < range.end;
+    let code = tree.code.iter().find(holds);
+    let whole = code.or_else(|| tree.tables.iter().chain(&tree.underlined).find(holds));
+    if split && whole.is_none() && !text[at..caret_line.end].trim().is_empty() {
+        let mut rewrite = Rewrite::default();
+        rewrite.put(at..at, format!("\n{}", continued(text, &tree, tree.line_of(at))));
+        return placed(&rewrite.apply(text), at, block, into, todo, table, false);
+    }
+    let index = whole.map_or(tree.line_of(at), |range| tree.line_of(range.end - 1));
+    let line = tree.lines[index].clone();
+    let has_words = |other: usize| tree.on_line(other).next().is_some() || tree.in_code(other) || tree.words_of(text, other) < tree.lines[other].end;
+    // (An item with nothing in it: the block its first.)
+    let marks_only = whole.is_none() && tree.on_line(index).last().is_some_and(|item| tree.items[item].words == line.end);
+    let blank = marks_only || whole.is_none() && !has_words(index);
+    let first_prefix = if blank { text[line.start..tree.words_of(text, index)].to_string() } else { continued(text, &tree, index) };
+    let prefix = if marks_only || !blank { continued(text, &tree, index) } else { first_prefix.clone() };
+    let gap = prefix.trim_end().to_string();
+    let item_line = |other: usize| other < tree.lines.len() && tree.on_line(other).next().is_some();
+    let before = if marks_only { false } else if blank { index > 0 && has_words(index - 1) } else { true };
+    let after = index + 1 < tree.lines.len() && has_words(index + 1);
+    let gap_before = before && !(todo && item_line(if blank { index.wrapping_sub(1) } else { index }));
+    // (A block ending in a line of its own has its blank line.)
+    let gap_after = after && !(todo && item_line(index + 1)) && !block.ends_with('\n');
+    // (Code not closed: its fence, as it opened, before what is put after it.)
+    let closing = code.filter(|code| tree.fenced.contains(code)).and_then(|code| {
+        let fence = text[code.start..].chars().next().filter(|c| matches!(c, '`' | '~'))?;
+        let length = text[code.start..].chars().take_while(|c| *c == fence).count();
+        let (first, last) = (tree.line_of(code.start), tree.line_of(code.end - 1));
+        let closer = text[tree.words_of(text, last)..tree.lines[last].end].trim_end();
+        let closed = last > first && closer.chars().all(|c| c == fence) && closer.len() >= length;
+        (!closed).then(|| format!("\n{}{}", opening(text, code.start), fence.to_string().repeat(length)))
+    });
+    let mut lines: Vec<String> = Vec::new();
+    if gap_before {
+        lines.push(gap.clone());
+    }
+    let (into_line, into_column) = (block[..into].matches('\n').count(), into - block[..into].rfind('\n').map_or(0, |at| at + 1));
+    let caret_index = lines.len() + into_line;
+    // (Its first line where the line's marks are, written in, the others under it.)
+    let begun = |nth: usize| if nth == 0 && !gap_before { first_prefix.as_str() } else { prefix.as_str() };
+    let caret_prefix = begun(into_line).len();
+    for (nth, written) in block.split('\n').enumerate() {
+        let begun = begun(nth);
+        lines.push(if written.is_empty() && nth != into_line { gap.clone() } else { format!("{begun}{written}") });
+    }
+    if gap_after {
+        lines.push(gap.clone());
+    }
+    if table && !gap_after {
+        // (The lines after it there are, as many as are wanted: a blank one, and one to write on.)
+        let there = tree.lines.len() - 1 - index;
+        for _ in there.min(2)..2 {
+            lines.push(gap.clone());
+        }
+    }
     let range = if blank { line.clone() } else { line.end..line.end };
-    let caret = range.start + opened.len() + into;
+    let head = if blank { String::new() } else { format!("{}\n", closing.unwrap_or_default()) };
+    let caret = range.start + head.len() + lines[..caret_index].iter().map(|line| line.len() + 1).sum::<usize>() + caret_prefix + into_column;
+    let with = format!("{head}{}", lines.join("\n"));
     let mut rewrite = Rewrite::default();
     rewrite.put(range, with);
-    edit(text, &rewrite.apply(text), (caret, caret))
+    (rewrite.apply(text), caret)
+}
+
+/// What is pasted: its words (line breaks `\n`), and whether they are blocks, each to stand on lines of its own (see
+/// `placed`), not words among others put where the caret is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pasted {
+    pub text: String,
+    pub blocks: bool,
 }
 
 /// `pasted` put in place of what is chosen, its line breaks `\n`: a web address alone over words chosen on one line
-/// makes a link of them (see `link`). The caret after what is put.
-pub fn paste(text: &str, chosen: (usize, usize), pasted: &str) -> Edit {
-    let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
-    if chosen.0 != chosen.1 {
-        if let Some(made) = web_address(&pasted).and_then(|to| link(text, chosen, Some(to))) {
+/// makes a link of them (see `link`), blocks are put on lines of their own (see `placed`). The caret after what is put.
+pub fn paste(text: &str, chosen: (usize, usize), pasted: &Pasted) -> Edit {
+    let words = pasted.text.replace("\r\n", "\n").replace('\r', "\n");
+    if chosen.0 != chosen.1 && !pasted.blocks {
+        if let Some(made) = web_address(&words).and_then(|to| link(text, chosen, Some(to))) {
             return made;
         }
     }
     let (start, end) = (byte(text, chosen.0.min(chosen.1)), byte(text, chosen.0.max(chosen.1)));
     let mut rewrite = Rewrite::default();
-    rewrite.put(start..end, pasted.as_str());
-    let caret = start + pasted.len();
-    edit(text, &rewrite.apply(text), (caret, caret))
+    rewrite.put(start..end, if pasted.blocks { "" } else { words.as_str() });
+    let once = rewrite.apply(text);
+    if !pasted.blocks {
+        let caret = start + words.len();
+        return edit(text, &once, (caret, caret));
+    }
+    let (after, caret) = placed(&once, start, &words, words.len(), false, ends_in_table(&words), true);
+    edit(text, &after, (caret, caret))
+}
+
+/// Whether the last block of `markdown` is a table.
+fn ends_in_table(markdown: &str) -> bool {
+    let mut depth = 0usize;
+    let mut last = false;
+    for event in Parser::new_ext(markdown, READ) {
+        match event {
+            Event::Start(tag) => {
+                if depth == 0 {
+                    last = matches!(tag, Tag::Table(_));
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ if depth == 0 => last = false,
+            _ => {}
+        }
+    }
+    last
 }
 
 /// Whether `pasted` is a web address alone (one line, `http://` or `https://`, no spaces): pasted over what is chosen,
@@ -1196,8 +1353,9 @@ mod tests {
             let (text, chosen) = read(marked);
             applied(&text, &insert(&text, chosen, block))
         };
-        assert_eq!(inserted("‸", Block::Table), "| ‸ |  |\n| --- | --- |\n|  |  |");
-        assert_eq!(inserted("文‸字", Block::Table), "文字\n\n| ‸ |  |\n| --- | --- |\n|  |  |");
+        assert_eq!(inserted("‸", Block::Table), "| ‸ |  |\n| --- | --- |\n|  |  |\n\n");
+        assert_eq!(inserted("文‸字", Block::Table), "文字\n\n| ‸ |  |\n| --- | --- |\n|  |  |\n\n");
+        assert_eq!(inserted("a‸\n", Block::Table), "a\n\n| ‸ |  |\n| --- | --- |\n|  |  |\n\n");
         assert_eq!(inserted("a‸\nb", Block::Table), "a\n\n| ‸ |  |\n| --- | --- |\n|  |  |\n\nb");
         assert_eq!(inserted("a\n‸\nb", Block::Code), "a\n\n```\n‸\n```\n\nb");
         assert_eq!(inserted("a\n\n‸\n\nb", Block::Code), "a\n\n```\n‸\n```\n\nb");
@@ -1208,21 +1366,76 @@ mod tests {
         assert_eq!(inserted("- a\n‸", Block::Todo), "- a\n- [ ] ‸");
         assert_eq!(inserted("‸\na", Block::Todo), "- [ ] ‸\n\na");
         assert_eq!(inserted("```\nx‸\n```\nb", Block::Rule), "```\nx\n```\n\n---\n‸\nb");
-        assert_eq!(inserted("```\n‸\n```", Block::Table), "```\n\n```\n\n| ‸ |  |\n| --- | --- |\n|  |  |");
+        assert_eq!(inserted("```\n‸\n```", Block::Table), "```\n\n```\n\n| ‸ |  |\n| --- | --- |\n|  |  |\n\n");
+        // In a list's item: a to-do another item after it (after what is under it), as far in and marked as it is,
+        // numbered on.
+        assert_eq!(inserted("- a\n  - b‸\n    - x\n  - c", Block::Todo), "- a\n  - b\n    - x\n  - [ ] ‸\n  - c");
+        assert_eq!(inserted("* a‸", Block::Todo), "* a\n* [ ] ‸");
+        assert_eq!(inserted("1. a‸\n2. b", Block::Todo), "1. a\n2. [ ] ‸\n3. b");
+        // In a quote, in an item: its lines begun as theirs are.
+        assert_eq!(inserted("> a‸", Block::Todo), "> a\n>\n> - [ ] ‸");
+        assert_eq!(inserted("> a‸", Block::Table), "> a\n>\n> | ‸ |  |\n> | --- | --- |\n> |  |  |\n>\n>");
+        assert_eq!(inserted("- a‸\n- b", Block::Code), "- a\n\n  ```\n  ‸\n  ```\n\n- b");
+        assert_eq!(inserted("- ‸", Block::Rule), "- ---\n  ‸");
+        // Code whose fence is not closed, closed first.
+        assert_eq!(inserted("```\nx‸", Block::Table), "```\nx\n```\n\n| ‸ |  |\n| --- | --- |\n|  |  |\n\n");
+        assert_eq!(inserted("> ~~~~\n> x‸", Block::Code), "> ~~~~\n> x\n> ~~~~\n>\n> ```\n> ‸\n> ```");
     }
 
     /// What is pasted goes in place of what is chosen with its line breaks made `\n`, the caret after it: a web
     /// address over words chosen makes a link of them.
     #[test]
     fn pasting() {
-        let pasted = |marked: &str, what: &str| {
+        let pasted_as = |marked: &str, what: &str, blocks: bool| {
             let (text, chosen) = read(marked);
-            applied(&text, &paste(&text, chosen, what))
+            applied(&text, &paste(&text, chosen, &Pasted { text: what.into(), blocks }))
         };
+        let pasted = |marked: &str, what: &str| pasted_as(marked, what, false);
         assert_eq!(pasted("a‸b", "x\r\ny\rz"), "ax\ny\nz‸b");
         assert_eq!(pasted("a«bc»d", "中"), "a中‸d");
         assert_eq!(pasted("看«文档»", "https://a.b/c"), "看[文档](https://a.b/c)‸");
         assert_eq!(pasted("看‸", "https://a.b/c"), "看https://a.b/c‸");
         assert_eq!(pasted("«a\nb»", "https://a.b"), "https://a.b‸");
+        // Blocks on lines of their own, where the caret is: the words after it after them.
+        let blocks = |marked: &str, what: &str| pasted_as(marked, what, true);
+        assert_eq!(blocks("before‸after", "# 标题"), "before\n\n# 标题‸\n\nafter");
+        assert_eq!(blocks("‸after", "# 标题"), "# 标题‸\n\nafter");
+        assert_eq!(blocks("a«bc»", "# 标题\n\n段"), "a\n\n# 标题\n\n段‸");
+        assert_eq!(blocks("> 引‸文", "| A |\n| --- |"), "> 引\n>\n> | A |\n> | --- |‸\n>\n> 文");
+        assert_eq!(blocks("- ‸", "# 标题\n\n段"), "- # 标题\n\n  段‸");
+        assert_eq!(blocks("x‸", "| A |\n| --- |"), "x\n\n| A |\n| --- |‸\n\n");
+    }
+
+    /// Lists numbered as they are moved: a list begun by an item moved in under another from one, a line moved past
+    /// another its list's numbers as they were.
+    #[test]
+    fn lists_are_numbered_as_they_move() {
+        assert_eq!(tab("3. a\n4. ‸b", false), Some(Some("3. a\n   1. ‸b".into())));
+        let moved = |marked: &str, up: bool| {
+            let (text, chosen) = read(marked);
+            move_lines(&text, chosen, up).map(|edit| applied(&text, &edit))
+        };
+        assert_eq!(moved("1. ‸a\n2. b", false), Some("1. b\n2. ‸a".into()));
+        assert_eq!(moved("1. a\n2. ‸b", true), Some("1. ‸b\n2. a".into()));
+        assert_eq!(moved("x\n\n3. ‸a\n4. b", false), Some("x\n\n3. b\n4. ‸a".into()));
+    }
+
+    /// A heading underlined over several lines made one of `#` marks: all its words, on one line. Code's fence (in
+    /// from the line's start) is no heading's.
+    #[test]
+    fn headings_underlined_over_lines() {
+        let made = |marked: &str, level: u8| {
+            let (text, chosen) = read(marked);
+            applied(&text, &heading(&text, chosen, level))
+        };
+        assert_eq!(made("al‸pha\nbeta\n===", 1), "# al‸pha beta");
+        assert_eq!(made("  ``‸`\nx\n  ```", 1), "  ``‸`\nx\n  ```");
+    }
+
+    /// A link made of words ending in a backslash: the backslash escaped, so the link is one.
+    #[test]
+    fn a_link_of_words_ending_in_a_backslash() {
+        let (text, chosen) = read("«C:\\»");
+        assert_eq!(applied(&text, &link(&text, chosen, Some("https://a.b")).unwrap()), "[C:\\\\](https://a.b)‸");
     }
 }

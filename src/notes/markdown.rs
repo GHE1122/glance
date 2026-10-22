@@ -274,17 +274,22 @@ impl Shown {
                 shown.marks.push((units.range(&(from..bytes.end)), span(of)));
             }
         };
-        // Each open container whose marks are put away, as far as what it holds reaches (its first and last held); a
-        // list's item where it begins.
+        // Each open container whose marks are put away, as far as what it holds reaches (its first and last held), and
+        // whether it is a quote or a list's item (what is in it does not stand on its own). A list's item where it
+        // begins.
         struct Open {
             hides: bool,
             range: Range<usize>,
             held: Option<Range<usize>>,
+            contains: bool,
         }
         let mut open: Vec<Open> = Vec::new();
         let mut item: Option<usize> = None;
-        // (Where each table drawn laid out begins.)
+        // (Where each table drawn laid out begins. The table being read, all of it: what is marked in it shows as
+        // written where it does, its links not gone to, and all the tables' spans.)
         let mut drawn = Vec::new();
+        let mut table: Option<Range<usize>> = None;
+        let mut table_spans = Vec::new();
         let hold = |open: &mut Vec<Open>, range: &Range<usize>| {
             if let Some(parent) = open.last_mut() {
                 let held = parent.held.get_or_insert(range.clone());
@@ -299,12 +304,18 @@ impl Shown {
                     if matches!(tag, Tag::Item) {
                         item = Some(range.start);
                     }
+                    let contained = open.iter().any(|open| open.contains);
                     // A table on lines of its own put away, to be drawn laid out (one in a quote or a list's item is
                     // left as written).
-                    if let (Tag::Table(_), Some(start)) = (&tag, super::table::on_its_own(text, range.start)) {
-                        let all = start..range.end;
-                        hide(&mut shown, all.clone(), &all);
-                        drawn.push(span(&all).start);
+                    if let Tag::Table(_) = &tag {
+                        let own = super::table::on_its_own(text, range.start, contained);
+                        let all = own.unwrap_or(range.start)..range.end;
+                        if own.is_some() {
+                            hide(&mut shown, all.clone(), &all);
+                            drawn.push(span(&all).start);
+                        }
+                        table_spans.push(span(&all));
+                        table = Some(all);
                     }
                     let hides = match &tag {
                         // (A heading as `#` makes it: one underlined is left as written.)
@@ -314,16 +325,20 @@ impl Shown {
                     };
                     if let Tag::Link { dest_url, .. } = &tag {
                         // (Its words found as it ends.)
-                        shown.links.push(Linked { words: 0..0, to: dest_url.to_string(), span: span(&range) });
+                        shown.links.push(Linked { words: 0..0, to: dest_url.to_string(), span: span(table.as_ref().unwrap_or(&range)) });
                     }
-                    open.push(Open { hides, range, held: None });
+                    open.push(Open { hides, range, held: None, contains: matches!(tag, Tag::Item | Tag::BlockQuote(_)) });
                 }
                 Event::End(end) => {
                     let Some(closed) = open.pop() else { continue };
+                    if matches!(end, TagEnd::Table) {
+                        table = None;
+                    }
                     // (One holding nothing is left as written: put away, nothing of it would show.)
+                    let of = table.clone().unwrap_or_else(|| closed.range.clone());
                     if let (true, Some(held)) = (closed.hides, &closed.held) {
-                        hide(&mut shown, closed.range.start..held.start, &closed.range);
-                        hide(&mut shown, held.end..closed.range.end, &closed.range);
+                        hide(&mut shown, closed.range.start..held.start, &of);
+                        hide(&mut shown, held.end..closed.range.end, &of);
                     }
                     if matches!(end, TagEnd::Link) {
                         if let Some(link) = shown.links.last_mut() {
@@ -337,13 +352,14 @@ impl Shown {
                     let written = &text[range.clone()];
                     let ticks = written.len() - written.trim_start_matches('`').len();
                     if !code.is_empty() && written.len() > 2 * ticks {
-                        hide(&mut shown, range.start..range.start + ticks, &range);
-                        hide(&mut shown, range.end - ticks..range.end, &range);
+                        let of = table.clone().unwrap_or_else(|| range.clone());
+                        hide(&mut shown, range.start..range.start + ticks, &of);
+                        hide(&mut shown, range.end - ticks..range.end, &of);
                     }
                 }
                 Event::Rule => {
                     hold(&mut open, &range);
-                    if let Some(start) = super::table::on_its_own(text, range.start) {
+                    if let Some(start) = super::table::on_its_own(text, range.start, open.iter().any(|open| open.contains)) {
                         let all = start..range.end;
                         hide(&mut shown, all.clone(), &all);
                         shown.rules.push(span(&all));
@@ -362,7 +378,9 @@ impl Shown {
         }
         shown.links.retain(|link| !link.words.is_empty());
         for (words, to) in addresses(text) {
-            shown.links.push(Linked { words: units.range(&words), to, span: units.range(&words) });
+            let words = units.range(&words);
+            let span = table_spans.iter().find(|table| table.start <= words.start && words.start < table.end).cloned().unwrap_or_else(|| words.clone());
+            shown.links.push(Linked { words, to, span });
         }
         shown.tables = super::table::tables(text).into_iter().filter(|table| drawn.contains(&table.span.start)).collect();
         shown
@@ -587,6 +605,22 @@ mod tests {
         let rule = shown.rules[0].clone();
         assert_eq!(shown.rules_drawn(Some((rule.end, rule.end))).count(), 0);
         assert!(!shown.hidden(Some((rule.end, rule.end))).iter().any(|hidden| of(hidden) == "---"));
+    }
+
+    /// Written at anywhere in a table, all of it shows as written, its words' marks too, and its links are not gone
+    /// to. One in a list's item (only spaces before it on its line) is the item's: left as written.
+    #[test]
+    fn a_table_written_in_shows_all_its_marks() {
+        let text = "| **粗** | [链](https://a.b) |\n| --- | --- |\n| x | https://c.d |";
+        let shown = Shown::of(text);
+        let x = text.encode_utf16().collect::<Vec<_>>().len() - " | https://c.d |".encode_utf16().count() - 1;
+        assert!(shown.hidden(Some((x, x))).is_empty());
+        assert!(!shown.hidden(None).is_empty());
+        assert!(shown.links.iter().all(|link| link.span == shown.tables[0].span));
+        assert_eq!(shown.links.len(), 2);
+        assert!(shown.link_at(shown.links[0].words.start, Some((x, x))).is_none());
+        let listed = Shown::of("- 项\n\n  | a |\n  | - |\n  | b |\n\n  ---");
+        assert!(listed.tables.is_empty() && listed.rules.is_empty());
     }
 
     /// In a note not written in, a heading's `#`, emphasis's, code's and a link's marks are put away, a list's and a
