@@ -20,6 +20,8 @@ use super::icons::Icon;
 use super::text::Lang;
 use super::theme::{Skin, Theme};
 
+mod link;
+
 /// How high a note's words are written (DIPs).
 pub const WORDS: f32 = 15.0;
 /// The room a note's page leaves at its sides, round its words, its head's and its foot's, and how tall its head and its foot
@@ -184,8 +186,9 @@ pub fn turn_source() {
 }
 
 /// What a note's writing menu does to its words (see `Writing::write`): what is chosen cut or copied, the clipboard's
-/// text pasted, a block inserted (see `notes::edit::insert`), a link made, the lines chosen made headings of a level
-/// (0: words again), the table whose cell is written in changed there (see `notes::table::changed`).
+/// text pasted, a block inserted (see `notes::edit::insert`), a link written (see `link`: the one there edited), where
+/// the link there goes copied, or it taken off its words, the lines chosen made headings of a level (0: words again),
+/// the table whose cell is written in changed there (see `notes::table::changed`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Write {
     Cut,
@@ -193,23 +196,56 @@ pub enum Write {
     Paste,
     Insert(crate::notes::edit::Block),
     Link,
+    CopyLink,
+    Unlink,
     Heading(u8),
     Table(crate::notes::table::Change),
 }
 
+/// Where a note's writing menu is asked for: in a table's cell (or its words), on a link (see `notes::edit::link_at`:
+/// whether it can be taken off its words, see `notes::edit::unlink`), or on none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Spot {
+    pub in_cell: bool,
+    pub link: Option<bool>,
+}
+
 /// A note's writing menu, shown on its words pressed with the right button (or the menu key, Shift+F10) while it is
-/// written in: cut, copy and paste, the blocks inserted and a link, the headings and words again. In a table's cell
-/// (`in_cell`), cut, copy and paste, and its table's rows and columns added and taken away, or it. Its rows, and what
-/// each does.
-pub fn writing_menu(lang: Lang, in_cell: bool) -> (Vec<super::menu::Item<'static>>, Vec<Choice>) {
+/// written in, where `spot` says: cut, copy and paste, the blocks inserted and a link, the headings and words again. In
+/// a table's cell, cut, copy and paste, a link, and its table's rows and columns added and taken away, or it. On a link,
+/// in place of a link inserted, it edited, where it goes copied, and (but a web address written out) it taken off its
+/// words. Its rows, and what each does.
+pub fn writing_menu(lang: Lang, spot: Spot) -> (Vec<super::menu::Item<'static>>, Vec<Choice>) {
     use super::menu::{Item, Mark};
     use crate::notes::edit::Block;
     use crate::notes::table::Change;
-    if in_cell {
-        let rows = [
-            (Write::Cut, lang.pick("剪切", "Cut"), Icon::Scissors, false),
-            (Write::Copy, lang.pick("复制", "Copy"), Icon::Copy, false),
-            (Write::Paste, lang.pick("粘贴", "Paste"), Icon::ClipboardPaste, false),
+    let mut rows = vec![
+        (Write::Cut, lang.pick("剪切", "Cut"), Icon::Scissors, false),
+        (Write::Copy, lang.pick("复制", "Copy"), Icon::Copy, false),
+        (Write::Paste, lang.pick("粘贴", "Paste"), Icon::ClipboardPaste, false),
+    ];
+    if !spot.in_cell {
+        rows.extend([
+            (Write::Insert(Block::Todo), lang.pick("插入待办事项", "Insert a to-do"), Icon::SquareCheck, true),
+            (Write::Insert(Block::Table), lang.pick("插入表格", "Insert a table"), Icon::Table, false),
+            (Write::Insert(Block::Code), lang.pick("插入代码块", "Insert a code block"), Icon::SquareCode, false),
+            (Write::Insert(Block::Rule), lang.pick("插入分隔线", "Insert a divider"), Icon::Minus, false),
+        ]);
+    }
+    // (Its link's rows: in a cell, a group of their own.)
+    let first = spot.in_cell;
+    match spot.link {
+        None => rows.push((Write::Link, lang.pick("插入链接", "Insert a link"), Icon::Link, first)),
+        Some(removable) => {
+            rows.push((Write::Link, lang.pick("编辑链接", "Edit the link"), Icon::SquarePen, first));
+            rows.push((Write::CopyLink, lang.pick("复制链接地址", "Copy the link address"), Icon::Link, false));
+            if removable {
+                rows.push((Write::Unlink, lang.pick("移除链接", "Remove the link"), Icon::Unlink, false));
+            }
+        }
+    }
+    if spot.in_cell {
+        rows.extend([
             (Write::Table(Change::RowAbove), lang.pick("在上方插入行", "Insert a row above"), Icon::ArrowUpToLine, true),
             (Write::Table(Change::RowBelow), lang.pick("在下方插入行", "Insert a row below"), Icon::ArrowDownToLine, false),
             (Write::Table(Change::ColumnLeft), lang.pick("在左侧插入列", "Insert a column to the left"), Icon::ArrowLeftToLine, false),
@@ -217,24 +253,15 @@ pub fn writing_menu(lang: Lang, in_cell: bool) -> (Vec<super::menu::Item<'static
             (Write::Table(Change::TakeRow), lang.pick("删除行", "Delete the row"), Icon::Trash, true),
             (Write::Table(Change::TakeColumn), lang.pick("删除列", "Delete the column"), Icon::Trash, false),
             (Write::Table(Change::TakeTable), lang.pick("删除表格", "Delete the table"), Icon::Trash, false),
-        ];
-        let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, mark: Some(Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
-        return (items, rows.into_iter().map(|(write, ..)| Choice::Write(write)).collect());
+        ]);
+    } else {
+        rows.extend([
+            (Write::Heading(1), lang.pick("一级标题", "Heading 1"), Icon::Heading1, true),
+            (Write::Heading(2), lang.pick("二级标题", "Heading 2"), Icon::Heading2, false),
+            (Write::Heading(3), lang.pick("三级标题", "Heading 3"), Icon::Heading3, false),
+            (Write::Heading(0), lang.pick("正文", "Body text"), Icon::Pilcrow, false),
+        ]);
     }
-    let rows = [
-        (Write::Cut, lang.pick("剪切", "Cut"), Icon::Scissors, false),
-        (Write::Copy, lang.pick("复制", "Copy"), Icon::Copy, false),
-        (Write::Paste, lang.pick("粘贴", "Paste"), Icon::ClipboardPaste, false),
-        (Write::Insert(Block::Todo), lang.pick("插入待办事项", "Insert a to-do"), Icon::SquareCheck, true),
-        (Write::Insert(Block::Table), lang.pick("插入表格", "Insert a table"), Icon::Table, false),
-        (Write::Insert(Block::Code), lang.pick("插入代码块", "Insert a code block"), Icon::SquareCode, false),
-        (Write::Insert(Block::Rule), lang.pick("插入分隔线", "Insert a divider"), Icon::Minus, false),
-        (Write::Link, lang.pick("插入链接", "Insert a link"), Icon::Link, false),
-        (Write::Heading(1), lang.pick("一级标题", "Heading 1"), Icon::Heading1, true),
-        (Write::Heading(2), lang.pick("二级标题", "Heading 2"), Icon::Heading2, false),
-        (Write::Heading(3), lang.pick("三级标题", "Heading 3"), Icon::Heading3, false),
-        (Write::Heading(0), lang.pick("正文", "Body text"), Icon::Pilcrow, false),
-    ];
     let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, mark: Some(Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
     (items, rows.into_iter().map(|(write, ..)| Choice::Write(write)).collect())
 }
@@ -296,13 +323,15 @@ enum Placed {
 /// table's cell written in (`table`, row, column), the caret placed in it so. Or the cell written in left: the caret
 /// after the end of the line before its table (`before`), or at the start of the one after it (none there: one
 /// begun), or (neither: pressed off it) where it is. Or a row more under the table whose cell is written in, written
-/// in at its `column`. Or that table changed at the cell (chosen in the writing menu: see `table::changed`).
+/// in at its `column`. Or that table changed at the cell (chosen in the writing menu: see `table::changed`). Or a link
+/// written where the caret is (see `link`: Ctrl+K, the format bar's button).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Asked {
     Cell(usize, usize, usize, Placed),
     Leave(Option<bool>),
     RowAfter(usize),
     Table(crate::notes::table::Change),
+    Link,
 }
 
 /// The table cell `point` (in the window) is over, of those drawn laid out in `editor` (`laid`, as its words were
@@ -466,9 +495,11 @@ fn answer_cell(hwnd: HWND, (message, wparam, lparam): (u32, WPARAM, LPARAM), ins
                 // Pasted: on one line, its pipes escaped (see `into_cell`).
                 VK_V if ctrl && !alt => eaten(paste_in_cell(hwnd, inside)),
                 VK_INSERT if shift && !ctrl && !alt => eaten(paste_in_cell(hwnd, inside)),
-                // (Of the keys held with Ctrl, choosing all, copying, cutting, undoing and doing again are a cell's: the
-                // rest write Markdown, a cell's words written as they are.)
+                // (Of the keys held with Ctrl, choosing all, copying, cutting, undoing and doing again are a cell's, and a
+                // link written: the rest write Markdown, a cell's words written as they are.)
                 VK_A | VK_C | VK_X | VK_Z | VK_Y if ctrl => sent(),
+                // (Ctrl+K: a link written there, as in the note's words.)
+                VK_K if ctrl && !shift => eaten(ask(Asked::Link)),
                 _ if ctrl && (0x30..=0x5A).contains(&key.0) => eaten(done),
                 _ => sent(),
             }
@@ -620,13 +651,13 @@ fn writes(key: VIRTUAL_KEY) -> bool {
 /// Enter carries a list on (Shift+Enter a line break), Ctrl+Enter ticks a to-do, Tab and Shift+Tab move a list's items in
 /// and out, Backspace takes an item's mark off (and, the note shown as it reads, marks put away one by one, a rule
 /// before it: see `edit::backspace`), Delete a rule after it (see `edit::delete`), Alt+Up and Alt+Down move lines. Ctrl+B, Ctrl+I, Ctrl+Shift+X and Ctrl+E
-/// put on and take off bold, slanted, struck through and code, Ctrl+K makes a link (to the web address on the clipboard,
-/// `clipboard` asked only then, for its text), Ctrl+1 to 3 headings and Ctrl+0 none. Ctrl+V and Shift+Insert paste what is
-/// on the clipboard as Markdown, words among others or blocks (`clipboard` asked for it so: see `clipboard_pasted`,
-/// `edit::paste`: the text services' own paste would bring what a note's file does not keep). Ctrl with any
-/// other key that writes is eaten but for choosing all, copying, cutting, undoing and redoing: the text services' own
-/// would dress the words in ways a note's file does not keep.
-fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, system: bool, clipboard: impl FnOnce(Taken) -> Option<crate::notes::edit::Pasted>) -> Option<Option<crate::notes::edit::Edit>> {
+/// put on and take off bold, slanted, struck through and code, Ctrl+1 to 3 headings and Ctrl+0 none. Ctrl+V and
+/// Shift+Insert paste what is on the clipboard as Markdown, words among others or blocks (`clipboard` asked for it then
+/// only: see `clipboard_pasted`, `edit::paste`: the text services' own paste would bring what a note's file does not
+/// keep). Ctrl with any other key that writes is eaten but for choosing all, copying, cutting, undoing and redoing: the
+/// text services' own would dress the words in ways a note's file does not keep. (Ctrl+K, a link written, is its words'
+/// box's: see `Writing::answer`.)
+fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, system: bool, clipboard: impl FnOnce() -> Option<crate::notes::edit::Pasted>) -> Option<Option<crate::notes::edit::Edit>> {
     use crate::notes::edit::{self, Marked};
     let caret = (chosen.0 == chosen.1).then_some(chosen.0);
     if system || held.alt {
@@ -642,15 +673,14 @@ fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, sys
         (VK_TAB, false, back) => crate::notes::table::tab(text, chosen, back).or_else(|| edit::indent(text, chosen, back)),
         (VK_BACK, false, false) => caret.and_then(|caret| edit::backspace(text, caret, !crate::notes::source())).map(Some),
         (VK_DELETE, false, false) => caret.and_then(|caret| edit::delete(text, caret, !crate::notes::source())).map(Some),
-        (VK_INSERT, false, true) => Some(clipboard(Taken::Pasted).map(|pasted| edit::paste(text, chosen, &pasted))),
+        (VK_INSERT, false, true) => Some(clipboard().map(|pasted| edit::paste(text, chosen, &pasted))),
         (_, false, _) => None,
         (VK_B, true, false) => marked(Marked::Bold),
         (VK_I, true, false) => marked(Marked::Italic),
         (VK_E, true, false) => marked(Marked::Code),
         (VK_X, true, true) => marked(Marked::Struck),
-        (VK_K, true, false) => Some(edit::link(text, chosen, clipboard(Taken::Text).as_ref().and_then(|taken| edit::web_address(&taken.text)))),
         (VK_0 | VK_1 | VK_2 | VK_3, true, false) => Some(Some(edit::heading(text, chosen, (key.0 - VK_0.0) as u8))),
-        (VK_V, true, false) => Some(clipboard(Taken::Pasted).map(|pasted| edit::paste(text, chosen, &pasted))),
+        (VK_V, true, false) => Some(clipboard().map(|pasted| edit::paste(text, chosen, &pasted))),
         (VK_A | VK_C | VK_X | VK_Z | VK_Y, true, false) | (VK_Z, true, true) => None,
         (key, true, _) if writes(key) => Some(None),
         _ => None,
@@ -706,14 +736,6 @@ fn bar_button(bar: &RECT, point: POINT, pixels: f32) -> Option<usize> {
     (x >= 0.0 && y >= 0.0 && y < BAR_BUTTON * per && nth < BAR.len() as f32).then_some(nth as usize)
 }
 
-/// What is taken off the clipboard: its text as it is (a link made of a web address), or what is on it as Markdown,
-/// to be pasted (see `clipboard_pasted`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Taken {
-    Text,
-    Pasted,
-}
-
 /// The clipboard's `format`, if it holds it: its data as far as the zero that ends it (a unit `unit` bytes long, 1 for
 /// bytes, 2 for UTF-16).
 fn clipboard_data(owner: HWND, format: u32, unit: usize) -> Option<Vec<u8>> {
@@ -767,14 +789,6 @@ fn clipboard_pasted(owner: HWND) -> Option<crate::notes::edit::Pasted> {
     written.filter(|written| !written.text.is_empty()).or_else(|| text.map(plain))
 }
 
-/// What is taken off the clipboard as `taken` says.
-fn clipboard(owner: HWND, taken: Taken) -> Option<crate::notes::edit::Pasted> {
-    match taken {
-        Taken::Text => clipboard_text(owner).map(|text| crate::notes::edit::Pasted { text, blocks: false }),
-        Taken::Pasted => clipboard_pasted(owner),
-    }
-}
-
 /// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
 /// colour, its words' box, whether what is written is not yet kept, and what was last said of keeping it.
 pub struct Writing {
@@ -817,6 +831,8 @@ pub struct Writing {
     over: Rc<Cell<Option<usize>>>,
     /// Where its writing menu was asked for (on the screen), not yet shown: see `take_menu_asked`.
     menu_asked: Rc<Cell<Option<POINT>>>,
+    /// The link being written in it, if one is (see `link`).
+    link: link::Held,
 }
 
 impl Writing {
@@ -861,6 +877,7 @@ impl Writing {
             pressing: Rc::new(Cell::new(false)),
             over: Rc::new(Cell::new(None)),
             menu_asked: Rc::new(Cell::new(None)),
+            link: Rc::new(RefCell::new(None)),
         };
         writing.dress();
         // (The caret where words are, not among what is put away.)
@@ -917,10 +934,75 @@ impl Writing {
     }
 
     /// Its words told they have the keys (`on`), or no longer (what the input method composes written): a table's cell
-    /// written in, where one is.
+    /// written in, where one is, the field of a link being written that has them. A link being written is left as they
+    /// go (nothing written).
     pub fn focus(&self, on: bool) {
-        let focused = self.cell_now().map_or_else(|| self.editor.clone(), |(inside, ..)| inside);
+        if !on {
+            link::end(&self.link, link::Ending::Left);
+        }
+        let linking = self.link.borrow().clone();
+        let focused = match linking {
+            Some(linking) => linking.field(linking.focused()).clone(),
+            None => self.target(),
+        };
         let _ = focused.send(if on { WM_SETFOCUS } else { WM_KILLFOCUS }, WPARAM(0), LPARAM(0));
+    }
+
+    /// The box its words are written in now: a table's cell written in, where one is, else its own.
+    fn target(&self) -> Rc<Editor> {
+        self.cell_now().map_or_else(|| self.editor.clone(), |(inside, ..)| inside)
+    }
+
+    /// The link what is chosen where it is written in is on (see `notes::edit::link_at`), in the box it is written in,
+    /// with that box's words.
+    fn link_here(&self) -> Option<(Rc<Editor>, String, crate::notes::edit::Found)> {
+        let target = self.target();
+        let (from, to) = target.selection();
+        let text = target.words();
+        let found = crate::notes::edit::link_at(&text, (from.max(0) as usize, to.max(0) as usize))?;
+        Some((target, text, found))
+    }
+
+    /// Where its writing menu is asked for now (see `Spot`).
+    pub fn spot(&self) -> Spot {
+        Spot { in_cell: self.in_cell(), link: self.link_here().map(|(_, text, found)| crate::notes::edit::unlink(&text, &found).is_some()) }
+    }
+
+    /// A link written where it is written in (see `link`): the one what is chosen is on edited, else one put in place
+    /// of what is chosen (on one line: its words those, else none, put after it), going to the web address on the
+    /// clipboard where there is one. Not while one is.
+    fn open_link(&self) {
+        if self.link.borrow().is_some() {
+            return;
+        }
+        let target = self.target();
+        let opened = match self.link_here() {
+            Some((_, _, found)) => link::Linking::open(target, (found.span.start, found.span.end), self.editor.clone(), (&found.shown, &found.to), &self.palette.face, self.pixels(), self.palette.text),
+            None => {
+                let (from, to) = target.selection();
+                let (from, to) = (from.min(to).max(0) as usize, from.max(to).max(0) as usize);
+                let units: Vec<u16> = target.words().encode_utf16().collect();
+                let chosen = String::from_utf16_lossy(&units[from.min(units.len())..to.min(units.len())]);
+                let (range, words) = match chosen.contains('\n') {
+                    false => ((from, to), crate::notes::edit::brackets_unescaped(&chosen)),
+                    true => ((to, to), String::new()),
+                };
+                let on_clipboard = clipboard_text(self.editor.window());
+                let to = on_clipboard.as_deref().and_then(crate::notes::edit::web_address).unwrap_or_default();
+                link::Linking::open(target, range, self.editor.clone(), (&words, to), &self.palette.face, self.pixels(), self.palette.text)
+            }
+        };
+        *self.link.borrow_mut() = opened.map(Rc::new);
+    }
+
+    /// Whether `point` (in its window) is its: on its words, or on the link being written.
+    pub fn holds(&self, point: POINT) -> bool {
+        self.editor.holds(point) || self.link.borrow().as_ref().is_some_and(|linking| linking.holds(point))
+    }
+
+    /// Pressed elsewhere in its window (off what is its: see `holds`): the link being written left.
+    pub fn pressed_off(&self) {
+        link::end(&self.link, link::Ending::Left);
     }
 
     /// What is chosen where it is written in (see `Editor::selection`): in a table's cell written in, where one is.
@@ -1087,6 +1169,7 @@ impl Writing {
                     self.open_cell(nth, row, column, Placed::Start);
                 }
             }
+            Asked::Link => self.open_link(),
             Asked::Table(change) => {
                 self.sync_cell();
                 let Some((_, nth, row, column)) = self.cell_now() else { return };
@@ -1155,6 +1238,27 @@ impl Writing {
     /// `how` done to its words, chosen in its writing menu (see `Write`): each change one undo.
     pub fn write(&self, how: Write) {
         use crate::notes::edit;
+        // (A link, where it is written in: its words' or a table's cell's.)
+        match how {
+            Write::Link => self.open_link(),
+            Write::CopyLink => {
+                if let Some((_, _, found)) = self.link_here() {
+                    crate::diagnostics::copy(self.editor.window(), &found.to);
+                }
+            }
+            Write::Unlink => {
+                if let Some((target, text, found)) = self.link_here() {
+                    if let Some(edit) = edit::unlink(&text, &found) {
+                        target.apply(&edit);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if matches!(how, Write::Link | Write::CopyLink | Write::Unlink) {
+            self.keyed.set(true);
+            return;
+        }
         // (A table's cell written in: cut, copied and pasted there, its table changed as it is next seen to.)
         if let Some((inside, ..)) = self.cell_now() {
             match how {
@@ -1177,10 +1281,9 @@ impl Writing {
             }
             Write::Paste => clipboard_pasted(owner).map(|pasted| edit::paste(&text, chosen, &pasted)),
             Write::Insert(block) => Some(edit::insert(&text, chosen, block)),
-            Write::Link => edit::link(&text, chosen, clipboard_text(owner).as_deref().and_then(edit::web_address)),
             Write::Heading(level) => Some(edit::heading(&text, chosen, level)),
-            // (Only in a table's cell's menu.)
-            Write::Table(_) => None,
+            // (Only in a table's cell's menu. A link's done above.)
+            Write::Table(_) | Write::Link | Write::CopyLink | Write::Unlink => None,
         };
         if let Some(edit) = made {
             self.editor.apply(&edit);
@@ -1192,7 +1295,8 @@ impl Writing {
     /// method answers inside the message that asked it (the box placing its windows as it is drawn, say), and a
     /// composition the box ends (a press on its words) comes back inside that press. (Given only while the window was
     /// free, those went past the box: a composition it ended never ended in it, its words left in it as they were shown,
-    /// the syllables' marks with them.) See `Answer`: Esc is the window's.
+    /// the syllables' marks with them.) See `Answer`: Esc is the window's, but while a link is being written (see
+    /// `link`), whose plate answers first.
     ///
     /// A to-do's box pressed is ticked, or no longer (as if typed: undo takes it back): drawn as a box (off the lines
     /// written on), pressed anywhere in its room, written out, on its `[ ]`. A link's words, where they show as it reads,
@@ -1203,6 +1307,7 @@ impl Writing {
         let cell = self.cell.clone();
         let asking = Asking { asked: self.asked.clone(), eaten: self.eaten.clone(), menu_asked: self.menu_asked.clone(), pressing: self.pressing_cell.clone() };
         let asked = self.asked.clone();
+        let link = self.link.clone();
         Rc::new(move |hwnd, message, wparam, lparam| {
             let point = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
             let pointer = || {
@@ -1213,6 +1318,27 @@ impl Writing {
                 }
                 at
             };
+            // A link being written: what is its answered there (see `link::Linking::answer`), Esc among it. As it ends,
+            // its link written where it was to go, the keys given back there. (A press off it ends it, and is the note's.)
+            let linking = link.try_borrow().ok().and_then(|held| held.clone());
+            let was_linking = linking.is_some();
+            if let Some(linking) = linking {
+                depth.set(depth.get() + 1);
+                let (answered, ending) = linking.answer(hwnd, (message, wparam, lparam));
+                if let Some(ending) = ending {
+                    link::end(&link, ending);
+                    keyed.set(true);
+                    // (Ended by a key, the character it makes is none of the words'.)
+                    eaten.set(matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN));
+                }
+                depth.set(depth.get() - 1);
+                if answered.is_some() {
+                    if matches!(message, WM_KEYDOWN | WM_CHAR | WM_IME_COMPOSITION) {
+                        keyed.set(true);
+                    }
+                    return answered;
+                }
+            }
             let its = match message {
                 // (Esc is the window's: it leaves the words.)
                 WM_KEYDOWN => wparam.0 != usize::from(VK_ESCAPE.0),
@@ -1279,8 +1405,14 @@ impl Writing {
                     eaten.set(true);
                     return Some(Some(LRESULT(0)));
                 }
+                // Ctrl+K: a link written where the caret is (the one there edited), as it is next seen to.
+                if message == WM_KEYDOWN && key == VK_K && held.ctrl && !held.shift && !editor.composing() {
+                    asked.set(Some(Asked::Link));
+                    eaten.set(true);
+                    return Some(Some(LRESULT(0)));
+                }
                 let (from, to) = editor.selection();
-                let made = (!editor.composing()).then(|| pressed(&editor.words(), (from.max(0) as usize, to.max(0) as usize), VIRTUAL_KEY(wparam.0 as u16), held, message == WM_SYSKEYDOWN, |taken| clipboard(hwnd, taken))).flatten();
+                let made = (!editor.composing()).then(|| pressed(&editor.words(), (from.max(0) as usize, to.max(0) as usize), VIRTUAL_KEY(wparam.0 as u16), held, message == WM_SYSKEYDOWN, || clipboard_pasted(hwnd))).flatten();
                 if let Some(made) = made {
                     eaten.set(true);
                     depth.set(depth.get() + 1);
@@ -1294,7 +1426,8 @@ impl Writing {
             // The format bar's, where it shows and the pointer is on it: a button pressed puts what it puts on the words
             // chosen (what is chosen chosen still), the pointer over it lights it, an arrow. Else what is pressed on the
             // words chooses (the bar not shown till it is let go).
-            let at_bar = |point: POINT| bar_at(&editor, pixels.get(), pressing.get()).filter(|bar| point.x >= bar.left && point.x < bar.right && point.y >= bar.top && point.y < bar.bottom);
+            // (Not shown while a link was being written: what was pressed is the words'.)
+            let at_bar = |point: POINT| bar_at(&editor, pixels.get(), pressing.get() || was_linking).filter(|bar| point.x >= bar.left && point.x < bar.right && point.y >= bar.top && point.y < bar.bottom);
             let on_bar = match message {
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_MOUSEMOVE => at_bar(point).map(|bar| bar_button(&bar, point, pixels.get())),
                 WM_SETCURSOR => at_bar(pointer()).map(|_| None),
@@ -1310,7 +1443,11 @@ impl Writing {
                         let (text, chosen) = (editor.words(), (from.max(0) as usize, to.max(0) as usize));
                         let made = match BAR[button].1 {
                             Format::Marked(how) => Some(crate::notes::edit::toggle(&text, chosen, how)),
-                            Format::Link => crate::notes::edit::link(&text, chosen, clipboard_text(hwnd).as_deref().and_then(crate::notes::edit::web_address)),
+                            // (A link written of them, as it is next seen to: see `link`.)
+                            Format::Link => {
+                                asked.set(Some(Asked::Link));
+                                None
+                            }
                         };
                         depth.set(depth.get() + 1);
                         if let Some(edit) = made {
@@ -1547,6 +1684,8 @@ impl Writing {
         if self.stamp.is_some_and(|was| was.same(&stamp)) {
             return;
         }
+        // (A link being written there left: what it was for is written anew.)
+        link::end(&self.link, link::Ending::Left);
         let chosen = self.editor.selection();
         self.editor.set_text(&text);
         self.editor.select(chosen);
@@ -1654,7 +1793,8 @@ impl Writing {
             }
         }
         frame.unclip();
-        if let Some(bar) = bar_at(&self.editor, self.pixels.get(), self.pressing.get()) {
+        let linking = self.link.borrow().clone();
+        if let Some(bar) = bar_at(&self.editor, self.pixels.get(), self.pressing.get()).filter(|_| linking.is_none()) {
             let per = self.pixels.get() / WORDS / scale;
             let (left, top) = in_window(bar.left as f32, bar.top as f32);
             let (right, bottom) = in_window(bar.right as f32, bar.bottom as f32);
@@ -1671,9 +1811,13 @@ impl Writing {
             Some((inside, ..)) => inside.caret(),
             None => self.editor.caret(),
         };
-        if let (Some((cx, cy, cw, ch)), true) = (caret, caret_on) {
+        if let (Some((cx, cy, cw, ch)), true, None) = (caret, caret_on, &linking) {
             let (cx, cy) = in_window(cx as f32, cy as f32);
             frame.fill(theme.text, cx, cy, (cw as f32 / scale).max(1.2), ch as f32 / scale);
+        }
+        // A link being written: over all of it, its caret in the field that has the keys.
+        if let Some(linking) = linking {
+            linking.paint(frame, theme, lang, window, scale, caret_on);
         }
     }
 }
@@ -1869,6 +2013,66 @@ mod pictures {
         super::super::gfx::let_go();
     }
 
+    /// A link being written on its plate, in each skin, light and dark, in Chinese and English: under the words chosen,
+    /// its words filled in, where it goes empty (its button faint), then filled in. (`cargo test --features studio
+    /// --lib -- --ignored a_link_s_plate` writes `target/beside/link-<skin>-<light|dark>-<zh|en>-<empty|filled>.png`.)
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    fn a_link_s_plate() {
+        let _device = crate::ui::gfx::held().unwrap();
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let gfx = super::super::gfx::current().unwrap();
+        let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let folder = std::env::temp_dir().join(format!("glance-note-link-pictures-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let text = "# 本周要做\n看一下这份文档，再回复\n- [ ] 买牛奶";
+        std::fs::write(folder.join("a.md"), text).unwrap();
+        let (w, h) = super::super::view::STUCK_NOTE;
+        let scale = 1.5;
+        let size = ((w * scale) as u32, (h * scale) as u32);
+        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, size.0 as i32, size.1 as i32, None, None, None, None) }.unwrap();
+        for (skin, name) in [(Skin::Glass, "glass"), (Skin::Fluent, "fluent"), (Skin::Paper, "paper")] {
+            for dark in [false, true] {
+                for lang in [Lang::Zh, Lang::En] {
+                    let theme = Theme::new(skin, dark);
+                    let writing = Writing::open(hwnd, words_box(0, 0, size.0 as i32, size.1 as i32, scale), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("a.md".into()), &theme, WORDS * scale).unwrap();
+                    let from = text.find("文档").map(|at| text[..at].encode_utf16().count()).unwrap() as i32;
+                    writing.editor.select((from, from + 2));
+                    writing.write(Write::Link);
+                    {
+                        let held = writing.link.borrow();
+                        let linking = held.as_ref().unwrap();
+                        linking.to.set_text("");
+                    }
+                    let dark_name = if dark { "dark" } else { "light" };
+                    let lang_name = if lang == Lang::Zh { "zh" } else { "en" };
+                    let drawn = gfx.draw_offscreen(size, scale, |frame| writing.paint(frame, &theme, lang, (0.0, 0.0, w, h), (0.0, 0.0), scale, true)).unwrap();
+                    crate::studio::save_png(&out.join(format!("link-{name}-{dark_name}-{lang_name}-empty.png")), size.0, size.1, &drawn).unwrap();
+                    {
+                        let held = writing.link.borrow();
+                        let linking = held.as_ref().unwrap();
+                        linking.to.set_text("https://docs.example.com/weekly/report-2026-10");
+                        let _ = linking.to.send(WM_KEYDOWN, WPARAM(usize::from(VK_END.0)), LPARAM(0));
+                    }
+                    let drawn = gfx.draw_offscreen(size, scale, |frame| writing.paint(frame, &theme, lang, (0.0, 0.0, w, h), (0.0, 0.0), scale, true)).unwrap();
+                    crate::studio::save_png(&out.join(format!("link-{name}-{dark_name}-{lang_name}-filled.png")), size.0, size.1, &drawn).unwrap();
+                    drop(writing);
+                }
+            }
+        }
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+        drop(gfx);
+        super::super::gfx::let_go();
+    }
+
     /// What was dressed found where it is now, the input method's words composed before it, in it or after it.
     #[test]
     fn what_was_dressed_where_it_is_now() {
@@ -2021,7 +2225,7 @@ mod tests {
     /// Which keys write Markdown: Enter in a list (not Shift+Enter, not with words chosen), Tab, Backspace at an item's
     /// words, the format keys. Ctrl with the text services' own keys (centring, line spacing) eaten, choosing all,
     /// copying, pasting, undoing theirs still, as are the keys that write nothing (Ctrl+arrows). The clipboard asked only
-    /// for a link.
+    /// for a paste. (Ctrl+K, a link, is its box's: eaten here.)
     #[test]
     fn which_keys_write_markdown() {
         use super::{pressed, Held, VIRTUAL_KEY};
@@ -2030,13 +2234,13 @@ mod tests {
         let ctrl = Held { ctrl: true, ..none };
         let shift = Held { shift: true, ..none };
         let alt = Held { alt: true, ..none };
-        let asked = std::cell::Cell::new(None);
+        let asked = std::cell::Cell::new(false);
         let plain = |text: &str| crate::notes::edit::Pasted { text: text.into(), blocks: false };
-        let clipboard = |taken| {
-            asked.set(Some(taken));
+        let clipboard = || {
+            asked.set(true);
             Some(plain("https://a.b"))
         };
-        let made = |text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held| pressed(text, chosen, key, held, held.alt, |_| None).map(|edit| edit.map(|edit| edit.with));
+        let made = |text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held| pressed(text, chosen, key, held, held.alt, || None).map(|edit| edit.map(|edit| edit.with));
         assert_eq!(made("- a", (3, 3), VK_RETURN, none), Some(Some("\n- ".into())));
         assert_eq!(made("- a", (3, 3), VK_RETURN, shift), None);
         assert_eq!(made("- a", (2, 3), VK_RETURN, none), None);
@@ -2046,7 +2250,7 @@ mod tests {
         assert_eq!(made("- a", (3, 3), VK_TAB, none), Some(None));
         assert_eq!(made("words", (5, 5), VK_TAB, none), None);
         // In a table, Tab and Shift+Tab go from cell to cell (choosing its words, nothing written), past the last a row more.
-        let chosen = |text: &str, at: usize, held: Held| pressed(text, (at, at), VK_TAB, held, false, |_| None).flatten().map(|edit| (edit.with, edit.chosen));
+        let chosen = |text: &str, at: usize, held: Held| pressed(text, (at, at), VK_TAB, held, false, || None).flatten().map(|edit| (edit.with, edit.chosen));
         assert_eq!(chosen("| a | b |\n| - | - |", 2, none), Some((String::new(), (6, 7))));
         assert_eq!(chosen("| a | b |\n| - | - |", 6, shift), Some((String::new(), (2, 3))));
         assert_eq!(chosen("| a | b |\n| - | - |\n| c | d |", 26, none), Some(("\n|  |  |".into(), (32, 32))));
@@ -2064,13 +2268,13 @@ mod tests {
             assert_eq!(made("ab", (0, 2), key, ctrl), None, "Ctrl+{:#x}", key.0);
         }
         assert_eq!(pressed("ab", (0, 2), VK_B, ctrl, false, clipboard).map(|edit| edit.map(|edit| edit.with)), Some(Some("**ab**".into())));
-        assert_eq!(asked.get(), None);
-        assert_eq!(pressed("ab", (0, 2), VK_K, ctrl, false, clipboard).map(|edit| edit.map(|edit| edit.with)), Some(Some("[ab](https://a.b)".into())));
-        assert_eq!(asked.get(), Some(super::Taken::Text));
+        assert!(!asked.get());
+        assert_eq!(pressed("ab", (0, 2), VK_K, ctrl, false, clipboard).map(|edit| edit.map(|edit| edit.with)), Some(None));
+        assert!(!asked.get());
         let _ = pressed("ab", (1, 1), VK_V, ctrl, false, clipboard);
-        assert_eq!(asked.get(), Some(super::Taken::Pasted));
+        assert!(asked.get());
         // Pasting: the clipboard's text, its line breaks `\n`, a web address over words a link, nothing with no text.
-        let pasted = |chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, on: Option<&str>| pressed("ab", chosen, key, held, false, |_| on.map(plain)).map(|edit| edit.map(|edit| edit.with));
+        let pasted = |chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, on: Option<&str>| pressed("ab", chosen, key, held, false, || on.map(plain)).map(|edit| edit.map(|edit| edit.with));
         assert_eq!(pasted((1, 1), VK_V, ctrl, Some("x\r\ny")), Some(Some("x\ny".into())));
         assert_eq!(pasted((1, 1), VK_INSERT, shift, Some("x")), Some(Some("x".into())));
         assert_eq!(pasted((0, 2), VK_V, ctrl, Some("https://a.b")), Some(Some("[ab](https://a.b)".into())));
@@ -2079,22 +2283,28 @@ mod tests {
     }
 
     /// The writing menu: cut, copy, paste, the blocks and a link, the headings and words again, each row's icon its own.
+    /// On a link: it edited, where it goes copied, it taken off its words (but a web address written out).
     #[test]
     fn the_writing_menu_s_rows() {
-        use super::{writing_menu, Choice, Write};
+        use super::{writing_menu, Choice, Spot, Write};
         use crate::notes::edit::Block;
-        let (items, choices) = writing_menu(super::Lang::Zh, false);
+        let (items, choices) = writing_menu(super::Lang::Zh, Spot::default());
         assert_eq!(items.len(), choices.len());
         assert_eq!(items.iter().map(|item| item.label).collect::<Vec<_>>(), ["剪切", "复制", "粘贴", "插入待办事项", "插入表格", "插入代码块", "插入分隔线", "插入链接", "一级标题", "二级标题", "三级标题", "正文"]);
         assert_eq!(choices[4], Choice::Write(Write::Insert(Block::Table)));
         assert_eq!(choices[11], Choice::Write(Write::Heading(0)));
         assert_eq!(items.iter().filter(|item| item.rule_before).count(), 2);
-        // (In a table's cell: cut, copy, paste, and what is done to its rows, its columns and itself.)
-        let (items, choices) = writing_menu(super::Lang::Zh, true);
+        let labels = |spot: Spot| writing_menu(super::Lang::Zh, spot).0.iter().map(|item| item.label).collect::<Vec<_>>();
+        assert_eq!(labels(Spot { in_cell: false, link: Some(true) })[7..10], ["编辑链接", "复制链接地址", "移除链接"]);
+        assert_eq!(labels(Spot { in_cell: false, link: Some(false) })[7..9], ["编辑链接", "复制链接地址"]);
+        assert_eq!(labels(Spot { in_cell: false, link: Some(false) })[9], "一级标题");
+        // (In a table's cell: cut, copy, paste, a link, and what is done to its rows, its columns and itself.)
+        let (items, choices) = writing_menu(super::Lang::Zh, Spot { in_cell: true, link: None });
         assert_eq!(items.len(), choices.len());
-        assert_eq!(items.iter().map(|item| item.label).collect::<Vec<_>>(), ["剪切", "复制", "粘贴", "在上方插入行", "在下方插入行", "在左侧插入列", "在右侧插入列", "删除行", "删除列", "删除表格"]);
-        assert_eq!(choices[9], Choice::Write(Write::Table(crate::notes::table::Change::TakeTable)));
-        assert_eq!(items.iter().filter(|item| item.rule_before).count(), 2);
+        assert_eq!(items.iter().map(|item| item.label).collect::<Vec<_>>(), ["剪切", "复制", "粘贴", "插入链接", "在上方插入行", "在下方插入行", "在左侧插入列", "在右侧插入列", "删除行", "删除列", "删除表格"]);
+        assert_eq!(choices[10], Choice::Write(Write::Table(crate::notes::table::Change::TakeTable)));
+        assert_eq!(items.iter().filter(|item| item.rule_before).count(), 3);
+        assert_eq!(labels(Spot { in_cell: true, link: Some(true) })[3..6], ["编辑链接", "复制链接地址", "移除链接"]);
     }
 
     /// The format bar's buttons side by side in it, none at its edge or past its last, larger as the words are.
@@ -2247,6 +2457,140 @@ mod tests {
         assert_eq!(writing.editor.selection(), (2, 2));
         key(&mut writing, VK_RIGHT);
         assert_eq!(open(&writing), Some((0, 0)));
+        // (Its boxes' text services shut down while their window is there.)
+        drop(answer);
+        drop(writing);
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A link written on its plate, keys given as Windows gives them: words chosen and Ctrl+K, the plate opens with them
+    /// as its words, the keys in its field for where it goes, Enter writes the link (as one undo), an address with a
+    /// space written so it reads back. On the link, Ctrl+K opens it filled from it: its words cleared, Enter writes
+    /// nothing, words with a bracket written escaped. Esc, and a press off it, leave it with nothing written, the keys
+    /// the note's again (what is typed then is its words'). Taken off its words from the menu. In a table's cell, one
+    /// written there.
+    #[test]
+    fn a_link_is_written_on_its_plate() {
+        let _device = crate::ui::gfx::held().unwrap();
+        use windows::core::w;
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_ESCAPE, VK_K, VK_RETURN, VK_TAB};
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let folder = std::env::temp_dir().join(format!("glance-note-link-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("l.md"), "看文档吧\n\n| 甲 | 乙 |\n| - | - |\n| x | y |\n\n后").unwrap();
+        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, 400, 400, None, None, None, None) }.unwrap();
+        let theme = super::Theme::new(super::Skin::Paper, false);
+        let mut writing = super::Writing::open(hwnd, super::words_box(0, 0, 400, 400, 1.0), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("l.md".into()), &theme, super::WORDS).unwrap();
+        let answer = writing.answer();
+        let at = |x: i32, y: i32| LPARAM(((y as isize) << 16) | (x as isize & 0xFFFF));
+        let first = |writing: &super::Writing| writing.editor.words().split('\n').next().unwrap().to_string();
+        let fields = |writing: &super::Writing| writing.link.borrow().as_ref().map(|linking| (linking.words.words(), linking.to.words(), linking.focused()));
+        // (Each key as Windows gives it: down, the character it makes, up. The note seen to after each, as its window
+        // does.)
+        let key = |writing: &mut super::Writing, key: VIRTUAL_KEY, character: Option<u16>| {
+            answer(hwnd, WM_KEYDOWN, WPARAM(usize::from(key.0)), LPARAM(1));
+            writing.written();
+            if let Some(character) = character {
+                answer(hwnd, WM_CHAR, WPARAM(usize::from(character)), LPARAM(1));
+            }
+            answer(hwnd, WM_KEYUP, WPARAM(usize::from(key.0)), LPARAM(1));
+            writing.written();
+        };
+        let typed = |writing: &mut super::Writing, text: &str| {
+            for c in text.encode_utf16() {
+                answer(hwnd, WM_CHAR, WPARAM(usize::from(c)), LPARAM(1));
+                writing.written();
+            }
+        };
+        let ctrl = |down: bool| unsafe {
+            let mut keys = [0u8; 256];
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardState(&mut keys);
+            keys[usize::from(VK_CONTROL.0)] = if down { 0x80 } else { 0 };
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetKeyboardState(&keys);
+        };
+        let ctrl_k = |writing: &mut super::Writing| {
+            ctrl(true);
+            key(writing, VK_K, Some(0x0B));
+            ctrl(false);
+        };
+        // Words chosen, Ctrl+K: the plate, its words those, the keys where it goes (all of it chosen, to be typed over).
+        writing.editor.select((1, 3));
+        ctrl_k(&mut writing);
+        let (words, _, focused) = fields(&writing).expect("the plate up");
+        assert_eq!((words.as_str(), focused), ("文档", super::link::Field::To));
+        typed(&mut writing, "https://a.b/x y");
+        key(&mut writing, VK_RETURN, Some(0x0D));
+        assert!(fields(&writing).is_none());
+        assert_eq!(first(&writing), "看[文档](<https://a.b/x y>)吧");
+        let end = "看[文档](<https://a.b/x y>)".encode_utf16().count() as i32;
+        assert_eq!(writing.editor.selection(), (end, end));
+        // On it, Ctrl+K: filled from it. Its words cleared: Enter writes nothing. Written anew, with a bracket.
+        writing.editor.select((2, 2));
+        ctrl_k(&mut writing);
+        assert_eq!(fields(&writing).map(|(words, to, _)| (words, to)), Some(("文档".into(), "https://a.b/x y".into())));
+        key(&mut writing, VK_TAB, Some(0x09));
+        assert_eq!(fields(&writing).map(|(.., focused)| focused), Some(super::link::Field::Words));
+        key(&mut writing, VK_BACK, Some(0x08));
+        key(&mut writing, VK_RETURN, Some(0x0D));
+        assert_eq!(fields(&writing).map(|(words, ..)| words), Some(String::new()));
+        typed(&mut writing, "说明]");
+        key(&mut writing, VK_RETURN, Some(0x0D));
+        assert!(fields(&writing).is_none());
+        assert_eq!(first(&writing), "看[说明\\]](<https://a.b/x y>)吧");
+        // (EM_UNDO: the link as it was, in one step.)
+        writing.editor.send(0x00C7, WPARAM(0), LPARAM(0));
+        writing.written();
+        assert_eq!(first(&writing), "看[文档](<https://a.b/x y>)吧");
+        // Esc: left, nothing written, the keys the note's again.
+        writing.editor.select((2, 2));
+        ctrl_k(&mut writing);
+        typed(&mut writing, "别处");
+        key(&mut writing, VK_ESCAPE, Some(0x1B));
+        assert!(fields(&writing).is_none());
+        assert_eq!(writing.editor.selection(), (2, 2));
+        typed(&mut writing, "好");
+        assert_eq!(first(&writing), "看[好文档](<https://a.b/x y>)吧");
+        // A press off it: left, the press the note's.
+        ctrl_k(&mut writing);
+        let plate = writing.link.borrow().as_ref().unwrap().laid().plate;
+        let off = writing.editor.character(0).unwrap();
+        assert!(off.bottom <= plate.top, "{plate:?} under the words");
+        answer(hwnd, WM_LBUTTONDOWN, WPARAM(1), at(off.left + 1, off.top + 2));
+        answer(hwnd, WM_LBUTTONUP, WPARAM(0), at(off.left + 1, off.top + 2));
+        writing.written();
+        assert!(fields(&writing).is_none());
+        assert_eq!(first(&writing), "看[好文档](<https://a.b/x y>)吧");
+        // Taken off its words from the menu: they stay, chosen.
+        writing.editor.select((3, 3));
+        assert_eq!(writing.spot(), super::Spot { in_cell: false, link: Some(true) });
+        writing.write(super::Write::Unlink);
+        writing.written();
+        assert_eq!(first(&writing), "看好文档吧");
+        assert_eq!(writing.editor.selection(), (1, 4));
+        // In a table's cell: one written there, after its words.
+        let units: Vec<u16> = writing.editor.text().encode_utf16().collect();
+        let top = super::line_top(&writing.editor, &units, writing.laid[0].0.span.start).unwrap();
+        let cell = super::cell_box(&writing.editor, &writing.laid[0].1, top, 1, 1).unwrap();
+        answer(hwnd, WM_LBUTTONDOWN, WPARAM(1), at((cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2));
+        writing.written();
+        answer(hwnd, WM_LBUTTONUP, WPARAM(0), at((cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2));
+        key(&mut writing, VK_END, None);
+        ctrl_k(&mut writing);
+        assert_eq!(fields(&writing).map(|(.., focused)| focused), Some(super::link::Field::Words));
+        typed(&mut writing, "网|页");
+        key(&mut writing, VK_TAB, Some(0x09));
+        typed(&mut writing, "https://c.d");
+        key(&mut writing, VK_RETURN, Some(0x0D));
+        assert!(fields(&writing).is_none());
+        assert!(writing.in_cell());
+        assert!(writing.editor.words().contains("| x | y[网\\|页](https://c.d) |"), "{}", writing.editor.words());
         // (Its boxes' text services shut down while their window is there.)
         drop(answer);
         drop(writing);

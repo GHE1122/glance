@@ -990,6 +990,119 @@ fn unpaired_escaped(words: &str) -> String {
     out
 }
 
+/// `words` with every square bracket in it escaped (`\[`, `\]`: those already escaped left), a backslash at its end that
+/// escapes nothing escaped: as a link's words written from what is to show, read back as they were written, brackets and
+/// all (a pair left as written could read as a link of its own inside it, which a link's words cannot hold).
+fn brackets_escaped(words: &str) -> String {
+    let mut out = String::with_capacity(words.len());
+    let mut chars = words.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                match chars.next() {
+                    Some(next) => out.push(next),
+                    None => out.push('\\'),
+                }
+            }
+            '[' | ']' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// A link's words as written (`written`) as they are to show where they are written anew (see `link_written`): their
+/// escaped square brackets brackets, a backslash escaped at their end one, the rest as written.
+pub fn brackets_unescaped(written: &str) -> String {
+    let chars: Vec<char> = written.chars().collect();
+    let mut out = String::with_capacity(written.len());
+    let mut at = 0;
+    while at < chars.len() {
+        match (chars[at], chars.get(at + 1)) {
+            ('\\', Some(&next @ ('[' | ']'))) => out.push(next),
+            ('\\', Some('\\')) if at + 2 == chars.len() => out.push('\\'),
+            ('\\', Some(&next)) => {
+                out.push('\\');
+                out.push(next);
+            }
+            (c, _) => {
+                out.push(c);
+                at += 1;
+                continue;
+            }
+        }
+        at += 2;
+    }
+    out
+}
+
+/// A link written of `words` (to show, as `brackets_escaped` writes them) going to `to`: `[words](to)`, read back as
+/// a link of those words going there (see `destination`).
+pub fn link_written(words: &str, to: &str) -> String {
+    format!("[{}]({})", brackets_escaped(words), destination(to))
+}
+
+/// A link found where something is chosen (see `link_at`): all of it and its words (UTF-16 units), its words as they
+/// are to show where it is written anew (see `link_written`), where it goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub span: Range<usize>,
+    pub words: Range<usize>,
+    pub shown: String,
+    pub to: String,
+}
+
+/// The link `chosen` (from, to: UTF-16 units) is on, as the note is read: the caret in its words or at their end, or
+/// what is chosen within it and some of its words. Not a table's (its words are written in its cell's own box, read
+/// there as words alone). None elsewhere.
+pub fn link_at(text: &str, chosen: (usize, usize)) -> Option<Found> {
+    let shown = super::markdown::Shown::of(text);
+    let (from, to) = (chosen.0.min(chosen.1), chosen.0.max(chosen.1));
+    let units: Vec<u16> = text.encode_utf16().collect();
+    // (A link in square brackets has its words from the one that opens it: as read, they begin past a backslash that
+    // escapes their first character, which is theirs.)
+    let words_of = |link: &super::markdown::Linked| match units.get(link.span.start) == Some(&u16::from(b'[')) {
+        true => link.span.start + 1..link.words.end,
+        false => link.words.clone(),
+    };
+    shown
+        .links
+        .iter()
+        .filter(|link| !shown.tables.iter().any(|table| table.span.start == link.span.start))
+        .map(|link| (link, words_of(link)))
+        .find(|(link, words)| if from == to { words.start <= from && from <= words.end } else { link.span.start <= from && to <= link.span.end && from < words.end && to > words.start })
+        .map(|(link, words)| Found { span: link.span.clone(), shown: brackets_unescaped(&String::from_utf16_lossy(&units[words.clone()])), words, to: link.to.clone() })
+}
+
+/// A link of `words` going to `to` (see `link_written`) put in place of `chosen` (from, to: UTF-16 units), the caret
+/// after it.
+pub fn put_link(text: &str, chosen: (usize, usize), words: &str, to: &str) -> Edit {
+    let (start, end) = (byte(text, chosen.0.min(chosen.1)), byte(text, chosen.0.max(chosen.1)));
+    let with = link_written(words, to);
+    let caret = start + with.len();
+    let mut rewrite = Rewrite::default();
+    rewrite.put(start..end, with);
+    edit(text, &rewrite.apply(text), (caret, caret))
+}
+
+/// The link `found` taken off its words: its marks and where it goes taken away, its words left as written, chosen.
+/// None where those words would read as a link still (a web address written out).
+pub fn unlink(text: &str, found: &Found) -> Option<Edit> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let words = String::from_utf16_lossy(&units[found.words.clone()]);
+    let (start, end) = (byte(text, found.span.start), byte(text, found.span.end));
+    let mut rewrite = Rewrite::default();
+    rewrite.put(start..end, words.as_str());
+    let after = rewrite.apply(text);
+    let length = words.encode_utf16().count();
+    let still = super::markdown::Shown::of(&after).links.iter().any(|link| link.words.start < found.span.start + length && found.span.start < link.words.end);
+    (!still).then(|| edit(text, &after, (start, start + words.len())))
+}
+
 /// Where a link goes, as written in its parentheses.
 fn destination(to: &str) -> String {
     let mut depth = 0i32;
@@ -1568,6 +1681,74 @@ mod tests {
         };
         assert_eq!(made("al‸pha\nbeta\n===", 1), "# al‸pha beta");
         assert_eq!(made("  ``‸`\nx\n  ```", 1), "  ``‸`\nx\n  ```");
+    }
+
+    /// A link written from words to show and where it goes (as the link's plate writes one), whatever they hold
+    /// (brackets, a pair of them, a link's own marks, a backslash at the end, an address with spaces, parentheses
+    /// paired or not, angle brackets, a backslash): read back as one link, of those words, going there, all of what
+    /// was written.
+    #[test]
+    fn a_link_written_reads_back_as_written() {
+        let words = ["文档", "a]b", "[x]", "[x](y)", "a [b", "C:\\", "a\\b", "**粗**", "一 二"];
+        let places = ["https://a.b/c", "C:/my file.md", "https://w.org/A_(b)", "https://a.b/(", "x)y", "a<b>c", "a\\b", "https://a.b/?q=[1]"];
+        for shown in words {
+            for to in places {
+                let written = link_written(shown, to);
+                let text = format!("看{written}吧");
+                let found = link_at(&text, (2, 2)).unwrap_or_else(|| panic!("{text}: no link"));
+                assert_eq!(found.to, to, "{text}");
+                assert_eq!(found.span, 1..1 + written.encode_utf16().count(), "{text}");
+                if !shown.contains('*') {
+                    assert_eq!(found.shown, shown, "{text}");
+                }
+                // Written anew from what it shows: the same.
+                assert_eq!(link_written(&found.shown, &found.to), written, "{text}");
+            }
+        }
+    }
+
+    /// The link the caret is on (in its words, or at their end), or what is chosen within it: not one beside it, nor
+    /// one in a table. A web address written out is one too.
+    #[test]
+    fn links_are_found_where_chosen() {
+        let found = |marked: &str| {
+            let (text, chosen) = read(marked);
+            link_at(&text, chosen).map(|found| (found.shown, found.to))
+        };
+        let docs = Some(("文档".to_string(), "https://a.b".to_string()));
+        assert_eq!(found("看[文‸档](https://a.b)"), docs);
+        assert_eq!(found("看[‸文档](https://a.b)"), docs);
+        assert_eq!(found("看[文档‸](https://a.b)"), docs);
+        assert_eq!(found("看«[文档](https://a.b)»"), docs);
+        assert_eq!(found("看[«文»档](https://a.b)"), docs);
+        assert_eq!(found("看‸[文档](https://a.b)"), None);
+        assert_eq!(found("看[文档](https://a.b)‸"), None);
+        assert_eq!(found("«看[文»档](https://a.b)"), None);
+        assert_eq!(found("见 https://x.y/‸z"), Some(("https://x.y/z".into(), "https://x.y/z".into())));
+        assert_eq!(found("[a\\]b‸](x)"), Some(("a]b".into(), "x".into())));
+        assert_eq!(found("| [a‸](x) |\n| - |"), None);
+    }
+
+    /// A link put in place of what is chosen, the caret after it. One taken off its words leaves them, chosen, but not
+    /// a web address written out (it would read as a link still).
+    #[test]
+    fn links_are_put_and_taken_off() {
+        let put = |marked: &str, words: &str, to: &str| {
+            let (text, chosen) = read(marked);
+            applied(&text, &put_link(&text, chosen, words, to))
+        };
+        assert_eq!(put("看«文档»吧", "文档", "https://a.b"), "看[文档](https://a.b)‸吧");
+        assert_eq!(put("看‸", "新的 [1]", "a b"), "看[新的 \\[1\\]](<a b>)‸");
+        assert_eq!(put("看[文档](https://a.b)‸", "说明", "https://c.d"), "看[文档](https://a.b)[说明](https://c.d)‸");
+        let off = |marked: &str| {
+            let (text, chosen) = read(marked);
+            let found = link_at(&text, chosen).unwrap();
+            unlink(&text, &found).map(|edit| applied(&text, &edit))
+        };
+        assert_eq!(off("看[文‸档](https://a.b)吧").as_deref(), Some("看«文档»吧"));
+        assert_eq!(off("[**粗‸**](x)").as_deref(), Some("«**粗**»"));
+        assert_eq!(off("看 https://a.b/‸c"), None);
+        assert_eq!(off("看 <https://a.b/‸c>"), None);
     }
 
     /// A link made of words ending in a backslash: the backslash escaped, so the link is one.

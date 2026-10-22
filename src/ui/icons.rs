@@ -86,6 +86,9 @@ pub enum Icon {
     ArrowDownToLine,
     ArrowLeftToLine,
     ArrowRightToLine,
+    /// What a note's writing menu does to a link: it edited, its mark taken off (Lucide's square-pen, unlink).
+    SquarePen,
+    Unlink,
 }
 
 impl Icon {
@@ -96,7 +99,8 @@ impl Icon {
     /// "chevron-down", "maximize", "minimize", "file", "link", "inbox", "clipboard", "ellipsis", "list",
     /// "image", "grip-vertical", "plus", "search", "palette", "smartphone", "pencil-ruler", "pin-off", "trash-2", "eye-off", "bold", "italic", "strikethrough", "code",
     /// "scissors", "copy", "clipboard-paste", "square-check-big", "table", "minus", "square-code", "heading-1", "heading-2",
-    /// "heading-3", "pilcrow", from
+    /// "heading-3", "pilcrow", "arrow-up-to-line", "arrow-down-to-line", "arrow-left-to-line", "arrow-right-to-line",
+    /// "square-pen", "unlink", from
     /// lucide-static 1.53.0), its
     /// rectangles and circles written as paths.
     fn data(self) -> &'static [&'static str] {
@@ -159,6 +163,12 @@ impl Icon {
             Icon::ArrowDownToLine => &["M12 17V3", "m6 11 6 6 6-6", "M19 21H5"],
             Icon::ArrowLeftToLine => &["M3 19V5", "m13 6-6 6 6 6", "M7 12h14"],
             Icon::ArrowRightToLine => &["M17 12H3", "m11 18 6-6-6-6", "M21 5v14"],
+            Icon::SquarePen => &["M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7", "M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"],
+            Icon::Unlink => &[
+                "m18.84 12.25 1.72-1.71h-.02a5.004 5.004 0 0 0-.12-7.07 5.006 5.006 0 0 0-6.95 0l-1.72 1.71",
+                "m5.17 11.75-1.71 1.71a5.004 5.004 0 0 0 .12 7.07 5.006 5.006 0 0 0 6.95 0l1.71-1.71",
+                "M8 2v3", "M2 8h3", "M16 19v3", "M19 16h3",
+            ],
             Icon::Close => &["M18 6 6 18", "m6 6 12 12"],
             Icon::File => &["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z", "M14 2v4a2 2 0 0 0 2 2h4"],
             Icon::Link => &["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71", "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"],
@@ -434,7 +444,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow, Icon::ArrowUpToLine, Icon::ArrowDownToLine, Icon::ArrowLeftToLine, Icon::ArrowRightToLine] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow, Icon::ArrowUpToLine, Icon::ArrowDownToLine, Icon::ArrowLeftToLine, Icon::ArrowRightToLine, Icon::SquarePen, Icon::Unlink] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid.

@@ -41,6 +41,8 @@ struct Kept {
     para_format: Box<PARAFORMAT>,
     /// What was written changed since it was last asked.
     changed: Cell<bool>,
+    /// Words on one line alone, plain (a field's: see `Editor::line`), scrolled along as they are written past its end.
+    one_line: bool,
 }
 
 #[implement(ITextHost2, ITextHost)]
@@ -96,6 +98,16 @@ impl Editor {
     /// A box in `hwnd` at `rect`, its words in `face` `pixels` high, of `color`; none where the text services cannot
     /// be had.
     pub fn new(hwnd: HWND, rect: RECT, face: &str, pixels: f32, color: COLORREF) -> Option<Editor> {
+        Editor::made(hwnd, rect, face, pixels, color, false)
+    }
+
+    /// As `new`, a field's: its words plain (as typed or pasted, dressed in nothing), on one line alone, scrolled along
+    /// as they are written past its end.
+    pub fn line(hwnd: HWND, rect: RECT, face: &str, pixels: f32, color: COLORREF) -> Option<Editor> {
+        Editor::made(hwnd, rect, face, pixels, color, true)
+    }
+
+    fn made(hwnd: HWND, rect: RECT, face: &str, pixels: f32, color: COLORREF, one_line: bool) -> Option<Editor> {
         let mut char_format = Box::new(CHARFORMAT2W::default());
         char_format.Base.cbSize = std::mem::size_of::<CHARFORMAT2W>() as u32;
         char_format.Base.dwMask = CFM_SIZE | CFM_FACE | CFM_COLOR | CFM_CHARSET;
@@ -110,7 +122,7 @@ impl Editor {
         para_format.cbSize = std::mem::size_of::<PARAFORMAT>() as u32;
         para_format.dwMask = PFM_ALL;
         para_format.wAlignment = PFA_LEFT;
-        let kept = Rc::new(Kept { hwnd, rect: Cell::new(rect), caret: Cell::new(None), caret_size: Cell::new((1, 16)), caret_shown: Cell::new(false), char_format, para_format, changed: Cell::new(false) });
+        let kept = Rc::new(Kept { hwnd, rect: Cell::new(rect), caret: Cell::new(None), caret_size: Cell::new((1, 16)), caret_shown: Cell::new(false), char_format, para_format, changed: Cell::new(false), one_line });
         let host: ITextHost2 = Host { kept: kept.clone() }.into();
         let (make, iid) = services_maker()?;
         let make = make?;
@@ -660,8 +672,8 @@ impl ITextHost_Impl for Host_Impl {
         Ok(())
     }
     fn TxGetScrollBars(&self, bars: *mut u32) -> windows::core::Result<()> {
-        // (Scrolled down as it is written, by the wheel; no bar drawn of theirs.)
-        unsafe { *bars = WS_VSCROLL.0 | 0x40 };
+        // (Scrolled down as it is written, by the wheel, no bar drawn of theirs. On one line, along: ES_AUTOHSCROLL.)
+        unsafe { *bars = if self.kept.one_line { 0x80 } else { WS_VSCROLL.0 | 0x40 } };
         Ok(())
     }
     fn TxGetPasswordChar(&self) -> windows::core::Result<i8> {
@@ -681,7 +693,8 @@ impl ITextHost_Impl for Host_Impl {
         Ok(())
     }
     fn TxGetPropertyBits(&self, mask: u32, bits: *mut u32) -> windows::core::Result<()> {
-        let ours = TXTBIT_RICHTEXT | TXTBIT_MULTILINE | TXTBIT_WORDWRAP | TXTBIT_D2DDWRITE | TXTBIT_D2DSIMPLETYPOGRAPHY | TXTBIT_D2DPIXELSNAPPED;
+        let drawn = TXTBIT_D2DDWRITE | TXTBIT_D2DSIMPLETYPOGRAPHY | TXTBIT_D2DPIXELSNAPPED;
+        let ours = if self.kept.one_line { drawn } else { TXTBIT_RICHTEXT | TXTBIT_MULTILINE | TXTBIT_WORDWRAP | drawn };
         unsafe { *bits = ours & mask };
         Ok(())
     }

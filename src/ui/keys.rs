@@ -3,7 +3,8 @@
 //! takes the focus (see `window`) but while it does this: it comes to the front then, and what writes in it answers its
 //! messages (the keys, the input method's, the pointer's over the words, its own timers), given it whatever the window
 //! is in the middle of (an input method answers inside the message that asked it). Esc, or another program's window
-//! come in front, gives the keys back (told as `LEFT`, for its owner to see to).
+//! come in front, gives the keys back (told as `LEFT`, for its owner to see to): Esc where what writes there does not
+//! keep it for itself (a link being written there, left by it).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -49,21 +50,21 @@ pub fn taking(hwnd: HWND) -> bool {
 }
 
 /// A message for `hwnd` (from its window's procedure): answered where it takes the keys and it is the words' (see
-/// `Answer`), or Esc, or the window gone from the front (told as `LEFT`). None: the window's own.
+/// `Answer`), or Esc (not theirs), or the window gone from the front (told as `LEFT`). None: the window's own.
 pub fn answer(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
     // (Cloned out first: what answers may be asked again from inside its answer.)
     let answer = TAKING.with_borrow(|taking| taking.iter().find(|(window, _)| *window == hwnd.0 as isize).map(|(_, answer)| answer.clone()))?;
-    match message {
-        WM_KEYDOWN if wparam.0 == usize::from(VK_ESCAPE.0) => {
+    if message == WM_ACTIVATE && (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
+        let _ = unsafe { PostMessageW(Some(hwnd), LEFT, WPARAM(0), LPARAM(0)) };
+    }
+    let escaped = message == WM_KEYDOWN && wparam.0 == usize::from(VK_ESCAPE.0);
+    let Some(answered) = answer(hwnd, message, wparam, lparam) else {
+        if escaped {
             let _ = unsafe { PostMessageW(Some(hwnd), LEFT, WPARAM(1), LPARAM(0)) };
             return Some(LRESULT(0));
         }
-        WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
-            let _ = unsafe { PostMessageW(Some(hwnd), LEFT, WPARAM(0), LPARAM(0)) };
-        }
-        _ => {}
-    }
-    let answered = answer(hwnd, message, wparam, lparam)?;
+        return None;
+    };
     TOOK.with_borrow_mut(|took| {
         if !took.contains(&(hwnd.0 as isize)) {
             took.push(hwnd.0 as isize);
@@ -134,16 +135,22 @@ mod tests {
     }
 
     /// A window taking the keys: its messages answered by what writes in it, and told as taken. Esc, and the window gone
-    /// from the front, give the keys back (told as `LEFT`, Esc's never reaching the words). Given back, nothing answered.
+    /// from the front, give the keys back (told as `LEFT`, Esc not the words'). Given back, nothing answered. Esc the
+    /// words keep for themselves (a link being written left by it) leaves the keys taken.
     #[test]
     fn esc_or_another_window_in_front_gives_the_keys_back() {
         let window = crate::ui::window::Window::new().unwrap();
         let hwnd = window.hwnd;
         let heard = Rc::new(RefCell::new(Vec::new()));
         let hears = heard.clone();
+        let keeps_esc = Rc::new(std::cell::Cell::new(false));
+        let keeps = keeps_esc.clone();
         take(
             hwnd,
-            Rc::new(move |_, message, _, _| {
+            Rc::new(move |_, message, wparam, _| {
+                if message == WM_KEYDOWN && wparam.0 == usize::from(VK_ESCAPE.0) && !keeps.get() {
+                    return None;
+                }
                 hears.borrow_mut().push(message);
                 Some(Some(LRESULT(0)))
             }),
@@ -160,9 +167,14 @@ mod tests {
             left.push(message.wParam.0);
         }
         assert_eq!(left, vec![1, 0]);
+        keeps_esc.set(true);
+        send(WM_KEYDOWN, usize::from(VK_ESCAPE.0));
+        assert_eq!(*heard.borrow(), vec![WM_CHAR, WM_ACTIVATE, WM_KEYDOWN]);
+        let _ = took();
+        assert!(!unsafe { PeekMessageW(&mut message, Some(hwnd), LEFT, LEFT, PM_REMOVE) }.as_bool());
         give_back(hwnd);
         send(WM_CHAR, usize::from(b'b'));
-        assert_eq!(heard.borrow().len(), 2);
+        assert_eq!(heard.borrow().len(), 3);
         assert!(took().is_empty());
     }
 }

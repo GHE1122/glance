@@ -1992,8 +1992,8 @@ impl Widgets {
     /// none was asked for.
     pub fn take_writing_menu_asked(&mut self, lang: Lang, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, String, Vec<crate::ui::note::Choice>)> {
         let (hwnd, name, at) = self.writing_menu_asked.take()?;
-        let in_cell = self.list.iter().find(|w| w.window.hwnd == hwnd).and_then(|w| w.in_place.as_ref()).is_some_and(|in_place| in_place.writing.in_cell());
-        let (items, choices) = crate::ui::note::writing_menu(lang, in_cell);
+        let spot = self.list.iter().find(|w| w.window.hwnd == hwnd).and_then(|w| w.in_place.as_ref()).map(|in_place| in_place.writing.spot()).unwrap_or_default();
+        let (items, choices) = crate::ui::note::writing_menu(lang, spot);
         let open = crate::ui::menu::Menu::open_at(items, self.look_of(hwnd), at, false, over_the_panel)?;
         Some((open, name, choices))
     }
@@ -2752,7 +2752,9 @@ impl Widget {
                     in_place.menu_pressed = true;
                     return true;
                 }
-                if !in_place.writing.editor.holds(client) {
+                // (Pressed off its words, and off the link being written there: that left, the press the widget's.)
+                if !in_place.writing.holds(client) {
+                    in_place.writing.pressed_off();
                     return false;
                 }
                 in_place.selecting = true;
@@ -2775,10 +2777,17 @@ impl Widget {
                 hand_on(msg.message);
                 true
             }
-            // (The right button's on its words theirs: the writing menu.)
-            WM_MOUSEWHEEL | WM_RBUTTONDOWN | WM_RBUTTONUP if self.in_place.as_ref().is_some_and(|in_place| in_place.taking && in_place.writing.editor.holds(client)) => {
+            // (The right button's on its words theirs: the writing menu. Pressed elsewhere, a link being written there
+            // left.)
+            WM_MOUSEWHEEL | WM_RBUTTONDOWN | WM_RBUTTONUP if self.in_place.as_ref().is_some_and(|in_place| in_place.taking && in_place.writing.holds(client)) => {
                 hand_on(msg.message);
                 true
+            }
+            WM_RBUTTONDOWN => {
+                if let Some(in_place) = self.in_place.as_ref().filter(|in_place| in_place.taking) {
+                    in_place.writing.pressed_off();
+                }
+                false
             }
             _ => false,
         }
