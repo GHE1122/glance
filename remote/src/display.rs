@@ -273,7 +273,7 @@ pub fn sleep() -> Result<()> {
 
 /// A monitor put out with its signal kept: which (its place among them and
 /// its name), whether it was turned off by itself (else it is covered in
-/// black), and how bright it was, where it was made dim under the cover.
+/// black), and how bright it was, where it was told to be dim under the cover.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Darkened {
     pub index: usize,
@@ -300,6 +300,146 @@ static SINGLY: Mutex<Vec<(Darkened, Option<Covering>)>> = Mutex::new(Vec::new())
 /// often it is asked meanwhile.
 const TURNING_OFF: Duration = Duration::from_millis(2000);
 const ASKED_EVERY: Duration = Duration::from_millis(200);
+/// How long a monitor told to turn on is given to say it is on, and how
+/// often it is told again meanwhile: a monitor takes the write of a
+/// feature whether or not it then does it, and one in standby may let the
+/// first go by while it wakes.
+const TURNING_ON: Duration = Duration::from_millis(4000);
+const TOLD_AGAIN_EVERY: Duration = Duration::from_millis(1000);
+/// How long a monitor told how bright to be is given to say it is, and how
+/// often it is asked meanwhile.
+const BRIGHTENING: Duration = Duration::from_millis(1000);
+const BRIGHTNESS_ASKED_EVERY: Duration = Duration::from_millis(100);
+
+/// One feature of a monitor, told and asked, and the time it is given
+/// between: a monitor over DDC/CI, a laptop's own screen through Windows,
+/// or one made up to be tested with.
+trait Feature {
+    /// Tells it the feature is to be `value`: whether the telling was taken
+    /// (not that it is done).
+    fn tell(&mut self, value: u32) -> bool;
+    /// What it says the feature is: none, where it says nothing.
+    fn ask(&mut self) -> Option<u32>;
+    fn wait(&mut self, time: Duration);
+}
+
+/// A monitor's power, and the signal Windows sends it: what is done to turn
+/// it on where telling it is not enough.
+trait Powered: Feature {
+    /// Whether Windows has the screens off (no signal: a monitor told to turn on has nothing to show).
+    fn signal_off(&self) -> bool;
+    /// Windows told the display is wanted, as a touch of the mouse would.
+    fn want_signal(&mut self);
+}
+
+/// Tells a feature to be `wanted` and asks it every `every` till it says it
+/// is, telling it again every `again`, for at most `within`: done, or what
+/// it last said (none, if it said nothing).
+fn settle(feature: &mut impl Feature, wanted: u32, within: Duration, every: Duration, again: Duration) -> std::result::Result<(), Option<u32>> {
+    let (mut waited, mut told, mut said) = (Duration::ZERO, None, None);
+    while waited < within {
+        if told.is_none_or(|at| waited - at >= again) {
+            feature.tell(wanted);
+            told = Some(waited);
+        }
+        feature.wait(every);
+        waited += every;
+        said = feature.ask();
+        if said == Some(wanted) {
+            return Ok(());
+        }
+    }
+    Err(said)
+}
+
+/// Turns a monitor on: on once it says it is. One that does not, while
+/// Windows has the screens off, is told again once Windows is asked for
+/// them (the signal back, it may wake at that). Nothing more is asked: told
+/// which input to show, a monitor with several PCs plugged into it goes
+/// over to another (see `wake`).
+fn power_on(monitor: &mut impl Powered) -> std::result::Result<(), Option<u32>> {
+    let first = settle(monitor, POWER_ON, TURNING_ON, ASKED_EVERY, TOLD_AGAIN_EVERY);
+    if first.is_ok() || !monitor.signal_off() {
+        return first;
+    }
+    monitor.want_signal();
+    settle(monitor, POWER_ON, TURNING_ON, ASKED_EVERY, TOLD_AGAIN_EVERY)
+}
+
+/// A monitor's feature `code`, over DDC/CI.
+struct Vcp {
+    monitor: HANDLE,
+    code: u8,
+}
+
+impl Feature for Vcp {
+    fn tell(&mut self, value: u32) -> bool {
+        unsafe { SetVCPFeature(self.monitor, self.code, value) != 0 }
+    }
+    fn ask(&mut self) -> Option<u32> {
+        ask(self.monitor, self.code)
+    }
+    fn wait(&mut self, time: Duration) {
+        std::thread::sleep(time);
+    }
+}
+
+impl Powered for Vcp {
+    fn signal_off(&self) -> bool {
+        STATE.load(Ordering::Relaxed) == 0
+    }
+    fn want_signal(&mut self) {
+        want_display();
+    }
+}
+
+/// How bright the PC's own screen is (percent), through Windows.
+struct Panel;
+
+impl Feature for Panel {
+    fn tell(&mut self, value: u32) -> bool {
+        set_panel_brightness(value.min(100) as u8)
+    }
+    fn ask(&mut self) -> Option<u32> {
+        panel_brightness().map(u32::from)
+    }
+    fn wait(&mut self, time: Duration) {
+        std::thread::sleep(time);
+    }
+}
+
+/// Why a monitor is not as it was asked to be.
+const NO_SUCH: &str = "there is no such monitor";
+const NOT_ON: &str = "the monitor did not come on";
+
+/// Turns `monitor` (the one at `index`, called `name`) on, with what came
+/// of it noted: whether it says it is on.
+fn turn_on(index: usize, name: &str, monitor: HANDLE) -> bool {
+    let came = power_on(&mut Vcp { monitor, code: POWER_MODE });
+    crate::journal::note(format!(
+        "monitor {index} {name}: {}",
+        match came {
+            Ok(()) => "on again".to_string(),
+            Err(Some(mode)) => format!("told to turn on, it did not (it says its power mode is {mode})"),
+            Err(None) => "told to turn on, it did not (it says nothing of its power)".to_string(),
+        }
+    ));
+    came.is_ok()
+}
+
+/// Makes `monitor` as bright as `percent` of its most: whether it then says
+/// it is (none, where how bright it is cannot be set).
+fn brighten(monitor: HANDLE, built_in: bool, percent: u8) -> Option<bool> {
+    let percent = percent.min(100) as u32;
+    let done = if let Some((_, most)) = asked(monitor, BRIGHTNESS).filter(|(_, most)| *most > 0) {
+        settle(&mut Vcp { monitor, code: BRIGHTNESS }, (percent * most + 50) / 100, BRIGHTENING, BRIGHTNESS_ASKED_EVERY, BRIGHTENING)
+    } else if built_in {
+        settle(&mut Panel, percent, BRIGHTENING, BRIGHTNESS_ASKED_EVERY, BRIGHTENING)
+    } else {
+        return None;
+    };
+    Some(done.is_ok())
+}
 
 /// Whether this helper is keeping the screens dark with their signal kept.
 pub fn kept_dark() -> bool {
@@ -372,18 +512,14 @@ fn put_out(index: usize, name: String, built_in: bool, monitor: HANDLE) -> Darke
             off = ask(monitor, POWER_MODE) != Some(POWER_ON);
         }
     }
-    let mut was = None;
+    // Covered, it is told to be dim where how bright it was is known (so it can be put back): put back so whether
+    // or not it then says it is dim (it may have been made so all the same).
+    let (mut was, mut dimmed) = (None, false);
     if !off {
         was = brightness(monitor).or_else(|| built_in.then(panel_brightness).flatten());
-        let dimmed = match asked(monitor, BRIGHTNESS) {
-            Some(_) => unsafe { SetVCPFeature(monitor, BRIGHTNESS, 0) != 0 },
-            None => built_in && set_panel_brightness(0),
-        };
-        if !dimmed {
-            was = None;
-        }
+        dimmed = was.is_some() && brighten(monitor, built_in, 0) == Some(true);
     }
-    crate::journal::note(format!("monitor {index} {name}: {}", if off { "turned off by itself".to_string() } else { format!("covered in black{}", if was.is_some() { " and dimmed" } else { "" }) }));
+    crate::journal::note(format!("monitor {index} {name}: {}", if off { "turned off by itself".to_string() } else { format!("covered in black{}", if dimmed { " and dimmed" } else { "" }) }));
     Darkened { index, name, off, brightness: was }
 }
 
@@ -430,25 +566,42 @@ pub fn darken() {
 }
 
 /// Each of `monitors` as it was before it was put out (see `darken`): on
-/// again, as bright as it was. A monitor is known by its place and its
-/// name; one that has moved among the others since, by its name.
-pub fn restore(monitors: &[Darkened]) {
+/// again where it then says it is (see `power_on`), as bright as it was. A
+/// monitor is known by its place and its name, and one that has moved
+/// among the others since, by its name. Those turned off by themselves that did
+/// not come on are handed back, where they are now: dark still.
+pub fn restore(monitors: &[Darkened]) -> Vec<Darkened> {
     let mut there = Vec::new();
     each_monitor(|index, name, _, _, _| there.push((index, name)));
+    let mut dark = Vec::new();
     for one in monitors {
-        let Some((index, _)) = there.iter().find(|(index, name)| *index == one.index && *name == one.name).or_else(|| there.iter().find(|(_, name)| *name == one.name)) else {
+        let Some(&(index, _)) = there.iter().find(|(index, name)| *index == one.index && *name == one.name).or_else(|| there.iter().find(|(_, name)| *name == one.name)) else {
             crate::journal::note(format!("monitor {} {} is not there to be put on again", one.index, one.name));
             continue;
         };
-        if one.off && !tell(*index, POWER_MODE, POWER_ON) {
-            crate::journal::note(format!("monitor {index} {} did not take being turned on", one.name));
-        }
-        if let Some(percent) = one.brightness {
-            if !dim(*index, percent) {
-                crate::journal::note(format!("monitor {index} {} did not take its brightness back", one.name));
+        // (One covered in black is on once uncovered.)
+        let on = with_monitor(index, |_, _, built_in, monitor| {
+            let on = !one.off || turn_on(index, &one.name, monitor);
+            if let Some(percent) = one.brightness {
+                if brighten(monitor, built_in, percent) != Some(true) {
+                    crate::journal::note(format!("monitor {index} {} did not take its brightness back", one.name));
+                }
             }
+            on
+        });
+        if on == Some(false) {
+            dark.push(Darkened { index, ..one.clone() });
         }
     }
+    *KNOWN.lock().unwrap() = None;
+    dark
+}
+
+/// Monitors turned off by themselves that did not come on again (see
+/// `restore`): held as if put out one by one, said to be off, and turned on
+/// from there when asked again or at the next wake.
+pub fn hold(monitors: Vec<Darkened>) {
+    SINGLY.lock().unwrap().extend(monitors.into_iter().map(|one| (one, None)));
     *KNOWN.lock().unwrap() = None;
 }
 
@@ -456,8 +609,19 @@ pub fn restore(monitors: &[Darkened]) {
 fn lighten() -> bool {
     let Some(dark) = DARK.lock().unwrap().take() else { return false };
     uncover(dark.covering);
-    restore(&dark.monitors);
+    hold(restore(&dark.monitors));
     true
+}
+
+/// Windows told the display is wanted, and the mouse moved by nothing
+/// (which is input all the same): the screens on, as a touch of the mouse
+/// brings them.
+fn want_display() {
+    unsafe {
+        SetThreadExecutionState(ES_DISPLAY_REQUIRED);
+        let nudge = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: MOUSEEVENTF_MOVE, ..Default::default() } } };
+        SendInput(&[nudge], size_of::<INPUT>() as i32);
+    }
 }
 
 /// The screens on again, exactly as a touch of the mouse brings them:
@@ -466,7 +630,7 @@ fn lighten() -> bool {
 /// monitors: told besides to power on, and which input to show, a monitor
 /// with several PCs plugged into it went over to another. One this helper
 /// put out by itself (see `turn`), which no touch of the mouse wakes, is
-/// put on again.
+/// put on again (and held as off still, where it does not come on).
 pub fn wake() {
     *OUT.lock().unwrap() = None;
     say_out(false);
@@ -476,11 +640,7 @@ pub fn wake() {
     if listener != 0 && STATE.load(Ordering::Relaxed) != 0 {
         let _ = unsafe { PostMessageW(Some(HWND(listener as *mut _)), HEAR_TOUCHES, WPARAM(0), LPARAM(0)) };
     }
-    unsafe {
-        SetThreadExecutionState(ES_DISPLAY_REQUIRED);
-        let nudge = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: MOUSEEVENTF_MOVE, ..Default::default() } } };
-        SendInput(&[nudge], size_of::<INPUT>() as i32);
-    }
+    want_display();
     let singly = std::mem::take(&mut *SINGLY.lock().unwrap());
     let mut back = Vec::new();
     for (one, covering) in singly {
@@ -489,7 +649,7 @@ pub fn wake() {
         }
         back.push(one);
     }
-    restore(&back);
+    hold(restore(&back));
 }
 
 /// A monitor: what it calls itself, where it is on the desktop (left, top,
@@ -591,6 +751,18 @@ fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32, i32, i32), bool, 
     }
 }
 
+/// What `with` makes of the monitor at `index`, handed what `each_monitor`
+/// hands of it: none, where there is no such monitor.
+fn with_monitor<R>(index: usize, with: impl FnOnce(String, (i32, i32, i32, i32), bool, HANDLE) -> R) -> Option<R> {
+    let (mut with, mut made) = (Some(with), None);
+    each_monitor(|at, name, place, built_in, monitor| {
+        if let Some(with) = with.take_if(|_| at == index) {
+            made = Some(with(name, place, built_in, monitor));
+        }
+    });
+    made
+}
+
 /// A monitor's feature `code`: what it is now, and the most it can be.
 fn asked(monitor: HANDLE, code: u8) -> Option<(u32, u32)> {
     let (mut now, mut most) = (0u32, 0u32);
@@ -667,58 +839,206 @@ pub fn tell(index: usize, code: u8, value: u32) -> bool {
     told
 }
 
-/// Makes the monitor at `index` as bright as `percent` of its most:
-/// whether it took it.
-pub fn dim(index: usize, percent: u8) -> bool {
-    let mut told = false;
-    each_monitor(|at, _, _, built_in, monitor| {
-        if at == index {
-            if let Some((_, most)) = asked(monitor, BRIGHTNESS).filter(|(_, most)| *most > 0) {
-                told = unsafe { SetVCPFeature(monitor, BRIGHTNESS, (percent.min(100) as u32 * most + 50) / 100) } != 0;
-            } else if built_in {
-                told = set_panel_brightness(percent.min(100));
-            }
-        }
-    });
+/// Makes the monitor at `index` as bright as `percent` of its most: done
+/// once it says it is, else why not.
+pub fn dim(index: usize, percent: u8) -> std::result::Result<(), &'static str> {
+    let done = with_monitor(index, |_, _, built_in, monitor| brighten(monitor, built_in, percent));
     *KNOWN.lock().unwrap() = None;
-    told
+    match done {
+        None => Err(NO_SUCH),
+        Some(None) => Err("how bright the monitor is cannot be set"),
+        Some(Some(false)) => Err("the monitor did not become as bright as asked"),
+        Some(Some(true)) => Ok(()),
+    }
 }
 
 /// Puts the monitor at `index` out by itself, or on again: the others
 /// stay as they are, and Windows keeps its windows where they were (to
 /// Windows it is still there). Out, it is turned off where it then says
-/// it is, and covered in black (made as dim as it goes) where not. Whether
-/// there is such a monitor.
-pub fn turn(index: usize, on: bool) -> bool {
+/// it is, and covered in black (made as dim as it goes) where not. On, it
+/// is on once it says it is (one covered, once uncovered): done, else why not.
+/// One that does not come on is held as off still.
+pub fn turn(index: usize, on: bool) -> std::result::Result<(), &'static str> {
     let mut singly = SINGLY.lock().unwrap();
     let held = singly.iter().position(|(one, _)| one.index == index);
-    let mut there = false;
-    match (on, held) {
-        (false, Some(_)) => there = true,
-        (false, None) => {
-            let mut done = None;
-            each_monitor(|at, name, place, built_in, monitor| {
-                if at == index {
-                    done = Some((put_out(at, name, built_in, monitor), place));
-                }
-            });
-            if let Some((done, place)) = done {
+    let done = match (on, held) {
+        (false, Some(_)) => Ok(()),
+        (false, None) => match with_monitor(index, |name, place, built_in, monitor| (put_out(index, name, built_in, monitor), place)) {
+            Some((done, place)) => {
                 let cover = if done.off { None } else { covering(vec![place], false) };
                 singly.push((done, cover));
-                there = true;
+                Ok(())
             }
-        }
+            None => Err(NO_SUCH),
+        },
         (true, Some(held)) => {
             let (one, cover) = singly.remove(held);
             if let Some(cover) = cover {
                 uncover(cover);
             }
-            restore(&[one]);
-            there = true;
+            match restore(&[one]).pop() {
+                Some(dark) => {
+                    singly.push((dark, None));
+                    Err(NOT_ON)
+                }
+                None => Ok(()),
+            }
         }
-        // (Off by other means than this helper's: told to turn on.)
-        (true, None) => there = tell(index, POWER_MODE, POWER_ON),
-    }
+        // Off by other means than this helper's: told to turn on. One that says it is on, or says nothing of
+        // its power (on, as `monitors` has it), is told nothing.
+        (true, None) => match with_monitor(index, |name, _, _, monitor| matches!(ask(monitor, POWER_MODE), None | Some(POWER_ON)) || turn_on(index, &name, monitor)) {
+            Some(true) => Ok(()),
+            Some(false) => Err(NOT_ON),
+            None => Err(NO_SUCH),
+        },
+    };
     *KNOWN.lock().unwrap() = None;
-    there
+    done
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A monitor made up to be told and asked: what it is, what it does with
+    /// what it is told and when, and the time that has gone by.
+    struct Made {
+        now: Duration,
+        value: u32,
+        /// Tellings it takes and lets go by before it does one.
+        lets_go: usize,
+        /// How long after a telling it does it is so.
+        takes: Duration,
+        becoming: Option<(Duration, u32)>,
+        /// It says nothing till it is as it was last told.
+        silent_till_done: bool,
+        /// It does nothing it is told while Windows sends it no signal.
+        wants_signal: bool,
+        signal: bool,
+        told: Vec<Duration>,
+        signal_wanted: usize,
+    }
+
+    impl Made {
+        fn standing(value: u32) -> Self {
+            Made { now: Duration::ZERO, value, lets_go: 0, takes: Duration::ZERO, becoming: None, silent_till_done: false, wants_signal: false, signal: true, told: Vec::new(), signal_wanted: 0 }
+        }
+    }
+
+    impl Feature for Made {
+        fn tell(&mut self, value: u32) -> bool {
+            self.told.push(self.now);
+            if self.wants_signal && !self.signal {
+                return true;
+            }
+            if self.lets_go > 0 {
+                self.lets_go -= 1;
+                return true;
+            }
+            // (Told again while it is becoming so, it goes on as it was.)
+            if self.becoming.is_none_or(|(_, becoming)| becoming != value) {
+                self.becoming = Some((self.now + self.takes, value));
+            }
+            true
+        }
+        fn ask(&mut self) -> Option<u32> {
+            if let Some((_, value)) = self.becoming.filter(|(at, _)| self.now >= *at) {
+                self.value = value;
+                self.becoming = None;
+                self.silent_till_done = false;
+            }
+            (!self.silent_till_done).then_some(self.value)
+        }
+        fn wait(&mut self, time: Duration) {
+            self.now += time;
+        }
+    }
+
+    impl Powered for Made {
+        fn signal_off(&self) -> bool {
+            !self.signal
+        }
+        fn want_signal(&mut self) {
+            self.signal = true;
+            self.signal_wanted += 1;
+        }
+    }
+
+    #[test]
+    fn a_monitor_that_wakes_is_on() {
+        let mut monitor = Made { takes: Duration::from_millis(1500), ..Made::standing(POWER_OFF) };
+        assert_eq!(power_on(&mut monitor), Ok(()));
+        assert_eq!(monitor.value, POWER_ON);
+        assert!(monitor.now >= Duration::from_millis(1500) && monitor.now < TURNING_ON);
+        assert_eq!(monitor.signal_wanted, 0);
+    }
+
+    /// The report this was found by: told to turn on, the monitor took the telling and stayed in standby.
+    #[test]
+    fn a_monitor_that_takes_the_telling_and_stays_off_is_not_on() {
+        let mut monitor = Made { lets_go: usize::MAX, ..Made::standing(POWER_OFF) };
+        assert_eq!(power_on(&mut monitor), Err(Some(POWER_OFF)));
+        // Told again meanwhile, and given no more than its time.
+        assert_eq!(monitor.told.len(), (TURNING_ON.as_millis() / TOLD_AGAIN_EVERY.as_millis()) as usize);
+        assert!(monitor.now <= TURNING_ON);
+        // (Windows sends it a signal already: nothing more is done.)
+        assert_eq!(monitor.signal_wanted, 0);
+    }
+
+    #[test]
+    fn a_monitor_that_lets_the_first_telling_go_by_is_told_again() {
+        let mut monitor = Made { lets_go: 1, ..Made::standing(POWER_OFF) };
+        assert_eq!(power_on(&mut monitor), Ok(()));
+        assert_eq!(monitor.told, vec![Duration::ZERO, TOLD_AGAIN_EVERY]);
+    }
+
+    #[test]
+    fn a_monitor_silent_while_off_that_stays_so_is_not_on() {
+        let mut monitor = Made { lets_go: usize::MAX, silent_till_done: true, ..Made::standing(POWER_OFF) };
+        assert_eq!(power_on(&mut monitor), Err(None));
+    }
+
+    #[test]
+    fn a_monitor_silent_while_off_is_on_once_it_says_so() {
+        let mut monitor = Made { silent_till_done: true, takes: Duration::from_millis(2500), ..Made::standing(POWER_OFF) };
+        assert_eq!(power_on(&mut monitor), Ok(()));
+    }
+
+    #[test]
+    fn a_monitor_with_no_signal_is_on_once_windows_sends_one() {
+        let mut monitor = Made { wants_signal: true, signal: false, ..Made::standing(POWER_OFF) };
+        assert_eq!(power_on(&mut monitor), Ok(()));
+        assert_eq!(monitor.signal_wanted, 1);
+        assert!(monitor.now > TURNING_ON && monitor.now <= TURNING_ON * 2);
+    }
+
+    #[test]
+    fn a_monitor_with_a_signal_that_still_stays_off_is_not_on() {
+        let mut monitor = Made { lets_go: usize::MAX, signal: false, ..Made::standing(POWER_OFF) };
+        assert_eq!(power_on(&mut monitor), Err(Some(POWER_OFF)));
+        assert_eq!(monitor.signal_wanted, 1);
+        assert!(monitor.now <= TURNING_ON * 2);
+    }
+
+    #[test]
+    fn a_monitor_already_on_is_on() {
+        let mut monitor = Made::standing(POWER_ON);
+        assert_eq!(power_on(&mut monitor), Ok(()));
+        assert_eq!(monitor.told.len(), 1);
+    }
+
+    #[test]
+    fn brightness_is_taken_once_the_monitor_says_it() {
+        let mut monitor = Made { takes: Duration::from_millis(300), ..Made::standing(80) };
+        assert_eq!(settle(&mut monitor, 30, BRIGHTENING, BRIGHTNESS_ASKED_EVERY, BRIGHTENING), Ok(()));
+        assert_eq!(monitor.told.len(), 1);
+    }
+
+    /// A monitor whose brightness is held by a mode of its own takes the telling and stays as bright.
+    #[test]
+    fn brightness_a_monitor_keeps_is_not_taken() {
+        let mut monitor = Made { lets_go: usize::MAX, ..Made::standing(80) };
+        assert_eq!(settle(&mut monitor, 30, BRIGHTENING, BRIGHTNESS_ASKED_EVERY, BRIGHTENING), Err(Some(80)));
+        assert!(monitor.now <= BRIGHTENING);
+    }
 }
