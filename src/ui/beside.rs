@@ -2455,6 +2455,7 @@ mod pictures {
     #[test]
     #[ignore = "writes pictures to look at"]
     fn beside_picker() {
+        let _device = crate::ui::gfx::held().unwrap();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
@@ -2484,7 +2485,7 @@ otepad.exe"),
             use crate::station::recent::{Came, Key, Kind};
             let now = crate::station::now_ms();
             let came = |id: u128, name: &str, ago_min: u64| Came { key: Key { drive: 'D', file: id }, path: file(name), came_ms: now - ago_min * 60_000, bytes: 1000, kind: Kind::Document, downloaded: false, site: None };
-            crate::station::recent::pretend(vec![came(1, "Cargo.toml", 3), came(2, "README.md", 30), came(3, "docs/station-and-notes.md", 90), came(4, "website/apple-touch-icon.png", 600), came(5, "scripts/release.ps1", 2000)]);
+            crate::station::recent::pretend(vec![came(1, "Cargo.toml", 3), came(2, "README.md", 30), came(3, "README.zh-CN.md", 90), came(4, "icons/128x128@2x.png", 600), came(5, "scripts/release.ps1", 2000)]);
         }
         let gfx = gfx::current().unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
@@ -2555,6 +2556,7 @@ mod note_pictures {
     #[test]
     #[ignore = "writes pictures to look at"]
     fn note_page_and_stuck_note() {
+        let _device = crate::ui::gfx::held().unwrap();
         use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
@@ -2702,6 +2704,7 @@ mod tests {
     #[test]
     #[cfg(feature = "studio")]
     fn a_note_s_words_read_on_its_page() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::super::canvas::{Canvas, Color};
         use super::super::theme::{Skin, Theme};
         let luminance = |c: Color| {

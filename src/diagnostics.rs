@@ -234,7 +234,7 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let picture = std::mem::take(&mut crate::ui::picture::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/website/apple-touch-icon.png"), (84, 52)).expect("a picture to send").jpeg);
+        let picture = std::mem::take(&mut crate::ui::picture::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/128x128@2x.png"), (84, 52)).expect("a picture to send").jpeg);
         let id = super::send("Glance (a test of sending from this program; nothing is wrong)", &[picture]);
         println!("sent as {id:?}");
         assert!(id.is_some_and(|id| id.len() == 6));

@@ -80,7 +80,7 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let picture = super::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/website/apple-touch-icon.png"), (84, 52)).expect("read");
+        let picture = super::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/128x128@2x.png"), (84, 52)).expect("read");
         assert_eq!(picture.jpeg[..3], [0xFF, 0xD8, 0xFF]);
         assert!(picture.jpeg.len() <= super::BYTES_MOST);
         // (A square picture: as wide as its room, and as tall as it is wide.)
