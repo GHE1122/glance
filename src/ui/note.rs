@@ -228,6 +228,45 @@ struct Reads {
     shown: crate::notes::markdown::Shown,
     at: crate::notes::markdown::At,
     folder: std::path::PathBuf,
+    laid: Laid,
+}
+
+/// A note's tables drawn laid out where it is written at (see `notes::markdown::Shown::tables_drawn`), each laid out in
+/// its words' box (pixels: see `Gfx::table_laid`).
+type Laid = Vec<(crate::notes::table::Table, crate::notes::table::Laid)>;
+
+/// The face a note's tables' words are written in, as its words are (see `palette_for`, `paint_stuck`).
+const TABLE_FAMILY: Family = Family::YaHei;
+
+/// The top of the line the character at `at` (UTF-16 units) is on in `editor` (in the window), found by its line's
+/// break (the line's words may be put away, and nowhere drawn: its break is drawn). None where it is not drawn.
+fn line_top(editor: &Editor, at: usize) -> Option<i32> {
+    let units: Vec<u16> = editor.text().encode_utf16().collect();
+    let end = (at..units.len()).find(|&unit| units[unit] == u16::from(b'\n'))?;
+    editor.character(end).map(|drawn| drawn.top)
+}
+
+/// The words of the cell of a table drawn laid out in `editor` (`laid`) that `point` (in the window) is on: none off them.
+fn cell_at(editor: &Editor, laid: &Laid, point: POINT) -> Option<std::ops::Range<usize>> {
+    let left = editor.bounds().left;
+    laid.iter().find_map(|(table, laid)| {
+        let top = line_top(editor, table.span.start)?;
+        let (x, y) = ((point.x - left) as f32, (point.y - top) as f32);
+        if x < 0.0 || y < 0.0 || x >= laid.width() || y >= laid.height() {
+            return None;
+        }
+        // (The one whose room it is in, a line counted with the one after it: the last's, past the end.)
+        let nth = |lengths: &[f32], along: f32| {
+            let mut end = 0.0;
+            lengths.iter().position(|length| {
+                end += length;
+                along < end
+            })
+            .unwrap_or(lengths.len() - 1)
+        };
+        let (row, column) = (nth(&laid.rows, y), nth(&laid.columns, x));
+        table.rows.get(row)?.get(column).map(|cell| cell.words.clone())
+    })
 }
 
 /// What a note's words' box answers its window's messages with (see `Writing::answer`).
@@ -271,7 +310,7 @@ fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, sys
     match (key, held.ctrl, held.shift) {
         (VK_RETURN, false, false) => caret.and_then(|caret| edit::enter(text, caret)).map(Some),
         (VK_RETURN, true, false) => Some(edit::toggle_task(text, chosen.0)),
-        (VK_TAB, false, out) => edit::indent(text, chosen, out),
+        (VK_TAB, false, back) => crate::notes::table::tab(text, chosen, back).or_else(|| edit::indent(text, chosen, back)),
         (VK_BACK, false, false) => caret.and_then(|caret| edit::backspace(text, caret)).map(Some),
         (VK_INSERT, false, true) => Some(clipboard().map(|pasted| edit::paste(text, chosen, &pasted))),
         (_, false, _) => None,
@@ -382,6 +421,8 @@ pub struct Writing {
     /// `notes::markdown::Shown`), the same for its box's messages (see `Reads`).
     shown: crate::notes::markdown::Shown,
     at: crate::notes::markdown::At,
+    /// Its tables drawn laid out, as it was last dressed.
+    laid: Laid,
     reads: Rc<RefCell<Reads>>,
     /// What was chosen in it as it opened (the caret), and whether it has been written in or the caret moved since: till
     /// then it is written at nowhere, and it shows as the note did where it was pressed (its marks put away).
@@ -433,7 +474,8 @@ impl Writing {
             said: None,
             shown: Default::default(),
             at: None,
-            reads: Rc::new(RefCell::new(Reads { shown: Default::default(), at: None, folder: folder.path.clone() })),
+            laid: Vec::new(),
+            reads: Rc::new(RefCell::new(Reads { shown: Default::default(), at: None, folder: folder.path.clone(), laid: Vec::new() })),
             opened_at,
             touched: false,
             keyed: Rc::new(Cell::new(false)),
@@ -455,12 +497,23 @@ impl Writing {
         self.dress_as(shown, self.at_now(), &text);
     }
 
-    /// Its words, `text`, dressed as `shown` reads them, written at `at`.
+    /// Its words, `text`, dressed as `shown` reads them, written at `at`: its tables not written at laid out in its words'
+    /// box (as a note shown lays them out, see `Frame::markdown`), their lines as tall as they take.
     fn dress_as(&mut self, shown: crate::notes::markdown::Shown, at: crate::notes::markdown::At, text: &str) {
         let (hidden, rooms) = shown.put_away(at);
-        self.editor.dress(&crate::notes::markdown::looks(text), &hidden, &rooms, &self.palette);
+        // (Its words whole pixels high, as a note shown makes them, at its window's scale.)
+        let (pixels, per) = (self.pixels().round(), self.pixels() / WORDS);
+        let bounds = self.editor.bounds();
+        // (The device asked for only where there is a table to lay out: made on a thread, it is that thread's to let go.)
+        let tables: Vec<_> = shown.tables_drawn(at).collect();
+        self.laid = match (!tables.is_empty()).then(super::gfx::current) {
+            Some(Ok(gfx)) => tables.into_iter().map(|table| (table.clone(), gfx.table_laid(table, TABLE_FAMILY, pixels, per, (bounds.right - bounds.left) as f32))).collect(),
+            _ => Vec::new(),
+        };
+        let drawn: Vec<_> = self.laid.iter().map(|(table, laid)| (table.span.clone(), laid.height())).collect();
+        self.editor.dress(&crate::notes::markdown::looks(text), &hidden, &rooms, &drawn, &self.palette);
         if let Ok(mut reads) = self.reads.try_borrow_mut() {
-            *reads = Reads { shown: shown.clone(), at, folder: self.folder.clone() };
+            *reads = Reads { shown: shown.clone(), at, folder: self.folder.clone(), laid: self.laid.clone() };
         }
         self.shown = shown;
         self.at = at;
@@ -662,6 +715,14 @@ impl Writing {
                 WM_LBUTTONUP => pressing.set(false),
                 WM_MOUSEMOVE => pressing.set(pressing.get() && wparam.0 & 0x0001 != 0),
                 _ => {}
+            }
+            // A table drawn laid out pressed on a cell: the caret at the end of its words (the table shown as written).
+            if message == WM_LBUTTONDOWN && !editor.composing() {
+                let cell = reads.try_borrow().ok().and_then(|reads| cell_at(&editor, &reads.laid, point));
+                if let Some(words) = cell {
+                    editor.select((words.end as i32, words.end as i32));
+                    return Some(Some(LRESULT(0)));
+                }
             }
             depth.set(depth.get() + 1);
             let ticked = (message == WM_LBUTTONDOWN && !editor.composing())
@@ -871,6 +932,16 @@ impl Writing {
         let (left, top) = in_window(bounds.left as f32, bounds.top as f32);
         let (right, bottom) = in_window(bounds.right as f32, bounds.bottom as f32);
         frame.clip(left, top, right - left, bottom - top);
+        for (table, laid) in &self.laid {
+            let Some(line) = line_top(&self.editor, table.span.start) else { continue };
+            let (x, y) = in_window(bounds.left as f32, line as f32);
+            frame.table(table, laid, TABLE_FAMILY, pixels.round(), inks, x, y);
+        }
+        for rule in self.shown.rules_drawn(self.at) {
+            let Some(line) = self.editor.character(rule.end) else { continue };
+            let (x, y) = in_window(bounds.left as f32, line.top as f32);
+            frame.rule(inks, x, y, (bounds.right - bounds.left) as f32 / scale, (line.bottom - line.top) as f32);
+        }
         for boxed in self.shown.boxes(self.at) {
             let (Some(room), Some(baseline)) = (self.editor.character(boxed.room), self.editor.baseline(boxed.room + 1)) else { continue };
             let (bx, by, side) = box_in(room.left, baseline, pixels);
@@ -902,28 +973,19 @@ impl Writing {
 mod pictures {
     use super::*;
 
-    /// A note written, and as it is drawn not written in (stuck on the desktop), in each skin: each line's words
-    /// beginning where they do on the other (written in where it is, its words do not move along their lines), its marks
-    /// put away (a heading's `#`, emphasis's, code's, a link's), a to-do a box, and once its to-do's line is written on,
-    /// that line as written. (Down the page, the text services set lines a little further apart than DirectWrite, as
-    /// they always have: within a few pixels after a few lines.) (`cargo test --features studio --lib -- --ignored
-    /// written_and_not` writes `target/beside/note-<skin>-<face|page|written>.png`, the note in a folder of the test's own.)
-    /// A note's words drawn not written in (stuck on the desktop) as they are drawn written in, pixel for pixel, at each
-    /// of the screen's usual scales: as the text services draw them (else, written in, they came out sharper).
-    #[test]
-    #[ignore = "makes a window of this session's"]
-    fn its_words_are_drawn_alike_written_in_or_not() {
+    /// How many pixels of a note's words' room, written `text`, differ drawn written in and not (stuck on the desktop), at
+    /// each of the screen's usual scales. Each drawing is written to `target/beside/alike-<name>-<scale>-<page|face>.png`.
+    fn drawn_apart(text: &str, name: &str) -> Vec<(f32, usize)> {
         use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
         let gfx = super::super::gfx::current().unwrap();
-        let folder = std::env::temp_dir().join(format!("glance-note-alike-{}", std::process::id()));
+        let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let folder = std::env::temp_dir().join(format!("glance-note-alike-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
-        let text = "天下
-你是我的我是你的谁哦
-The quick brown fox, 1% low";
         std::fs::write(folder.join("a.md"), text).unwrap();
         let (w, h) = super::super::view::STUCK_NOTE;
         let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, (w * 2.0) as i32, (h * 2.0) as i32, None, None, None, None) }.unwrap();
@@ -934,6 +996,8 @@ The quick brown fox, 1% low";
             let writing = Writing::open(hwnd, words_box(0, 0, size.0 as i32, size.1 as i32, scale), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("a.md".into()), &theme, WORDS * scale).unwrap();
             let written = gfx.draw_offscreen(size, scale, |frame| writing.paint(frame, &theme, Lang::Zh, (0.0, 0.0, w, h), (0.0, 0.0), scale, false)).unwrap();
             let not = gfx.draw_offscreen(size, scale, |frame| paint_stuck(frame, &theme, Lang::Zh, text, writing.colour, "x", "a.md", (0.0, 0.0, w, h))).unwrap();
+            crate::studio::save_png(&out.join(format!("alike-{name}-{scale}-page.png")), size.0, size.1, &written).unwrap();
+            crate::studio::save_png(&out.join(format!("alike-{name}-{scale}-face.png")), size.0, size.1, &not).unwrap();
             // Over its words' room: how many of its pixels differ.
             let (left, top, wide, tall) = words_in(w, h);
             let differ = ((top * scale) as u32..((top + tall) * scale) as u32)
@@ -949,9 +1013,35 @@ The quick brown fox, 1% low";
         // (Its device let go of before the thread ends: else it hung there.)
         drop(gfx);
         super::super::gfx::let_go();
+        apart
+    }
+
+    /// A note's words drawn not written in (stuck on the desktop) as they are drawn written in, pixel for pixel, at each
+    /// of the screen's usual scales: as the text services draw them (else, written in, they came out sharper).
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn its_words_are_drawn_alike_written_in_or_not() {
+        let apart = drawn_apart("天下\n你是我的我是你的谁哦\nThe quick brown fox, 1% low", "words");
         assert!(apart.iter().all(|(_, differ)| *differ == 0), "pixels apart at each scale: {apart:?}");
     }
 
+    /// A note's tables and rules drawn not written in as they are drawn written in, pixel for pixel, at each of the
+    /// screen's usual scales: a table laid out in the room its lines leave, the words under it where they are, a rule
+    /// through its line's middle. A table in a quote is left as written.
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn tables_and_rules_are_drawn_alike_written_in_or_not() {
+        let text = "上面一行\n\n| 名称 | 数量 | 说明 |\n| :-- | :-: | --: |\n| 苹果 | 3 | 红的，很甜，放在厨房的篮子里面 |\n| pear | 12 |  |\n\n---\n下面一行\n> | 引 | 用 |\n> | - | - |";
+        let apart = drawn_apart(text, "table");
+        assert!(apart.iter().all(|(_, differ)| *differ == 0), "pixels apart at each scale: {apart:?}");
+    }
+
+    /// A note written, and as it is drawn not written in (stuck on the desktop), in each skin: each line's words
+    /// beginning where they do on the other (written in where it is, its words do not move along their lines), its marks
+    /// put away (a heading's `#`, emphasis's, code's, a link's), a to-do a box, and once its to-do's line is written on,
+    /// that line as written. (Down the page, the text services set lines a little further apart than DirectWrite, as
+    /// they always have: within a few pixels after a few lines.) (`cargo test --features studio --lib -- --ignored
+    /// written_and_not` writes `target/beside/note-<skin>-<face|page|written>.png`, the note in a folder of the test's own.)
     #[test]
     #[ignore = "writes pictures to look at"]
     fn written_and_not() {
@@ -1110,6 +1200,11 @@ mod tests {
         assert_eq!(made("- a\n- b", (7, 7), VK_TAB, none), Some(Some("  ".into())));
         assert_eq!(made("- a", (3, 3), VK_TAB, none), Some(None));
         assert_eq!(made("words", (5, 5), VK_TAB, none), None);
+        // In a table, Tab and Shift+Tab go from cell to cell (choosing its words, nothing written), past the last a row more.
+        let chosen = |text: &str, at: usize, held: Held| pressed(text, (at, at), VK_TAB, held, false, || None).flatten().map(|edit| (edit.with, edit.chosen));
+        assert_eq!(chosen("| a | b |\n| - | - |", 2, none), Some((String::new(), (6, 7))));
+        assert_eq!(chosen("| a | b |\n| - | - |", 6, shift), Some((String::new(), (2, 3))));
+        assert_eq!(chosen("| a | b |\n| - | - |\n| c | d |", 26, none), Some(("\n|  |  |".into(), (32, 32))));
         assert_eq!(made("- a", (2, 2), VK_BACK, none), Some(Some(String::new())));
         assert_eq!(made("- a", (3, 3), VK_BACK, none), None);
         assert_eq!(made("a\nb", (2, 2), VK_UP, alt), Some(Some("b\na".into())));

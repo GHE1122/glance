@@ -502,6 +502,45 @@ impl Gfx {
         metrics.height
     }
 
+    /// A note's table's cell's words laid out (see `Frame::table`): in `family`, `pixels` high (whole) at `per` pixels a
+    /// DIP, bold or not, on lines `wide` pixels across (none: on one line), set in them as `align` says. Laid out as a
+    /// note's lines are (see `Frame::markdown`), GDI's way, as the text services lay out theirs.
+    #[allow(clippy::too_many_arguments)]
+    fn cell(&self, words: &str, family: Family, pixels: f32, per: f32, bold: bool, wide: Option<f32>, align: crate::notes::table::Align) -> Result<IDWriteTextLayout> {
+        use crate::notes::table::Align;
+        use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_CENTER;
+        let factory: IDWriteFactory = self.write.cast()?;
+        let (face, collection) = self.face(family);
+        let weight = if bold { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT(400) };
+        let format = unsafe { factory.CreateTextFormat(face, collection, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, pixels / per, w!("zh-cn"))? };
+        let wide_units: Vec<u16> = words.encode_utf16().collect();
+        // (On one line: as wide as words go.)
+        let across = wide.map_or(1.0e6, |wide| wide.max(0.0) / per);
+        let layout = unsafe { factory.CreateGdiCompatibleTextLayout(&wide_units, &format, across, f32::MAX, per, None, false)? };
+        unsafe {
+            layout.SetWordWrapping(if wide.is_some() { DWRITE_WORD_WRAPPING_WRAP } else { DWRITE_WORD_WRAPPING_NO_WRAP })?;
+            layout.SetTextAlignment(match align {
+                Align::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
+                Align::Centre => DWRITE_TEXT_ALIGNMENT_CENTER,
+                Align::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
+            })?;
+        }
+        Ok(layout)
+    }
+
+    /// A note's `table` laid out (see `notes::table::lay`), its words in `family` `pixels` high (whole) at `per` pixels a
+    /// DIP, in `room` pixels across: in pixels. (Its words not to be laid out, none of them takes room.)
+    pub fn table_laid(&self, table: &crate::notes::table::Table, family: Family, pixels: f32, per: f32, room: f32) -> crate::notes::table::Laid {
+        let measure = |words: &str, bold: bool, wide: Option<f32>| {
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            match self.cell(words, family, pixels, per, bold, wide, crate::notes::table::Align::Left).and_then(|layout| unsafe { layout.GetMetrics(&mut metrics) }) {
+                Ok(()) => (metrics.width * per, metrics.height * per),
+                Err(_) => (0.0, 0.0),
+            }
+        };
+        crate::notes::table::lay(table, pixels, room, measure)
+    }
+
     fn laid_out(&self, text: &str, font: Font, width: f32, align: Align, wrap: bool) -> IDWriteTextLayout {
         let key = (text.to_string(), font.key(), width.max(0.0).to_bits(), align == Align::End, wrap);
         if let Some((layout, used)) = self.layouts.borrow_mut().get_mut(&key) {
@@ -1704,11 +1743,22 @@ impl<'a> Frame<'a> {
             let nothing: IDWriteInlineObject = Room { width: 0.0 }.into();
             let room: IDWriteInlineObject = Room { width: BOX_ROOM * size }.into();
             let (left, top) = self.on_pixel(x, y);
+            // Its tables laid out in its room (in pixels), their lines as tall as they take, and its rules.
+            let pixels = size * per;
+            let tables: Vec<_> = shown.tables_drawn(None).map(|table| (table, self.gfx.table_laid(table, font.family, pixels, per, (width * per).floor()))).collect();
+            let drawn: Vec<_> = tables.iter().map(|(table, laid)| (table.span.clone(), laid.height())).collect();
+            let rules: Vec<_> = shown.rules_drawn(None).collect();
             // Each line laid out on its own, as tall as it is set, under the one before.
             let mut down = 0.0;
-            for (line, tall) in line_heights(text, size * per) {
+            for (line, tall) in line_heights(text, pixels, &drawn) {
                 if down >= height {
                     break;
+                }
+                if let Some((table, laid)) = tables.iter().find(|(table, _)| table.span.start == line.start) {
+                    self.table(table, laid, font.family, pixels, inks, left, top + down);
+                }
+                if rules.iter().any(|rule| rule.start == line.start) {
+                    self.rule(inks, left, top + down, width, tall);
                 }
                 // (Its words, without its line break: a `\r` before it too, as a file written on Windows has.)
                 let breaks = [u16::from(b'\n'), u16::from(b'\r')];
@@ -1792,6 +1842,55 @@ impl<'a> Frame<'a> {
         }
     }
 
+    /// Draws a note's `table` as `laid` out (see `Gfx::table_laid`), from (`x`, `y`) (DIPs, put on a whole pixel), its
+    /// words in `family` `pixels` high (whole), in its `inks`: its lines a pixel wide (`rule_ink`), its head's row tinted
+    /// and its words bold, each cell's words set in it as its column says, in the middle of its row's height. The same
+    /// for a note written in and one shown (see `Writing::paint`, `markdown`): pixel for pixel alike.
+    #[allow(clippy::too_many_arguments)]
+    pub fn table(&self, table: &crate::notes::table::Table, laid: &crate::notes::table::Laid, family: Family, pixels: f32, inks: Inks, x: f32, y: f32) {
+        use crate::notes::table::PAD_SIDE;
+        let per = self.axes().map_or(1.0, |(t, device)| t.M11 * device);
+        let (left, top) = self.on_pixel(x, y);
+        let (width, height) = (laid.width(), laid.height());
+        let at = |lengths: &[f32], nth: usize| lengths[..nth].iter().sum::<f32>();
+        let line = rule_ink(inks);
+        if let Some(head) = laid.rows.first() {
+            self.fill(Color { a: HEAD_TINT, ..inks.faint }, left, top, width / per, (head + 1.0) / per);
+        }
+        for column in 0..=laid.columns.len() {
+            self.fill(line, left + at(&laid.columns, column) / per, top, 1.0 / per, height / per);
+        }
+        for row in 0..=laid.rows.len() {
+            self.fill(line, left, top + at(&laid.rows, row) / per, width / per, 1.0 / per);
+        }
+        let side = (PAD_SIDE * pixels).round();
+        let drawn = (|| -> Result<()> {
+            for (row, cells) in table.rows.iter().enumerate() {
+                for ((column, cell), wide) in cells.iter().enumerate().zip(&laid.columns) {
+                    let layout = self.gfx.cell(&cell.reads, family, pixels, per, row == 0, Some(wide - 1.0 - 2.0 * side), table.aligns[column])?;
+                    let mut metrics = DWRITE_TEXT_METRICS::default();
+                    unsafe { layout.GetMetrics(&mut metrics)? };
+                    // (In the middle of its row, under the row's line, on a whole pixel.)
+                    let down = at(&laid.rows, row) + 1.0 + ((laid.rows[row] - 1.0 - metrics.height * per) / 2.0).round();
+                    let along = at(&laid.columns, column) + 1.0 + side;
+                    unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: left + along / per, Y: top + down / per }, &layout, self.brush(inks.words), self.text_snap()) };
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = drawn {
+            self.fail(error);
+        }
+    }
+
+    /// Draws a note's rule (`---`) across `width` from `x` (DIPs), on its line from `y` `tall` pixels high: a line a
+    /// pixel wide through its middle, in its `inks` (see `rule_ink`).
+    pub fn rule(&self, inks: Inks, x: f32, y: f32, width: f32, tall: f32) {
+        let per = self.axes().map_or(1.0, |(t, device)| t.M11 * device);
+        let (left, top) = self.on_pixel(x, y);
+        self.fill(rule_ink(inks), left, top + (tall / 2.0).floor() / per, width, 1.0 / per);
+    }
+
     /// Draws `text` with its first baseline-box at `(x, y)`, in a box `width` wide.
     /// As `text`, its glyphs where they fall, not put on whole pixels: words moving by less than a pixel a frame
     /// (put on whole pixels, they stood still, then jumped).
@@ -1851,6 +1950,14 @@ impl IDWriteInlineObject_Impl for Room_Impl {
         Ok(())
     }
 }
+
+/// The ink a note's tables' lines and its rules are drawn in, of its `inks`: its faint, fainter.
+fn rule_ink(inks: Inks) -> Color {
+    Color { a: 0.5, ..inks.faint }
+}
+
+/// How strongly a note's table's head's row is tinted in its faint ink (see `Frame::table`).
+const HEAD_TINT: f32 = 0.08;
 
 /// How much the bitmaps made from their keys alone may hold (bytes; see `Gfx::made`): a glass panel's on a 4K screen
 /// at 150 %, about 13 MB.

@@ -258,9 +258,10 @@ impl Editor {
 
     /// Its words dressed as `looks` says (see `notes::markdown`), in `palette`'s colours and faces, `hidden` hidden
     /// (Markdown's marks put away) and each of `rooms` (a space) made as wide as a to-do's box's room
-    /// (`markdown::BOX_ROOM`): what they are left as it is, the dressing kept out of what undo takes back (and drawn
-    /// once, done).
-    pub fn dress(&self, looks: &[(std::ops::Range<usize>, crate::notes::markdown::Look)], hidden: &[std::ops::Range<usize>], rooms: &[usize], palette: &Palette) {
+    /// (`markdown::BOX_ROOM`), the lines of each table drawn laid out over them (`drawn`: its span and how tall it is, in
+    /// pixels) as tall as it is between them: what they are left as it is, the dressing kept out of what undo takes back
+    /// (and drawn once, done).
+    pub fn dress(&self, looks: &[(std::ops::Range<usize>, crate::notes::markdown::Look)], hidden: &[std::ops::Range<usize>], rooms: &[usize], drawn: &[(std::ops::Range<usize>, f32)], palette: &Palette) {
         use crate::notes::markdown::Look;
         let Ok(document) = self.services.cast::<ITextDocument>() else { return };
         let face = BSTR::from(palette.face.as_str());
@@ -303,7 +304,7 @@ impl Editor {
             // Each line set exactly as tall as `markdown::line_heights` says (as a note's face sets it). (tomLineSpaceExactly;
             // points.)
             const EXACTLY: i32 = 4;
-            for (range, height) in crate::notes::markdown::line_heights(&self.text(), pixels.round()) {
+            for (range, height) in crate::notes::markdown::line_heights(&self.text(), pixels.round(), drawn) {
                 if let Ok(para) = document.Range(range.start as i32, range.end as i32).and_then(|range| range.GetPara()) {
                     let _ = para.SetLineSpacing(EXACTLY, height * 0.75);
                 }
@@ -808,7 +809,7 @@ mod tests {
             let editor = Editor::new(hwnd, RECT { left: 0, top: 0, right: 400, bottom: 300 }, "Microsoft YaHei UI", 20.0, COLORREF(0)).expect("text services");
             let palette = Palette { text: COLORREF(0x202020), faint: COLORREF(0x909090), accent: COLORREF(0xD07000), points: 15.0, face: "Microsoft YaHei UI".into(), code_face: "Cascadia Mono".into() };
             editor.set_text("# Title\nbody");
-            editor.dress(&looks(&editor.text()), &[], &[], &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &[], &palette);
             let document: ITextDocument = editor.services.cast().unwrap();
             let font_at = |at: i32| document.Range(at, at + 1).unwrap().GetFont().unwrap();
             // "T" (2) bold and larger; "b" of body (8) neither.
@@ -824,7 +825,7 @@ mod tests {
                 let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(usize::from(c)), LPARAM(0));
             }
             assert_eq!(editor.text().trim_end(), "# Title\nbody!");
-            editor.dress(&looks(&editor.text()), &[], &[], &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &[], &palette);
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
             assert_eq!(editor.text().trim_end(), "# Title\nbody");
             assert_eq!(font_at(2).GetBold().unwrap(), tomTrue.0);
@@ -844,12 +845,12 @@ mod tests {
             for c in "你好世界".encode_utf16() {
                 let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(usize::from(c)), LPARAM(0));
             }
-            editor.dress(&looks(&editor.text()), &[], &[], &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &[], &palette);
             let back = WPARAM(usize::from(windows::Win32::UI::Input::KeyboardAndMouse::VK_BACK.0));
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN, back, LPARAM(0));
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(8), LPARAM(0));
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_KEYUP, back, LPARAM(0));
-            editor.dress(&looks(&editor.text()), &[], &[], &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &[], &palette);
             assert_eq!(editor.text().trim_end(), "你好世");
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
             assert_eq!(editor.text().trim_end(), "你好世界");
@@ -898,7 +899,7 @@ mod tests {
                 let mut hidden = shown.hidden(None);
                 hidden.extend(shown.boxes(None).map(|boxed| boxed.marks.clone()));
                 let rooms: Vec<usize> = shown.boxes(None).map(|boxed| boxed.room).collect();
-                editor.dress(&looks(&text), &hidden, &rooms, &palette);
+                editor.dress(&looks(&text), &hidden, &rooms, &[], &palette);
             };
             // "买" at 6, "粗" at 10 (after "**").
             editor.set_text("- [ ] 买牛奶\n**粗**体");

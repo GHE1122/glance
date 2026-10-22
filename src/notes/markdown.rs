@@ -15,9 +15,9 @@
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 
-/// What of Markdown a note is read for, beyond CommonMark: to-dos and words struck through. One reading, for what is
+/// What of Markdown a note is read for, beyond CommonMark: to-dos, words struck through and tables. One reading, for what is
 /// shown and for what the keys do to a note's words (see `edit`).
-pub const READ: Options = Options::ENABLE_TASKLISTS.union(Options::ENABLE_STRIKETHROUGH);
+pub const READ: Options = Options::ENABLE_TASKLISTS.union(Options::ENABLE_STRIKETHROUGH).union(Options::ENABLE_TABLES);
 
 /// How a stretch of words looks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -201,6 +201,10 @@ pub struct Shown {
     pub marks: Vec<(Range<usize>, Range<usize>)>,
     pub boxes: Vec<Boxed>,
     pub links: Vec<Linked>,
+    /// Its tables, put away whole (each line's words among its marks, with the table's span) and drawn laid out in
+    /// their room (see `table`), and its rules, put away and drawn as a line across (each with its line's words).
+    pub tables: Vec<super::table::Table>,
+    pub rules: Vec<Range<usize>>,
 }
 
 /// A to-do drawn as a box to tick: its list's mark and its box (`- [ ]`), put away, and the space after them, the room
@@ -279,6 +283,8 @@ impl Shown {
         }
         let mut open: Vec<Open> = Vec::new();
         let mut item: Option<usize> = None;
+        // (Where each table drawn laid out begins.)
+        let mut drawn = Vec::new();
         let hold = |open: &mut Vec<Open>, range: &Range<usize>| {
             if let Some(parent) = open.last_mut() {
                 let held = parent.held.get_or_insert(range.clone());
@@ -292,6 +298,13 @@ impl Shown {
                     hold(&mut open, &range);
                     if matches!(tag, Tag::Item) {
                         item = Some(range.start);
+                    }
+                    // A table on lines of its own put away, to be drawn laid out (one in a quote or a list's item is
+                    // left as written).
+                    if let (Tag::Table(_), Some(start)) = (&tag, super::table::on_its_own(text, range.start)) {
+                        let all = start..range.end;
+                        hide(&mut shown, all.clone(), &all);
+                        drawn.push(span(&all).start);
                     }
                     let hides = match &tag {
                         // (A heading as `#` makes it: one underlined is left as written.)
@@ -328,6 +341,14 @@ impl Shown {
                         hide(&mut shown, range.end - ticks..range.end, &range);
                     }
                 }
+                Event::Rule => {
+                    hold(&mut open, &range);
+                    if let Some(start) = super::table::on_its_own(text, range.start) {
+                        let all = start..range.end;
+                        hide(&mut shown, all.clone(), &all);
+                        shown.rules.push(span(&all));
+                    }
+                }
                 Event::TaskListMarker(done) => {
                     hold(&mut open, &range);
                     // (Its box drawn in the space after it: none, it is left as written.)
@@ -343,7 +364,18 @@ impl Shown {
         for (words, to) in addresses(text) {
             shown.links.push(Linked { words: units.range(&words), to, span: units.range(&words) });
         }
+        shown.tables = super::table::tables(text).into_iter().filter(|table| drawn.contains(&table.span.start)).collect();
         shown
+    }
+
+    /// Its tables drawn laid out where it is written at `at`: those it does not touch (see `At`).
+    pub fn tables_drawn(&self, at: At) -> impl Iterator<Item = &super::table::Table> + '_ {
+        self.tables.iter().filter(move |table| !touches(&table.span, at, true))
+    }
+
+    /// Its rules drawn as a line across where it is written at `at`: those it does not touch.
+    pub fn rules_drawn(&self, at: At) -> impl Iterator<Item = &Range<usize>> + '_ {
+        self.rules.iter().filter(move |rule| !touches(rule, at, true))
     }
 
     /// Its marks hidden where what they mark is not written at (`at`).
@@ -377,8 +409,9 @@ pub const HEADING_LEADING: f32 = 1.4;
 
 /// Each of `text`'s lines (UTF-16 units, its line break with it) and how tall it is set (whole pixels), its words
 /// `words` pixels high: the same however it is drawn (the text services as it is written, DirectWrite on its face),
-/// so its lines are where they were as one gives way to the other.
-pub fn line_heights(text: &str, words: f32) -> Vec<(Range<usize>, f32)> {
+/// so its lines are where they were as one gives way to the other. The lines of each table drawn laid out (`drawn`: its
+/// span, and how tall it is laid out, whole) share its height between them, as its room.
+pub fn line_heights(text: &str, words: f32, drawn: &[(Range<usize>, f32)]) -> Vec<(Range<usize>, f32)> {
     let headings: Vec<(usize, f32)> = looks(text)
         .into_iter()
         .filter_map(|(range, look)| match look {
@@ -398,6 +431,14 @@ pub fn line_heights(text: &str, words: f32) -> Vec<(Range<usize>, f32)> {
         let height = (words * LEADING).max(words * size * HEADING_LEADING).round();
         lines.push((start..end, height));
         start = end;
+    }
+    // (A table's lines, the `nth` of `count`, each as far down its room as its share of it, in whole pixels.)
+    for (span, tall) in drawn {
+        let within: Vec<usize> = (0..lines.len()).filter(|&line| span.start <= lines[line].0.start && lines[line].0.start <= span.end).collect();
+        let count = within.len() as f32;
+        for (nth, line) in within.into_iter().enumerate() {
+            lines[line].1 = (tall * (nth + 1) as f32 / count).round() - (tall * nth as f32 / count).round();
+        }
     }
     lines
 }
@@ -459,12 +500,12 @@ pub fn tasks(text: &str) -> Vec<(Range<usize>, bool)> {
 }
 
 /// Where each byte of a text is in UTF-16 units.
-struct Units {
+pub(crate) struct Units {
     at: Vec<usize>,
 }
 
 impl Units {
-    fn of(text: &str) -> Units {
+    pub(crate) fn of(text: &str) -> Units {
         let mut at = vec![0; text.len() + 1];
         let mut units = 0;
         for (byte, c) in text.char_indices() {
@@ -477,7 +518,7 @@ impl Units {
         Units { at }
     }
 
-    fn range(&self, bytes: &Range<usize>) -> Range<usize> {
+    pub(crate) fn range(&self, bytes: &Range<usize>) -> Range<usize> {
         self.at[bytes.start.min(self.at.len() - 1)]..self.at[bytes.end.min(self.at.len() - 1)]
     }
 }
@@ -514,9 +555,38 @@ mod tests {
     /// empty line after a last line break too; in whole pixels.
     #[test]
     fn sets_each_line_as_tall_as_its_words_ask() {
-        let lines = line_heights("# 标题\n正文\n#### 小\n", 20.0);
+        let lines = line_heights("# 标题\n正文\n#### 小\n", 20.0, &[]);
         assert_eq!(lines, vec![(0..5, (20.0 * 1.6 * HEADING_LEADING).round()), (5..8, 32.0), (8..15, 32.0), (15..15, 32.0)]);
-        assert_eq!(line_heights("", 15.0), vec![(0..0, 24.0)]);
+        assert_eq!(line_heights("", 15.0, &[]), vec![(0..0, 24.0)]);
+        // A table's three lines share the 100 pixels it is laid out in, in whole pixels, the lines round it as they were.
+        let lines = line_heights("a\n| x |\n| - |\n| y |\nb", 20.0, &[(2..19, 100.0)]);
+        assert_eq!(lines.iter().map(|(_, tall)| *tall).collect::<Vec<_>>(), [32.0, 33.0, 34.0, 33.0, 32.0]);
+    }
+
+    /// A table on lines of its own, and a rule, put away where they are not written at, to be drawn (a table from its
+    /// line's start, spaces before it with it), one in a quote left as written. Written at (the caret in it, or at its
+    /// end), each shows as written.
+    #[test]
+    fn puts_tables_and_rules_away() {
+        let text = "a\n\n  | x | y |\n| - | - |\n| 1 | 2 |\n\n---\n> | q |\n> | - |";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let of = |range: &Range<usize>| String::from_utf16(&units[range.clone()]).unwrap();
+        let shown = Shown::of(text);
+        assert_eq!(shown.tables.len(), 1);
+        assert_eq!(of(&shown.tables[0].span), "  | x | y |\n| - | - |\n| 1 | 2 |");
+        assert_eq!(shown.rules.iter().map(of).collect::<Vec<_>>(), ["---"]);
+        let hidden: Vec<String> = shown.hidden(None).iter().map(of).collect();
+        for line in ["  | x | y |", "| - | - |", "| 1 | 2 |", "---"] {
+            assert!(hidden.contains(&line.to_string()), "{line} in {hidden:?}");
+        }
+        assert!(!hidden.iter().any(|hidden| hidden.contains('q')));
+        let table = shown.tables[0].span.clone();
+        assert_eq!(shown.tables_drawn(Some((table.start + 4, table.start + 4))).count(), 0);
+        assert_eq!(shown.tables_drawn(Some((table.end, table.end))).count(), 0);
+        assert_eq!(shown.tables_drawn(Some((0, 0))).count(), 1);
+        let rule = shown.rules[0].clone();
+        assert_eq!(shown.rules_drawn(Some((rule.end, rule.end))).count(), 0);
+        assert!(!shown.hidden(Some((rule.end, rule.end))).iter().any(|hidden| of(hidden) == "---"));
     }
 
     /// In a note not written in, a heading's `#`, emphasis's, code's and a link's marks are put away, a list's and a
