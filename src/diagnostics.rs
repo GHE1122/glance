@@ -69,15 +69,15 @@ pub fn report() -> String {
 
 /// Sends `text` (the report, as the user was shown it, their own `words` in it) to Glance's site (see
 /// `update::own_site`), with a secret made for it alone, which the report is followed by (see `reports`): the short
-/// name it was given there, to quote when asking about it, and the report remembered to be followed. None if it
-/// did not get there.
+/// name it was given there, to quote when asking about it, and the report remembered to be followed (with small copies
+/// of its pictures, on this thread: see `reports::remember`). None if it did not get there.
 pub fn send(text: &str, words: &str, pictures: &[Vec<u8>]) -> Option<String> {
     let secret = crate::reports::secret()?;
-    let pictures: Vec<String> = pictures.iter().map(|picture| base64(picture)).collect();
-    let sent = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "text": text, "pictures": pictures, "secret": secret }).to_string();
+    let encoded: Vec<String> = pictures.iter().map(|picture| base64(picture)).collect();
+    let sent = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "text": text, "pictures": encoded, "secret": secret }).to_string();
     let answer: serde_json::Value = serde_json::from_slice(&crate::update::post(&format!("{}/api/report", crate::update::own_site()), sent.as_bytes())?).ok()?;
     let id = answer.get("id")?.as_str()?.to_string();
-    crate::reports::remember(&id, secret, words);
+    crate::reports::remember(&id, secret, words, pictures);
     Some(id)
 }
 

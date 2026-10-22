@@ -62,6 +62,15 @@ pub enum Icon {
     Trash,
     /// What is no longer listed (Lucide's eye-off).
     EyeOff,
+    /// What sends a message (Lucide's send), and what went with one (paperclip).
+    Send,
+    Paperclip,
+    /// How a report stands: open (Lucide's circle-dot), answered (message-circle), fixed (circle-check), closed
+    /// (circle-x).
+    CircleDot,
+    MessageCircle,
+    CircleCheck,
+    CircleX,
 }
 
 impl Icon {
@@ -70,7 +79,8 @@ impl Icon {
     /// "mouse-pointer-2", "panel-right", "undo-2", "refresh-cw", "power", "layers", "clock", "image-plus", "skip-back", "play", "pause", "skip-forward",
     /// "music", "volume-2", "volume-x" (their speaker an older Lucide's, as lines), "layout-grid", "gauge",
     /// "chevron-down", "briefcase", "maximize", "minimize", "file", "link", "inbox", "clipboard", "ellipsis", "list",
-    /// "image", "grip-vertical", "plus", "search", "palette", "smartphone", "pencil-ruler", "pin-off", "trash-2", "eye-off";
+    /// "image", "grip-vertical", "plus", "search", "palette", "smartphone", "pencil-ruler", "pin-off", "trash-2", "eye-off",
+    /// "send", "paperclip", "circle-dot", "message-circle" (an older Lucide's), "circle-check", "circle-x";
     /// lucide-static 1.53.0), its
     /// rectangles and circles written as paths.
     fn data(self) -> &'static [&'static str] {
@@ -112,6 +122,15 @@ impl Icon {
                 "m2 2 20 20",
             ],
             Icon::Close => &["M18 6 6 18", "m6 6 12 12"],
+            Icon::Send => &[
+                "M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z",
+                "m21.854 2.147-10.94 10.939",
+            ],
+            Icon::Paperclip => &["m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"],
+            Icon::CircleDot => &["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20z", "M13 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0z"],
+            Icon::MessageCircle => &["M7.9 20A9 9 0 1 0 4 16.1L2 22Z"],
+            Icon::CircleCheck => &["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20z", "m9 12 2 2 4-4"],
+            Icon::CircleX => &["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20z", "m15 9-6 6", "m9 9 6 6"],
             Icon::File => &["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z", "M14 2v4a2 2 0 0 0 2 2h4"],
             Icon::Link => &["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71", "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"],
             Icon::Inbox => &["M22 12h-6l-2 3h-4l-2-3H2", "M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"],
@@ -386,7 +405,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Send, Icon::Paperclip, Icon::CircleDot, Icon::MessageCircle, Icon::CircleCheck, Icon::CircleX] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid.

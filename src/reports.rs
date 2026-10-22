@@ -3,7 +3,8 @@
 //! whoever asks sent it. Along with each update check, Glance asks the site what is new in the reports it sent (the
 //! owner's replies, and changes of their status), with nothing but their ids, their secrets and how far it has
 //! heard, and tells the user once of each report with news. The user reads a thread, and adds to it, from the
-//! settings. Kept beside the settings (`FILE`), and forgotten 90 days after anything last happened in it.
+//! settings. Kept beside the settings (`FILE`), with small copies of the pictures sent (`PICTURES`), and forgotten 90
+//! days after anything last happened in it.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::ui::text::Lang;
 
 /// Where they are kept, in the settings' folder, and the most of it that is read.
-const FILE: &str = "reports.json";
+pub const FILE: &str = "reports.json";
 const MOST: u64 = 4 << 20;
 /// How long a report is followed after anything last happened in it (milliseconds).
 const FOLLOWED_FOR: u64 = 90 * 86_400_000;
@@ -21,6 +22,11 @@ const FOLLOWED_FOR: u64 = 90 * 86_400_000;
 const ASKED_MOST: usize = 20;
 /// The most of the user's own words kept (characters), as the window that takes them takes no more.
 const WORDS_MOST: usize = 500;
+/// The folder beside them where small copies of the pictures sent are kept, to be shown in their threads (see `keep`):
+/// how large a copy is made (its longer side, pixels), and the most of one that is read.
+pub const PICTURES: &str = "reports";
+const PICTURE_SIDE: u32 = 480;
+const PICTURE_MOST: u64 = 1 << 20;
 
 /// The reports sent from this PC.
 #[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq)]
@@ -29,8 +35,8 @@ pub struct Kept {
 }
 
 /// A report sent: its id as the site gave it, the secret sent with it, when it was sent (ms since 1970), the user's
-/// own words with it, its thread since, the highest number of the site's that asking has heard (what is asked
-/// past), and the highest the user has read.
+/// own words with it and how many pictures, its thread since, the highest number of the site's that asking has heard
+/// (what is asked past), and the highest the user has read.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct Report {
     pub id: String,
@@ -38,6 +44,8 @@ pub struct Report {
     pub sent: u64,
     #[serde(default)]
     pub words: String,
+    #[serde(default)]
+    pub pictures: usize,
     #[serde(default)]
     pub thread: Vec<Message>,
     #[serde(default)]
@@ -137,11 +145,11 @@ struct Told {
     version: String,
 }
 
-/// The reports followed no longer: nothing has happened in them for `FOLLOWED_FOR` by `now`. Whether any was.
-fn forget_old(kept: &mut Kept, now: u64) -> bool {
-    let before = kept.reports.len();
-    kept.reports.retain(|report| report.active().saturating_add(FOLLOWED_FOR) >= now);
-    kept.reports.len() != before
+/// The reports followed no longer: nothing has happened in them for `FOLLOWED_FOR` by `now`. Those that were.
+fn forget_old(kept: &mut Kept, now: u64) -> Vec<Report> {
+    let (old, followed) = std::mem::take(&mut kept.reports).into_iter().partition(|report| report.active().saturating_add(FOLLOWED_FOR) < now);
+    kept.reports = followed;
+    old
 }
 
 /// What the site is asked, of the reports kept (the latest first, as many as it answers): each one's id, its secret
@@ -288,11 +296,60 @@ pub fn secret() -> Option<String> {
     Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-/// The report the site took as `id`, sent with `secret` and the user's `words`, remembered to be followed.
-pub fn remember(id: &str, secret: String, words: &str) {
+/// The report the site took as `id`, sent with `secret`, the user's `words` and their `pictures` (JPEGs), remembered
+/// to be followed. On a thread of the caller's (see `keep`).
+pub fn remember(id: &str, secret: String, words: &str, pictures: &[Vec<u8>]) {
     let words: String = words.chars().take(WORDS_MOST).collect();
-    let report = Report { id: id.to_string(), secret, sent: now(), words, thread: Vec::new(), heard: 0, read: 0 };
+    let report = Report { id: id.to_string(), secret, sent: now(), words, pictures: pictures.len(), thread: Vec::new(), heard: 0, read: 0 };
     with(true, |kept| kept.reports.push(report));
+    keep(id, 0, pictures);
+}
+
+/// The name a picture sent with the report `id` is kept under: the `k`th of the report itself (`n` 0), or of the
+/// user's addition numbered `n`. None for an id that is no name the site gives.
+fn picture_name(id: &str, n: u64, k: usize) -> Option<String> {
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())).then(|| format!("{id}-{n}-{k}.jpg"))
+}
+
+/// Small copies of `pictures` (JPEGs) sent with the report `id` (`n`: 0 for the report itself, else the number of the
+/// user's addition that carried them), kept to be shown in its thread. On a thread of the caller's, which joins the
+/// process's apartment for the codecs it uses.
+fn keep(id: &str, n: u64, pictures: &[Vec<u8>]) {
+    if pictures.is_empty() {
+        return;
+    }
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+    }
+    let own = crate::settings::config_dir();
+    let folder = own.join(PICTURES);
+    if let Err(error) = crate::elevation::ensure_folder(&own).and_then(|()| crate::elevation::ensure_folder(&folder)) {
+        crate::journal::note(format!("could not keep the pictures of a report: {error}"));
+        return;
+    }
+    for (k, picture) in pictures.iter().enumerate() {
+        let (Some(name), Some(small)) = (picture_name(id, n, k), crate::ui::picture::shrunk(picture, PICTURE_SIDE)) else { continue };
+        if let Err(error) = crate::elevation::write_in_place(&folder, &name, &small) {
+            crate::journal::note(format!("could not keep a picture of a report: {error}"));
+        }
+    }
+}
+
+/// The copies kept of the `count` pictures sent with the report `id` (`n` as for `keep`): those that are there.
+pub fn pictures(id: &str, n: u64, count: usize) -> Vec<Vec<u8>> {
+    let folder = crate::settings::config_dir().join(PICTURES);
+    (0..count).filter_map(|k| crate::elevation::read_bytes_in_place(&folder, &picture_name(id, n, k)?, PICTURE_MOST)).collect()
+}
+
+/// The copies kept of the pictures sent with `report`, gone with it.
+fn forget_pictures(report: &Report) {
+    let folder = crate::settings::config_dir().join(PICTURES);
+    let carried = std::iter::once((0, report.pictures)).chain(report.thread.iter().filter(|message| message.kind == Kind::User).map(|message| (message.n, message.pictures)));
+    for (n, count) in carried {
+        for name in (0..count).filter_map(|k| picture_name(&report.id, n, k)) {
+            crate::elevation::remove_in_place(&folder, &name);
+        }
+    }
 }
 
 /// Asks Glance's site what is new in the reports this PC sent, and tells the user once of each with news (on the
@@ -313,10 +370,12 @@ pub fn ask() {
 /// What is new in the reports followed, asked of the site and kept: each report with news, and what is newest in it.
 fn hear() -> Vec<(String, Message)> {
     let now = now();
-    let asked = with_changing(|kept| {
+    let (asked, forgotten) = with_changing(|kept| {
         let forgotten = forget_old(kept, now);
-        (asking(kept), forgotten)
+        let changed = !forgotten.is_empty();
+        ((asking(kept), forgotten), changed)
     });
+    forgotten.iter().for_each(forget_pictures);
     let Some(asked) = asked else { return Vec::new() };
     let Some(answer) = crate::update::post(&format!("{}/api/report/news", crate::update::own_site()), asked.as_bytes()) else {
         crate::journal::note("reports: no answer from the site");
@@ -330,7 +389,8 @@ fn hear() -> Vec<(String, Message)> {
 }
 
 /// Adds the user's `words` (and `diagnostics`, if they agreed to send them), with their `pictures`, to the report
-/// `id`, in its thread on the site, and to the thread kept here. Whether it got there.
+/// `id`, in its thread on the site, and to the thread kept here. Whether it got there. On a thread of the caller's
+/// (see `keep`).
 pub fn add(id: &str, words: &str, diagnostics: Option<&str>, pictures: &[Vec<u8>]) -> bool {
     let Some(secret) = with(false, |kept| kept.reports.iter().find(|report| report.id == id).map(|report| report.secret.clone())) else { return false };
     let text = match diagnostics {
@@ -358,6 +418,7 @@ pub fn add(id: &str, words: &str, diagnostics: Option<&str>, pictures: &[Vec<u8>
             report.thread.sort_by_key(|message| message.n);
         }
     });
+    keep(id, n, pictures);
     true
 }
 
@@ -377,21 +438,45 @@ pub fn read(id: &str) {
     });
 }
 
-/// Reports as pictures of the settings need them, held and never written: one with a reply unread, one fixed, one
-/// waiting, sent `now` (ms) and before.
+/// Reports as pictures of the settings need them, held and never written (their pictures, `pictures`, kept in the
+/// test's own settings folder): one whose thread went on a while, with pictures, a reply, the user's addition and the
+/// fix, its latest unread, then one fixed and read, and one waiting. Sent `now` (ms) and before.
 #[cfg(all(test, feature = "studio"))]
-pub fn pretend(now: u64) {
+pub fn pretend(now: u64, pictures: &[Vec<u8>]) {
     const HOUR: u64 = 3_600_000;
     let message = |n: u64, ts: u64, kind: Kind, text: &str, version: &str| Message { n, ts, kind, text: text.into(), version: version.into(), pictures: 0, diagnostics: false };
-    let report = |id: &str, sent: u64, words: &str, thread: Vec<Message>, read: u64| Report { id: id.into(), secret: String::new(), sent, words: words.into(), heard: thread.iter().map(|message| message.n).max().unwrap_or(0), thread, read };
+    let report = |id: &str, sent: u64, words: &str, thread: Vec<Message>, read: u64| Report {
+        id: id.into(),
+        secret: String::new(),
+        sent,
+        words: words.into(),
+        pictures: 0,
+        heard: thread.iter().filter(|message| message.kind != Kind::User).map(|message| message.n).max().unwrap_or(0),
+        thread,
+        read,
+    };
+    let (first, added) = (&pictures[..pictures.len().min(2)], &pictures[pictures.len().min(2)..]);
+    let addition = Message { n: 14, ts: now - 6 * HOUR, kind: Kind::User, text: "开启后仍然没有显示。附上新的截图与诊断信息。".into(), version: "0.4.1".into(), pictures: added.len(), diagnostics: true };
+    let mut followed = report(
+        "KQRH9F",
+        now - 30 * HOUR,
+        "主板温度未显示\n华硕 B650 主板，其他软件可以读到",
+        vec![
+            message(11, now - 26 * HOUR, Kind::Reply, "已收到。请问开启“以管理员身份读取传感器”后是否仍然没有显示？", ""),
+            message(12, now - 26 * HOUR, Kind::Answered, "", ""),
+            addition,
+            message(17, now - 2 * HOUR, Kind::Reply, "已找到原因：这块主板的温度需要从 Super I/O 芯片读取，下一版本将加入支持。", ""),
+            message(18, now - HOUR, Kind::Fixed, "", "0.4.2"),
+        ],
+        14,
+    );
+    followed.pictures = first.len();
+    // (The test's own settings folder, as Glance's is where it runs.)
+    std::fs::create_dir_all(crate::settings::config_dir()).unwrap();
+    keep("KQRH9F", 0, first);
+    keep("KQRH9F", 14, added);
     let reports = vec![
-        report(
-            "KQRH9F",
-            now - 30 * HOUR,
-            "主板温度未显示\n华硕 B650 主板，其他软件可以读到",
-            vec![message(11, now - 2 * HOUR, Kind::Reply, "已收到。请问开启“以管理员身份读取传感器”后是否仍然没有显示？", ""), message(12, now - 2 * HOUR, Kind::Answered, "", "")],
-            0,
-        ),
+        followed,
         report("7MPA2D", now - 300 * HOUR, "风扇转速与其他软件不一致", vec![message(3, now - 250 * HOUR, Kind::Reply, "已找到原因，下个版本修复。", ""), message(5, now - 100 * HOUR, Kind::Fixed, "", "0.4.0")], 5),
         report("ZX3W8N", now - 5 * HOUR, "", Vec::new(), 0),
     ];
@@ -405,7 +490,7 @@ mod tests {
     const DAY: u64 = 86_400_000;
 
     fn report(id: &str, sent: u64) -> Report {
-        Report { id: id.into(), secret: format!("{:0>64}", id.to_lowercase()), sent, words: "主板温度未显示\n第二行".into(), thread: Vec::new(), heard: 0, read: 0 }
+        Report { id: id.into(), secret: format!("{:0>64}", id.to_lowercase()), sent, words: "主板温度未显示\n第二行".into(), pictures: 0, thread: Vec::new(), heard: 0, read: 0 }
     }
 
     fn news(items: &[(&str, u64, &str, &str)]) -> Vec<u8> {
@@ -553,6 +638,35 @@ mod tests {
         assert!(report.unread());
         read(&id);
         assert!(!list().into_iter().find(|report| report.id == id).unwrap().unread());
+    }
+
+    /// The pictures sent are kept small, under the report and the message that carried them, read again as they
+    /// were kept, and gone with the report.
+    #[test]
+    fn pictures_sent_are_kept_small_and_go_with_their_report() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        // (The test's own settings folder, as Glance's is where it runs.)
+        std::fs::create_dir_all(crate::settings::config_dir()).unwrap();
+        let picture = std::mem::take(&mut crate::ui::picture::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/icon.png"), (8, 8)).expect("a picture").jpeg);
+        keep("PICTRS", 0, &[picture.clone(), picture.clone()]);
+        keep("PICTRS", 9, std::slice::from_ref(&picture));
+        let kept = pictures("PICTRS", 0, 2);
+        assert_eq!(kept.len(), 2);
+        let again = crate::ui::picture::from_jpeg(&kept[0], (8, 8)).expect("read again");
+        assert!(again.size.0.max(again.size.1) <= PICTURE_SIDE);
+        assert_eq!(pictures("PICTRS", 9, 1).len(), 1);
+        // (Asked for more than there are: those there are.)
+        assert_eq!(pictures("PICTRS", 9, 3).len(), 1);
+        // No file is named after what is no id.
+        assert_eq!(picture_name("../x", 0, 0), None);
+        let mut report = report("PICTRS", 0);
+        report.pictures = 2;
+        report.thread.push(Message { n: 9, ts: 1, kind: Kind::User, text: String::new(), version: String::new(), pictures: 1, diagnostics: false });
+        forget_pictures(&report);
+        assert!(pictures("PICTRS", 0, 2).is_empty());
+        assert!(pictures("PICTRS", 9, 1).is_empty());
     }
 
     /// Written and read again as they were, in a folder of the test's own.

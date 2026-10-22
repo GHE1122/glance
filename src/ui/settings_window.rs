@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::E;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::core::{w, BOOL, HSTRING, PCWSTR};
@@ -189,6 +189,13 @@ const PERF_LIVE: u32 = WM_APP + 91;
 const TO_WORKBENCH: u32 = WM_APP + 42;
 /// Asked to turn to the page of the reports sent.
 const TO_REPORTS: u32 = WM_APP + 44;
+/// What the window of a report's thread tells it (see `ask::thread::open`): the user sent what they wrote there, or
+/// closed it. Kept as told (`THREAD_SEND`, `THREAD_CLOSE`), and seen to as the window is next looked at (see `tick`),
+/// outside whatever holds its state then.
+const THREAD_TOLD: u32 = WM_APP + 45;
+static THREAD_OWED: AtomicUsize = AtomicUsize::new(0);
+const THREAD_SEND: usize = 1;
+const THREAD_CLOSE: usize = 2;
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
@@ -558,6 +565,14 @@ fn tick(now: Instant) -> Option<Duration> {
         if SCREENS_OWED.swap(false, Ordering::AcqRel) {
             ui.screens = crate::screens::all();
             ui.next_frame = now;
+        }
+        // What the window of a report's thread told.
+        let told = THREAD_OWED.swap(0, Ordering::AcqRel);
+        if told & THREAD_SEND != 0 {
+            ui.send_in_thread();
+        }
+        if told & THREAD_CLOSE != 0 {
+            ui.close_thread();
         }
         // Minimized, nothing is drawn (it is drawn whole as it is restored: see WM_SIZE), and nothing is looked at
         // again till a message comes (restored, it is told so).
@@ -932,67 +947,92 @@ fn thread_time(lang: Lang, ts: u64) -> String {
     format!("{} {}", at.date(lang), at.time(false, lang).0)
 }
 
-/// What a report's thread says above it: how it stands, what that means for this Glance, and what may be done.
-fn thread_intro(lang: Lang, report: &crate::reports::Report) -> String {
-    let status = report.status();
-    let words = status_words(lang, &status);
-    let fix = match &status {
-        crate::reports::Status::Fixed(version) => match (update::newer(version, env!("CARGO_PKG_VERSION")), lang) {
-            (true, Lang::Zh) => format!("当前版本为 {}，更新到 {version} 即可获得此修复。", env!("CARGO_PKG_VERSION")),
-            (true, Lang::En) => format!("This is {}. Update to {version} to have the fix. ", env!("CARGO_PKG_VERSION")),
-            (false, Lang::Zh) => "当前版本已包含此修复。".to_string(),
-            (false, Lang::En) => "This version has the fix. ".to_string(),
-        },
-        _ => String::new(),
-    };
-    match lang {
-        Lang::Zh => format!("状态：{words}。{fix}以下为这份反馈的全部往来，最新的在最下方。如需补充说明或截图，可在下方填写，将发送至同一份反馈。"),
-        Lang::En => format!("Status: {words}. {fix}Below is all that was said about this report, the newest last. To add words or pictures, write them below: they go to the same report."),
+/// How a report stands, as its thread's window colours it.
+fn tone_of(status: &crate::reports::Status) -> super::ask::thread::Tone {
+    use super::ask::thread::Tone;
+    use crate::reports::Status;
+    match status {
+        Status::Open => Tone::Open,
+        Status::Answered => Tone::Answered,
+        Status::Fixed(_) => Tone::Fixed,
+        Status::Closed => Tone::Closed,
     }
 }
 
-/// A report's thread as text, in time order: what the user sent, the developer's replies, the user's additions,
-/// and each change of its status.
-fn thread_text(lang: Lang, report: &crate::reports::Report) -> String {
-    use crate::reports::Kind;
-    let you = pick(lang, "你", "You");
-    let what = |words: &str, pictures: usize, diagnostics: bool| {
-        let mut said = if words.is_empty() { pick(lang, "（未填写说明）", "(No words)").to_string() } else { words.to_string() };
-        let attached = match (lang, diagnostics, pictures) {
-            (_, false, 0) => String::new(),
-            (Lang::Zh, true, 0) => "（附诊断信息）".into(),
-            (Lang::Zh, false, n) => format!("（附截图 {n} 张）"),
-            (Lang::Zh, true, n) => format!("（附诊断信息及截图 {n} 张）"),
-            (Lang::En, true, 0) => "(With the diagnostics)".into(),
-            (Lang::En, false, n) => format!("(With {n} pictures)"),
-            (Lang::En, true, n) => format!("(With the diagnostics and {n} pictures)"),
-        };
-        if !attached.is_empty() {
-            said = format!("{said}\n{attached}");
-        }
-        said
-    };
-    let mut parts = vec![format!("{you} · {}\n{}", thread_time(lang, report.sent), what(&report.words, 0, true))];
+/// A report's thread as its window shows it (see `ask::thread`): its title (the first line of what the user wrote),
+/// which report it is and when it was sent, how it stands and what that means for this Glance. Then, in time order,
+/// what the user sent with its pictures and the diagnostics, the developer's replies, the user's additions, and each
+/// change of its status (but the one to answered that the site makes with a reply, which the reply itself tells).
+fn thread_of(lang: Lang, report: &crate::reports::Report) -> super::ask::thread::Thread {
+    use super::ask::thread::{Item, Thread};
+    use crate::reports::{Kind, Status};
+    let attached = pick(lang, "附诊断信息", "With the diagnostics");
+    let mut items = vec![Item::Mine { when: thread_time(lang, report.sent), words: report.words.clone(), pictures: crate::reports::pictures(&report.id, 0, report.pictures), attached: attached.into() }];
+    let mut before: Option<&crate::reports::Message> = None;
     for message in &report.thread {
         let when = thread_time(lang, message.ts);
-        parts.push(match message.kind {
-            Kind::User => format!("{you} · {when}\n{}", what(&message.text, message.pictures, message.diagnostics)),
-            Kind::Reply => format!("{} · {when}\n{}", pick(lang, "Glance 开发者", "Glance's developer"), message.text),
+        let item = match message.kind {
+            Kind::User => Some(Item::Mine {
+                when,
+                words: message.text.clone(),
+                pictures: crate::reports::pictures(&report.id, message.n, message.pictures),
+                attached: if message.diagnostics { attached.into() } else { String::new() },
+            }),
+            Kind::Reply => Some(Item::Theirs { who: pick(lang, "Glance 开发者", "Glance's developer").into(), when, words: message.text.clone() }),
+            Kind::Answered if before.is_some_and(|before| before.kind == Kind::Reply && before.ts == message.ts) => None,
             kind => {
                 let status = match kind {
-                    Kind::Fixed => crate::reports::Status::Fixed(message.version.clone()),
-                    Kind::Closed => crate::reports::Status::Closed,
-                    Kind::Answered => crate::reports::Status::Answered,
-                    _ => crate::reports::Status::Open,
+                    Kind::Fixed => Status::Fixed(message.version.clone()),
+                    Kind::Closed => Status::Closed,
+                    Kind::Answered => Status::Answered,
+                    _ => Status::Open,
                 };
-                match lang {
+                let words = match lang {
                     Lang::Zh => format!("状态改为“{}” · {when}", status_words(lang, &status)),
                     Lang::En => format!("Status set to {} · {when}", status_words(lang, &status)),
-                }
+                };
+                Some(Item::Event { tone: tone_of(&status), words })
             }
-        });
+        };
+        items.extend(item);
+        before = Some(message);
     }
-    parts.join("\n\n")
+    let status = report.status();
+    let note = match &status {
+        Status::Fixed(version) => match (update::newer(version, env!("CARGO_PKG_VERSION")), lang) {
+            (true, Lang::Zh) => format!("当前版本为 {}，更新到 {version} 即可获得此修复。", env!("CARGO_PKG_VERSION")),
+            (true, Lang::En) => format!("This is {}. Update to {version} to have the fix.", env!("CARGO_PKG_VERSION")),
+            (false, Lang::Zh) => "当前版本已包含此修复。".to_string(),
+            (false, Lang::En) => "This version has the fix.".to_string(),
+        },
+        _ => String::new(),
+    };
+    let (id, sent) = (&report.id, thread_time(lang, report.sent));
+    let title = match (report.first_line(), lang) {
+        ("", Lang::Zh) => format!("反馈 {id}"),
+        ("", Lang::En) => format!("Report {id}"),
+        (first, _) => first.to_string(),
+    };
+    let about = match lang {
+        Lang::Zh => format!("反馈 {id} · {sent} 发送"),
+        Lang::En => format!("Report {id} · sent {sent}"),
+    };
+    Thread { title, about, status: status_words(lang, &status), tone: tone_of(&status), note, items }
+}
+
+/// What a report's thread's window says besides the thread.
+fn thread_talk(lang: Lang, dark: bool) -> super::ask::thread::Talk<'static> {
+    super::ask::thread::Talk {
+        hint: pick(lang, "输入补充说明，截图可拖入或粘贴（最多 3 张）", "Add to this report. Pictures may be dropped or pasted here (up to 3)"),
+        add: pick(lang, "添加截图", "Add a picture"),
+        paste: pick(lang, "粘贴截图", "Paste the picture"),
+        kinds: pick(lang, "图片", "Pictures"),
+        option: pick(lang, "附上当前的诊断信息", "Attach the current diagnostics"),
+        send: pick(lang, "发送", "Send"),
+        close: pick(lang, "关闭", "Close"),
+        you: pick(lang, "你", "You"),
+        dark,
+    }
 }
 
 /// A row that is on or off.
@@ -1367,6 +1407,9 @@ struct Ui {
     /// What the user adds to a report, being sent (on a thread of its own), and how the last went.
     adding: Option<(String, std::thread::JoinHandle<bool>)>,
     added: Option<(String, bool)>,
+    /// The report whose thread is open in its window (see `ask::thread`): its id, the window, and the report as the
+    /// window was last given it.
+    thread: Option<(String, HWND, crate::reports::Report)>,
     /// Since when the fans in the phone remote's picture have been turning.
     phone_from: Instant,
     phone: PhonePage,
@@ -1583,6 +1626,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             adding_asked: None,
             adding: None,
             added: None,
+            thread: None,
             phone_from: Instant::now(),
             phone: PhonePage { state: None, parts: Vec::new(), at: None, scroll: 0.0, most: 0.0, slid: None, pressed: None, making: None, held_since: Instant::now(), removing: false, link: None, asked: Instant::now(), waiting: 0 },
             uninstaller: std::env::current_exe().ok().and_then(|exe| elevation::trusted(&exe.with_file_name("uninstall.exe"))),
@@ -1700,6 +1744,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         TO_REPORTS => {
             to_reports();
+            LRESULT(0)
+        }
+        THREAD_TOLD => {
+            THREAD_OWED.fetch_or(if wparam.0 == 1 { THREAD_SEND } else { THREAD_CLOSE }, Ordering::AcqRel);
             LRESULT(0)
         }
         // (Measuring: a page, and a tab of the monitor's, turned to as a press on it turns to it; see `perf`.)
@@ -3112,60 +3160,81 @@ impl Ui {
         }
     }
 
-    /// The thread of the report `id` sent from here, shown whole, the newest last, with room to add to it: the user's
-    /// words and pictures, and, if they choose, fresh diagnostics (shown first, see `add_with_diagnostics`).
+    /// The thread of the report `id` sent from here, opened in its window (see `ask::thread`), over this one, as a
+    /// conversation the user adds to: their words and pictures, and, if they choose, fresh diagnostics (shown first,
+    /// see `add_with_diagnostics`). Read, as it is shown.
     fn open_thread(&mut self, id: &str) {
+        if self.thread.is_some() {
+            return;
+        }
         let Some(report) = crate::reports::list().into_iter().find(|report| report.id == id) else { return };
-        let lang = self.lang;
-        let title = match lang {
-            Lang::Zh => format!("反馈 {id}"),
-            Lang::En => format!("Report {id}"),
-        };
-        let intro = thread_intro(lang, &report);
-        let thread = thread_text(lang, &report);
-        let asked = super::ask::Asked {
-            title: &title,
-            intro: &intro,
-            own: Some(super::ask::Own {
-                words: pick(lang, "补充说明（选填）", "What you add (may be left empty)"),
-                hint: pick(lang, "例如：更新后问题是否仍然存在", "For instance: whether the problem remains after updating"),
-                pictures: pick(lang, "截图（选填，最多 3 张）", "Pictures (if you like, up to 3)"),
-                add: pick(lang, "添加截图", "Add a picture"),
-                ways: pick(lang, "点击选择、拖入窗口，或按 Ctrl+V 粘贴", "Click to choose one, drop it here, or paste it with Ctrl+V"),
-                paste: pick(lang, "粘贴剪贴板中的截图", "Paste the clipboard's"),
-                waiting: pick(lang, "剪贴板中有截图，按 Ctrl+V 即可粘贴", "There is a picture on the clipboard: Ctrl+V pastes it"),
-                kinds: pick(lang, "图片", "Pictures"),
-            }),
-            option: Some(pick(lang, "附上当前的诊断信息（发送前完整显示，供确认）", "Attach the current diagnostics (shown whole before they are sent)")),
-            sent: Some((pick(lang, "往来记录", "What was said"), &thread)),
-            from_end: true,
-            yes: pick(lang, "补充", "Add to it"),
-            no: pick(lang, "关闭", "Close"),
-            dark: self.dark,
-        };
-        let said = super::ask::show(self.hwnd, &asked);
+        let Some(window) = super::ask::thread::open(self.hwnd, THREAD_TOLD, thread_of(self.lang, &report), &thread_talk(self.lang, self.dark)) else { return };
+        // What is being added to it already (sent before it was last closed): shown as being sent.
+        if self.adding.as_ref().is_some_and(|(adding, _)| adding == id) || self.adding_asked.as_ref().is_some_and(|(asked, _)| asked == id) {
+            super::ask::thread::sending(window, pick(self.lang, "正在发送…", "Sending…"));
+        }
         crate::reports::read(id);
         self.followed = crate::reports::list();
-        let Some(said) = said else { return };
+        self.thread = Some((id.to_string(), window, report));
+        self.next_frame = Instant::now();
+    }
+
+    /// The window of the thread of the report `id`, if it is the one open.
+    fn thread_window(&self, id: &str) -> Option<HWND> {
+        self.thread.as_ref().filter(|(open, ..)| open == id).map(|(_, window, _)| *window)
+    }
+
+    /// The thread open, as the reports sent are now (`followed`): given again to its window if anything was said in
+    /// it since, and read.
+    fn follow_thread(&mut self) {
+        let Some((id, window, shown)) = &self.thread else { return };
+        let Some(report) = self.followed.iter().find(|report| report.id == *id) else { return };
+        if report.thread == shown.thread {
+            return;
+        }
+        let (id, window, report) = (id.clone(), *window, report.clone());
+        super::ask::thread::update(window, thread_of(self.lang, &report));
+        crate::reports::read(&id);
+        self.followed = crate::reports::list();
+        self.thread = Some((id, window, report));
+    }
+
+    /// What the user wrote in the thread open, sent, as its window told: with fresh diagnostics, those put together
+    /// first and shown whole (see `tick`), and without them at once, on a thread of its own. One addition at a time.
+    fn send_in_thread(&mut self) {
+        let Some((id, window)) = self.thread.as_ref().map(|(id, window, _)| (id.clone(), *window)) else { return };
+        if self.adding.is_some() || self.adding_asked.is_some() || self.reporting.is_some() {
+            return;
+        }
+        let Some(said) = super::ask::thread::said(window) else { return };
+        let lang = self.lang;
         self.added = None;
         if said.option {
-            // The diagnostics put together first, then shown whole (see `tick`).
-            if self.reporting.is_none() {
-                self.adding_asked = Some((id.to_string(), said));
-                self.reporting = Some((ReportFor::Add, std::thread::spawn(crate::diagnostics::report)));
-            }
-        } else if !said.words.is_empty() || !said.pictures.is_empty() {
-            let id = id.to_string();
+            super::ask::thread::sending(window, pick(lang, "正在收集诊断信息…", "Gathering the diagnostics…"));
+            self.adding_asked = Some((id, said));
+            self.reporting = Some((ReportFor::Add, std::thread::spawn(crate::diagnostics::report)));
+        } else {
+            super::ask::thread::sending(window, pick(lang, "正在发送…", "Sending…"));
             self.adding = Some((id.clone(), std::thread::spawn(move || crate::reports::add(&id, &said.words, None, &said.pictures))));
         }
         self.next_frame = Instant::now();
     }
 
-    /// The fresh diagnostics the user chose to add to a report, put together: shown whole, and sent with what they
-    /// added if they agree. Nothing is sent if they do not.
+    /// The thread open, closed by the user: its window taken down, it read, and the reports as they are now.
+    fn close_thread(&mut self) {
+        let Some((id, window, _)) = self.thread.take() else { return };
+        super::ask::thread::close(window);
+        crate::reports::read(&id);
+        self.followed = crate::reports::list();
+        self.next_frame = Instant::now();
+    }
+
+    /// The fresh diagnostics the user chose to add to a report, put together: shown whole (over its thread's window,
+    /// if it is open), and sent with what they added if they agree. Nothing is sent if they do not.
     fn add_with_diagnostics(&mut self, report: String) {
         let Some((id, said)) = self.adding_asked.take() else { return };
         let lang = self.lang;
+        let window = self.thread_window(&id);
         let intro = match lang {
             Lang::Zh => format!("以下诊断信息将连同补充说明与截图一并发送至反馈 {id}。不包含任何文件、账号或网络地址。"),
             Lang::En => format!("These diagnostics go to report {id}, with the words and pictures you added. Nothing of your files, accounts or network address."),
@@ -3181,9 +3250,14 @@ impl Ui {
             no: pick(lang, "取消", "Cancel"),
             dark: self.dark,
         };
-        if super::ask::show(self.hwnd, &asked).is_some() {
+        if super::ask::show(window.unwrap_or(self.hwnd), &asked).is_some() {
+            if let Some(window) = window {
+                super::ask::thread::sending(window, pick(lang, "正在发送…", "Sending…"));
+            }
             self.adding = Some((id.clone(), std::thread::spawn(move || crate::reports::add(&id, &said.words, Some(&report), &said.pictures))));
             self.next_frame = Instant::now();
+        } else if let Some(window) = window {
+            super::ask::thread::writing(window);
         }
     }
 
@@ -3773,8 +3847,7 @@ impl Ui {
                 self.followed = crate::reports::list();
                 self.turn_to(Page::Reports);
             }
-            Target::Thread(id) if self.adding.is_none() && self.adding_asked.is_none() => self.open_thread(&id),
-            Target::Thread(_) => {}
+            Target::Thread(id) => self.open_thread(&id),
             // (Pressed again, its code is put away.)
             Target::GetApp if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) => self.code = None,
             // (Each asked of the remote's helper on another thread: see `tick`.)
@@ -4324,16 +4397,27 @@ impl Ui {
         // What was added to a report: how that went, once it is over.
         if self.adding.as_ref().is_some_and(|(_, adding)| adding.is_finished()) {
             let (id, adding) = self.adding.take().unwrap();
-            self.added = Some((id, adding.join().unwrap_or(false)));
+            let sent = adding.join().unwrap_or(false);
+            // Its thread's window, open: written in afresh, or what was written kept to be sent again.
+            if let Some(window) = self.thread_window(&id) {
+                if sent {
+                    super::ask::thread::sent(window);
+                } else {
+                    super::ask::thread::failed(window, pick(lang, "发送失败，请稍后重试", "It could not be sent. Try again later"));
+                }
+            }
+            self.added = Some((id, sent));
             self.followed = crate::reports::list();
+            self.follow_thread();
         }
         if self.adding.is_some() {
             self.next_frame = now + Duration::from_millis(300);
         }
-        // The reports sent, as they are now (news is heard on the update check's thread).
+        // The reports sent, as they are now (news is heard on the update check's thread), and the thread open with them.
         if now.duration_since(self.followed_at) > Duration::from_secs(1) {
             self.followed = crate::reports::list();
             self.followed_at = now;
+            self.follow_thread();
         }
         // The switches as they are, read.
         if self.reading_switches.as_ref().is_some_and(|reading| reading.is_finished()) {
@@ -5721,7 +5805,7 @@ mod pictures {
         let history = (0..120).map(|i| crate::studio::made_up(&info, now_ms - (120 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
         crate::pictured(info, history);
         // Reports sent from here, followed (see `Page::Reports`).
-        crate::reports::pretend(now_ms as u64);
+        crate::reports::pretend(now_ms as u64, &[]);
         // The station holding a few things (files of this repository, pictured as Explorer shows them).
         {
             use crate::station::shelf::{Item, What};
@@ -5830,6 +5914,107 @@ mod pictures {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
         }
     }
+
+    /// Glance pictured with made-up readings, the settings window made (not shown), and reports sent from here
+    /// pretended (see `reports::pretend`), the first carrying pictures taken of that window: the device, the window.
+    fn pretended() -> (gfx::Held, HWND) {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let info = crate::metrics::Sampler::new().info;
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let history = (0..120).map(|i| crate::studio::made_up(&info, now_ms as f64 - (120 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
+        crate::pictured(info, history);
+        crate::reports::pretend(now_ms, &[]);
+        let gfx = gfx::held().unwrap();
+        let hwnd = make(gfx.clone(), false).unwrap();
+        // Pictures taken of the window's pages, as a user takes them of what is wrong.
+        let scale = with_ui(|ui| ui.scale).unwrap();
+        let mut taken = Vec::new();
+        for (at, page) in [Page::Monitor, Page::General, Page::Look].into_iter().enumerate() {
+            with_ui(|ui| ui.turn_to(page));
+            for _ in 0..6 {
+                with_ui(|ui| ui.draw(Instant::now()));
+                std::thread::sleep(Duration::from_millis(80));
+            }
+            let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+            let size = ((cw * scale).round() as u32, (ch * scale).round() as u32);
+            let pixels = gfx
+                .draw_offscreen(size, scale, |frame| {
+                    with_ui(|ui| {
+                        fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                        ui.paint(frame, Instant::now())
+                    });
+                })
+                .unwrap();
+            let file = std::env::temp_dir().join(format!("glance-thread-picture-{}-{at}.png", std::process::id()));
+            crate::studio::save_png(&file, size.0, size.1, &pixels).unwrap();
+            taken.push(std::mem::take(&mut super::super::picture::from_file(&file.to_string_lossy(), (1, 1)).unwrap().jpeg));
+            std::fs::remove_file(&file).unwrap();
+        }
+        crate::reports::pretend(now_ms, &taken);
+        with_ui(|ui| {
+            ui.turn_to(Page::Reports);
+            ui.followed = crate::reports::list();
+        });
+        (gfx, hwnd)
+    }
+
+    /// A report's thread as its window draws it (see `ask::thread`), in Chinese and in English, light and dark,
+    /// scrolled to its newest: into `target/settings` (`thread-zh-light.png` and the rest), with
+    /// `cargo test --release --lib --features studio draws_a_report_s_thread -- --ignored`.
+    #[test]
+    #[ignore = "draws on this PC's graphics card, to pictures to be looked at"]
+    fn draws_a_report_s_thread() {
+        let (gfx, hwnd) = pretended();
+        let out = std::path::PathBuf::from(format!("{}/target/settings", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let report = crate::reports::list().into_iter().find(|report| report.id == "KQRH9F").unwrap();
+        let scale = with_ui(|ui| ui.scale).unwrap();
+        for (lang, said) in [(Lang::Zh, "zh"), (Lang::En, "en")] {
+            for (dark, shade) in [(false, "light"), (true, "dark")] {
+                let ((w, h), pixels) = super::super::ask::thread::pictured(&gfx, thread_of(lang, &report), &thread_talk(lang, dark), scale);
+                crate::studio::save_png(&out.join(format!("thread-{said}-{shade}.png")), w, h, &pixels).unwrap();
+            }
+        }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+        }
+    }
+
+    /// Opens a report's thread (its latest reply and fix not yet read) in its window on this PC's desktop, for `FOR`
+    /// seconds (8 if not set) or till it is closed, to be looked at and tried:
+    /// `cargo test --lib --features studio shows_a_report_s_thread -- --ignored` (`DARK` set: dark, `EN` set: in
+    /// English).
+    #[test]
+    #[ignore = "puts a window up on this PC's desktop"]
+    fn shows_a_report_s_thread() {
+        let (_gfx, hwnd) = pretended();
+        with_ui(|ui| {
+            ui.dark = std::env::var("DARK").is_ok();
+            if std::env::var("EN").is_ok() {
+                ui.lang = Lang::En;
+            }
+            ui.open_thread("KQRH9F");
+        });
+        // The settings' thread's own turn at the messages, as `up` gives it, while the thread is open.
+        let until = Instant::now() + Duration::from_secs(std::env::var("FOR").ok().and_then(|s| s.parse().ok()).unwrap_or(8));
+        let mut msg = MSG::default();
+        while Instant::now() < until && with_ui(|ui| ui.thread.is_some()).unwrap_or(false) {
+            unsafe {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            tick(Instant::now());
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        with_ui(|ui| ui.close_thread());
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5838,37 +6023,6 @@ mod tests {
 
     /// What the preview measures of its desktop is what the desktop is where it is asked: kept while it is asked of
     /// the same place, measured again for another.
-    /// Opens a report's thread (one with a reply not yet read) on this PC's desktop for a few seconds, to be looked
-    /// at: `cargo test --lib --features studio shows_a_report_s_thread -- --ignored` (`DARK` set: dark).
-    #[cfg(feature = "studio")]
-    #[test]
-    #[ignore = "puts a window up on this PC's desktop"]
-    fn shows_a_report_s_thread() {
-        use windows::core::w;
-        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, FindWindowW, PostMessageW, WM_CLOSE};
-        unsafe {
-            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
-        }
-        let info = crate::metrics::Sampler::new().info;
-        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-        let history = (0..120).map(|i| crate::studio::made_up(&info, now_ms as f64 - (120 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
-        crate::pictured(info, history);
-        crate::reports::pretend(now_ms);
-        let gfx = gfx::held().unwrap();
-        let hwnd = make(gfx.clone(), false).unwrap();
-        std::thread::spawn(|| {
-            std::thread::sleep(Duration::from_secs(std::env::var("FOR").ok().and_then(|s| s.parse().ok()).unwrap_or(8)));
-            let _ = unsafe { PostMessageW(FindWindowW(w!("GlanceAsk"), None).ok(), WM_CLOSE, WPARAM(0), LPARAM(0)) };
-        });
-        with_ui(|ui| {
-            ui.dark = std::env::var("DARK").is_ok();
-            ui.open_thread("KQRH9F");
-        });
-        unsafe {
-            let _ = DestroyWindow(hwnd);
-        }
-    }
-
     #[test]
     fn the_preview_measures_its_desktop_where_asked() {
         // Black on the left half, white on the right.
