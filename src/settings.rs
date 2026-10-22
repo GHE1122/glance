@@ -417,6 +417,9 @@ pub struct WidgetAt {
     pub on_desktop: bool,
     #[serde(default)]
     pub stuck: Option<WidgetSide>,
+    /// The side across `stuck` it is stuck to as well: it is stuck in their corner.
+    #[serde(default)]
+    pub corner: Option<WidgetSide>,
     /// How large it is (DIPs), where its size is its own (what plays) rather than its form's.
     #[serde(default)]
     pub size: Option<(f32, f32)>,

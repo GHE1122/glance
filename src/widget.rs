@@ -127,15 +127,27 @@ fn middle_along(rect: RECT, side: Side) -> i32 {
     }
 }
 
-/// Where a surface `size` large (physical px) stuck to `side` of the work area `work`, its middle `along` it, has its
-/// corner, all in the work area; along the side where it is now (its corner `at`) for none.
-fn stuck_at(work: RECT, at: POINT, side: Side, along: Option<i32>, size: (i32, i32)) -> POINT {
-    let (x, y) = match side {
-        Side::Left => (work.left, at.y),
-        Side::Right => (work.right - size.0, at.y),
-        Side::Top => (at.x, work.top),
-        Side::Bottom => (at.x, work.bottom - size.1),
+/// The side across `side` of `work` (a work area) that `rect` (physical px) is within `within` DIPs of (`scale`
+/// physical px a DIP), the nearer where it is near both: stuck to both, it is stuck in their corner.
+fn corner_side(work: RECT, rect: RECT, scale: f32, side: Side, within: f32) -> Option<Side> {
+    let across = match side {
+        Side::Left | Side::Right => [(Side::Top, rect.top - work.top), (Side::Bottom, work.bottom - rect.bottom)],
+        Side::Top | Side::Bottom => [(Side::Left, rect.left - work.left), (Side::Right, work.right - rect.right)],
     };
+    across.into_iter().filter(|(_, away)| (*away as f32 / scale) < within).min_by_key(|(_, away)| *away).map(|(side, _)| side)
+}
+
+/// Where a surface `size` large (physical px) stuck to `side` of the work area `work`, its middle `along` it, has its
+/// corner, all in the work area; along the side where it is now (its corner `at`) for none. Stuck to the side across
+/// it `also`, in their corner (where along `side` it was is not asked).
+fn stuck_at(work: RECT, at: POINT, side: Side, along: Option<i32>, also: Option<Side>, size: (i32, i32)) -> POINT {
+    let flush = |side: Side, (x, y): (i32, i32)| match side {
+        Side::Left => (work.left, y),
+        Side::Right => (work.right - size.0, y),
+        Side::Top => (x, work.top),
+        Side::Bottom => (x, work.bottom - size.1),
+    };
+    let (x, y) = flush(side, (at.x, at.y));
     let x = match (side, along) {
         (Side::Top | Side::Bottom, Some(middle)) => middle - size.0 / 2,
         _ => x,
@@ -144,6 +156,7 @@ fn stuck_at(work: RECT, at: POINT, side: Side, along: Option<i32>, size: (i32, i
         (Side::Left | Side::Right, Some(middle)) => middle - size.1 / 2,
         _ => y,
     };
+    let (x, y) = also.map_or((x, y), |also| flush(also, (x, y)));
     let x = x.clamp(work.left, (work.right - size.0).max(work.left));
     let y = y.clamp(work.top, (work.bottom - size.1).max(work.top));
     POINT { x, y }
@@ -530,6 +543,8 @@ struct Widget {
     /// Where along it its middle is (physical px; none: where it was,
     /// restored from the settings): where the middle of what was stuck was.
     along: Option<i32>,
+    /// The side across it it is stuck to as well: it is stuck in their corner.
+    also: Option<Side>,
     /// Its skin's room round it for its shadow (DIPs, its own).
     margin: f32,
     /// Settling after it was sized by its left or top edge: where its right
@@ -2295,6 +2310,7 @@ impl Widget {
         self.at = POINT { x: self.at.x + dx, y: self.at.y + dy };
         self.stuck = None;
         self.along = None;
+        self.also = None;
         self.keeps_to = (false, false);
         let rect = self.rect();
         if let Some(contact) = monitor_at(POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 }) {
@@ -2323,6 +2339,7 @@ impl Widget {
             fling: None,
             opacity: 1.0,
             stuck: None,
+            also: None,
             along: None,
             margin: Theme::new(Skin::Paper, false).margin,
             anchor: None,
@@ -2403,6 +2420,7 @@ impl Widget {
         widget.on_desktop = kept.on_desktop;
         widget.window.set_on_desktop(widget.low());
         widget.stuck = kept.stuck.map(Side::from_kept);
+        widget.also = kept.stuck.and(kept.corner).map(Side::from_kept);
         Some(widget)
     }
 
@@ -2424,6 +2442,7 @@ impl Widget {
             game_only: self.game_only,
             on_desktop: self.on_desktop,
             stuck: self.stuck.map(Side::kept),
+            corner: self.also.map(Side::kept),
             size,
             parts,
             beside,
@@ -2858,7 +2877,14 @@ impl Widget {
                     if away > UNSTICK {
                         self.stuck = None;
                         self.along = None;
+                        self.also = None;
                         self.keeps_to = (false, false);
+                    }
+                    // Pulled out of its corner along the edge: stuck to that edge alone, slid along it.
+                    let rect = RECT { left: to.x, top: to.y, right: to.x + w as i32, bottom: to.y + h as i32 };
+                    if self.also.is_some_and(|also| corner_side(work, rect, scale, side, UNSTICK) != Some(also)) {
+                        self.also = None;
+                        self.keeps_to = (side == Side::Right, side == Side::Bottom);
                     }
                 }
                 self.at = POINT { x: cursor.x - grab.x, y: cursor.y - grab.y };
@@ -2889,6 +2915,7 @@ impl Widget {
                 self.room = Some((width, height));
                 self.stuck = None;
                 self.along = None;
+                self.also = None;
                 // The edges not held stay where they were.
                 let start = (room.0 * scale, room.1 * scale);
                 let right = corner.x + start.0 as i32;
@@ -3055,17 +3082,24 @@ impl Widget {
     }
 
     /// Let go near an edge of its screen's work area: stuck to it, as it is (sticking only says where it is, never
-    /// what it shows or how large); already stuck, flush with its edge again.
+    /// what it shows or how large); already stuck, flush with its edge again. Near the edge across it too, stuck in
+    /// their corner.
     fn stick(&mut self) {
         let near = self.nearest_side().filter(|(_, away)| *away < STICK).map(|(side, _)| side);
         let was = self.stuck.map(|side| (side, self.along.unwrap_or_else(|| self.middle_along(side))));
         let Some((side, along)) = stuck_after(near, was, self.rect()) else { return };
-        if self.stuck != Some(side) {
-            note(format!("widget: stuck to the {side:?} edge"));
+        let also = corner_side(self.contact.work, self.rect(), self.contact.scale, side, STICK);
+        if (self.stuck, self.also) != (Some(side), also) {
+            match also {
+                Some(also) => note(format!("widget: stuck in the {side:?} {also:?} corner")),
+                None => note(format!("widget: stuck to the {side:?} edge")),
+            }
         }
         self.stuck = Some(side);
         self.along = Some(along);
-        self.keeps_to = (side == Side::Right, side == Side::Bottom);
+        self.also = also;
+        let keeps = |to: Side| side == to || also == Some(to);
+        self.keeps_to = (keeps(Side::Right), keeps(Side::Bottom));
     }
 
     /// The edge of its screen's work area it is nearest, and how near (DIPs).
@@ -3090,10 +3124,10 @@ impl Widget {
         middle_along(self.rect(), side)
     }
 
-    /// Where a surface `size` large (physical px) stuck to `side`, its middle `along` it, has its corner (see the
-    /// function of that name).
-    fn stuck_at(&self, side: Side, along: Option<i32>, size: (i32, i32)) -> POINT {
-        stuck_at(self.contact.work, self.at, side, along, size)
+    /// Where a surface `size` large (physical px) stuck to `side`, its middle `along` it, and to the side across it
+    /// `also`, has its corner (see the function of that name).
+    fn stuck_at(&self, side: Side, along: Option<i32>, also: Option<Side>, size: (i32, i32)) -> POINT {
+        stuck_at(self.contact.work, self.at, side, along, also, size)
     }
 
     /// Shows where it would stick, as the skin draws it: `rect` (physical
@@ -3467,7 +3501,7 @@ impl Widget {
         // Stuck to an edge: flush with it, at its stop along it. Else, at
         // rest, all of it on its screen.
         if let (Some(side), None) = (self.stuck, &self.drag) {
-            self.at = self.stuck_at(side, self.along, size);
+            self.at = self.stuck_at(side, self.along, self.also, size);
         } else if self.drag.is_none() && self.fling.is_none() {
             let work = self.contact.work;
             self.at.x = self.at.x.clamp(work.left, (work.right - size.0).max(work.left));
@@ -3508,10 +3542,12 @@ impl Widget {
         };
         match near {
             Some((side, away)) => {
-                // As large as it is: it sticks as it is.
+                // As large as it is: it sticks as it is (in the corner, near enough the edge across it to stick
+                // there too).
                 let rect = self.rect();
                 let size = (rect.right - rect.left, rect.bottom - rect.top);
-                let POINT { x, y } = self.stuck_at(side, Some(self.middle_along(side)), size);
+                let also = corner_side(self.contact.work, rect, self.contact.scale, side, STICK);
+                let POINT { x, y } = self.stuck_at(side, Some(self.middle_along(side)), also, size);
                 let firm = away < STICK;
                 // In steps: drawn again as it changes visibly, not each frame.
                 let strength = if firm { 1.0 } else { ((0.25 + 0.5 * (1.0 - (away - STICK) / (HINT_SEEN - STICK))) * 20.0).round() / 20.0 };
@@ -4118,15 +4154,40 @@ mod tests {
         let rect = RECT { left: at.x, top: at.y, right: at.x + size.0, bottom: at.y + size.1 };
         let (side, along) = stuck_after(None, Some((Side::Left, 300)), rect).unwrap();
         assert_eq!(side, Side::Left);
-        assert_eq!(stuck_at(work, at, side, Some(along), size), at);
+        assert_eq!(stuck_at(work, at, side, Some(along), None, size), at);
         // Slid up into the top left corner, nearer the top: stuck to the top, where it is.
         let at = POINT { x: 0, y: 0 };
         let rect = RECT { left: at.x, top: at.y, right: at.x + size.0, bottom: at.y + size.1 };
         let (side, along) = stuck_after(Some(Side::Top), Some((Side::Left, 300)), rect).unwrap();
         assert_eq!(side, Side::Top);
-        assert_eq!(stuck_at(work, at, side, Some(along), size), at);
+        assert_eq!(stuck_at(work, at, side, Some(along), None, size), at);
         // Stuck to none, let go near none: stuck to none.
         assert_eq!(stuck_after(None, None, rect), None);
+    }
+
+    /// A widget let go near two edges that meet is stuck in their corner, flush with both, however near each it was;
+    /// near one alone, or the other only past where it sticks, to that edge alone.
+    #[test]
+    fn a_widget_let_go_near_a_corner_is_stuck_in_it() {
+        let work = RECT { left: 0, top: 0, right: 1920, bottom: 1032 };
+        let size = (400, 200);
+        let rect_at = |x: i32, y: i32| RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 };
+        // 20 px from the right, 30 from the bottom, at 1.5: near both (a little over 13 and 20 DIPs).
+        let rect = rect_at(1920 - 400 - 20, 1032 - 200 - 30);
+        let (side, along) = stuck_after(Some(Side::Right), None, rect).unwrap();
+        let also = corner_side(work, rect, 1.5, side, STICK);
+        assert_eq!(also, Some(Side::Bottom));
+        assert_eq!(stuck_at(work, POINT { x: rect.left, y: rect.top }, side, Some(along), also, size), POINT { x: 1520, y: 832 });
+        // The top left corner, the top nearer.
+        let rect = rect_at(30, 4);
+        assert_eq!(corner_side(work, rect, 1.0, Side::Top, STICK), Some(Side::Left));
+        assert_eq!(stuck_at(work, POINT { x: 30, y: 4 }, Side::Top, Some(230), Some(Side::Left), size), POINT { x: 0, y: 0 });
+        // Near the right edge alone: 100 DIPs from the bottom, it is stuck to the right, where it is along it.
+        let rect = rect_at(1520, 1032 - 200 - 100);
+        assert_eq!(corner_side(work, rect, 1.0, Side::Right, STICK), None);
+        // Nearer both the top and the bottom than it sticks (a screen as short as it is tall): the nearer.
+        let short = RECT { left: 0, top: 0, right: 1920, bottom: 230 };
+        assert_eq!(corner_side(short, rect_at(1520, 20), 1.0, Side::Right, STICK), Some(Side::Bottom));
     }
 
     /// A widget's window lets a click over its shadow through to what is under it, as the panel's does, but not one on
