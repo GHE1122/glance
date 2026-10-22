@@ -753,6 +753,15 @@ pub struct Settings {
     /// Folders whose files Recent files does not list (see `station::recent`).
     #[serde(default)]
     pub recent_hidden: Vec<PathBuf>,
+    /// Drives whose files Recent files does not list (see `HiddenDrive`).
+    #[serde(default)]
+    pub recent_hidden_drives: Vec<HiddenDrive>,
+    /// Whether Recent files lists only the files in `recent_folders` (and in the folders in them), the folders kept
+    /// while it does not.
+    #[serde(default)]
+    pub recent_only: bool,
+    #[serde(default)]
+    pub recent_folders: Vec<PathBuf>,
     /// What is kept at hand on the workbench, in its order (see `station::apps`).
     #[serde(default)]
     pub apps: Vec<crate::station::apps::App>,
@@ -785,6 +794,16 @@ pub fn pin(pinned_panels: &mut Vec<((i32, i32), Option<Edge>)>, point: (i32, i32
     if pinned {
         pinned_panels.push((point, Some(edge)));
     }
+}
+
+/// A drive whose files Recent files does not list: its volume, as Windows names it whatever letter it is given
+/// (`\\?\Volume{…}\`: an external disk plugged in under another letter is still left out, and a disk formatted
+/// anew keeps it, where its serial number changes), and its label and letter as last seen, to name it while it is away.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct HiddenDrive {
+    pub volume: String,
+    pub label: String,
+    pub letter: char,
 }
 
 /// The station's pages, each shown its own way (see `ShelfView`).
@@ -878,6 +897,9 @@ impl Default for Settings {
             music_source: None,
             station: StationSettings::default(),
             recent_hidden: Vec::new(),
+            recent_hidden_drives: Vec::new(),
+            recent_only: false,
+            recent_folders: Vec::new(),
             apps: Vec::new(),
             notes_folder: None,
             notes_view: NotesView::Deck,
@@ -1219,6 +1241,21 @@ mod tests {
         assert_eq!(wide.save(&dir).unwrap_err().kind(), std::io::ErrorKind::FileTooLarge);
         assert!(!saved(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What Recent files lists, from settings kept before it could be told (0.4's: folders not listed alone) and as
+    /// it is kept now: every drive and every folder listed but those not listed. The drives left out, and the folders
+    /// listed only, read back as they were written (the folders kept while the switch is off).
+    #[test]
+    fn reads_what_recent_files_lists() {
+        let (older, _) = read_value(serde_json::json!({ "recent_hidden": [r"D:\Private"], "station": { "recent": true } }), &Settings::default());
+        assert_eq!((older.recent_hidden.clone(), older.recent_hidden_drives.clone(), older.recent_only, older.recent_folders.clone()), (vec![PathBuf::from(r"D:\Private")], Vec::new(), false, Vec::new()));
+        let mut now = older;
+        now.recent_hidden_drives.push(HiddenDrive { volume: r"\\?\Volume{1b2c}\".into(), label: "Phone backup".into(), letter: 'E' });
+        now.recent_folders.push(PathBuf::from(r"D:\Photos"));
+        let (again, left_out) = read_value(serde_json::to_value(&now).unwrap(), &Settings::default());
+        assert!(left_out.is_empty());
+        assert_eq!((again.recent_hidden_drives, again.recent_only, again.recent_folders), (now.recent_hidden_drives, false, vec![PathBuf::from(r"D:\Photos")]));
     }
 
     /// A change that is not a number (not kept: written as none at all) is left as it is held, the others taken
