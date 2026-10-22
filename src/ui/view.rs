@@ -1799,29 +1799,22 @@ impl Hash for Block {
             Block::StuckNote(note) => note.hash(state),
             Block::Apps { apps, rows, named, over } => {
                 (apps, rows, named, over).hash(state);
-                apps.iter().for_each(|(_, target)| face_key(std::path::Path::new(target), APP_PIXELS).hash(state));
+                crate::station::thumbs::changes().hash(state);
             }
             Block::Recent { rows, filter, view, tall } => {
                 (rows, filter, view, tall.to_bits()).hash(state);
-                rows.iter().for_each(|row| face_key(&row.path, TILE_PIXELS).hash(state));
+                crate::station::thumbs::changes().hash(state);
             }
             Block::Shelf { tiles, shows, tall, said, over } => {
                 (tiles, shows, tall.to_bits(), said, over).hash(state);
-                pictures_made(tiles, if let Shows::View(view) = shows { pixels_for(*view) } else { TILE_PIXELS }, state);
+                crate::station::thumbs::changes().hash(state);
             }
             Block::Copies { rows, view, tall } => {
                 (rows, view, tall.to_bits()).hash(state);
-                pictures_made(rows, pixels_for(*view), state);
+                crate::station::thumbs::changes().hash(state);
             }
         }
     }
-}
-
-/// Each of `tiles`' pictures as it is now (`side` px), for a drawing to tell one made since.
-fn pictures_made<H: Hasher>(tiles: &[Tile], side: u32, state: &mut H) {
-    tiles.iter().for_each(|tile| if let Face::Picture { path, .. } = &tile.face {
-        face_key(path, side).hash(state);
-    });
 }
 
 /// How much of its module a lane shows (see `arrange::Form`).
@@ -3975,17 +3968,6 @@ fn paint_shell_icon(frame: &dyn Canvas, theme: &Theme, path: &std::path::Path, c
     }
 }
 
-/// What tells a thing's face as it is drawn now (see `paint_face`, `paint_app`): the picture it is drawn with, made
-/// or not yet; for a drawing to tell one made since.
-fn face_key(path: &std::path::Path, side: u32) -> Option<u64> {
-    let picture = if shows_itself(path) {
-        crate::station::thumbs::filling(path, side)
-    } else {
-        crate::station::thumbs::icon(path, side)
-    };
-    picture.map(|picture| picture.key)
-}
-
 /// A folder's or a file's mark, as the panel's icons are drawn (a line, not the shell's picture of it), `side` wide
 /// round `centre`: a folder; a page, its kind (the file's extension) named on a tag of its colour where it is
 /// `tagged` (large enough to read). `faint`: as for one no longer where it was.
@@ -5350,33 +5332,11 @@ otepad.exe", "Notepad"),
         }
     }
 
-    /// For pictures: a station of four things, three kept at hand, three notes.
+    /// For pictures: the workbench as the studio films it.
     #[cfg(feature = "studio")]
     fn pretend_workbench() {
-        use super::*;
-        use crate::notes::{Colour, Note};
-        use crate::station::shelf::{Item, What};
-        let now = crate::station::now_ms();
-        let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
-        let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0 };
-        crate::station::run::pretend(vec![
-            item(1, What::Files { paths: vec![file("website/apple-touch-icon.png")], kept: Vec::new() }, 400),
-            item(2, What::Text { text: "会议改到周四下午三点\n地点：二楼小会议室".into() }, 180),
-            item(3, What::Files { paths: vec![file("docs")], kept: Vec::new() }, 60),
-            item(4, What::Files { paths: vec![file("Cargo.toml")], kept: Vec::new() }, 20),
-        ], ShelfView::Cards);
-        let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into() };
-        crate::station::apps::pretend(vec![
-            app(r"C:\Windows\explorer.exe", "Explorer"),
-            app(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "Calculator"),
-            app(r"C:\Windows\System32\cmd.exe", "Command"),
-        ]);
-        let note = |name: &str, text: &str, colour: Colour, ago_min: u64| Note { name: name.into(), text: text.into(), colour, stamp: crate::notes::store::Stamp { bytes: 0, written_ms: now - ago_min * 60_000, digest: 0 } };
-        crate::notes::pretend(vec![
-            note("a.md", "# 本周要做的事\n- [x] 发布 0.3.13\n- [ ] 中转站三种视图\n周五前合并", Colour::Blue, 3),
-            note("b.md", "显卡价格记录\n5070 Ti 京东 6299", Colour::Yellow, 60 * 20),
-            note("c.md", "周末开车听的歌\n- 敢爱敢做", Colour::Green, 60 * 50),
-        ]);
+        let props = std::path::PathBuf::from(format!("{}/target/props", env!("CARGO_MANIFEST_DIR")));
+        crate::studio::pretend_workbench(Lang::Zh, &props).unwrap();
     }
 
     /// The workbench's lanes each a widget of its own in every shape (a strip down, one across, the least), and all

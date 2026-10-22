@@ -1,6 +1,5 @@
-// A Glance panel drawn in the page, running on made-up readings: it slides
-// out when the pointer is pushed against the window's right edge, as Glance
-// does at the screen's, and shows each of its looks in place.
+// A Glance panel drawn in the page, running on made-up readings: on the
+// desk (see desk.js), at its right edge, and in each of its looks in place.
 (function () {
   "use strict";
 
@@ -21,6 +20,9 @@
     down: "Down", up: "Up", cols: ["CPU", "Mem", "GPU"],
     uptime: function (m) { return "Up " + Math.floor(m / 60) + " h " + (m % 60) + " min"; }
   };
+
+  // The parts each lane is of, named in its head.
+  var PARTS = { cpu: "AMD Ryzen 9 9950X", gpu: "NVIDIA GeForce RTX 5070 Ti", memory: "2 × 32 GB DDR5-6000", network: "Wi-Fi 6E" };
 
   // ---- the readings: slow walks, as a machine at moderate work ----
   function walk(value, low, high, pull, jitter) {
@@ -201,11 +203,13 @@
     var updates = [];
     function lane(cls, col) { var l = el("section", "lane " + cls); cols[col].appendChild(l); return l; }
 
+    // Each lane in its ink on glass (theme.rs `glass`): the network's second trace its first's, fainter. The other
+    // looks draw them all in their one ink (site.css).
     // CPU
     var cpu = lane("cpu", 0);
-    var ch = head(T.cpu, "AMD Ryzen 9 9950X");
+    var ch = head(T.cpu, PARTS.cpu);
     var cb = big();
-    var cc = chart("#5aa9ff");
+    var cc = chart("#3d9bff");
     var top = el("div", "top");
     top.appendChild(cb.node);
     top.appendChild(cc.node);
@@ -225,15 +229,15 @@
 
     // GPU
     var gpu = lane("gpu", 0);
-    var gh = head(T.gpu, "NVIDIA GeForce RTX 5070 Ti");
+    var gh = head(T.gpu, PARTS.gpu);
     var gb = big();
-    var gc = chart("#41d27a");
+    var gc = chart("#30d158");
     var gtop = el("div", "top");
     gtop.appendChild(gb.node);
     gtop.appendChild(gc.node);
     var vline = el("div", "vram");
     vline.appendChild(el("span", "k", T.vram));
-    var vb = bar("#41d27a");
+    var vb = bar("#30d158");
     vline.appendChild(vb.node);
     var vt = el("span", "v");
     vline.appendChild(vt);
@@ -252,9 +256,9 @@
 
     // Memory
     var mem = lane("mem", 1);
-    var mh = head(T.memory, "2 × 32 GB DDR5-6000");
+    var mh = head(T.memory, PARTS.memory);
     var mb = big();
-    var mc = chart("#ffad42");
+    var mc = chart("#ff9f0a");
     var mtop = el("div", "top");
     mtop.appendChild(mb.node);
     mtop.appendChild(mc.node);
@@ -267,7 +271,7 @@
 
     // Network
     var net = lane("net", 1);
-    var nh = head(T.network, "Wi-Fi 6E");
+    var nh = head(T.network, PARTS.network);
     var nrow = el("div", "top");
     var legend = el("dl", "rates");
     legend.appendChild(el("dt", "down", T.down));
@@ -277,8 +281,8 @@
     var uv = el("dd");
     legend.appendChild(uv);
     var nwrap = el("div", "pair");
-    var dc = chart("#c58bff");
-    var uc = chart("#5fd6e6");
+    var dc = chart("#c77dff");
+    var uc = chart("rgba(199, 125, 255, 0.55)");
     nwrap.appendChild(dc.node);
     nwrap.appendChild(uc.node);
     nrow.appendChild(legend);
@@ -341,25 +345,33 @@
   });
   if (!panels.length) return;
 
-  // What else draws the readings (the widget: see widget.js).
-  var others = [];
-  window.GlanceDemo = {
-    readings: R, el: el, svg: svg, chart: chart, words: T, rate: rate,
-    onTick: function (f) { others.push(f); }
-  };
+  // The readings as they are now, for what else draws them (the monitor torn off the desk's panel as a widget, see
+  // readings.js): a copy made as they step, which what reads it cannot change, with how many steps they have taken.
+  var shown = null, steps = 0;
+  window.GlanceDemo = Object.freeze({
+    read: function () { return shown; },
+    words: Object.freeze(T),
+    parts: Object.freeze(PARTS),
+    rate: rate
+  });
 
   function refresh() {
     panels.forEach(function (p) { p.update(); });
-    others.forEach(function (f) { f(); });
+    var copy = JSON.parse(JSON.stringify(R));
+    copy.steps = steps;
+    Object.keys(copy).forEach(function (k) { if (typeof copy[k] === "object") Object.freeze(copy[k]); });
+    copy.procs.forEach(Object.freeze);
+    shown = Object.freeze(copy);
   }
   // A minute of readings already behind the charts, as in a panel just opened.
-  for (var i = 0; i < HISTORY; i++) step();
+  for (var i = 0; i < HISTORY; i++) { step(); steps++; }
   refresh();
   var ticks = 0;
   setInterval(function () {
     // Off screen or in a hidden tab, nothing to show.
     if (document.hidden) return;
     step();
+    steps++;
     if (++ticks % 60 === 0) R.uptime++;
     refresh();
   }, 1000);
@@ -385,43 +397,4 @@
     window.addEventListener("resize", function () { look(root.getAttribute("data-look")); });
   }
   look("glass");
-
-  // ---- the edge: push the pointer against the window's right edge ----
-  var drawer = document.querySelector("[data-drawer]");
-  if (!drawer) return;
-  var hint = document.querySelector("[data-edge]");
-  var peek = document.querySelectorAll("[data-peek]");
-  var open = false, closing = null;
-
-  function setOpen(on) {
-    if (closing) { clearTimeout(closing); closing = null; }
-    if (on === open) return;
-    open = on;
-    drawer.classList.toggle("open", on);
-    drawer.setAttribute("aria-hidden", on ? "false" : "true");
-    if (hint) hint.classList.toggle("gone", on);
-  }
-
-  // At the edge, the pointer can go no further: as in Glance, that is the push.
-  document.addEventListener("pointermove", function (e) {
-    if (e.pointerType !== "mouse") return;
-    var edge = document.documentElement.clientWidth;
-    if (e.clientX >= edge - 3) { setOpen(true); return; }
-    if (!open) return;
-    var r = drawer.getBoundingClientRect();
-    var near = e.clientX >= r.left - 32 && e.clientY >= r.top - 32 && e.clientY <= r.bottom + 32;
-    if (near) { if (closing) { clearTimeout(closing); closing = null; } }
-    else if (!closing) closing = setTimeout(function () { setOpen(false); }, 220);
-  }, { passive: true });
-  document.documentElement.addEventListener("mouseleave", function (e) {
-    // Leaving through the right edge is the same push, when the browser fills the screen.
-    if (e.clientX >= document.documentElement.clientWidth - 3) setOpen(true);
-  });
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") setOpen(false); });
-  Array.prototype.forEach.call(peek, function (b) {
-    b.addEventListener("click", function (e) { e.stopPropagation(); setOpen(!open); });
-  });
-  document.addEventListener("click", function (e) {
-    if (open && !drawer.contains(e.target)) setOpen(false);
-  });
 })();

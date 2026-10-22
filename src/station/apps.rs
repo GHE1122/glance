@@ -42,7 +42,7 @@ impl App {
 
 static SHOWN: Mutex<Option<Arc<Vec<App>>>> = Mutex::new(None);
 
-#[cfg(all(test, feature = "studio"))]
+#[cfg(feature = "studio")]
 thread_local! {
     /// What this thread's pictures pretend (see `pretend`): each test's its own, as tests run side by side.
     static PRETENDED: std::cell::RefCell<Option<Arc<Vec<App>>>> = const { std::cell::RefCell::new(None) };
@@ -50,7 +50,7 @@ thread_local! {
 
 /// What is kept at hand, in its order.
 pub fn shown() -> Arc<Vec<App>> {
-    #[cfg(all(test, feature = "studio"))]
+    #[cfg(feature = "studio")]
     if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
         return pretended;
     }
@@ -78,7 +78,7 @@ pub fn follow(apps: &[App]) {
 }
 
 /// For pictures: as if these were kept at hand.
-#[cfg(all(test, feature = "studio"))]
+#[cfg(feature = "studio")]
 pub fn pretend(apps: Vec<App>) {
     PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(apps)));
 }

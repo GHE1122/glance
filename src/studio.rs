@@ -60,6 +60,9 @@ struct Script {
     /// screen's work area ends above it.
     #[serde(default)]
     taskbar: f32,
+    /// When the shots begin (ms since 1970: what their clocks show), if not the studio's own moment.
+    #[serde(default)]
+    start_ms: Option<f64>,
     shots: Vec<Shot>,
 }
 
@@ -75,6 +78,13 @@ struct Shot {
     #[serde(default = "zh")]
     lang: String,
     seconds: f32,
+    /// The edge the panel opens at: "left" or "right" (if absent).
+    #[serde(default)]
+    edge: Option<String>,
+    /// The workbench (its station, notes and quick launch holding made-up things, see `pretend_workbench`) rather
+    /// than the readings: its lanes are `modules`' then.
+    #[serde(default)]
+    workbench: bool,
     /// When the panel slides in; shown from the start if absent.
     slide_in: Option<f32>,
     /// When it slides away again, if it does.
@@ -115,6 +125,184 @@ struct Shot {
     /// Widgets on the desktop from the start.
     #[serde(default)]
     widgets: Vec<Placed>,
+    /// A song playing, filmed as a music widget on the desktop or as the music full screen, instead of the panel.
+    #[serde(default)]
+    music: Option<MusicShot>,
+}
+
+/// A song as the music widget or the full screen shows it: its lines (as Glance's lyrics hold them, in a JSON file),
+/// what is heard of it (see `studio/song.py`), its cover (a picture), what it is called and by whom, how long it is,
+/// and how far into it the shot begins (seconds).
+#[derive(Deserialize)]
+struct MusicShot {
+    lyrics: String,
+    heard: String,
+    cover: String,
+    title: String,
+    artist: String,
+    length: f64,
+    #[serde(default)]
+    from: f64,
+    /// The widget: where it is and how large (DIPs on the screen) and how opaque, key by key, eased between them;
+    /// sliding in and away as the shot's `slide_in` and `slide_out` say, out of its `edge`, as a panel does.
+    #[serde(default)]
+    keys: Vec<MusicKey>,
+    /// The full screen instead, over the whole frame, its lines in the serif face in the file named (else in YaHei,
+    /// as till the face is had).
+    #[serde(default)]
+    full: bool,
+    #[serde(default)]
+    serif: Option<String>,
+    /// What the widget shows, as the music's switches say (as they are at first if absent).
+    #[serde(default)]
+    shows: MusicSwitches,
+}
+
+/// The music's switches (see `ui::music::Shows`), each as it is at first unless said.
+#[derive(Deserialize)]
+#[serde(default)]
+struct MusicSwitches {
+    cover: bool,
+    title: bool,
+    translation: bool,
+    spectrum: bool,
+    controls: bool,
+    clear: bool,
+}
+
+impl Default for MusicSwitches {
+    fn default() -> Self {
+        MusicSwitches { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false }
+    }
+}
+
+#[derive(Deserialize, Clone, Copy)]
+struct MusicKey {
+    t: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    #[serde(default = "opaque")]
+    opacity: f32,
+}
+
+fn opaque() -> f32 {
+    1.0
+}
+
+/// What is heard of a song every `step` seconds, as `sound::Heard` says it.
+#[derive(Deserialize)]
+struct HeardSong {
+    step: f64,
+    level: Vec<f32>,
+    bands: Vec<[f32; crate::sound::BANDS]>,
+    beat: Vec<f32>,
+}
+
+impl HeardSong {
+    /// What is heard at `at` seconds into the song (the last look before it: nothing before the first, the last after
+    /// the end).
+    fn at(&self, at: f64) -> crate::sound::Heard {
+        if at < self.step {
+            return crate::sound::Heard::default();
+        }
+        let index = ((at / self.step) as usize - 1).min(self.level.len() - 1);
+        crate::sound::Heard { level: self.level[index], bands: self.bands[index], beat: self.beat[index] }
+    }
+}
+
+/// The widget at `t` seconds, its keys eased between (held past the ends).
+fn music_key(keys: &[MusicKey], t: f32) -> MusicKey {
+    match keys.iter().position(|key| key.t > t) {
+        Some(0) => keys[0],
+        None => keys[keys.len() - 1],
+        Some(next) => {
+            let (a, b) = (keys[next - 1], keys[next]);
+            let k = ((t - a.t) / (b.t - a.t)).clamp(0.0, 1.0);
+            let k = k * k * (3.0 - 2.0 * k);
+            let mix = |p: f32, q: f32| p + (q - p) * k;
+            MusicKey { t, x: mix(a.x, b.x), y: mix(a.y, b.y), w: mix(a.w, b.w), h: mix(a.h, b.h), opacity: mix(a.opacity, b.opacity) }
+        }
+    }
+}
+
+/// How long the music is drawn before a shot's first frame is kept (seconds): its colours come to the cover's, its
+/// spectrum and the full screen's smoke to the song, as they would have while it played.
+const MUSIC_BEFORE: f32 = 2.0;
+
+/// A song playing (see `MusicShot`), filmed at the script's moments: each frame drawn for its own moment, every motion
+/// in it timed from that moment, not from the clock as it draws.
+fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, desktop: &crate::ui::backdrop::Capture, folder: &Path) -> Result<(), String> {
+    use crate::ui::music::{Ground, Music, Played, Shows as MusicShows};
+    let read = |path: &str| std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"));
+    let lines: std::sync::Arc<Vec<crate::lyrics::Line>> = std::sync::Arc::new(serde_json::from_str(&read(&music.lyrics)?).map_err(|e| format!("{}: {e}", music.lyrics))?);
+    let heard: HeardSong = serde_json::from_str(&read(&music.heard)?).map_err(|e| format!("{}: {e}", music.heard))?;
+    let cover = std::sync::Arc::new(crate::cover::of_picture(Path::new(&music.cover)).ok_or_else(|| format!("{}: not a picture", music.cover))?);
+    let lang = if shot.lang == "en" { Lang::En } else { Lang::Zh };
+    if let Some(serif) = &music.serif {
+        crate::serif::have(std::fs::read(serif).map_err(|e| format!("{serif}: {e}"))?);
+    }
+    // (Its volume, as the sound's key shows it.)
+    crate::playing::pretend(crate::playing::Now { timeline: None, players: 1, title: music.title.clone(), artist: music.artist.clone(), album: String::new(), app: lang.pick("音乐", "Music").into(), playing: true, volume: Some(60), muted: false, sung: None });
+    let px = script.scale;
+    let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
+    let on = &music.shows;
+    let shows = MusicShows { cover: on.cover, title: on.title, translation: on.translation, spectrum: on.spectrum, controls: on.controls, clear: on.clear, inset: None };
+    // Sliding out of its edge as a panel does, where the shot says when (its look's entrance, out of the edge it is at).
+    let entrance = Theme::new(Skin::named(&shot.skin), true).entrance;
+    let outward = if shot.edge.as_deref() == Some("left") { -1.0 } else { 1.0 };
+    let mut widget = Music::default();
+    let mut full = crate::fullscreen::Shown::new(std::time::Instant::now());
+    let mut smoke = if music.full { Some(crate::ui::smoke::Smoke::new(gfx).map_err(|e| e.to_string())?) } else { None };
+    let began = std::time::Instant::now() + std::time::Duration::from_secs_f32(MUSIC_BEFORE);
+    let frames = (shot.seconds * script.fps).round() as i64;
+    let before = (MUSIC_BEFORE * script.fps).round() as i64;
+    for index in -before..frames {
+        let t = index as f32 / script.fps;
+        let now = if t >= 0.0 { began + std::time::Duration::from_secs_f32(t) } else { began - std::time::Duration::from_secs_f32(-t) };
+        let position = (music.from + t as f64).max(0.0);
+        let sound = heard.at(music.from + t as f64);
+        let played = || Played { lines: lines.clone(), position, length: music.length, title: music.title.clone(), artist: music.artist.clone(), cover: cover.clone(), sound };
+        let pixels = if let Some(smoke) = smoke.as_mut() {
+            full.follow(now, sound, Some(Some(&cover)), Some(lines.clone()), crate::lyrics::sung_at(&lines, position));
+            full.render_smoke(smoke, (script.width, script.height)).map_err(|e| e.to_string())?;
+            let smoke = &*smoke;
+            gfx.draw_offscreen((script.width, script.height), px, |frame| full.paint(frame, (sw, sh), Some(smoke), position, now))
+        } else {
+            let mut key = music_key(&music.keys, t);
+            if shot.slide_in.is_some() {
+                let (shift, opacity) = motion(shot, t);
+                let travel = match entrance {
+                    Entrance::Beyond(extra) => key.w + extra,
+                    Entrance::Slide(distance) => distance,
+                };
+                key.x += outward * shift * travel;
+                key.opacity *= opacity;
+            }
+            gfx.draw_offscreen((script.width, script.height), px, |frame| {
+                if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
+                    unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+                }
+                if key.opacity <= 0.0 {
+                    return;
+                }
+                let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+                let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: key.opacity, ..Default::default() };
+                unsafe { frame.dc.PushLayer(&layer, None) };
+                frame.place(Matrix3x2::translation(key.x, key.y));
+                widget.paint_played(frame, (key.w, key.h), &shows, Ground::of(&shows), px, None, now, played());
+                frame.origin(0.0, 0.0);
+                unsafe { frame.dc.PopLayer() };
+            })
+        }
+        .map_err(|e| e.to_string())?;
+        gfx.sweep();
+        if index >= 0 {
+            save_png(&folder.join(format!("{:05}.png", index + 1)), script.width, script.height, &pixels).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn yes() -> bool {
@@ -426,6 +614,66 @@ fn zh() -> String {
 }
 
 /// Films every shot in `script` into a folder of its own under `out`.
+/// How many of the files' pictures (see `station::thumbs`) have been made.
+static PICTURES_MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The workbench as it is filmed: its station holding a picture, a few documents, a folder, words and a link (made in
+/// `props`, named in `lang`); a few programs kept at hand (Windows' own); three notes.
+pub fn pretend_workbench(lang: Lang, props: &Path) -> Result<(), String> {
+    use crate::notes::{Colour, Note};
+    use crate::station::shelf::{Item, What};
+    std::fs::create_dir_all(props).map_err(|e| e.to_string())?;
+    // (Whole paths, as the station keeps them: one that is not is taken for a Store app's name.)
+    let props = &std::path::absolute(props).map_err(|e| e.to_string())?;
+    let zh = lang == Lang::Zh;
+    let made = |name: &str, from: Option<&str>| -> Result<PathBuf, String> {
+        let path = props.join(name);
+        match from {
+            Some(from) => std::fs::copy(from, &path).map(|_| ()),
+            None if name.contains('.') => std::fs::write(&path, b"").map(|_| ()),
+            None => std::fs::create_dir_all(&path),
+        }
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(path)
+    };
+    let photo = made(if zh { "桌面壁纸.jpg" } else { "Wallpaper.jpg" }, Some(r"C:\Windows\Web\Screen\img100.jpg"))?;
+    let sheet = made(if zh { "第三季度报表.xlsx" } else { "Q3 report.xlsx" }, None)?;
+    let doc = made(if zh { "会议纪要.docx" } else { "Meeting notes.docx" }, None)?;
+    let folder = made(if zh { "项目资料" } else { "Project files" }, None)?;
+    let now = crate::station::now_ms();
+    let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0 };
+    crate::station::run::pretend(vec![
+        item(1, What::Files { paths: vec![photo], kept: Vec::new() }, 300),
+        item(2, What::Text { text: if zh { "会议改到周四下午三点\n地点：二楼小会议室" } else { "Meeting moved to Thursday, 3 pm\nRoom 2B, second floor" }.into() }, 180),
+        item(3, What::Files { paths: vec![sheet, doc], kept: Vec::new() }, 45),
+        item(4, What::Link { url: "https://glancepc.com".into() }, 30),
+        item(5, What::Files { paths: vec![folder], kept: Vec::new() }, 12),
+    ], crate::settings::ShelfView::Cards);
+    let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into() };
+    crate::station::apps::pretend(vec![
+        app(r"C:\Windows\explorer.exe", if zh { "文件资源管理器" } else { "File Explorer" }),
+        app(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "Microsoft Edge"),
+        app(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", if zh { "计算器" } else { "Calculator" }),
+        app(r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", if zh { "记事本" } else { "Notepad" }),
+        app(r"C:\Windows\System32\cmd.exe", if zh { "命令提示符" } else { "Command Prompt" }),
+    ]);
+    let note = |name: &str, text: &str, colour: Colour, ago_min: u64| Note { name: name.into(), text: text.into(), colour, stamp: crate::notes::store::Stamp { bytes: 0, written_ms: now - ago_min * 60_000, digest: 0 } };
+    crate::notes::pretend(if zh {
+        vec![
+            note("a.md", "# 本周要做的事\n- [x] 交季度报表\n- [ ] 订周六的餐厅\n- [ ] 给妈妈打电话", Colour::Blue, 3),
+            note("b.md", "显卡价格记录\n5070 Ti 京东 6299", Colour::Yellow, 60 * 20),
+            note("c.md", "周末开车听的歌\n- 晴天\n- 后来", Colour::Green, 60 * 50),
+        ]
+    } else {
+        vec![
+            note("a.md", "# This week\n- [x] Send the Q3 report\n- [ ] Book Saturday's table\n- [ ] Call Mum", Colour::Blue, 3),
+            note("b.md", "GPU prices\n5070 Ti 549 USD", Colour::Yellow, 60 * 20),
+            note("c.md", "Songs for the drive\n- Here Comes the Sun", Colour::Green, 60 * 50),
+        ]
+    });
+    Ok(())
+}
+
 pub fn run(script: &Path, out: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
     let script: Script = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", script.display()))?;
@@ -433,6 +681,12 @@ pub fn run(script: &Path, out: &Path) -> Result<(), String> {
     let info = crate::metrics::Sampler::new().info;
     let gfx = Gfx::new().map_err(|e| e.to_string())?;
     let desktop = wallpaper::picture(&script.wallpaper, script.width, script.height).map_err(|e| format!("{}: {e}", script.wallpaper))?;
+    // The files' pictures, made on a thread of their own (for the workbench), counted as they come.
+    if script.shots.iter().any(|shot| shot.workbench) {
+        crate::station::thumbs::start(|| {
+            PICTURES_MADE.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        });
+    }
     for shot in &script.shots {
         let folder = out.join(&shot.name);
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
@@ -443,6 +697,9 @@ pub fn run(script: &Path, out: &Path) -> Result<(), String> {
 }
 
 fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &crate::ui::backdrop::Capture, folder: &Path) -> Result<(), String> {
+    if let Some(music) = &shot.music {
+        return film_music(gfx, script, shot, music, desktop, folder);
+    }
     let skin = Skin::named(&shot.skin);
     let lang = if shot.lang == "en" { Lang::En } else { Lang::Zh };
     let px = script.scale;
@@ -450,6 +707,10 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
     known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
+    if shot.workbench {
+        known.extend(["station", "notes", "apps"].map(String::from));
+        pretend_workbench(lang, &folder.join("props"))?;
+    }
     let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     if let Some(shown) = &shot.modules {
         prefs.modules.sort_by_key(|entry| shown.iter().position(|id| *id == entry.id).unwrap_or(usize::MAX));
@@ -460,7 +721,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     crate::playing::pretend(crate::playing::Now { timeline: None, players: 1, title: "Clair de lune".into(), artist: "Claude Debussy".into(), album: "Suite bergamasque".into(), app: lang.pick("音乐", "Music").into(), playing: true, volume: Some(40), muted: false, sung: None });
     let frames = (shot.seconds * script.fps).round() as usize;
     let interval = 1000.0;
-    let start_ms = 1_760_000_000_000.0;
+    let start_ms = script.start_ms.unwrap_or(1_760_000_000_000.0);
     let backlog = prefs.chart_seconds + 5.0;
     let load = |t: f32| match shot.loads.iter().position(|(at, _)| *at > t) {
         _ if shot.loads.is_empty() => shot.load.0 + (shot.load.1 - shot.load.0) * (t / shot.seconds).clamp(0.0, 1.0),
@@ -483,7 +744,9 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     // Laid out and placed as the panel would be on a screen this size, for
     // the readings of the moment, and held through the shot as the panel
     // holds its outline while it is up (see `arrange::Opening`).
-    let edge = Edge::Right;
+    let edge = if shot.edge.as_deref() == Some("left") { Edge::Left } else { Edge::Right };
+    // (Out of the panel's edge, away from it, as it slides in.)
+    let outward = if edge == Edge::Left { -1.0 } else { 1.0 };
     let opening: std::cell::RefCell<Option<arrange::Opening>> = std::cell::RefCell::new(None);
     let place = |scene: &Scene, theme: &Theme| {
         let mut held = opening.borrow_mut();
@@ -500,7 +763,8 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         };
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
-        let rest = (sw - theme.inset * zoom - pw, ((sh - ph) / 2.0).max(GAP));
+        let x = if edge == Edge::Left { theme.inset * zoom } else { sw - theme.inset * zoom - pw };
+        let rest = (x, ((sh - ph) / 2.0).max(GAP));
         (layout, zoom, rest, opening.seen.clone())
     };
     // Toned by the desktop where it first rests.
@@ -533,7 +797,13 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let mut placed_widgets: Vec<Filming> = shot.widgets.iter().map(|w| Filming::new(Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) }, w.at)).collect();
     let work = (sw, sh - script.taskbar);
     let mut placements = Vec::new();
-    for index in 0..frames {
+    // The files' pictures (a station's, quick launch's) come as they are made, on their own thread: the first frame
+    // drawn again till none has come for a while (some are slow to make), before any is kept.
+    let mut settling = shot.workbench;
+    let mut still = 0;
+    let mut made = PICTURES_MADE.load(std::sync::atomic::Ordering::Acquire);
+    let mut index = 0;
+    while index < frames {
         let t = index as f32 / script.fps;
         let now_ms = start_ms + t as f64 * 1000.0;
         let read = history.iter().take_while(|sample| sample.t as f64 <= now_ms).count().max(1);
@@ -629,7 +899,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                 let backdrop = behind.as_ref().map(|bitmap| (bitmap, Vector2 { X: rest.0 / zoom, Y: rest.1 / zoom }, desktop.digest, px * zoom));
                 let size = (layout.width(), layout.height());
                 let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size, at: (0.0, 0.0), edge: Some(edge), backdrop, frost, rough: false };
-                let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(rest.0 + shift * travel * zoom, rest.1);
+                let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(rest.0 + outward * shift * travel * zoom, rest.1);
                 let _ = layers.draw(frame, &picture, local, px * zoom);
                 if let (Some(layout), Some(sample)) = (shot.overlay, scene.history.last()) {
                     use crate::ui::overlay::{self, Metrics, INSET, MARGIN};
@@ -700,7 +970,17 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             sum.into_iter().map(|total| ((total + MOMENTS as u32 / 2) / MOMENTS as u32) as u8).collect()
         };
         let (shift, _) = moved(t);
-        let panel_at = view::Rect { x: shift * travel, y: 0.0, w: layout.width(), h: layout.height() };
+        if settling {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let now = PICTURES_MADE.load(std::sync::atomic::Ordering::Acquire);
+            still = if now == made { still + 1 } else { 0 };
+            made = now;
+            settling = still < 3;
+            if settling {
+                continue;
+            }
+        }
+        let panel_at = view::Rect { x: outward * shift * travel, y: 0.0, w: layout.width(), h: layout.height() };
         let where_is = |filming: &Filming| {
             let zoom = filming.last.as_ref().map_or(1.0, |shown| shown.zoom);
             serde_json::json!({
@@ -714,6 +994,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         placements.push(serde_json::json!({ "t": t, "panel": rect(&panel_at), "widget": widget, "widgets": others, "hints": hints }));
         gfx.sweep();
         save_png(&folder.join(format!("{:05}.png", index + 1)), script.width, script.height, &pixels).map_err(|e| e.to_string())?;
+        index += 1;
     }
     std::fs::write(folder.join("frames.json"), serde_json::to_string(&placements).unwrap()).map_err(|e| e.to_string())?;
     std::fs::write(folder.join("lanes.json"), serde_json::to_string_pretty(&placed).unwrap()).map_err(|e| e.to_string())

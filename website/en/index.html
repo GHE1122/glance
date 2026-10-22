@@ -3,21 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Glance: a system monitor at the edge of your screen</title>
-<meta name="description" content="Glance is a free, open-source system monitor for Windows. Push the pointer against the edge of the screen and a panel slides out with CPU, graphics, memory, network, disk and temperatures; move away and it's gone.">
+<title>Glance: a monitor and workbench at the edge of your screen</title>
+<meta name="description" content="Glance is a free, open-source companion for Windows. Push the pointer against the edge of the screen and a panel slides out with CPU, graphics, memory, network, disk and temperatures, and the files, notes, programs and music you reach for. Move away and it's gone.">
 <meta name="theme-color" content="#2b2f5c">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Glance: a system monitor at the edge of your screen">
+<meta property="og:title" content="Glance: a monitor and workbench at the edge of your screen">
 <meta property="og:description" content="Push the pointer there; move away and it's gone. Free and open source, for Windows 10 and 11.">
 <link rel="icon" href="../assets/img/icon.svg" type="image/svg+xml">
 <link rel="icon" href="../favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <link rel="preload" href="../assets/fonts/archivo-600.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="../assets/site.css?v=16">
-<script src="../assets/site.js?v=8" defer></script>
-<script src="../assets/demo.js?v=7" defer></script>
-<script src="../assets/widget.js?v=4" defer></script>
+<link rel="stylesheet" href="../assets/site.css?v=20">
+<link rel="stylesheet" href="../assets/bench.css?v=2">
+<link rel="stylesheet" href="../assets/desk.css?v=5">
+<script src="../assets/site.js?v=10" defer></script>
+<script src="../assets/demo.js?v=11" defer></script>
 <script src="../assets/overlay.js?v=4" defer></script>
+<script src="../assets/bench.js?v=3" defer></script>
+<script src="../assets/music.js?v=3" defer></script>
+<script src="../assets/full.js?v=1" defer></script>
+<script src="../assets/readings.js?v=1" defer></script>
+<script src="../assets/desk.js?v=5" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -26,6 +32,7 @@
   <div class="wrap">
     <a class="mark" href="./" aria-label="Glance home"><img src="../assets/img/icon.svg" alt="" width="32" height="32">Glance</a>
     <nav class="nav" aria-label="Page">
+      <a class="sec" href="#desk">Demo</a>
       <a class="sec" href="#features">Features</a>
       <a class="sec" href="#workbench">Workbench</a>
       <a class="sec" href="#faq">Questions</a>
@@ -42,8 +49,8 @@
     <div class="wrap">
       <div class="hero-text">
         <p class="pill">Free · open source · Windows 10 / 11</p>
-        <h1>A system monitor at the edge of your screen</h1>
-        <p class="lede">Push the pointer against the edge of the screen and a panel slides out with everything your PC is doing: CPU, graphics, memory, network, disks and temperatures. Move away and it slides back, taking no room at all.</p>
+        <h1>A monitor and workbench at the edge of your screen</h1>
+        <p class="lede">Push the pointer against the edge of the screen and a panel slides out with everything your PC is doing: CPU, graphics, memory, network, disks and temperatures. The other edge holds a workbench with the files, notes and programs you reach for. Move away and it slides back, taking no room at all.</p>
 
         <div class="phone" role="note">
           <p><strong>Glance is a Windows app</strong>; it won't install on a phone. Copy this address and open it in a browser on your PC to download it.</p>
@@ -60,11 +67,51 @@
           <p class="sys">For Windows 10 and 11 (64-bit) · signed installer</p>
           <p class="not-windows">Glance is Windows-only for now, so it won't run on this computer. Send this address to a Windows PC to download it there.</p>
         </div>
-        <p class="try" data-edge-hint><span>Try it: push the pointer against the right edge of this window</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m0 0-5-5m5 5-5 5"/></svg></p>
-        <button class="peek" type="button" data-peek>Show the panel</button>
+        <a class="to-desk" href="#desk">See it in action<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></a>
       </div>
     </div>
   </div>
+
+  <section class="desk-sec" id="desk">
+    <div class="wrap">
+      <p class="eyebrow">Demo</p>
+      <h2>Try it on this screen</h2>
+      <p class="sub">A simulated desktop, with the panels and widgets drawn as Glance draws them. It plays through on its own. Move the pointer onto it to push its edges yourself, drag the monitor panel and the music off as widgets and size them, or open the full screen lyrics. Switch between the three looks below it.</p>
+      <div class="vdesk" data-desk role="region" aria-label="Glance in use">
+        <div class="screen">
+          <div class="taskbar"></div>
+          <div class="edge" data-at="left"></div>
+          <div class="edge" data-at="right"><div data-demo></div></div>
+          <div class="mw" hidden><canvas></canvas></div>
+          <div class="full"></div>
+          <div class="esc">Esc</div>
+          <svg class="pointer" viewBox="0 0 26 38" aria-hidden="true"><path d="M2 2 L2 30 L9 23.5 L14 35 L18.5 33 L13.5 21.8 L22.5 21.8 Z" fill="#fff" stroke="#111" stroke-width="1.6" stroke-linejoin="round"/></svg>
+        </div>
+      </div>
+      <div class="desk-bar">
+        <p class="desk-say" data-say aria-live="polite"></p>
+        <div class="desk-tools">
+          <div class="seg" role="group" aria-label="Look" data-looks><button type="button" data-look="paper" aria-pressed="false">Chart paper</button><button type="button" data-look="glass" aria-pressed="true">Frosted glass</button><button type="button" data-look="win11" aria-pressed="false">Windows 11</button></div>
+          <div class="seg" role="group" aria-label="Parts of the demo" data-chapters><button type="button" aria-pressed="false">Monitor</button><button type="button" aria-pressed="false">Workbench</button><button type="button" aria-pressed="false">Music</button><button type="button" aria-pressed="false">Full screen</button></div>
+          <button class="desk-sound" type="button" aria-pressed="false" data-sound><svg class="off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/></svg><svg class="on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/></svg><span>Sound</span></button>
+        </div>
+      </div>
+
+      <div class="looks">
+        <div class="looks-text">
+          <div>
+            <h3>The overlay: a card or a strip</h3>
+            <p>It floats in a corner while you play, on tinted glass, which turns darker or lighter with what is around it, so the figures always read.</p>
+          </div>
+          <div class="seg" role="group" data-overlay-layout>
+          <button type="button" data-layout="card" aria-pressed="true">Card</button>
+          <button type="button" data-layout="strip" aria-pressed="false">Strip</button>
+          </div>
+        </div>
+        <div class="stage scene" data-overlay-stage></div>
+      </div>
+    </div>
+  </section>
 
   <section id="features">
     <div class="wrap">
@@ -114,43 +161,6 @@
           <p>A small app on your phone, paired by scanning a code, turns the PC's screens and case lights off, sets its volume and brightness, skips a song, and shows how warm it runs; night mode does it all at once while the PC keeps downloading. It works only on your own network and goes through no server. <a href="../app/">Get the phone app</a></p>
         </li>
       </ul>
-
-      <div class="looks">
-        <div class="looks-text">
-          <div>
-            <h3>Three looks, and a widget</h3>
-            <p>Chart paper, frosted glass, Windows 11. The panel below is laid out as Glance draws it, readings running: try another look. Switch to the widget and drag an edge or a corner to see it lay itself out for the room; hold its middle to move it, and let go near an edge to stick it there as a slim bar.</p>
-          </div>
-          <div class="segs">
-          <div class="seg" role="group" aria-label="Panel or widget" data-shape>
-          <button type="button" data-shape="panel" aria-pressed="true">Panel</button>
-          <button type="button" data-shape="widget" aria-pressed="false">Widget</button>
-          </div>
-          <div class="seg" role="group" data-looks>
-          <button type="button" data-look="paper" aria-pressed="false">Chart paper</button>
-          <button type="button" data-look="glass" aria-pressed="true">Frosted glass</button>
-          <button type="button" data-look="win11" aria-pressed="false">Windows 11</button>
-          </div>
-          </div>
-        </div>
-        <div class="stage" data-demo></div>
-        <div class="stage desk" data-widget aria-label="A widget to size" hidden></div>
-      </div>
-
-      <div class="looks">
-        <div class="looks-text">
-          <div>
-            <h3>The overlay: a card or a strip</h3>
-            <p>It floats in a corner while you play, on tinted glass, which turns darker or lighter with what is around it, so the figures always read.</p>
-          </div>
-          <div class="seg" role="group" data-overlay-layout>
-          <button type="button" data-layout="card" aria-pressed="true">Card</button>
-          <button type="button" data-layout="strip" aria-pressed="false">Strip</button>
-          </div>
-        </div>
-        <div class="stage scene" data-overlay-stage></div>
-      </div>
-
     </div>
   </section>
 
@@ -159,6 +169,7 @@
       <p class="eyebrow">Workbench and music</p>
       <h2>More than a monitor</h2>
       <p class="sub">From 0.4, Glance has two more components: a Workbench for the things you reach for, and Music that follows the lyrics. Like the monitor, each can sit on any screen edge, or be dragged out onto the desktop.</p>
+
 
       <ul class="features pairs">
         <li class="feature">
@@ -378,7 +389,5 @@
     <p><a href="../" hreflang="zh-CN" lang="zh-CN">中文</a></p>
   </div>
 </footer>
-<div class="edge-glow" data-edge aria-hidden="true"></div>
-<aside class="drawer" data-drawer aria-hidden="true" aria-label="Glance panel demo"><div data-demo></div></aside>
 </body>
 </html>

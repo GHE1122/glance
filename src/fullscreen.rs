@@ -38,6 +38,11 @@ const LEAVING: f32 = 0.7;
 /// Each character's size and tilt as it stands in its line, from a few of each (by its place and the line's).
 const SIZES: [f32; 8] = [1.15, 0.78, 1.0, 1.32, 0.86, 1.08, 0.72, 1.22];
 const TILTS: [f32; 8] = [-0.09, 0.06, -0.03, 0.08, -0.07, 0.04, -0.05, 0.07];
+/// The least share of its size a line is drawn at to fit in one row, else it takes more, at most so many; and how far
+/// apart the rows are, of the size they are drawn at.
+const LEAST_FIT: f32 = 0.6;
+const MOST_ROWS: usize = 3;
+const ROW_STEP: f32 = 1.3;
 
 /// What a press is on.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -69,21 +74,8 @@ pub struct FullMusic {
     scale: f32,
     /// That screen's display, as the desktop names it (see `screens::Screen::id`).
     display: Option<String>,
-    /// The music as it goes: each band followed slowly, the swell of the lows, how far the smoke has flowed.
-    smooth: [f32; crate::sound::BANDS],
-    swell: f32,
-    flow: f32,
-    /// The beat, up quickly and down slowly (as it is heard, it comes and goes from one frame to the next).
-    beat: f32,
-    last: Option<Instant>,
-    began: Instant,
-    /// The smoke's colours, easing toward the cover's.
-    tint: [f32; 3],
-    tint2: [f32; 3],
-    /// The line sung now, and the one before it with when it began to leave.
-    now: Option<usize>,
-    leaving: Option<(usize, Instant)>,
-    lines: Option<Arc<Vec<Line>>>,
+    /// The music and the lines as they go.
+    shown: Shown,
     /// The pointer: where it is, when it last moved; the controls, how far come.
     pointer: Option<(f32, f32)>,
     moved: Option<Instant>,
@@ -124,17 +116,7 @@ impl FullMusic {
             screen,
             scale,
             display: crate::screens::all().into_iter().find(|shown| shown.monitor == screen).map(|shown| shown.id),
-            smooth: [0.0; crate::sound::BANDS],
-            swell: 0.0,
-            flow: 0.0,
-            beat: 0.0,
-            last: None,
-            began: now,
-            tint: TINT,
-            tint2: TINT2,
-            now: None,
-            leaving: None,
-            lines: None,
+            shown: Shown::new(now),
             pointer: None,
             moved: Some(now),
             controls: 1.0,
@@ -175,20 +157,7 @@ impl FullMusic {
 
     /// Draws a frame; when the next is due (at once: it moves all the time).
     pub fn tick(&mut self, now: Instant) -> Duration {
-        let dt = self.last.map_or(0.0, |last| now.duration_since(last).as_secs_f32().min(0.1));
-        self.last = Some(now);
-        let heard = crate::sound::heard();
-        let k = 1.0 - (-dt / 0.22).exp();
-        for (shown, band) in self.smooth.iter_mut().zip(heard.bands) {
-            *shown += (band - *shown) * k;
-        }
-        let part = |from: usize, to: usize, of: &[f32]| of[from..to].iter().sum::<f32>() / (to - from) as f32;
-        let bass = part(0, 4, &heard.bands);
-        self.swell += (bass - self.swell) * (1.0 - (-dt / 0.45).exp());
-        self.flow += dt * (0.55 + self.swell * 0.9);
-        let heard_beat = heard.beat.clamp(0.0, 1.0);
-        let pace = if heard_beat > self.beat { 0.04 } else { 0.3 };
-        self.beat += (heard_beat - self.beat) * (1.0 - (-dt / pace).exp());
+        let dt = self.shown.last.map_or(0.0, |last| now.duration_since(last).as_secs_f32().min(0.1));
         // The controls: in while the pointer moved lately (or something is dragged), out after.
         let awake = self.dragging.is_some() || self.moved.is_some_and(|moved| now.duration_since(moved) < AWAKE);
         let to = if awake { 1.0 } else { 0.0 };
@@ -200,25 +169,13 @@ impl FullMusic {
             let over = crate::mouse::cursor_position().is_some_and(|at| at.x >= self.screen.left && at.x < self.screen.right && at.y >= self.screen.top && at.y < self.screen.bottom);
             self.window.point_none(!awake, over);
         }
-        // What plays, and its cover's colours.
+        // What plays, and its cover (a track with none: back toward its own colours, one not yet read: as they are).
         let heard_now = crate::playing::music();
-        if let Some(playing) = heard_now.as_ref().filter(|playing| !playing.title.is_empty()) {
-            // (A track with none: back toward its own.)
-            let toward = match crate::cover::of(playing) {
-                Some(cover) => {
-                    let top = cover.base.iter().fold(0.01f32, |top, c| top.max(*c));
-                    let tint = cover.base.map(|c| (c / top * 0.96).min(1.0));
-                    Some((tint, tint.map(|c| c + (1.0 - c) * 0.55)))
-                }
-                None if crate::cover::has_none(playing) => Some((TINT, TINT2)),
-                None => None,
-            };
-            if let Some((tint, tint2)) = toward {
-                let ease = 1.0 - (-dt / 0.6).exp();
-                self.tint = std::array::from_fn(|i| self.tint[i] + (tint[i] - self.tint[i]) * ease);
-                self.tint2 = std::array::from_fn(|i| self.tint2[i] + (tint2[i] - self.tint2[i]) * ease);
-            }
-        }
+        let cover = heard_now.as_ref().filter(|playing| !playing.title.is_empty()).and_then(|playing| match crate::cover::of(playing) {
+            Some(cover) => Some(Some(cover)),
+            None if crate::cover::has_none(playing) => Some(None),
+            None => None,
+        });
         let sung = heard_now.as_ref().and_then(|playing| playing.sung.clone());
         let (lines, sung_now) = match &sung {
             Some(Sung::Lines { lines, now, .. }) => (Some(lines.clone()), *now),
@@ -236,13 +193,7 @@ impl FullMusic {
             let (title, artist) = heard_now.as_ref().map_or_else(Default::default, |playing| (playing.title.clone(), playing.artist.clone()));
             (title, artist, why.to_string())
         });
-        if lines.as_ref().map(Arc::as_ptr) != self.lines.as_ref().map(Arc::as_ptr) {
-            self.leaving = None;
-        } else if sung_now != self.now {
-            self.leaving = self.now.map(|before| (before, now));
-        }
-        self.lines = lines;
-        self.now = sung_now;
+        self.shown.follow(now, crate::sound::heard(), cover.as_ref().map(Option::as_deref), lines, sung_now);
         let position = crate::playing::position(Follow::Music).unwrap_or(0.0);
         let playing = heard_now.as_ref().is_some_and(|playing| playing.playing);
         let length = heard_now.as_ref().and_then(|playing| playing.timeline).map(|timeline| (timeline.length, timeline.seekable));
@@ -259,15 +210,12 @@ impl FullMusic {
             }
         }
         if let Some(smoke) = self.smoke.as_mut() {
-            let made = ((pixels.0 as f32 * smoke::SCALE) as u32, (pixels.1 as f32 * smoke::SCALE) as u32);
-            if let Err(error) = smoke.render(made, &smoke::Now { flow: self.flow, swell: self.swell, tint: self.tint, tint2: self.tint2 }) {
+            if let Err(error) = self.shown.render_smoke(smoke, pixels) {
                 crate::journal::note(format!("music full screen: the smoke could not be drawn ({error})"));
                 self.smoke = None;
             }
         }
-        let t = now.duration_since(self.began).as_secs_f32();
-        let music = Music { smooth: self.smooth, swell: self.swell, beat: self.beat, high: part(14, 20, &self.smooth), bass: part(0, 4, &self.smooth) };
-        let (smoke, lines, now_index, leaving) = (&self.smoke, self.lines.clone(), self.now, self.leaving);
+        let (smoke, shown) = (&self.smoke, &self.shown);
         let (pointer, controls, dragging) = (self.pointer, self.controls, self.dragging);
         let mut volume_open = self.volume_open;
         let flash = self.volume_turned.is_some_and(|turned| now.duration_since(turned) < AWAKE);
@@ -276,13 +224,7 @@ impl FullMusic {
         let Some(surface) = self.surface.as_mut() else { return Duration::ZERO };
         let drawn = surface.draw(&gfx, pixels, self.scale, |frame| {
             frame.origin(0.0, 0.0);
-            frame.fill(Color::hex(0x000000, 1.0), 0.0, 0.0, w, h);
-            if let Some(smoke) = smoke {
-                smoke.paint(frame, rect(0.0, 0.0, w, h));
-            }
-            if let Some(lines) = &lines {
-                draw_lines(frame, (w, h), lines, now_index, leaving.map(|(index, since)| (index, now.duration_since(since).as_secs_f32())), position, t, &music);
-            }
+            shown.paint(frame, (w, h), smoke.as_ref(), position, now);
             if let Some((title, artist, why)) = &said {
                 draw_said(frame, (w, h), title, artist, why);
             }
@@ -425,6 +367,92 @@ impl FullMusic {
     }
 }
 
+/// What the full screen shows as the music goes, wherever it is drawn: the music followed (each band slowly, the swell
+/// of the lows, how far the smoke has flowed, the beat), the smoke's colours easing toward the cover's, and the lines
+/// with the one sung now and the one leaving.
+pub struct Shown {
+    smooth: [f32; crate::sound::BANDS],
+    swell: f32,
+    flow: f32,
+    /// The beat, up quickly and down slowly (as it is heard, it comes and goes from one frame to the next).
+    beat: f32,
+    last: Option<Instant>,
+    began: Instant,
+    tint: [f32; 3],
+    tint2: [f32; 3],
+    /// The line sung now, and the one before it with when it began to leave.
+    now: Option<usize>,
+    leaving: Option<(usize, Instant)>,
+    lines: Option<Arc<Vec<Line>>>,
+}
+
+impl Shown {
+    pub fn new(now: Instant) -> Shown {
+        Shown { smooth: [0.0; crate::sound::BANDS], swell: 0.0, flow: 0.0, beat: 0.0, last: None, began: now, tint: TINT, tint2: TINT2, now: None, leaving: None, lines: None }
+    }
+
+    /// Followed to `now`: `heard`, the cover's colours (`cover`: none known yet keeps them, a track with none goes back
+    /// toward its own), and `lines` with the one sung now.
+    pub fn follow(&mut self, now: Instant, heard: crate::sound::Heard, cover: Option<Option<&crate::cover::Cover>>, lines: Option<Arc<Vec<Line>>>, sung_now: Option<usize>) {
+        let dt = self.last.map_or(0.0, |last| now.duration_since(last).as_secs_f32().min(0.1));
+        self.last = Some(now);
+        let k = 1.0 - (-dt / 0.22).exp();
+        for (shown, band) in self.smooth.iter_mut().zip(heard.bands) {
+            *shown += (band - *shown) * k;
+        }
+        let bass = part(0, 4, &heard.bands);
+        self.swell += (bass - self.swell) * (1.0 - (-dt / 0.45).exp());
+        self.flow += dt * (0.55 + self.swell * 0.9);
+        let heard_beat = heard.beat.clamp(0.0, 1.0);
+        let pace = if heard_beat > self.beat { 0.04 } else { 0.3 };
+        self.beat += (heard_beat - self.beat) * (1.0 - (-dt / pace).exp());
+        let toward = cover.map(|cover| match cover {
+            Some(cover) => {
+                let top = cover.base.iter().fold(0.01f32, |top, c| top.max(*c));
+                let tint = cover.base.map(|c| (c / top * 0.96).min(1.0));
+                (tint, tint.map(|c| c + (1.0 - c) * 0.55))
+            }
+            None => (TINT, TINT2),
+        });
+        if let Some((tint, tint2)) = toward {
+            let ease = 1.0 - (-dt / 0.6).exp();
+            self.tint = std::array::from_fn(|i| self.tint[i] + (tint[i] - self.tint[i]) * ease);
+            self.tint2 = std::array::from_fn(|i| self.tint2[i] + (tint2[i] - self.tint2[i]) * ease);
+        }
+        if lines.as_ref().map(Arc::as_ptr) != self.lines.as_ref().map(Arc::as_ptr) {
+            self.leaving = None;
+        } else if sung_now != self.now {
+            self.leaving = self.now.map(|before| (before, now));
+        }
+        self.lines = lines;
+        self.now = sung_now;
+    }
+
+    /// The smoke made for `pixels` (the whole of what it covers) as it flows now.
+    pub fn render_smoke(&self, smoke: &mut Smoke, pixels: (u32, u32)) -> windows::core::Result<()> {
+        let made = ((pixels.0 as f32 * smoke::SCALE) as u32, (pixels.1 as f32 * smoke::SCALE) as u32);
+        smoke.render(made, &smoke::Now { flow: self.flow, swell: self.swell, tint: self.tint, tint2: self.tint2 })
+    }
+
+    /// Black, the smoke over it (as last made), and the lines at `position` (seconds into the track), at `now`.
+    pub fn paint(&self, frame: &Frame, (w, h): (f32, f32), smoke: Option<&Smoke>, position: f64, now: Instant) {
+        frame.fill(Color::hex(0x000000, 1.0), 0.0, 0.0, w, h);
+        if let Some(smoke) = smoke {
+            smoke.paint(frame, rect(0.0, 0.0, w, h));
+        }
+        if let Some(lines) = &self.lines {
+            let music = Music { smooth: self.smooth, swell: self.swell, beat: self.beat, high: part(14, 20, &self.smooth), bass: part(0, 4, &self.smooth) };
+            let t = now.duration_since(self.began).as_secs_f32();
+            draw_lines(frame, (w, h), lines, self.now, self.leaving.map(|(index, since)| (index, now.duration_since(since).as_secs_f32())), position, t, &music);
+        }
+    }
+}
+
+/// The mean of the bands `from` to `to` of `of`.
+fn part(from: usize, to: usize, of: &[f32]) -> f32 {
+    of[from..to].iter().sum::<f32>() / (to - from) as f32
+}
+
 /// The music as the lines move with it: each band followed slowly, the lows' swell, the beat, the lows and the highs.
 struct Music {
     #[allow(dead_code)]
@@ -484,6 +512,49 @@ fn draw_lines(frame: &Frame, (w, h): (f32, f32), lines: &[Line], now: Option<usi
     }
 }
 
+/// The fewest rows a line whose characters (each word, of a script that writes words) take `rooms` (and are spaces
+/// where `blank` says) is drawn in, `wide` across: one, unless it would be made smaller than `LEAST_FIT` of its size
+/// to fit (as a long line on a screen stood on end would), then as many more as keep it at least that large, at most
+/// `MOST_ROWS`. Each row as long as the others as near as may be, broken between characters (between words), a space
+/// where it breaks left at the end of the row before; and how much smaller than its size it is drawn to fit.
+fn rows_of(rooms: &[f32], blank: &[bool], wide: f32) -> (Vec<std::ops::Range<usize>>, f32) {
+    // How long a row of these is: without the spaces at its ends.
+    let long = |row: &std::ops::Range<usize>| {
+        let (mut from, mut to) = (row.start, row.end);
+        while from < to && blank[from] {
+            from += 1;
+        }
+        while to > from && blank[to - 1] {
+            to -= 1;
+        }
+        rooms[from..to].iter().sum::<f32>()
+    };
+    let total: f32 = rooms.iter().sum();
+    let mut chosen = (vec![0..rooms.len()], 1.0);
+    for count in 1..=MOST_ROWS.min(rooms.len().max(1)) {
+        // Each break where the room before it comes nearest to an even share of the whole.
+        let mut rows = Vec::new();
+        let (mut start, mut before) = (0, 0.0);
+        for row in 1..count {
+            let share = total * row as f32 / count as f32;
+            let mut end = start + 1;
+            while end < rooms.len() - (count - row) && (before + rooms[start..end].iter().sum::<f32>() + rooms[end] / 2.0) < share {
+                end += 1;
+            }
+            before += rooms[start..end].iter().sum::<f32>();
+            rows.push(start..end);
+            start = end;
+        }
+        rows.push(start..rooms.len());
+        let fit = (wide / rows.iter().map(long).fold(1.0, f32::max)).min(1.0);
+        chosen = (rows, fit);
+        if fit >= LEAST_FIT {
+            break;
+        }
+    }
+    chosen
+}
+
 /// A line's characters (see `timed`) as they move together: each of Chinese, Japanese and Korean script on its own,
 /// and of the others each word whole (its letters one, as they are read: moved each its own way, a word in English
 /// came apart into letters strewn along the wave); each with when it is sung and for how long, and spaces as they
@@ -519,13 +590,16 @@ fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>,
     if chars.iter().all(|(said, ..)| said.trim().is_empty()) {
         return;
     }
-    // Each character's size and room, the whole made smaller where it would not fit.
+    // Each character's size and room, in as few rows as keep them large enough (see `rows_of`), the whole made smaller
+    // where it would not fit; the last row on the baseline, those before it above it.
     let mut sizes: Vec<f32> = (0..chars.len()).map(|k| base * SIZES[(k + which * 3) % 8]).collect();
     let mut rooms: Vec<f32> = chars.iter().zip(&sizes).map(|((said, ..), size)| if said.trim().is_empty() { size * 0.4 } else { frame.measure(said, Font::new(crate::serif::family(), *size, 700.0)) + base * 0.08 }).collect();
-    let total: f32 = rooms.iter().sum();
-    let fit = ((w - 2.0 * left) / total.max(1.0)).min(1.0);
+    let blank: Vec<bool> = chars.iter().map(|(said, ..)| said.trim().is_empty()).collect();
+    let (rows, fit) = rows_of(&rooms, &blank, w - 2.0 * left);
     sizes.iter_mut().for_each(|size| *size *= fit);
     rooms.iter_mut().for_each(|room| *room *= fit);
+    let row_of = |k: usize| rows.iter().position(|row| row.contains(&k)).unwrap_or(0);
+    let row_baseline = |row: usize| baseline - (rows.len() - 1 - row) as f32 * base * fit * ROW_STEP;
     let sway = (t * 0.4).sin() * 0.04;
     // Each character as it stands now: what it says, its face, its middle and top, the point it turns and swells
     // about, its tilt and swell, how far it has come, how lit it is, how much of it shows, its room.
@@ -545,17 +619,22 @@ fn draw_line(frame: &Frame, (w, _h): (f32, f32), line: &Line, next: Option<f64>,
     let mut glyphs = Vec::new();
     let mut x = left;
     for (k, ((said, at, each), (size, room))) in chars.iter().zip(sizes.iter().zip(&rooms)).enumerate() {
-        let middle = x + room / 2.0;
-        x += room;
+        // (A row begins at the left; a space at its start is not drawn, and takes no room.)
+        if rows.iter().any(|row| row.start == k) {
+            x = left;
+        }
         if said.trim().is_empty() {
+            x += if x == left { 0.0 } else { *room };
             continue;
         }
+        let middle = x + room / 2.0;
+        x += room;
         let age = (position - at) as f32;
         if age < -0.25 {
             continue;
         }
         let font = Font::new(crate::serif::family(), *size, 700.0);
-        let y = baseline + (k as f32 * 0.9 + t * 0.8 + which as f32).sin() * base * 0.18 + (middle - w / 2.0) * sway;
+        let y = row_baseline(row_of(k)) + (k as f32 * 0.9 + t * 0.8 + which as f32).sin() * base * fit * 0.18 + (middle - w / 2.0) * sway;
         let came = ease((age + 0.25) / 0.55);
         // How lit it is: up as it is sung, down after.
         let lit = ease((age + 0.08) / 0.18) * (1.0 - ease((age - *each as f32 - 0.1) / 0.5)) * (1.0 - out);
@@ -802,6 +881,28 @@ mod tests {
         assert_eq!(super::along_track(area, from + wide), 1.0);
         assert_eq!(super::along_track(area, from + wide / 2.0), 0.5);
         assert_eq!((super::along_track(area, from - 5.0), super::along_track(area, from + wide + 5.0)), (0.0, 1.0));
+    }
+
+    /// A line too long to be drawn large in one row (on a screen stood on end) takes two, each about half of it; one
+    /// that fits keeps one; spaces where it breaks do not count toward a row's length.
+    #[test]
+    fn a_long_line_takes_more_rows_rather_than_shrinking() {
+        let rooms = [100.0; 10];
+        let blank = [false; 10];
+        let (rows, fit) = super::rows_of(&rooms, &blank, 1200.0);
+        assert_eq!((rows, fit), (vec![0..10], 1.0));
+        let (rows, fit) = super::rows_of(&rooms, &blank, 500.0);
+        assert_eq!((rows, fit), (vec![0..5, 5..10], 1.0));
+        // Words with spaces between them: broken at a space, which takes no room at either end.
+        let rooms = [300.0, 40.0, 300.0, 40.0, 300.0, 40.0, 300.0];
+        let blank = [false, true, false, true, false, true, false];
+        let (rows, fit) = super::rows_of(&rooms, &blank, 640.0);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(fit, 640.0 / 640.0);
+        // Too long for even the most rows: as many, and smaller.
+        let (rows, fit) = super::rows_of(&[100.0; 30], &[false; 30], 300.0);
+        assert_eq!(rows.len(), super::MOST_ROWS);
+        assert!(fit < super::LEAST_FIT);
     }
 
     /// Chinese moves a character at a time; a word in English whole, its letters' times summed.

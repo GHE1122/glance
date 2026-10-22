@@ -3,22 +3,28 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Glance：藏在屏幕边缘的系统监控 · 免费下载</title>
-<meta name="description" content="Glance 是一个免费、开源的 Windows 系统监控：鼠标推到屏幕边缘，面板滑出，CPU、显卡、内存、网络、硬盘和温度一眼看清；移开鼠标，面板收回。">
+<title>Glance：藏在屏幕边缘的系统监控和工作台 · 免费下载</title>
+<meta name="description" content="Glance 是一个免费、开源的 Windows 小工具：鼠标推到屏幕边缘，面板滑出，CPU、显卡、内存、网络、硬盘和温度一眼看清，随手要用的文件、便签、常用程序和正在播放的歌也在这里。移开鼠标，面板收回。">
 <meta name="theme-color" content="#2b2f5c">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Glance：藏在屏幕边缘的系统监控">
+<meta property="og:title" content="Glance：藏在屏幕边缘的系统监控和工作台">
 <meta property="og:description" content="鼠标推到屏幕边缘，面板滑出；移开即收回。免费、开源，适用于 Windows 10 / 11。">
 <link rel="icon" href="assets/img/icon.svg" type="image/svg+xml">
 <link rel="icon" href="favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="preload" href="assets/fonts/archivo-600.woff2" as="font" type="font/woff2" crossorigin>
 <script src="assets/lang.js?v=1"></script>
-<link rel="stylesheet" href="assets/site.css?v=16">
-<script src="assets/site.js?v=8" defer></script>
-<script src="assets/demo.js?v=7" defer></script>
-<script src="assets/widget.js?v=4" defer></script>
+<link rel="stylesheet" href="assets/site.css?v=20">
+<link rel="stylesheet" href="assets/bench.css?v=2">
+<link rel="stylesheet" href="assets/desk.css?v=5">
+<script src="assets/site.js?v=10" defer></script>
+<script src="assets/demo.js?v=11" defer></script>
 <script src="assets/overlay.js?v=4" defer></script>
+<script src="assets/bench.js?v=3" defer></script>
+<script src="assets/music.js?v=3" defer></script>
+<script src="assets/full.js?v=1" defer></script>
+<script src="assets/readings.js?v=1" defer></script>
+<script src="assets/desk.js?v=5" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">跳到正文</a>
@@ -27,6 +33,7 @@
   <div class="wrap">
     <a class="mark" href="./" aria-label="Glance 首页"><img src="assets/img/icon.svg" alt="" width="32" height="32">Glance</a>
     <nav class="nav" aria-label="页面导航">
+      <a class="sec" href="#desk">演示</a>
       <a class="sec" href="#features">功能</a>
       <a class="sec" href="#workbench">工作台</a>
       <a class="sec" href="#faq">常见问题</a>
@@ -43,8 +50,8 @@
     <div class="wrap">
       <div class="hero-text">
         <p class="pill">免费 · 开源 · Windows 10 / 11</p>
-        <h1>藏在屏幕边缘的<br>系统监控</h1>
-        <p class="lede">鼠标往屏幕边缘一推，面板就滑出来：CPU、显卡、内存、网络、硬盘、温度，电脑此刻的状态一眼看清。鼠标移开，它就收回去，平时完全不占地方。</p>
+        <h1>藏在屏幕边缘的<br>监控和工作台</h1>
+        <p class="lede">鼠标往屏幕边缘一推，面板就滑出来：CPU、显卡、内存、网络、硬盘、温度，电脑此刻的状态一眼看清。另一边放着工作台，随手要用的文件、便签和常用程序都在那里。鼠标移开，它就收回去，平时完全不占地方。</p>
 
         <div class="phone" role="note">
           <p><strong>Glance 是 Windows 电脑上的软件</strong>，手机上装不了。把这个网址复制下来，在电脑的浏览器里打开就能下载。</p>
@@ -62,11 +69,51 @@
           <p class="sys">适用于 Windows 10 / 11（64 位）· 安装包已签名</p>
           <p class="not-windows">Glance 目前只有 Windows 版，这台电脑装不了。可以把这个网址发到 Windows 电脑上再下载。</p>
         </div>
-        <p class="try" data-edge-hint><span>试试看：把鼠标推到窗口最右边</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m0 0-5-5m5 5-5 5"/></svg></p>
-        <button class="peek" type="button" data-peek>看看面板</button>
+        <a class="to-desk" href="#desk">查看演示<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></a>
       </div>
     </div>
   </div>
+
+  <section class="desk-sec" id="desk">
+    <div class="wrap">
+      <p class="eyebrow">演示</p>
+      <h2>在这块屏幕上试一试</h2>
+      <p class="sub">这是一块模拟的电脑屏幕，上面的面板和组件都按 Glance 的样子绘制。它会自己演示一遍。把鼠标移进去，就可以亲手推它的边缘、把监控面板和音乐拖成小组件并改变大小，或者打开全屏歌词。下方可以切换三种外观。</p>
+      <div class="vdesk" data-desk role="region" aria-label="Glance 使用演示">
+        <div class="screen">
+          <div class="taskbar"></div>
+          <div class="edge" data-at="left"></div>
+          <div class="edge" data-at="right"><div data-demo></div></div>
+          <div class="mw" hidden><canvas></canvas></div>
+          <div class="full"></div>
+          <div class="esc">Esc</div>
+          <svg class="pointer" viewBox="0 0 26 38" aria-hidden="true"><path d="M2 2 L2 30 L9 23.5 L14 35 L18.5 33 L13.5 21.8 L22.5 21.8 Z" fill="#fff" stroke="#111" stroke-width="1.6" stroke-linejoin="round"/></svg>
+        </div>
+      </div>
+      <div class="desk-bar">
+        <p class="desk-say" data-say aria-live="polite"></p>
+        <div class="desk-tools">
+          <div class="seg" role="group" aria-label="外观" data-looks><button type="button" data-look="paper" aria-pressed="false">记录纸</button><button type="button" data-look="glass" aria-pressed="true">磨砂玻璃</button><button type="button" data-look="win11" aria-pressed="false">Windows 11</button></div>
+          <div class="seg" role="group" aria-label="演示的部分" data-chapters><button type="button" aria-pressed="false">监控</button><button type="button" aria-pressed="false">工作台</button><button type="button" aria-pressed="false">音乐</button><button type="button" aria-pressed="false">全屏</button></div>
+          <button class="desk-sound" type="button" aria-pressed="false" data-sound><svg class="off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/></svg><svg class="on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/></svg><span>声音</span></button>
+        </div>
+      </div>
+
+      <div class="looks">
+        <div class="looks-text">
+          <div>
+            <h3>悬浮窗：卡片或横条</h3>
+            <p>玩游戏时浮在画面角落。底下是一块半透明的玻璃，按周围的明暗自动变深变浅，数字始终看得清。</p>
+          </div>
+          <div class="seg" role="group" data-overlay-layout>
+          <button type="button" data-layout="card" aria-pressed="true">卡片</button>
+          <button type="button" data-layout="strip" aria-pressed="false">横条</button>
+          </div>
+        </div>
+        <div class="stage scene" data-overlay-stage></div>
+      </div>
+    </div>
+  </section>
 
   <section id="features">
     <div class="wrap">
@@ -116,43 +163,6 @@
           <p>手机上装一个小 APP，扫码配对，就能给电脑关屏幕、关机箱灯、调音量和亮度、切歌，顺便看一眼温度；“夜间模式”一键全关，电脑继续下载。只在你家的局域网里工作，不经过任何服务器。<a href="app/">下载手机 APP</a></p>
         </li>
       </ul>
-
-      <div class="looks">
-        <div class="looks-text">
-          <div>
-            <h3>三种外观，也能撕成小组件</h3>
-            <p>记录纸、磨砂玻璃、Windows 11。下面这块面板和 Glance 画得一样，数字也在跑：换一种外观看看；切到“小组件”，拖它的边或角改变大小，看它怎么重新排版；按住中间可以移动，拖到边上松手会吸附成细条。</p>
-          </div>
-          <div class="segs">
-          <div class="seg" role="group" aria-label="面板还是小组件" data-shape>
-          <button type="button" data-shape="panel" aria-pressed="true">面板</button>
-          <button type="button" data-shape="widget" aria-pressed="false">小组件</button>
-          </div>
-          <div class="seg" role="group" data-looks>
-          <button type="button" data-look="paper" aria-pressed="false">记录纸</button>
-          <button type="button" data-look="glass" aria-pressed="true">磨砂玻璃</button>
-          <button type="button" data-look="win11" aria-pressed="false">Windows 11</button>
-          </div>
-          </div>
-        </div>
-        <div class="stage" data-demo></div>
-        <div class="stage desk" data-widget aria-label="可调整大小的小组件演示" hidden></div>
-      </div>
-
-      <div class="looks">
-        <div class="looks-text">
-          <div>
-            <h3>悬浮窗：卡片或横条</h3>
-            <p>玩游戏时浮在画面角落。底下是一块半透明的玻璃，按周围的明暗自动变深变浅，数字始终看得清。</p>
-          </div>
-          <div class="seg" role="group" data-overlay-layout>
-          <button type="button" data-layout="card" aria-pressed="true">卡片</button>
-          <button type="button" data-layout="strip" aria-pressed="false">横条</button>
-          </div>
-        </div>
-        <div class="stage scene" data-overlay-stage></div>
-      </div>
-
     </div>
   </section>
 
@@ -161,6 +171,7 @@
       <p class="eyebrow">工作台和音乐</p>
       <h2>不只是监控</h2>
       <p class="sub">0.4 起，Glance 多了两个组件：放随手要用的东西的“工作台”，和跟着歌词走的“音乐”。和监控一样，可以放在任意一条屏幕边缘，也能拖出来放在桌面上。</p>
+
 
       <ul class="features pairs">
         <li class="feature">
@@ -380,7 +391,5 @@
     <p><a href="en/" hreflang="en" lang="en">English</a></p>
   </div>
 </footer>
-<div class="edge-glow" data-edge aria-hidden="true"></div>
-<aside class="drawer" data-drawer aria-hidden="true" aria-label="Glance 面板演示"><div data-demo></div></aside>
 </body>
 </html>
