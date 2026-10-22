@@ -516,6 +516,8 @@ pub fn run() {
     thread::Builder::new().name("glance: updates".into()).spawn(update::watch).expect("a thread started");
     // The reports still talked over, asked about each hour (see `reports::follow`).
     thread::Builder::new().name("glance: reports".into()).spawn(reports::follow).expect("a thread started");
+    // NetEase's icon row put in where InfLink-rs was installed without it (see `netease::mend`).
+    thread::Builder::new().name("glance: netease".into()).spawn(netease::mend).expect("a thread started");
     // The station (its own thread: see `station::run`), the panel woken as what it holds changes.
     station::run::start(|| app().controller.wake());
     station::thumbs::start(|| app().controller.wake());
