@@ -143,6 +143,10 @@ pub(crate) fn on_its_own(text: &str, at: usize, contained: bool) -> Option<usize
 pub const PAD_SIDE: f32 = 0.6;
 pub const PAD_TOP: f32 = 0.35;
 
+/// How wide a column's words are let be at least, over the words' size (four characters of Chinese): a table just put
+/// in, its cells empty, has room to write in, and narrow words are not squeezed.
+pub const LEAST: f32 = 4.0;
+
 /// A table laid out (see `lay`): each column's width and each row's height, whole, each with the line before it (its
 /// left, its top), the line after the last column and the last row besides.
 #[derive(Clone, Debug, PartialEq)]
@@ -164,7 +168,7 @@ impl Laid {
 }
 
 /// `table` laid out, its words `words` high, in `room` across (its lines and the room round its cells' words, `PAD_SIDE`
-/// and `PAD_TOP`, with them): each column as wide as its widest cell's words on one line, where they all fit. Where they do not, the columns narrower than a fair share of the room keep their width,
+/// and `PAD_TOP`, with them): each column as wide as its widest cell's words on one line (`LEAST` at least), where they all fit. Where they do not, the columns narrower than a fair share of the room keep their width,
 /// the rest share what is left alike (again while one of them needs less than its share), their words on as many lines
 /// as they take. Each row as tall as its tallest cell's words, a line's height at least (`markdown::LEADING`).
 /// `measure` says how wide and how tall words are (bold or not), on lines as wide as asked, or on one.
@@ -175,7 +179,7 @@ pub fn lay(table: &Table, words: f32, room: f32, measure: impl Fn(&str, bool, Op
     let natural: Vec<f32> = (0..count)
         .map(|column| {
             let widest = table.rows.iter().enumerate().filter_map(|(row, cells)| cells.get(column).map(|cell| measure(&cell.reads, bold(row), None).0)).fold(0.0, f32::max);
-            (widest + 2.0 * side).ceil() + 1.0
+            (widest.max(LEAST * words) + 2.0 * side).ceil() + 1.0
         })
         .collect();
     let room = room - 1.0;
@@ -364,8 +368,8 @@ mod tests {
         assert!(tables("| a\nb |").is_empty());
     }
 
-    /// Each column as wide as its widest words where all fit, else the narrow kept and the rest sharing what is left,
-    /// each row as tall as its tallest words, a line's height at least.
+    /// Each column as wide as its widest words where all fit (four characters at least), else the narrow kept and the
+    /// rest sharing what is left, each row as tall as its tallest words, a line's height at least.
     #[test]
     fn lays_a_table_out() {
         let table = &tables("| a | bb |\n| - | - |\n| cccc | d |")[0];
@@ -377,13 +381,15 @@ mod tests {
         };
         // (Words 10 high: 6 at the sides, 4 over and under, a line 16 high.)
         let laid = lay(table, 10.0, 200.0, measure);
-        assert_eq!(laid.columns, [53.0, 33.0]);
+        assert_eq!(laid.columns, [53.0, 53.0]);
         assert_eq!(laid.rows, [29.0, 29.0]);
-        assert_eq!((laid.width(), laid.height()), (87.0, 59.0));
+        assert_eq!((laid.width(), laid.height()), (107.0, 59.0));
+        let wider = &tables("| aaaaaa | b |\n| - | - |\n| c | d |")[0];
+        assert_eq!(lay(wider, 10.0, 200.0, measure).columns, [73.0, 53.0]);
         let wide = &tables("| a | bbbbbbbbbbbbbbbbbbbb |\n| - | - |\n| c | d |")[0];
-        let laid = lay(wide, 10.0, 101.0, measure);
-        assert_eq!(laid.columns, [23.0, 77.0]);
-        // (The second column's 20 characters on 64 across: four lines.)
+        let laid = lay(wide, 10.0, 121.0, measure);
+        assert_eq!(laid.columns, [53.0, 67.0]);
+        // (The second column's 20 characters on 54 across: four lines.)
         assert_eq!(laid.rows, [89.0, 29.0]);
     }
 
