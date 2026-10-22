@@ -2072,6 +2072,19 @@ impl Widgets {
             }
             return;
         }
+        // (The notes' Markdown shown as written, or as it reads: each note written in dressed again so, the stuck ones
+        // drawn again.)
+        if choice == Choice::Source {
+            crate::ui::note::turn_source();
+            let written: Vec<HWND> = self.list.iter().filter(|w| w.in_place.is_some()).map(|w| w.window.hwnd).collect();
+            for hwnd in written {
+                self.written(hwnd);
+            }
+            for widget in &mut self.list {
+                widget.next_frame = Instant::now();
+            }
+            return;
+        }
         let kept = index.is_none_or(|index| {
             let widget = &mut self.list[index];
             widget.next_frame = Instant::now();

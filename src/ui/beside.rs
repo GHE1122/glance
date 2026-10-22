@@ -1072,6 +1072,13 @@ impl Beside {
             self.written();
             return false;
         }
+        // (The notes' Markdown shown as written, or as it reads: the note written dressed again so.)
+        if choice == Choice::Source {
+            super::note::turn_source();
+            self.written();
+            self.redraw();
+            return false;
+        }
         let kept = self.keep();
         let Some(writing) = self.writing.as_mut() else { return false };
         let folder = crate::notes::folder_at(writing.folder.clone());
@@ -1091,7 +1098,7 @@ impl Beside {
             }
             // (Offered only where the note is stuck on the desktop, on its card there: see `widget`. Its writing menu's
             // done above.)
-            Choice::Unstick | Choice::Write(_) => false,
+            Choice::Unstick | Choice::Source | Choice::Write(_) => false,
             Choice::TakeAway => {
                 // (What is written not kept, the page stays, saying so: taken away, the Recycle Bin had the note as it
                 // was before, and what was written was gone with the page.)

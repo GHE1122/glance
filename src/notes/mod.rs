@@ -154,9 +154,30 @@ pub fn view() -> crate::settings::NotesView {
     *VIEW.lock().unwrap()
 }
 
+/// Whether notes show their Markdown as written (see `settings::Settings::notes_source`), as the settings keep it.
+pub fn source() -> bool {
+    SOURCE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Notes shown with their Markdown as written, or as it reads, at once (kept in the settings by the one who asks).
+pub fn show_source(source: bool) {
+    SOURCE.store(source, std::sync::atomic::Ordering::Relaxed);
+}
+
+static SOURCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How note `text` shows: as it reads, or, its source asked for, as written (nothing put away).
+pub fn shown_as(text: &str) -> markdown::Shown {
+    match source() {
+        true => markdown::Shown::default(),
+        false => markdown::Shown::of(text),
+    }
+}
+
 /// How the notes show, taken from the settings as they change; the folder they are in followed as it changes.
 pub fn follow_settings(settings: &crate::settings::Settings) {
     *VIEW.lock().unwrap() = settings.notes_view;
+    show_source(settings.notes_source);
     let mut chosen = CHOSEN.lock().unwrap();
     if *chosen != settings.notes_folder {
         chosen.clone_from(&settings.notes_folder);

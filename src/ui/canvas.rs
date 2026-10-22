@@ -160,6 +160,34 @@ pub fn task_box(frame: &dyn Canvas, inks: Inks, x: f32, y: f32, side: f32, done:
     }
 }
 
+/// A list's dot in a note, in the room drawn for it from `left`, by its line's `baseline` (DIPs), its words `size` DIPs
+/// high: in its words' ink (see `notes::markdown::BULLET_SIDE`).
+pub fn bullet(frame: &dyn Canvas, inks: Inks, left: f32, baseline: f32, size: f32) {
+    use crate::notes::markdown::{BOX_RISE, BULLET_IN, BULLET_SIDE};
+    frame.fill_circle(inks.words, Point { x: left + BULLET_IN * size, y: baseline - BOX_RISE * size }, BULLET_SIDE * size / 2.0);
+}
+
+/// A quote's bars in a note, `deep` of them, in the room drawn for them from `left`, from `top` `tall` down (its line, all
+/// its rows: DIPs), its words `size` DIPs high and `per` pixels a DIP: each a whole number of pixels wide (two at least),
+/// in its faint ink, square at its ends (a quote's lines' bars one bar: see `notes::markdown::QUOTE_ROOM`).
+pub fn quote_bars(frame: &dyn Canvas, inks: Inks, (left, top, tall): (f32, f32, f32), deep: usize, size: f32, per: f32) {
+    use crate::notes::markdown::{BAR_IN, BAR_WIDE, QUOTE_ROOM};
+    let wide = (BAR_WIDE * size * per).round().max(2.0) / per;
+    for nth in 0..deep {
+        let x = ((left + (nth as f32 * QUOTE_ROOM + BAR_IN) * size) * per).round() / per;
+        frame.fill(Color { a: 0.6, ..inks.faint }, x, top, wide, tall);
+    }
+}
+
+/// A note's block of code's box, `width` × `tall` from (`x`, `y`) (DIPs), its words `size` DIPs high: tinted in its faint
+/// ink, its corners rounded.
+pub fn code_box(frame: &dyn Canvas, inks: Inks, x: f32, y: f32, width: f32, tall: f32, size: f32) {
+    frame.fill_rounded(Color { a: CODE_TINT, ..inks.faint }, x, y, width, tall, 0.3 * size);
+}
+
+/// How strongly a note's block of code's box is tinted in its faint ink.
+const CODE_TINT: f32 = 0.1;
+
 /// The fixed face code in a note is written in.
 pub const CODE_FACE: &str = "Cascadia Mono";
 

@@ -257,20 +257,25 @@ impl Editor {
     }
 
     /// Its words dressed as `looks` says (see `notes::markdown`), in `palette`'s colours and faces, `hidden` hidden
-    /// (Markdown's marks put away) and each of `rooms` (a space) made as wide as a to-do's box's room
-    /// (`markdown::BOX_ROOM`), the lines of each table drawn laid out over them (`drawn`: its span and how tall it is, in
-    /// pixels) as tall as it is between them: what they are left as it is, the dressing kept out of what undo takes back
-    /// (and drawn once, done).
-    pub fn dress(&self, looks: &[(std::ops::Range<usize>, crate::notes::markdown::Look)], hidden: &[std::ops::Range<usize>], rooms: &[usize], drawn: &[(std::ops::Range<usize>, f32)], palette: &Palette) {
+    /// (Markdown's marks put away) and each of `rooms` (a space) made as wide as it says (its words' size over: a
+    /// to-do's box's room, a bullet's, a quote's), the lines set otherwise than their words would set them (`drawn`: the
+    /// lines of each table drawn laid out over them, as tall as it is between them, a block of code's fences, low; see
+    /// `Shown::drawn_lines`) as tall as that says, each line with marks put away at its start (`leads`: see
+    /// `Shown::leads`) its rows after its first as far in as its words begin on it (a list's item's, a quote's words
+    /// wrapped under each other, not under its dot or its bars): what they are left as it is, the dressing kept out of
+    /// what undo takes back (and drawn once, done).
+    #[allow(clippy::too_many_arguments)]
+    pub fn dress(&self, looks: &[(std::ops::Range<usize>, crate::notes::markdown::Look)], hidden: &[std::ops::Range<usize>], rooms: &[(usize, f32)], drawn: &[(std::ops::Range<usize>, f32)], leads: &[std::ops::Range<usize>], palette: &Palette) {
         use crate::notes::markdown::Look;
         let Ok(document) = self.services.cast::<ITextDocument>() else { return };
         let face = BSTR::from(palette.face.as_str());
         let code = BSTR::from(palette.code_face.as_str());
         let color = |c: COLORREF| c.0 as i32;
-        // (A space as wide as the room: what it is wide as it is, and as much again as the room needs. Points, as the
-        // text services count, three to four pixels.)
+        // (A space as wide as the room, in whole pixels (as a note shown makes it, its words whole pixels high): what it
+        // is wide as it is, and as much again as the room needs. Points, as the text services count, three to four
+        // pixels.)
         let pixels = palette.points / 0.75;
-        let more = space_width(&palette.face, pixels).map(|space| (crate::notes::markdown::BOX_ROOM * pixels - space) * 0.75);
+        let space = space_width(&palette.face, pixels.round());
         unsafe {
             let _ = document.Undo(tomSuspend.0);
             let _ = document.Freeze();
@@ -284,6 +289,9 @@ impl Editor {
                 let _ = font.SetSize(palette.points);
                 let _ = font.SetName(&face);
                 let _ = font.SetForeColor(color(palette.text));
+            }
+            if let Ok(para) = document.Range(0, i32::MAX).and_then(|all| all.GetPara()) {
+                let _ = para.SetIndents(0.0, 0.0, 0.0);
             }
             for (range, look) in looks {
                 let Ok(font) = document.Range(range.start as i32, range.end as i32).and_then(|range| range.GetFont()) else { continue };
@@ -314,12 +322,26 @@ impl Editor {
                     let _ = font.SetHidden(tomTrue.0);
                 }
             }
-            for room in rooms.iter().filter(|_| more.is_some()) {
+            for (room, wide) in rooms {
+                let Some(space) = space else { break };
                 if let Ok(font) = document.Range(*room as i32, *room as i32 + 1).and_then(|range| range.GetFont()) {
-                    let _ = font.SetSpacing(more.unwrap_or_default());
+                    let _ = font.SetSpacing(((wide * pixels.round()).round() - space) * 0.75);
                 }
             }
             let _ = document.Unfreeze();
+            // Each line's rows after its first as far in as its words begin on its first, found as it is laid out now
+            // (points: the first row as far back out).
+            let left = self.kept.rect.get().left;
+            let indents: Vec<(usize, f32)> = leads.iter().filter_map(|lead| Some((lead.start, (self.character_anywhere(lead.end)?.left - left) as f32 * 0.75))).filter(|(_, by)| *by > 0.0).collect();
+            if !indents.is_empty() {
+                let _ = document.Freeze();
+                for (start, by) in indents {
+                    if let Ok(para) = document.Range(start as i32, start as i32).and_then(|range| range.GetPara()) {
+                        let _ = para.SetIndents(-by, by, 0.0);
+                    }
+                }
+                let _ = document.Unfreeze();
+            }
             let _ = document.Undo(tomResume.0);
         }
         // (Dressing is no writing.)
@@ -348,13 +370,13 @@ impl Editor {
         Some(RECT { left, top, right: right.max(left), bottom })
     }
 
-    /// Where the baseline of the character at `at` (UTF-16 units) is (in the window, from its top). None where it is
-    /// not drawn.
-    pub fn baseline(&self, at: usize) -> Option<i32> {
+    /// Where the baseline of the character at `at` (UTF-16 units) is (in the window), where it is drawn or would be
+    /// (scrolled out of the box, or only partly in it).
+    pub fn baseline_anywhere(&self, at: usize) -> Option<i32> {
         // (tomStart, TA_BASELINE.)
         const START: i32 = 32;
         const BASELINE: i32 = 24;
-        self.point(at, START | BASELINE, false).map(|(_, y)| y)
+        self.point(at, START | BASELINE, true).map(|(_, y)| y)
     }
 
     /// The point `kind` says of the character at `at` (UTF-16 units), in the window: where it is drawn, or where
@@ -452,8 +474,8 @@ impl Editor {
     }
 }
 
-/// How wide a space is in `face` `pixels` high (pixels), as DirectWrite lays it (as the text services draw here),
-/// measured once for each (none where DirectWrite could not lay it).
+/// How wide a space is in `face` `pixels` high (whole pixels), as the text services lay it, GDI's way (a whole number of
+/// pixels), measured once for each (none where DirectWrite could not lay it).
 fn space_width(face: &str, pixels: f32) -> Option<f32> {
     use windows::Win32::Graphics::DirectWrite::{DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_METRICS};
     thread_local! {
@@ -465,7 +487,7 @@ fn space_width(face: &str, pixels: f32) -> Option<f32> {
     let measured = (|| unsafe {
         let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
         let format = factory.CreateTextFormat(&HSTRING::from(face), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, pixels, windows::core::w!("zh-cn")).ok()?;
-        let layout = factory.CreateTextLayout(&[u16::from(b' ')], &format, 1000.0, 1000.0).ok()?;
+        let layout = factory.CreateGdiCompatibleTextLayout(&[u16::from(b' ')], &format, 1000.0, 1000.0, 1.0, None, false).ok()?;
         let mut metrics = DWRITE_TEXT_METRICS::default();
         layout.GetMetrics(&mut metrics).ok()?;
         Some(metrics.widthIncludingTrailingWhitespace)
@@ -822,7 +844,7 @@ mod tests {
             let editor = Editor::new(hwnd, RECT { left: 0, top: 0, right: 400, bottom: 300 }, "Microsoft YaHei UI", 20.0, COLORREF(0)).expect("text services");
             let palette = Palette { text: COLORREF(0x202020), faint: COLORREF(0x909090), accent: COLORREF(0xD07000), points: 15.0, face: "Microsoft YaHei UI".into(), code_face: "Cascadia Mono".into() };
             editor.set_text("# Title\nbody");
-            editor.dress(&looks(&editor.text()), &[], &[], &[], &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &[], &[], &palette);
             let document: ITextDocument = editor.services.cast().unwrap();
             let font_at = |at: i32| document.Range(at, at + 1).unwrap().GetFont().unwrap();
             // "T" (2) bold and larger; "b" of body (8) neither.
@@ -838,7 +860,7 @@ mod tests {
                 let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(usize::from(c)), LPARAM(0));
             }
             assert_eq!(editor.text().trim_end(), "# Title\nbody!");
-            editor.dress(&looks(&editor.text()), &[], &[], &[], &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &[], &[], &palette);
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
             assert_eq!(editor.text().trim_end(), "# Title\nbody");
             assert_eq!(font_at(2).GetBold().unwrap(), tomTrue.0);
@@ -858,12 +880,12 @@ mod tests {
             for c in "你好世界".encode_utf16() {
                 let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(usize::from(c)), LPARAM(0));
             }
-            editor.dress(&looks(&editor.text()), &[], &[], &[], &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &[], &[], &palette);
             let back = WPARAM(usize::from(windows::Win32::UI::Input::KeyboardAndMouse::VK_BACK.0));
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN, back, LPARAM(0));
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_CHAR, WPARAM(8), LPARAM(0));
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_KEYUP, back, LPARAM(0));
-            editor.dress(&looks(&editor.text()), &[], &[], &[], &palette);
+            editor.dress(&looks(&editor.text()), &[], &[], &[], &[], &palette);
             assert_eq!(editor.text().trim_end(), "你好世");
             let _ = editor.send(windows::Win32::UI::WindowsAndMessaging::WM_UNDO, WPARAM(0), LPARAM(0));
             assert_eq!(editor.text().trim_end(), "你好世界");
@@ -909,10 +931,8 @@ mod tests {
             let dress = |editor: &Editor| {
                 let text = editor.text();
                 let shown = Shown::of(&text);
-                let mut hidden = shown.hidden(None);
-                hidden.extend(shown.boxes(None).map(|boxed| boxed.marks.clone()));
-                let rooms: Vec<usize> = shown.boxes(None).map(|boxed| boxed.room).collect();
-                editor.dress(&looks(&text), &hidden, &rooms, &[], &palette);
+                let (hidden, rooms) = shown.put_away(None);
+                editor.dress(&looks(&text), &hidden, &rooms, &[], &shown.leads, &palette);
             };
             // "买" at 6, "粗" at 10 (after "**").
             editor.set_text("- [ ] 买牛奶\n**粗**体");

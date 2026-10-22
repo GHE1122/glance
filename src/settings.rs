@@ -762,6 +762,9 @@ pub struct Settings {
     /// How the notes show (see `NotesView`).
     #[serde(default)]
     pub notes_view: NotesView,
+    /// Whether notes show their Markdown as written, marks and all (see `notes::markdown::Shown`), not as it reads.
+    #[serde(default)]
+    pub notes_source: bool,
     pub view: serde_json::Value,
 }
 
@@ -881,6 +884,7 @@ impl Default for Settings {
             apps: Vec::new(),
             notes_folder: None,
             notes_view: NotesView::Deck,
+            notes_source: false,
             view: serde_json::Value::Null,
         }
     }

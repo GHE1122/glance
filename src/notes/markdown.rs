@@ -6,11 +6,11 @@
 //! mark shows as it will read: a heading larger, emphasis bold or slanted, code in a fixed face, a link in the accent
 //! (a web address written out one too), a quote and a done task faint.
 //!
-//! Where it is not written at (all of it, in a note not being written in), its marks are put away as it reads (see
-//! `Shown`): a heading's `#`, emphasis's, code's and a link's marks hidden, a to-do's list mark and box drawn as a box
-//! to tick, a link's words pressed to follow it. What the caret touches (the heading, the bold words, the link it is in
-//! or at the end of: see `At`) shows as written, marks and all, so the caret is never in what is put away. A list's
-//! and a quote's marks stay, faint: they are what shows it is one.
+//! As it reads (unless its source is asked for: see `crate::notes::source`), its marks are put away (see `Shown`),
+//! wherever the caret is: a heading's `#`, emphasis's, code's and a link's marks hidden, a to-do's list mark and box
+//! drawn as a box to tick, a list's mark as a dot, a quote's as a bar beside it, a block of code's fences as the room
+//! round the box it is drawn in, a rule as a line across, a table laid out, a link's words pressed to follow it. Only a
+//! table the caret is in (see `At`) shows as written, marks and all. A list's numbers stay as written.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
@@ -115,9 +115,15 @@ pub fn looks(text: &str) -> Vec<(Range<usize>, Look)> {
     let units = Units::of(text);
     let mut looks = Vec::new();
     let mut quoted = 0usize;
+    // (Whether each list open is one of bullets: a numbered list's numbers are words, not faint.)
+    let mut bulleted = Vec::new();
     for (event, range) in Parser::new_ext(text, READ).into_offset_iter() {
         let at = units.range(&range);
         match event {
+            Event::Start(Tag::List(first)) => bulleted.push(first.is_none()),
+            Event::End(TagEnd::List(_)) => {
+                bulleted.pop();
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 let level = match level {
                     HeadingLevel::H1 => 1,
@@ -144,7 +150,7 @@ pub fn looks(text: &str) -> Vec<(Range<usize>, Look)> {
             }
             Event::Start(Tag::Link { .. }) => looks.push((at, Look::Faint)),
             Event::Start(Tag::CodeBlock(_)) => looks.push((at, Look::Code)),
-            Event::Start(Tag::Item) => looks.push((at, Look::Faint)),
+            Event::Start(Tag::Item) if bulleted.last() == Some(&true) => looks.push((at, Look::Faint)),
             Event::Start(Tag::BlockQuote(_)) => {
                 looks.push((at, Look::Faint));
                 quoted += 1;
@@ -192,19 +198,27 @@ pub fn looks(text: &str) -> Vec<(Range<usize>, Look)> {
     looks
 }
 
-/// How a note shows where it is not written at (see the head of this file): what of it is put away, where (in UTF-16
-/// units, as the text services count, each line break one), each with all of what it marks (its span: see `At`).
+/// How a note shows as it reads (see the head of this file): what of it is put away, where (in UTF-16 units, as the
+/// text services count, each line break one), each with all of what it marks (its span: see `At`). Its source asked
+/// for, none of it is: `Shown::default()`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Shown {
-    /// Its marks hidden: a heading's `#`, emphasis's, code's, a link's (all but its words). Each with the heading's,
-    /// emphasis's, code's or link's span.
+    /// Its marks hidden: a heading's `#`, emphasis's, code's, a link's (all but its words), a block of code's fences.
+    /// Each with the heading's, emphasis's, code's, link's or block's span (a table's, where it is in one).
     pub marks: Vec<(Range<usize>, Range<usize>)>,
     pub boxes: Vec<Boxed>,
+    /// Its lists' bullets and its quotes' marks, each drawn in the room after it.
+    pub roomed: Vec<Roomed>,
     pub links: Vec<Linked>,
     /// Its tables, put away whole (each line's words among its marks, with the table's span) and drawn laid out in
     /// their room (see `table`), and its rules, put away and drawn as a line across (each with its line's words).
     pub tables: Vec<super::table::Table>,
     pub rules: Vec<Range<usize>>,
+    /// Its blocks of code drawn in a box, their fences put away.
+    pub codes: Vec<Coded>,
+    /// Where each line's marks put away at its start end (a heading's `#`, a list's mark and its to-do's box, a
+    /// quote's `>`, the spaces before them, the rooms after them): the caret is not to rest among them (see `settle`).
+    pub leads: Vec<Range<usize>>,
 }
 
 /// A to-do drawn as a box to tick: its list's mark and its box (`- [ ]`), put away, and the space after them, the room
@@ -222,6 +236,41 @@ impl Boxed {
     }
 }
 
+/// A list's bullet (`-`, `*`, `+`) or a quote's marks (`>`, as many as it is deep) put away, and the space after them,
+/// the room what stands in for them is drawn in (see `Drawn::room`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Roomed {
+    pub marks: Range<usize>,
+    pub room: usize,
+    pub drawn: Drawn,
+}
+
+/// What is drawn in a room in place of the marks put away: a list's dot, or a quote's bars (as many as it is deep).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drawn {
+    Bullet,
+    Bars(usize),
+}
+
+impl Drawn {
+    /// How wide its room is, its words' size over.
+    pub fn room(self) -> f32 {
+        match self {
+            Drawn::Bullet => BULLET_ROOM,
+            Drawn::Bars(deep) => QUOTE_ROOM * deep as f32,
+        }
+    }
+}
+
+/// A fenced block of code drawn in a box: all its lines (`span`, its fences' too), and its fences' lines, put away and
+/// made low (`FENCE` of its words' size), the room above and below its words in the box (one not closed, its first
+/// alone).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Coded {
+    pub span: Range<usize>,
+    pub fences: Vec<Range<usize>>,
+}
+
 /// A link: its words, where it goes, all of it (its span). (A web address written out: its words where it goes, and
 /// its span.)
 #[derive(Clone, Debug, PartialEq)]
@@ -232,8 +281,8 @@ pub struct Linked {
 }
 
 /// Where a note is written at: what is chosen in it (from, to: UTF-16 units, the caret where they are one). None: a
-/// note shown, not written in. What of its Markdown it touches shows as written, marks and all: what the caret is in or
-/// at either end of (a to-do's box not where its words begin), what is chosen over any of.
+/// note shown, not written in. A table it touches shows as written, marks and all: the caret in it or at either end
+/// of it, what is chosen over any of it.
 pub type At = Option<(usize, usize)>;
 
 /// Whether `at` touches `span` (see `At`): the caret at its end too where `closed`.
@@ -252,6 +301,38 @@ pub const BOX_ROOM: f32 = 1.55;
 pub const BOX_SIDE: f32 = 0.9;
 pub const BOX_IN: f32 = 0.08;
 pub const BOX_RISE: f32 = 0.36;
+/// How wide the room a list's dot is drawn in is, its words' size over (the dot `BULLET_SIDE` across, its middle
+/// `BULLET_IN` from the room's start and `BOX_RISE` over the words' baseline); a quote's, for each it is deep (its bar
+/// `BAR_WIDE` wide, `BAR_IN` from the start of its share of the room, as tall as the line).
+pub const BULLET_ROOM: f32 = 1.0;
+pub const BULLET_SIDE: f32 = 0.3;
+pub const BULLET_IN: f32 = 0.4;
+pub const QUOTE_ROOM: f32 = 0.9;
+pub const BAR_WIDE: f32 = 0.16;
+pub const BAR_IN: f32 = 0.1;
+/// How tall a block of code's fence's line is set, its words' size over (the room above and below its words in its
+/// box), and how far its box reaches out past the words' sides.
+pub const FENCE: f32 = 0.6;
+pub const CODE_OUT: f32 = 0.5;
+
+/// Which way the caret was moved (see `Shown::settle`): by an arrow, or put somewhere (pressed, Home, End, the words
+/// changed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Way {
+    Left,
+    Right,
+    Up,
+    Down,
+    Near,
+}
+
+/// Where the caret settles (see `Shown::settle`): at a unit, or on a line to be begun after the last (put away whole,
+/// nothing after it to write on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Settled {
+    At(usize),
+    Below,
+}
 
 impl Shown {
     pub fn of(text: &str) -> Shown {
@@ -290,6 +371,15 @@ impl Shown {
         let mut drawn = Vec::new();
         let mut table: Option<Range<usize>> = None;
         let mut table_spans = Vec::new();
+        // (Whether each list open is one of bullets, and the bullet put away for the item being read: taken back where
+        // it is a to-do's, its box drawn in its place. The block quotes (bytes), their marks found line by line once
+        // all is read. The block of code being read, and whether it is on lines of its own. Where the headings' marks
+        // put away at their lines' starts are.)
+        let mut bulleted: Vec<bool> = Vec::new();
+        let mut bullet: Option<usize> = None;
+        let mut quotes: Vec<Range<usize>> = Vec::new();
+        let mut code: Option<(Range<usize>, bool, bool)> = None;
+        let mut leading: Vec<Range<usize>> = Vec::new();
         let hold = |open: &mut Vec<Open>, range: &Range<usize>| {
             if let Some(parent) = open.last_mut() {
                 let held = parent.held.get_or_insert(range.clone());
@@ -301,10 +391,24 @@ impl Shown {
             match event {
                 Event::Start(tag) => {
                     hold(&mut open, &range);
-                    if matches!(tag, Tag::Item) {
-                        item = Some(range.start);
-                    }
                     let contained = open.iter().any(|open| open.contains);
+                    match &tag {
+                        Tag::List(first) => bulleted.push(first.is_none()),
+                        // A bullet followed by a space: put away, a dot drawn in the space's room.
+                        Tag::Item => {
+                            item = Some(range.start);
+                            let rest = &text[range.start..];
+                            let marker = range.start + rest.len() - rest.trim_start_matches([' ', '\t']).len();
+                            let marked = text[marker..].starts_with(['-', '*', '+']) && text[marker + 1..].starts_with(' ');
+                            bullet = (bulleted.last() == Some(&true) && marked).then(|| {
+                                shown.roomed.push(Roomed { marks: units.range(&(marker..marker + 1)), room: units.range(&(marker + 1..marker + 2)).start, drawn: Drawn::Bullet });
+                                shown.roomed.len() - 1
+                            });
+                        }
+                        Tag::BlockQuote(_) => quotes.push(range.clone()),
+                        Tag::CodeBlock(kind) => code = Some((range.clone(), matches!(kind, pulldown_cmark::CodeBlockKind::Fenced(_)), super::table::on_its_own(text, range.start, contained).is_some())),
+                        _ => {}
+                    }
                     // A table on lines of its own put away, to be drawn laid out (one in a quote or a list's item is
                     // left as written).
                     if let Tag::Table(_) = &tag {
@@ -331,14 +435,45 @@ impl Shown {
                 }
                 Event::End(end) => {
                     let Some(closed) = open.pop() else { continue };
-                    if matches!(end, TagEnd::Table) {
-                        table = None;
+                    match end {
+                        TagEnd::Table => table = None,
+                        TagEnd::List(_) => {
+                            bulleted.pop();
+                        }
+                        // A fenced block of code on lines of its own drawn in a box (its lines, from the first's start,
+                        // as far as its last's words), its fences put away, where there is a line between them (with
+                        // none, it is left as written: its box would hold nothing). One indented is left as written (a
+                        // line begun with a tab or spaces is one: those who do not write Markdown do that).
+                        TagEnd::CodeBlock => {
+                            if let Some((range, fenced, true)) = code.take() {
+                                let start = text[..range.start].rfind('\n').map_or(0, |at| at + 1);
+                                let all = start..range.start + text[range.clone()].trim_end_matches(['\n', '\r']).len();
+                                let opening = start..text[start..all.end].find('\n').map_or(all.end, |at| start + at);
+                                let last = text[..all.end].rfind('\n').map_or(0, |at| at + 1)..all.end;
+                                let fence = text[last.clone()].trim();
+                                let closing = (last.start > opening.end && fence.len() >= 3 && (fence.chars().all(|c| c == '`') || fence.chars().all(|c| c == '~'))).then_some(last);
+                                let between = closing.as_ref().map_or(all.end, |closing| closing.start.saturating_sub(1));
+                                if fenced && between > opening.end {
+                                    let mut fences = vec![opening.clone()];
+                                    fences.extend(closing);
+                                    for fence in &fences {
+                                        hide(&mut shown, fence.clone(), &all);
+                                    }
+                                    let fences = fences.iter().map(&span).collect();
+                                    shown.codes.push(Coded { span: span(&all), fences });
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                     // (One holding nothing is left as written: put away, nothing of it would show.)
                     let of = table.clone().unwrap_or_else(|| closed.range.clone());
                     if let (true, Some(held)) = (closed.hides, &closed.held) {
                         hide(&mut shown, closed.range.start..held.start, &of);
                         hide(&mut shown, held.end..closed.range.end, &of);
+                        if matches!(end, TagEnd::Heading(_)) {
+                            leading.push(units.range(&(closed.range.start..held.start)));
+                        }
                     }
                     if matches!(end, TagEnd::Link) {
                         if let Some(link) = shown.links.last_mut() {
@@ -371,9 +506,35 @@ impl Shown {
                     let from = item.unwrap_or(range.start);
                     if text[range.end..].starts_with(' ') && !text[from..range.end].contains('\n') {
                         shown.boxes.push(Boxed { marks: units.range(&(from..range.end)), room: units.range(&(range.end..range.end + 1)).start, done });
+                        if let Some(bullet) = bullet.take() {
+                            shown.roomed.remove(bullet);
+                        }
                     }
                 }
                 _ => hold(&mut open, &range),
+            }
+        }
+        Self::quote_marks(&mut shown, text, &units, &quotes);
+        // Each line's marks put away at its start, from it (the spaces before them too) as far as they go on.
+        leading.extend(shown.boxes.iter().map(Boxed::span));
+        leading.extend(shown.roomed.iter().map(|roomed| roomed.marks.start..roomed.room + 1));
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        for line in lines_of(&wide) {
+            let (mut at, mut end) = (line.start, None);
+            loop {
+                while at < line.end && (wide[at] == u16::from(b' ') || wide[at] == u16::from(b'\t')) {
+                    at += 1;
+                }
+                match leading.iter().find(|piece| piece.start == at && piece.end > at) {
+                    Some(piece) => {
+                        at = piece.end;
+                        end = Some(at);
+                    }
+                    None => break,
+                }
+            }
+            if let Some(end) = end {
+                shown.leads.push(line.start..end);
             }
         }
         shown.links.retain(|link| !link.words.is_empty());
@@ -386,38 +547,131 @@ impl Shown {
         shown
     }
 
+    /// Each line's block quotes' marks (`quotes`, bytes: all of each, the lines a quote is in), as many `>` as the
+    /// quotes it is in (each after up to three spaces), and the space after the last: put away, bars drawn in the
+    /// space's room. A line whose marks have no space after them, or whose words go on without them (a quote's
+    /// paragraph carried on), is left as written.
+    fn quote_marks(shown: &mut Shown, text: &str, units: &Units, quotes: &[Range<usize>]) {
+        let mut start = 0;
+        for line in text.split('\n') {
+            let end = start + line.len();
+            let deep = quotes.iter().filter(|quote| quote.start <= end && start < quote.end).count();
+            let (mut at, mut marks) = (start, None::<Range<usize>>);
+            for _ in 0..deep {
+                let spaces = text[at..end].bytes().take_while(|&c| c == b' ').count();
+                if spaces > 3 || !text[at + spaces..end].starts_with('>') {
+                    break;
+                }
+                let mark = at + spaces;
+                marks = Some(marks.map_or(mark..mark + 1, |marks| marks.start..mark + 1));
+                at = mark + 1;
+            }
+            if let Some(marks) = marks.filter(|marks| text[marks.end..end].starts_with(' ')) {
+                let count = text[marks.clone()].matches('>').count();
+                shown.roomed.push(Roomed { marks: units.range(&marks), room: units.range(&(marks.end..marks.end + 1)).start, drawn: Drawn::Bars(count) });
+            }
+            start = end + 1;
+        }
+        shown.roomed.sort_by_key(|roomed| roomed.marks.start);
+    }
+
+    /// Whether `span` is a table's (drawn laid out) that `at` touches: it shows as written, marks and all.
+    fn written_at(&self, span: &Range<usize>, at: At) -> bool {
+        self.tables.iter().any(|table| table.span == *span) && touches(span, at, true)
+    }
+
     /// Its tables drawn laid out where it is written at `at`: those it does not touch (see `At`).
     pub fn tables_drawn(&self, at: At) -> impl Iterator<Item = &super::table::Table> + '_ {
         self.tables.iter().filter(move |table| !touches(&table.span, at, true))
     }
 
-    /// Its rules drawn as a line across where it is written at `at`: those it does not touch.
-    pub fn rules_drawn(&self, at: At) -> impl Iterator<Item = &Range<usize>> + '_ {
-        self.rules.iter().filter(move |rule| !touches(rule, at, true))
-    }
-
-    /// Its marks hidden where what they mark is not written at (`at`).
+    /// Its marks hidden where it is written at `at`: all but those of a table it touches.
     pub fn hidden(&self, at: At) -> Vec<Range<usize>> {
-        self.marks.iter().filter(|(_, span)| !touches(span, at, true)).map(|(range, _)| range.clone()).collect()
+        self.marks.iter().filter(|(_, span)| !self.written_at(span, at)).map(|(range, _)| range.clone()).collect()
     }
 
-    /// Its to-dos drawn as boxes: those not written at.
-    pub fn boxes(&self, at: At) -> impl Iterator<Item = &Boxed> + '_ {
-        self.boxes.iter().filter(move |boxed| !touches(&boxed.span(), at, false))
+    /// Its blocks of code's fences' lines, set low (`FENCE`).
+    pub fn fences(&self) -> impl Iterator<Item = &Range<usize>> + '_ {
+        self.codes.iter().flat_map(|code| &code.fences)
     }
 
-    /// What is put away where it is written at `at`: its marks hidden, and its to-dos' marks (each drawn as a box in
-    /// its room, the rooms given too).
-    pub fn put_away(&self, at: At) -> (Vec<Range<usize>>, Vec<usize>) {
+    /// The lines set otherwise than their words would set them, its words `words` pixels high: its fences', `FENCE` of
+    /// that (whole pixels), and each table's drawn laid out (`tables`, its span and how tall it is laid out), for
+    /// `line_heights`.
+    pub fn drawn_lines(&self, words: f32, tables: impl IntoIterator<Item = (Range<usize>, f32)>) -> Vec<(Range<usize>, f32)> {
+        let mut drawn: Vec<_> = tables.into_iter().collect();
+        drawn.extend(self.fences().map(|fence| (fence.clone(), (words * FENCE).round())));
+        drawn
+    }
+
+    /// What is put away where it is written at `at`: its marks hidden, and its to-dos', bullets' and quotes' marks
+    /// (each drawn in its room, the rooms given too, each with how wide it is, its words' size over).
+    pub fn put_away(&self, at: At) -> (Vec<Range<usize>>, Vec<(usize, f32)>) {
         let mut hidden = self.hidden(at);
-        hidden.extend(self.boxes(at).map(|boxed| boxed.marks.clone()));
-        (hidden, self.boxes(at).map(|boxed| boxed.room).collect())
+        hidden.extend(self.boxes.iter().map(|boxed| boxed.marks.clone()));
+        hidden.extend(self.roomed.iter().map(|roomed| roomed.marks.clone()));
+        let mut rooms: Vec<(usize, f32)> = self.boxes.iter().map(|boxed| (boxed.room, BOX_ROOM)).collect();
+        rooms.extend(self.roomed.iter().map(|roomed| (roomed.room, roomed.drawn.room())));
+        (hidden, rooms)
     }
 
-    /// The link whose words are at `unit` (UTF-16 units), where they show as it reads (it not written at: `at`).
+    /// The link whose words are at `unit` (UTF-16 units), where they show as it reads (not in a table written at: `at`).
     pub fn link_at(&self, unit: usize, at: At) -> Option<&Linked> {
-        self.links.iter().find(|link| link.words.contains(&unit) && !touches(&link.span, at, true))
+        self.links.iter().find(|link| link.words.contains(&unit) && !self.written_at(&link.span, at))
     }
+
+    /// Where the caret at `caret` in its words (`units`, as it was read) is to rest, moved `way`: not on a line put
+    /// away whole (a rule, a fence), past it the way it was moved (left or up, to the end of the line before it; else
+    /// to the start of the line after it, or, after the last, on a line to be begun), nor among the marks put away at
+    /// a line's start (past them; moved left from past them, to the end of the line before). None where it rests
+    /// where it is.
+    pub fn settle(&self, units: &[u16], caret: usize, way: Way) -> Option<Settled> {
+        let lines = lines_of(units);
+        let whole = |line: &Range<usize>| self.rules.iter().chain(self.fences()).any(|hidden| hidden == line);
+        let (mut at, mut way) = (caret.min(units.len()), way);
+        loop {
+            let index = lines.partition_point(|line| line.end < at).min(lines.len() - 1);
+            let line = &lines[index];
+            let back = matches!(way, Way::Left | Way::Up);
+            if whole(line) {
+                match (back, index > 0, index + 1 < lines.len()) {
+                    (true, true, _) => at = lines[index - 1].end,
+                    (_, _, true) => {
+                        at = lines[index + 1].start;
+                        way = if back { Way::Down } else { way };
+                    }
+                    (false, _, false) => return Some(Settled::Below),
+                    (true, false, false) => break,
+                }
+                continue;
+            }
+            match self.leads.iter().find(|lead| lead.start == line.start && at < lead.end) {
+                Some(_) if way == Way::Left && index > 0 => at = lines[index - 1].end,
+                Some(lead) => {
+                    at = lead.end;
+                    break;
+                }
+                None => break,
+            }
+        }
+        (at != caret).then_some(Settled::At(at))
+    }
+}
+
+/// The lines of words `units` (UTF-16 units), each without its line break (`\n`, or `\r\n`): the empty one after a
+/// last line break too.
+pub fn lines_of(units: &[u16]) -> Vec<Range<usize>> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (at, &unit) in units.iter().enumerate() {
+        if unit == u16::from(b'\n') {
+            let end = if at > start && units[at - 1] == u16::from(b'\r') { at - 1 } else { at };
+            lines.push(start..end);
+            start = at + 1;
+        }
+    }
+    lines.push(start..units.len());
+    lines
 }
 
 /// How far apart a note's lines are set, over the height of their words; a heading's, over the height of its own
@@ -581,9 +835,9 @@ mod tests {
         assert_eq!(lines.iter().map(|(_, tall)| *tall).collect::<Vec<_>>(), [32.0, 33.0, 34.0, 33.0, 32.0]);
     }
 
-    /// A table on lines of its own, and a rule, put away where they are not written at, to be drawn (a table from its
-    /// line's start, spaces before it with it), one in a quote left as written. Written at (the caret in it, or at its
-    /// end), each shows as written.
+    /// A table on lines of its own, and a rule, put away, to be drawn (a table from its line's start, spaces before it
+    /// with it), one in a quote left as written. Written at (the caret in it, or at its end), a table shows as
+    /// written, a rule stays drawn.
     #[test]
     fn puts_tables_and_rules_away() {
         let text = "a\n\n  | x | y |\n| - | - |\n| 1 | 2 |\n\n---\n> | q |\n> | - |";
@@ -603,8 +857,7 @@ mod tests {
         assert_eq!(shown.tables_drawn(Some((table.end, table.end))).count(), 0);
         assert_eq!(shown.tables_drawn(Some((0, 0))).count(), 1);
         let rule = shown.rules[0].clone();
-        assert_eq!(shown.rules_drawn(Some((rule.end, rule.end))).count(), 0);
-        assert!(!shown.hidden(Some((rule.end, rule.end))).iter().any(|hidden| of(hidden) == "---"));
+        assert!(shown.hidden(Some((rule.end, rule.end))).iter().any(|hidden| of(hidden) == "---"));
     }
 
     /// Written at anywhere in a table, all of it shows as written, its words' marks too, and its links are not gone
@@ -623,52 +876,122 @@ mod tests {
         assert!(listed.tables.is_empty() && listed.rules.is_empty());
     }
 
-    /// In a note not written in, a heading's `#`, emphasis's, code's and a link's marks are put away, a list's and a
-    /// quote's not; a to-do is a box in its list's mark's place; a link, and a web address written out, followed from
-    /// its words.
+    /// A heading's `#`, emphasis's, code's and a link's marks are put away; a to-do is a box in its list's mark's
+    /// place, a list's bullet a dot, a quote's `>` a bar; a link, and a web address written out, followed from its
+    /// words. A heading underlined and a numbered list's numbers are left as written.
     #[test]
-    fn puts_away_marks_in_a_note_not_written_in() {
-        let text = "## 本周 ##\n**粗**与*斜*、`code`、~~删~~\n- [ ] 买牛奶\n- [x] 完成\n> 引\n[链接](https://a.b/c) 见 https://x.y/z?q=1。\n标题\n===";
+    fn puts_away_marks_as_the_note_reads() {
+        let text = "## 本周 ##\n**粗**与*斜*、`code`、~~删~~\n- [ ] 买牛奶\n- [x] 完成\n> 引\n[链接](https://a.b/c) 见 https://x.y/z?q=1。\n标题\n===\n\n- 点\n  * 里\n1. 一";
         let units: Vec<u16> = text.encode_utf16().collect();
         let of = |range: &Range<usize>| String::from_utf16(&units[range.clone()]).unwrap();
         let shown = Shown::of(text);
         let hidden: Vec<String> = shown.hidden(None).iter().map(of).collect();
         assert_eq!(hidden, ["## ", " ##", "**", "**", "*", "*", "`", "`", "~~", "~~", "[", "](https://a.b/c)"]);
-        let boxes: Vec<(String, String, bool)> = shown.boxes(None).map(|boxed| (of(&boxed.marks), of(&(boxed.room..boxed.room + 1)), boxed.done)).collect();
+        let boxes: Vec<(String, String, bool)> = shown.boxes.iter().map(|boxed| (of(&boxed.marks), of(&(boxed.room..boxed.room + 1)), boxed.done)).collect();
         assert_eq!(boxes, [("- [ ]".to_string(), " ".to_string(), false), ("- [x]".to_string(), " ".to_string(), true)]);
+        let roomed: Vec<(String, String, Drawn)> = shown.roomed.iter().map(|roomed| (of(&roomed.marks), of(&(roomed.room..roomed.room + 1)), roomed.drawn)).collect();
+        assert_eq!(roomed, [(">".to_string(), " ".to_string(), Drawn::Bars(1)), ("-".to_string(), " ".to_string(), Drawn::Bullet), ("*".to_string(), " ".to_string(), Drawn::Bullet)]);
         let links: Vec<(String, &str)> = shown.links.iter().map(|link| (of(&link.words), link.to.as_str())).collect();
         assert_eq!(links, [("链接".to_string(), "https://a.b/c"), ("https://x.y/z?q=1".to_string(), "https://x.y/z?q=1")]);
+        // What is put away of it, its rooms with how wide each is.
+        let (put, rooms) = shown.put_away(None);
+        assert!(put.iter().map(of).any(|put| put == "- [ ]") && put.iter().map(of).any(|put| put == ">"));
+        assert_eq!(rooms.iter().map(|(_, wide)| *wide).collect::<Vec<_>>(), [BOX_ROOM, BOX_ROOM, QUOTE_ROOM, BULLET_ROOM, BULLET_ROOM]);
+        // A numbered list's number as words, a bullet faint.
+        let looks = looks(text);
+        assert!(!look_of(&looks, text.encode_utf16().count() - "1. 一".encode_utf16().count()).contains(&Look::Faint));
+        assert!(look_of(&looks, text.encode_utf16().count() - "- 点\n  * 里\n1. 一".encode_utf16().count()).contains(&Look::Faint));
     }
 
-    /// Written in, what the caret is in or at either end of shows as written, marks and all, the rest put away still:
-    /// the bold the caret is in (not the slanted words beside it), the heading the caret is on, a link the caret is in
-    /// (not followed then). What is chosen over any of a stretch shows it. A to-do's box stays drawn with the caret
-    /// where its words begin, shows as written with the caret before that.
+    /// Written in, its marks stay put away wherever the caret is, what is chosen too: a link the caret is in followed
+    /// still. Only a table the caret is in shows as written.
     #[test]
-    fn shows_as_written_what_the_caret_touches() {
-        let text = "## 本周 ##\n**粗**与*斜*\n- [ ] 买\n[链接](https://a.b/c)";
-        let units: Vec<u16> = text.encode_utf16().collect();
-        let of = |range: &Range<usize>| String::from_utf16(&units[range.clone()]).unwrap();
+    fn puts_away_marks_wherever_the_caret_is() {
+        let text = "## 本周 ##\n**粗**与*斜*\n- [ ] 买\n- 点\n> 引\n[链接](https://a.b/c)\n\n| **x** |\n| - |\n| y |";
         let at = |what: &str| text[..text.find(what).unwrap()].encode_utf16().count();
         let shown = Shown::of(text);
-        let hidden = |at: At| shown.hidden(at).iter().map(of).collect::<Vec<_>>();
         let caret = |unit: usize| Some((unit, unit));
-        // In the bold (粗), at its end (after its `**`): its marks as written.
-        assert_eq!(hidden(caret(at("粗"))), ["## ", " ##", "*", "*", "[", "](https://a.b/c)"]);
-        assert_eq!(hidden(caret(at("与"))), ["## ", " ##", "*", "*", "[", "](https://a.b/c)"]);
-        // At the slanted words' start, not the bold's end: theirs.
-        assert_eq!(hidden(caret(at("*斜"))), ["## ", " ##", "**", "**", "[", "](https://a.b/c)"]);
-        // On the heading.
-        assert_eq!(hidden(caret(at("周"))), ["**", "**", "*", "*", "[", "](https://a.b/c)"]);
-        // What is chosen from the bold's words into the slanted's.
-        assert_eq!(hidden(Some((at("粗"), at("斜")))), ["## ", " ##", "[", "](https://a.b/c)"]);
-        // Chosen up to the bold's start, not over it.
-        assert_eq!(hidden(Some((at("周"), at("**粗")))), ["**", "**", "*", "*", "[", "](https://a.b/c)"]);
+        let table = shown.tables[0].span.clone();
+        let everywhere = shown.put_away(None);
+        for at in [caret(at("粗")), caret(at("与")), caret(at("周")), caret(at(" 买")), caret(at("- [")), caret(at("点")), caret(at("引")), caret(at("接")), Some((at("粗"), at("斜")))] {
+            assert_eq!(shown.put_away(at), everywhere, "{at:?}");
+            assert_eq!(shown.tables_drawn(at).count(), 1);
+        }
         let link = shown.links[0].words.start;
-        assert!(shown.link_at(link, caret(at("粗"))).is_some() && shown.link_at(link, caret(at("接"))).is_none());
-        assert_eq!(shown.boxes(caret(at("买"))).count(), 1);
-        assert_eq!(shown.boxes(caret(at(" 买"))).count(), 0);
-        assert_eq!(shown.boxes(caret(at("- ["))).count(), 0);
+        assert!(shown.link_at(link, caret(at("接"))).is_some());
+        let inside = caret(table.start + 3);
+        assert_eq!(shown.tables_drawn(inside).count(), 0);
+        assert_eq!(shown.put_away(inside).0.len(), everywhere.0.len() - 5);
+    }
+
+    /// A fenced block of code on lines of its own: its fences put away and set low, its box all its lines; with no line
+    /// between its fences, or in a quote, left as written, and an indented one.
+    #[test]
+    fn puts_a_block_of_code_s_fences_away() {
+        let text = "a\n\n```rust\nlet x = 1;\n\n```\n\n~~~\n~~~\n\n> ```\n> q\n> ```\n\n    indented\n\n```\n";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let of = |range: &Range<usize>| String::from_utf16(&units[range.clone()]).unwrap();
+        let shown = Shown::of(text);
+        let codes: Vec<(String, Vec<String>)> = shown.codes.iter().map(|code| (of(&code.span), code.fences.iter().map(of).collect())).collect();
+        assert_eq!(codes, [("```rust\nlet x = 1;\n\n```".to_string(), vec!["```rust".to_string(), "```".to_string()])]);
+        let hidden: Vec<String> = shown.hidden(None).iter().map(of).collect();
+        assert_eq!(hidden.iter().filter(|hidden| hidden.contains('`') || hidden.contains('~')).collect::<Vec<_>>(), ["```rust", "```"]);
+        // Its fences' lines set low, the rest as their words set them.
+        let drawn = shown.drawn_lines(20.0, []);
+        let lines = line_heights(text, 20.0, &drawn);
+        let tall: Vec<f32> = lines[2..6].iter().map(|(_, tall)| *tall).collect();
+        assert_eq!(tall, [12.0, 32.0, 32.0, 12.0]);
+        // One not closed, with a line after its fence: its fence put away, the box as far as its words go.
+        let open = Shown::of("```\nx\ny");
+        assert_eq!(open.codes.len(), 1);
+        assert_eq!((open.codes[0].fences.len(), open.codes[0].fences[0].clone()), (1, 0..3));
+        assert_eq!(open.codes[0].span, 0..7);
+        assert!(Shown::of("```").codes.is_empty() && Shown::of("```\n").codes.is_empty());
+    }
+
+    /// Quotes' marks as deep as each line's quotes, the space after them the room; one with none after it, or a
+    /// quote's paragraph carried on without them, left as written.
+    #[test]
+    fn puts_a_quote_s_marks_away() {
+        let text = "> a\n> > b\n>c\nd\n\n  > - e";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let of = |range: &Range<usize>| String::from_utf16(&units[range.clone()]).unwrap();
+        let shown = Shown::of(text);
+        let roomed: Vec<(String, Drawn)> = shown.roomed.iter().map(|roomed| (of(&roomed.marks), roomed.drawn)).collect();
+        assert_eq!(roomed, [(">".to_string(), Drawn::Bars(1)), ("> >".to_string(), Drawn::Bars(2)), (">".to_string(), Drawn::Bars(1)), ("-".to_string(), Drawn::Bullet)]);
+        // Each line's marks put away at its start, as far as they go on: the spaces before them, a quote's and a
+        // list's together.
+        let leads: Vec<String> = shown.leads.iter().map(of).collect();
+        assert_eq!(leads, ["> ", "> > ", "  > - "]);
+    }
+
+    /// The caret is not to rest among a line's marks put away at its start (past them, or moved left, to the line
+    /// before), nor on a line put away whole (past it the way it was moved, after the last on a line to be begun).
+    #[test]
+    fn the_caret_rests_where_words_are() {
+        let text = "# 标题\n- [ ] 事\n---\n```\nx\n```";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let at = |what: &str| text[..text.find(what).unwrap()].encode_utf16().count();
+        let shown = Shown::of(text);
+        let settle = |caret: usize, way: Way| shown.settle(&units, caret, way);
+        // Among a heading's marks: past them; moved left, from the first line, past them still.
+        assert_eq!(settle(0, Way::Near), Some(Settled::At(2)));
+        assert_eq!(settle(1, Way::Left), Some(Settled::At(2)));
+        assert_eq!(settle(2, Way::Near), None);
+        // Among a to-do's: past them and its room; moved left, to the end of the line before.
+        assert_eq!(settle(at("- ["), Way::Near), Some(Settled::At(at("事"))));
+        assert_eq!(settle(at("- [") + 2, Way::Up), Some(Settled::At(at("事"))));
+        assert_eq!(settle(at("- ["), Way::Left), Some(Settled::At(at("\n- ["))));
+        // On a rule: down to the line after it (a fence, past that too), or up to the end of the line before.
+        assert_eq!(settle(at("---"), Way::Down), Some(Settled::At(at("x"))));
+        assert_eq!(settle(at("---") + 3, Way::Right), Some(Settled::At(at("x"))));
+        assert_eq!(settle(at("---"), Way::Left), Some(Settled::At(at("\n---"))));
+        assert_eq!(settle(at("```\nx") + 1, Way::Up), Some(Settled::At(at("\n---"))));
+        // On the last line, a fence: up, to the end of the line before; down or pressed, on a line to be begun.
+        assert_eq!(settle(units.len(), Way::Left), Some(Settled::At(at("x") + 1)));
+        assert_eq!(settle(units.len(), Way::Near), Some(Settled::Below));
+        assert_eq!(settle(units.len() - 1, Way::Down), Some(Settled::Below));
+        assert_eq!(settle(at("x"), Way::Near), None);
     }
 
     /// A web address ends where a sentence does, or where words in another script go on after it.

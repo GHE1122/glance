@@ -9,7 +9,8 @@ use std::rc::Rc;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LRESULT, POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_DOWN, VK_E, VK_APPS, VK_ESCAPE, VK_F10, VK_I, VK_INSERT, VK_K, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_UP, VK_V, VK_X, VK_Y, VK_Z,
+    GetKeyState, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_E, VK_END, VK_APPS, VK_ESCAPE, VK_F10, VK_HOME, VK_I, VK_INSERT, VK_K, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP, VK_V,
+    VK_X, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -54,7 +55,12 @@ pub(super) fn word_inks(theme: &Theme, colour: crate::notes::Colour) -> Inks {
     let _ = colour;
     let (text, faint) = (theme.text, theme.text3);
     let ground = page_under(theme);
-    let opaque = |ink: Color| super::view::over(Color { a: 1.0, ..ground }, ink);
+    // (Each channel a whole step of 255, as the box takes its colours: else a note shown wrote its words a step apart.)
+    let whole = |channel: f32| (channel * 255.0).round() / 255.0;
+    let opaque = |ink: Color| {
+        let ink = super::view::over(Color { a: 1.0, ..ground }, ink);
+        Color { r: whole(ink.r), g: whole(ink.g), b: whole(ink.b), a: 1.0 }
+    };
     let accent = match theme.skin {
         Skin::Paper => theme.text,
         _ => super::theme::accent(theme.dark),
@@ -163,7 +169,18 @@ pub enum Choice {
     Stick,
     Unstick,
     TakeAway,
+    /// The notes' Markdown shown as written, or as it reads (see `crate::notes::source`).
+    Source,
     Write(Write),
+}
+
+/// The notes' Markdown shown as written where it was shown as it reads, or the other way (chosen in a note's menu): at
+/// once, and kept so in the settings. The notes shown drawn again.
+pub fn turn_source() {
+    let source = !crate::notes::source();
+    crate::notes::show_source(source);
+    std::thread::spawn(move || crate::app().change(|settings| settings.notes_source = source));
+    crate::notes::read_again();
 }
 
 /// What a note's writing menu does to its words (see `Writing::write`): what is chosen cut or copied, the clipboard's
@@ -203,13 +220,15 @@ pub fn writing_menu(lang: Lang) -> (Vec<super::menu::Item<'static>>, Vec<Choice>
     (items, rows.into_iter().map(|(write, ..)| Choice::Write(write)).collect())
 }
 
-/// A note's menu, of colour `colour`: its colours, each a dot of it, and kept in a file (`named`), it stuck on the desktop or
-/// (`stuck` there) taken off it, and it taken away. Its rows, and what each does.
+/// A note's menu, of colour `colour`: its colours, each a dot of it, the notes' Markdown shown as written (ticked while
+/// it is), and kept in a file (`named`), it stuck on the desktop or (`stuck` there) taken off it, and it taken away.
+/// Its rows, and what each does.
 pub fn menu(lang: Lang, colour: crate::notes::Colour, named: bool, stuck: bool) -> (Vec<super::menu::Item<'static>>, Vec<Choice>) {
     use crate::notes::Colour;
     use super::menu::{Item, Mark};
     let names = [(Colour::Blue, lang.pick("蓝色", "Blue")), (Colour::Yellow, lang.pick("黄色", "Yellow")), (Colour::Green, lang.pick("绿色", "Green")), (Colour::Pink, lang.pick("粉色", "Pink")), (Colour::Purple, lang.pick("紫色", "Purple")), (Colour::Grey, lang.pick("灰色", "Grey"))];
     let mut rows: Vec<(Choice, &'static str, Mark, bool, bool)> = names.iter().map(|(each, name)| (Choice::Colour(*each), *name, Mark::Colour(super::view::note_colour(*each)), colour == *each, false)).collect();
+    rows.push((Choice::Source, lang.pick("显示 Markdown 源码", "Show Markdown source"), Mark::Icon(Icon::Code), crate::notes::source(), true));
     if named {
         match stuck {
             true => rows.push((Choice::Unstick, lang.pick("从桌面取下", "Take off the desktop"), Mark::Icon(Icon::PinOff), false, true)),
@@ -277,6 +296,37 @@ fn line_top(editor: &Editor, units: &[u16], at: usize) -> Option<i32> {
     editor.character_anywhere(end).map(|drawn| drawn.top)
 }
 
+/// The foot of the line the character at `at` (UTF-16 units of `units`, its words) is on in `editor` (in the window), of
+/// all its rows (found by its line's break, or the words' end), where it is drawn or would be.
+fn line_foot(editor: &Editor, units: &[u16], at: usize) -> Option<i32> {
+    let end = (at..units.len()).find(|&unit| units[unit] == u16::from(b'\n')).unwrap_or(units.len());
+    editor.character_anywhere(end).map(|drawn| drawn.bottom)
+}
+
+/// The caret in `editor`, moved `way`, put where words are (see `notes::markdown::Shown::settle`), its words read as
+/// `shown` (as they were when dressed: `dressed`, UTF-16 units; changed since, not yet dressed, left where it is), on a
+/// line begun after the last where that is where it is to rest (`below`: else left). Not where something is chosen,
+/// nor while the input method composes.
+fn settle(editor: &Editor, shown: &crate::notes::markdown::Shown, dressed: &[u16], way: crate::notes::markdown::Way, below: bool) {
+    use crate::notes::markdown::Settled;
+    let (from, to) = editor.selection();
+    if from != to || editor.composing() {
+        return;
+    }
+    let now: Vec<u16> = editor.text().encode_utf16().collect();
+    if now != dressed {
+        return;
+    }
+    match shown.settle(&now, from.max(0) as usize, way) {
+        Some(Settled::At(at)) => editor.select((at as i32, at as i32)),
+        Some(Settled::Below) if below => {
+            let end = now.len();
+            editor.apply(&crate::notes::edit::Edit { range: end..end, with: "\n".into(), chosen: (end + 1, end + 1) });
+        }
+        _ => {}
+    }
+}
+
 /// The words of the cell of a table drawn laid out in `editor` (`laid`, as its words were dressed: `dressed`) that
 /// `point` (in the window) is on: none off them.
 fn cell_at(editor: &Editor, laid: &Laid, dressed: &[u16], point: POINT) -> Option<std::ops::Range<usize>> {
@@ -327,7 +377,8 @@ fn writes(key: VIRTUAL_KEY) -> bool {
 /// (`Some(None)`: the key and the character it makes eaten), or none: the key the text services' as always.
 ///
 /// Enter carries a list on (Shift+Enter a line break), Ctrl+Enter ticks a to-do, Tab and Shift+Tab move a list's items in
-/// and out, Backspace takes an item's mark off, Alt+Up and Alt+Down move lines. Ctrl+B, Ctrl+I, Ctrl+Shift+X and Ctrl+E
+/// and out, Backspace takes an item's mark off (and, the note shown as it reads, marks put away one by one, a rule
+/// before it: see `edit::backspace`), Delete a rule after it (see `edit::delete`), Alt+Up and Alt+Down move lines. Ctrl+B, Ctrl+I, Ctrl+Shift+X and Ctrl+E
 /// put on and take off bold, slanted, struck through and code, Ctrl+K makes a link (to the web address on the clipboard,
 /// `clipboard` asked only then, for its text), Ctrl+1 to 3 headings and Ctrl+0 none. Ctrl+V and Shift+Insert paste what is
 /// on the clipboard as Markdown, words among others or blocks (`clipboard` asked for it so: see `clipboard_pasted`,
@@ -348,7 +399,8 @@ fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, sys
         (VK_RETURN, false, false) => caret.and_then(|caret| edit::enter(text, caret)).map(Some),
         (VK_RETURN, true, false) => Some(edit::toggle_task(text, chosen.0)),
         (VK_TAB, false, back) => crate::notes::table::tab(text, chosen, back).or_else(|| edit::indent(text, chosen, back)),
-        (VK_BACK, false, false) => caret.and_then(|caret| edit::backspace(text, caret)).map(Some),
+        (VK_BACK, false, false) => caret.and_then(|caret| edit::backspace(text, caret, !crate::notes::source())).map(Some),
+        (VK_DELETE, false, false) => caret.and_then(|caret| edit::delete(text, caret, !crate::notes::source())).map(Some),
         (VK_INSERT, false, true) => Some(clipboard(Taken::Pasted).map(|pasted| edit::paste(text, chosen, &pasted))),
         (_, false, _) => None,
         (VK_B, true, false) => marked(Marked::Bold),
@@ -500,6 +552,8 @@ pub struct Writing {
     /// `notes::markdown::Shown`), the same for its box's messages (see `Reads`).
     shown: crate::notes::markdown::Shown,
     at: crate::notes::markdown::At,
+    /// Whether its Markdown was shown as written as it was last dressed (see `crate::notes::source`).
+    source: bool,
     /// Its tables drawn laid out, as it was last dressed, and its words then (UTF-16 units).
     laid: Laid,
     dressed: Rc<[u16]>,
@@ -554,6 +608,7 @@ impl Writing {
             said: None,
             shown: Default::default(),
             at: None,
+            source: false,
             laid: Vec::new(),
             dressed: Rc::from([]),
             reads: Rc::new(RefCell::new(Reads { shown: Default::default(), at: None, folder: folder.path.clone(), laid: Vec::new(), dressed: Rc::from([]) })),
@@ -568,13 +623,18 @@ impl Writing {
             menu_asked: Rc::new(Cell::new(None)),
         };
         writing.dress();
+        // (The caret where words are, not among what is put away: where it rests now is where it opened.)
+        settle(&writing.editor, &writing.shown, &writing.dressed, crate::notes::markdown::Way::Near, false);
+        writing.opened_at = writing.editor.selection();
         Some(writing)
     }
 
-    /// Its words dressed as their Markdown reads, its marks put away where it is not written at (see `at_now`).
+    /// Its words dressed as their Markdown reads (or as written, its source asked for: see `crate::notes::source`), its
+    /// marks put away but where a table is written at (see `at_now`).
     pub fn dress(&mut self) {
         let text = self.editor.text();
-        let shown = crate::notes::markdown::Shown::of(&text);
+        self.source = crate::notes::source();
+        let shown = crate::notes::shown_as(&text);
         self.dress_as(shown, self.at_now(), &text);
     }
 
@@ -591,8 +651,8 @@ impl Writing {
             Some(Ok(gfx)) => tables.into_iter().map(|table| (table.clone(), gfx.table_laid(table, TABLE_FAMILY, pixels, per, (bounds.right - bounds.left) as f32))).collect(),
             _ => Vec::new(),
         };
-        let drawn: Vec<_> = self.laid.iter().map(|(table, laid)| (table.span.clone(), laid.laid.height())).collect();
-        self.editor.dress(&crate::notes::markdown::looks(text), &hidden, &rooms, &drawn, &self.palette);
+        let drawn = shown.drawn_lines(pixels, self.laid.iter().map(|(table, laid)| (table.span.clone(), laid.laid.height())));
+        self.editor.dress(&crate::notes::markdown::looks(text), &hidden, &rooms, &drawn, &shown.leads, &self.palette);
         self.dressed = text.encode_utf16().collect();
         if let Ok(mut reads) = self.reads.try_borrow_mut() {
             *reads = Reads { shown: shown.clone(), at, folder: self.folder.clone(), laid: self.laid.clone(), dressed: self.dressed.clone() };
@@ -823,7 +883,7 @@ impl Writing {
             let ticked = (message == WM_LBUTTONDOWN && !editor.composing())
                 .then(|| {
                     let drawn = reads.try_borrow().ok().and_then(|reads| {
-                        reads.shown.boxes(reads.at).find_map(|boxed| {
+                        reads.shown.boxes.iter().find_map(|boxed| {
                             let room = editor.character(boxed.room)?;
                             (point.x >= room.left && point.x < room.right && point.y >= room.top && point.y < room.bottom).then(|| (boxed.marks.end - 3..boxed.marks.end, boxed.done))
                         })
@@ -863,7 +923,23 @@ impl Writing {
                     }
                     Some(LRESULT(1))
                 }
-                (None, None, _) => editor.send(message, wparam, lparam),
+                (None, None, _) => {
+                    let answered = editor.send(message, wparam, lparam);
+                    // The caret moved by a key, or put where the words were pressed: where words are, the way it went.
+                    use crate::notes::markdown::Way;
+                    let way = match (message, VIRTUAL_KEY(wparam.0 as u16)) {
+                        (WM_KEYDOWN, VK_LEFT) => Some(Way::Left),
+                        (WM_KEYDOWN, VK_RIGHT) => Some(Way::Right),
+                        (WM_KEYDOWN, VK_UP | VK_PRIOR) => Some(Way::Up),
+                        (WM_KEYDOWN, VK_DOWN | VK_NEXT) => Some(Way::Down),
+                        (WM_KEYDOWN, VK_HOME | VK_END) | (WM_LBUTTONDOWN | WM_LBUTTONUP, _) => Some(Way::Near),
+                        _ => None,
+                    };
+                    if let (Some(way), Ok(reads)) = (way, reads.try_borrow()) {
+                        settle(&editor, &reads.shown, &reads.dressed, way, true);
+                    }
+                    answered
+                }
             };
             depth.set(depth.get() - 1);
             // (The input method's, unanswered by the box, are the system's as well.)
@@ -890,8 +966,12 @@ impl Writing {
         let touched = !self.touched && (keyed || composed || self.editor.selection() != self.opened_at);
         self.touched |= touched;
         let composing = self.editor.composing();
-        if composed || (!composing && (changed || touched)) {
+        if composed || (!composing && (changed || touched || self.source != crate::notes::source())) {
             self.dress();
+            // (Written in: the caret where words are, a line begun after one put away whole, as a rule just written.)
+            if keyed && changed {
+                settle(&self.editor, &self.shown, &self.dressed, crate::notes::markdown::Way::Near, true);
+            }
         } else if !composing {
             let at = self.at_now();
             if self.shown.put_away(at) != self.shown.put_away(self.at) {
@@ -1024,6 +1104,27 @@ impl Writing {
         }
         // (Its box placed in its window: drawn from the window's corner.)
         let in_window = |px: f32, py: f32| (window.0 + px / scale, window.1 + py / scale);
+        let pixels = self.pixels();
+        let inks = word_inks(theme, self.colour);
+        let bounds = self.editor.bounds();
+        let (left, top) = in_window(bounds.left as f32, bounds.top as f32);
+        let (right, bottom) = in_window(bounds.right as f32, bounds.bottom as f32);
+        // (Where what was dressed is now: the input method's words may be in them, not yet dressed.)
+        let now: Vec<u16> = self.editor.text().encode_utf16().collect();
+        let moved = Moved::between(&self.dressed, &now);
+        // Its blocks of code's boxes, under its words, reaching out past their sides (as a note shown draws them: see
+        // `Frame::markdown`, its words whole pixels high).
+        let out = crate::notes::markdown::CODE_OUT * pixels.round() / scale;
+        frame.clip(left - out - 1.0, top, right - left + 2.0 * out + 2.0, bottom - top);
+        for code in &self.shown.codes {
+            let first = moved.at(code.span.start).and_then(|start| line_top(&self.editor, &now, start));
+            let last = moved.at(code.span.end).and_then(|end| line_foot(&self.editor, &now, end));
+            if let (Some(first), Some(last)) = (first, last) {
+                let (x, y) = in_window(bounds.left as f32, first as f32);
+                super::canvas::code_box(frame, inks, x - out, y, right - left + 2.0 * out, (last - first) as f32 / scale, pixels.round() / scale);
+            }
+        }
+        frame.unclip();
         let mut was = windows_numerics::Matrix3x2::default();
         unsafe {
             frame.dc.GetTransform(&mut was);
@@ -1031,31 +1132,40 @@ impl Writing {
         }
         frame.in_pixels(|target| self.editor.draw(target));
         unsafe { frame.dc.SetTransform(&was) };
-        let pixels = self.pixels();
-        let inks = word_inks(theme, self.colour);
-        let bounds = self.editor.bounds();
-        let (left, top) = in_window(bounds.left as f32, bounds.top as f32);
-        let (right, bottom) = in_window(bounds.right as f32, bounds.bottom as f32);
         frame.clip(left, top, right - left, bottom - top);
-        // (Where what was dressed is now: the input method's words may be in them, not yet dressed.)
-        let now: Vec<u16> = self.editor.text().encode_utf16().collect();
-        let moved = Moved::between(&self.dressed, &now);
         for (table, laid) in &self.laid {
             let Some(line) = moved.at(table.span.start).and_then(|start| line_top(&self.editor, &now, start)) else { continue };
             let (x, y) = in_window(bounds.left as f32, line as f32);
             frame.table(laid, inks, x, y, (top, bottom));
         }
-        for rule in self.shown.rules_drawn(self.at) {
-            let Some(line) = moved.at(rule.end).and_then(|end| self.editor.character(end)) else { continue };
+        // (Each where it is drawn or would be: one only partly in the box drawn as far as it is, as a note shown draws it.)
+        for rule in &self.shown.rules {
+            let Some(line) = moved.at(rule.end).and_then(|end| self.editor.character_anywhere(end)) else { continue };
             let (x, y) = in_window(bounds.left as f32, line.top as f32);
             frame.rule(inks, x, y, (bounds.right - bounds.left) as f32 / scale, (line.bottom - line.top) as f32);
         }
-        for boxed in self.shown.boxes(self.at) {
+        for boxed in &self.shown.boxes {
             let Some(room) = moved.at(boxed.room) else { continue };
-            let (Some(room), Some(baseline)) = (self.editor.character(room), self.editor.baseline(room + 1)) else { continue };
-            let (bx, by, side) = box_in(room.left, baseline, pixels);
+            let (Some(room), Some(baseline)) = (self.editor.character_anywhere(room), self.editor.baseline_anywhere(room + 1)) else { continue };
+            let (bx, by, side) = box_in(room.left, baseline, pixels.round());
             let (bx, by) = in_window(bx, by);
             super::canvas::task_box(frame, inks, bx, by, side / scale, boxed.done);
+        }
+        // Each list's dot and quote's bars in its room (the bars all its line's rows down, the next line's joining them).
+        for roomed in &self.shown.roomed {
+            let Some(at) = moved.at(roomed.room) else { continue };
+            let Some(room) = self.editor.character_anywhere(at) else { continue };
+            let (x, y) = in_window(room.left as f32, room.top as f32);
+            match roomed.drawn {
+                crate::notes::markdown::Drawn::Bullet => {
+                    let Some(baseline) = self.editor.baseline_anywhere(at + 1) else { continue };
+                    super::canvas::bullet(frame, inks, x, in_window(0.0, baseline as f32).1, pixels.round() / scale);
+                }
+                crate::notes::markdown::Drawn::Bars(deep) => {
+                    let Some(foot) = line_foot(&self.editor, &now, at) else { continue };
+                    super::canvas::quote_bars(frame, inks, (x, y, (foot - room.top) as f32 / scale), deep, pixels.round() / scale, scale);
+                }
+            }
         }
         frame.unclip();
         if let Some(bar) = bar_at(&self.editor, self.pixels.get(), self.pressing.get()) {
@@ -1143,6 +1253,23 @@ mod pictures {
         let text = "上面一行\n\n| 名称 | 数量 | 说明 |\n| :-- | :-: | --: |\n| 苹果 | 3 | 红的，很甜，放在厨房的篮子里面 |\n| pear | 12 |  |\n\n---\n下面一行\n> | 引 | 用 |\n> | - | - |";
         let apart = drawn_apart(text, "table");
         assert!(apart.iter().all(|(_, differ)| *differ == 0), "pixels apart at each scale: {apart:?}");
+    }
+
+    /// A note's lists' dots, quotes' bars, to-dos' boxes and blocks of code's boxes drawn not written in as they are drawn
+    /// written in, pixel for pixel, at each of the screen's usual scales: each in its room, a list's item's and a quote's
+    /// words wrapped under each other, a block of code's fences set low round its words, its box reaching out past their
+    /// sides. A heading's and bold words' lines set by the plain words' baseline (as the box sets them), a done to-do's
+    /// faint words in the ink the box has.
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn lists_quotes_and_code_are_drawn_alike_written_in_or_not() {
+        let lists = "## 清单\n- 苹果\n  - 红的\n- [ ] 买牛奶\n1. 第一\n\n> 引用的话，很长很长很长很长很长很长很长很长很长很长很长很长\n> > 再引\n> 又一行";
+        let code = "上面一行\n```rust\nlet a = 1;\n\nlet b = \"一段很长很长很长很长很长很长很长很长的字\";\n```\n下面一行\n\n    缩进的代码";
+        let one_by_one = [("## 清单\n正文", "heading"), ("清单\n---\n正文", "underlined"), ("**粗体**\n正文", "bold"), ("- [x] 完成\n正文", "done"), ("> 引用\n\n正文", "quote")];
+        for (text, name) in one_by_one.into_iter().chain([(lists, "lists"), (code, "code")]) {
+            let apart = drawn_apart(text, name);
+            assert!(apart.iter().all(|(_, differ)| *differ == 0), "{name}: pixels apart at each scale: {apart:?}");
+        }
     }
 
     /// A table below its box's room is found where it would be (below the box, not at its top: the text services'

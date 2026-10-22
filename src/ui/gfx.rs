@@ -1760,13 +1760,15 @@ impl<'a> Frame<'a> {
     /// Draws a note's words as the box they are written in does (see `Canvas::markdown`): laid out in a face of the
     /// font's family, each stretch's weight, slant, size, strike, face and ink set on it (the faces chosen by weight
     /// and slant, as the text services choose them, slanted where the face has no italic); each line set as tall as
-    /// `markdown::line_heights` says, its words as far above its foot as they reach below their baseline, as the text
-    /// services set a line exactly so tall.
+    /// `markdown::line_heights` says, its words as far above its foot as plain words reach below their baseline, as the text
+    /// services set a line exactly so tall. Its blocks of code's boxes drawn under them, reaching out past its sides.
     #[allow(clippy::too_many_arguments)]
     pub fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32) {
-        use crate::notes::markdown::{line_heights, Shown, BOX_IN, BOX_RISE, BOX_ROOM, BOX_SIDE};
-        // (Clipped and let go of whatever fails in between: the clip left on, the whole frame was lost.)
-        Canvas::clip(self, x, y, width, height);
+        use crate::notes::markdown::{line_heights, Drawn, BOX_IN, BOX_RISE, BOX_ROOM, BOX_SIDE, CODE_OUT};
+        // (Clipped, its blocks of code's boxes' sides within, and let go of whatever fails in between: the clip left on,
+        // the whole frame was lost.)
+        let out = CODE_OUT * font.size + 1.0;
+        Canvas::clip(self, x - out, y, width + 2.0 * out, height);
         let drawn = (|| -> Result<()> {
             let wide: Vec<u16> = text.encode_utf16().collect();
             let factory: IDWriteFactory = self.gfx.write.cast()?;
@@ -1779,44 +1781,53 @@ impl<'a> Frame<'a> {
             let per = self.axes().map_or(1.0, |(t, device)| t.M11 * device);
             let whole = |size: f32| (size * per).round().max(1.0) / per;
             let size = whole(font.size);
+            let out = CODE_OUT * size;
             let dressing = crate::notes::markdown::dressing(text);
-            // Its marks put away, as a note not being written in shows (see `notes::markdown::Shown`): each stood in
-            // for by nothing; a to-do's list mark, box and the space after them by the room its box is drawn in, as
-            // wide as the text services make that space where it is written.
-            let shown = Shown::of(text);
+            // Its marks put away, as a note shows (see `notes::markdown::Shown`; none, its source asked for): each
+            // stood in for by nothing; a to-do's list mark, box and the space after them, a bullet and the space after
+            // it, a quote's marks and the space after them, by the room what stands in for them is drawn in, as wide as
+            // the text services make that space where it is written.
+            let shown = crate::notes::shown_as(text);
             let hidden = shown.hidden(None);
             let nothing: IDWriteInlineObject = Room { width: 0.0 }.into();
-            let room: IDWriteInlineObject = Room { width: BOX_ROOM * size }.into();
+            let room = |wide: f32| -> IDWriteInlineObject { Room { width: (wide * size * per).round() / per }.into() };
             let (left, top) = self.on_pixel(x, y);
             // Its tables laid out in its room (in pixels), their lines as tall as they take, and its rules.
             let pixels = size * per;
             let tables: Vec<_> = shown.tables_drawn(None).map(|table| (table, self.gfx.table_laid(table, font.family, pixels, per, (width * per).floor()))).collect();
-            let drawn: Vec<_> = tables.iter().map(|(table, laid)| (table.span.clone(), laid.laid.height())).collect();
-            let rules: Vec<_> = shown.rules_drawn(None).collect();
-            // Each line laid out on its own, as tall as it is set, under the one before.
-            let mut down = 0.0;
-            for (line, tall) in line_heights(text, pixels, &drawn) {
-                if down >= height {
-                    break;
-                }
-                if let Some((_, laid)) = tables.iter().find(|(table, _)| table.span.start == line.start) {
-                    self.table(laid, inks, left, top + down, (y, y + height));
-                }
-                if rules.iter().any(|rule| rule.start == line.start) {
-                    self.rule(inks, left, top + down, width, tall);
-                }
-                // (Its words, without its line break: a `\r` before it too, as a file written on Windows has.)
-                let breaks = [u16::from(b'\n'), u16::from(b'\r')];
-                let end = (line.start..line.end).rev().find(|&at| !breaks.contains(&wide[at])).map_or(line.start, |at| at + 1);
-                let words = line.start..end;
-                // What of `range` (in its note) is on this line, as counted in the line.
+            let drawn = shown.drawn_lines(pixels, tables.iter().map(|(table, laid)| (table.span.clone(), laid.laid.height())));
+            // Each line laid out on its own, as tall as it is set, under the one before: all laid out first, its blocks
+            // of code's boxes drawn under them.
+            // (Each line's words, how far down it is and how tall each of its rows, it laid out whole (where what stands
+            // in for its marks is), and its words as drawn (from `indent` in, under each other: see `lay`), on `rows`.)
+            struct Line {
+                words: std::ops::Range<usize>,
+                down: f32,
+                tall: f32,
+                whole_line: IDWriteTextLayout,
+                layout: IDWriteTextLayout,
+                indent: f32,
+                rows: Vec<DWRITE_LINE_METRICS>,
+            }
+            // Each line's baseline as far above its foot as plain words reach below theirs, in whole pixels, whatever is
+            // on it (a heading's larger words, bold ones): as the text services set a line exactly so tall, by the words
+            // the box is written in, not the line's own.
+            let plain = unsafe { factory.CreateGdiCompatibleTextLayout(&[u16::from(b' ')], &format, f32::MAX, f32::MAX, per, None, false)? };
+            unsafe { plain.SetFontSize(size, DWRITE_TEXT_RANGE { startPosition: 0, length: 1 })? };
+            let mut count = 0;
+            let mut row = [DWRITE_LINE_METRICS::default()];
+            unsafe { plain.GetLineMetrics(Some(&mut row), &mut count)? };
+            let below = ((row[0].height - row[0].baseline) * per).round() / per;
+            // The words `words` (of a line, without its line break) laid out `room` wide, dressed, their marks put away.
+            // (Laid out and drawn as the text services lay out and draw words, GDI's way, glyphs on whole pixels: else the
+            // same words, written in and not, were drawn apart, those not written in softer.)
+            let lay = |words: std::ops::Range<usize>, room_wide: f32| -> Result<IDWriteTextLayout> {
+                // What of `range` (in its note) is in them, as counted in them.
                 let on_line = |range: &std::ops::Range<usize>| {
                     let (from, to) = (range.start.max(words.start), range.end.min(words.end));
                     (from < to).then(|| DWRITE_TEXT_RANGE { startPosition: (from - words.start) as u32, length: (to - from) as u32 })
                 };
-                // (Laid out and drawn as the text services lay out and draw words, GDI's way, glyphs on whole pixels: else
-                // the same words, written in and not, were drawn apart, those not written in softer.)
-                let layout = unsafe { factory.CreateGdiCompatibleTextLayout(&wide[words.clone()], &format, width.max(0.0), f32::MAX, per, None, false)? };
+                let layout = unsafe { factory.CreateGdiCompatibleTextLayout(&wide[words.clone()], &format, room_wide.max(0.0), f32::MAX, per, None, false)? };
                 unsafe {
                     layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
                     // (Tabs as far apart as the text services set them: else what follows one, and how lines wrap, moved.)
@@ -1838,46 +1849,89 @@ impl<'a> Frame<'a> {
                 for range in hidden.iter().filter_map(on_line) {
                     unsafe { layout.SetInlineObject(&nothing, range)? };
                 }
-                let boxes: Vec<_> = shown.boxes(None).filter(|boxed| words.contains(&boxed.marks.start)).collect();
-                for range in boxes.iter().filter_map(|boxed| on_line(&(boxed.marks.start..boxed.room + 1))) {
-                    unsafe { layout.SetInlineObject(&room, range)? };
+                let rooms = shown.boxes.iter().map(|boxed| (boxed.marks.start..boxed.room + 1, BOX_ROOM)).chain(shown.roomed.iter().map(|roomed| (roomed.marks.start..roomed.room + 1, roomed.drawn.room())));
+                for (range, wide) in rooms.filter(|(range, _)| words.contains(&range.start)) {
+                    if let Some(range) = on_line(&range) {
+                        unsafe { layout.SetInlineObject(&room(wide), range)? };
+                    }
                 }
+                Ok(layout)
+            };
+            let mut laid: Vec<Line> = Vec::new();
+            let mut down = 0.0;
+            for (line, tall) in line_heights(text, pixels, &drawn) {
+                if down >= height {
+                    break;
+                }
+                // (Its words, without its line break: a `\r` before it too, as a file written on Windows has.)
+                let breaks = [u16::from(b'\n'), u16::from(b'\r')];
+                let end = (line.start..line.end).rev().find(|&at| !breaks.contains(&wide[at])).map_or(line.start, |at| at + 1);
+                let words = line.start..end;
+                let whole_line = lay(words.clone(), width)?;
+                // With marks put away at its start (a list's item's, a quote's), its rows after its first as far in as its
+                // words begin on its first, as the box sets them: its words laid out from there, in the room left.
+                let lead = shown.leads.iter().find(|lead| lead.start == words.start).map(|lead| -> Result<(usize, f32)> {
+                    let (mut at_x, mut at_y) = (0.0, 0.0);
+                    let mut start = DWRITE_HIT_TEST_METRICS::default();
+                    unsafe { whole_line.HitTestTextPosition((lead.end - words.start) as u32, false, &mut at_x, &mut at_y, &mut start)? };
+                    Ok((lead.end, start.left))
+                });
+                let (layout, indent) = match lead.transpose()? {
+                    Some((from, indent)) if indent > 0.0 => (lay(from..words.end, width - indent)?, indent),
+                    _ => (whole_line.clone(), 0.0),
+                };
                 // The rows it is laid out on (a line too long for its room wrapped onto more than one: asked for its
                 // first row alone, DirectWrite said there was not room for them and nothing after it was drawn).
                 let mut count = 0;
                 let _ = unsafe { layout.GetLineMetrics(None, &mut count) };
-                let mut lines = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
-                unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count)? };
-                // Its words' baseline as far above its foot as they reach below it laid out as they come (on its first
-                // row), in whole pixels.
-                let below = ((lines[0].height - lines[0].baseline) * per).round() / per;
+                let mut rows = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
+                unsafe { layout.GetLineMetrics(Some(&mut rows), &mut count)? };
                 let tall = tall / per;
-                unsafe {
-                    layout.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, tall, tall - below)?;
-                    self.dc.DrawTextLayout(windows_numerics::Vector2 { X: left, Y: top + down }, &layout, self.brush(inks.words), self.text_snap());
+                unsafe { layout.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, tall, tall - below)? };
+                let lines = rows.len().max(1) as f32;
+                laid.push(Line { words, down, tall, whole_line, layout, indent, rows });
+                down += lines * tall;
+            }
+            // How far down each line's foot is.
+            let foot = |line: &Line| line.down + line.rows.len().max(1) as f32 * line.tall;
+            for code in &shown.codes {
+                let first = laid.iter().find(|line| line.words.start == code.span.start);
+                let last = laid.iter().rev().find(|line| line.words.start <= code.span.end);
+                if let (Some(first), Some(last)) = (first, last) {
+                    super::canvas::code_box(self, inks, left - out, top + first.down, width + 2.0 * out, foot(last) - first.down, size);
                 }
-                // Each to-do's box in its room, by its line's baseline (each line `tall`, its baseline `tall - below`
-                // down it).
-                let line_of = |at: usize| {
-                    let mut end = 0;
-                    lines.iter().position(|line| {
-                        end += line.length as usize;
-                        at < end
-                    })
-                };
-                for boxed in &boxes {
+            }
+            for line in &laid {
+                let (words, down, tall) = (&line.words, line.down, line.tall);
+                if let Some((_, laid)) = tables.iter().find(|(table, _)| table.span.start == words.start) {
+                    self.table(laid, inks, left, top + down, (y, y + height));
+                }
+                if shown.rules.iter().any(|rule| rule.start == words.start) {
+                    self.rule(inks, left, top + down, width, tall * per);
+                }
+                unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: left + line.indent, Y: top + down }, &line.layout, self.brush(inks.words), self.text_snap()) };
+                // Each to-do's box, list's dot and quote's bars in its room, on its first row (what stands in for marks
+                // at a line's start begins it), by its baseline (`tall - below` down it).
+                let place = |at: usize| -> Result<f32> {
                     let (mut at_x, mut at_y) = (0.0, 0.0);
                     let mut start = DWRITE_HIT_TEST_METRICS::default();
-                    unsafe { layout.HitTestTextPosition((boxed.marks.start - words.start) as u32, false, &mut at_x, &mut at_y, &mut start)? };
+                    unsafe { line.whole_line.HitTestTextPosition((at - words.start) as u32, false, &mut at_x, &mut at_y, &mut start)? };
+                    Ok(left + start.left)
+                };
+                let row = top + down;
+                for boxed in shown.boxes.iter().filter(|boxed| words.contains(&boxed.marks.start)) {
+                    let at_x = place(boxed.marks.start)?;
                     let side = BOX_SIDE * size;
-                    // (Its room on the line its marks begin: it stands in for them.)
-                    let line = line_of(boxed.marks.start - words.start).unwrap_or(0);
-                    let middle = top + down + line as f32 * tall + tall - below - BOX_RISE * size;
-                    super::canvas::task_box(self, inks, left + start.left + BOX_IN * size, middle - side / 2.0, side, boxed.done);
+                    let middle = row + tall - below - BOX_RISE * size;
+                    super::canvas::task_box(self, inks, at_x + BOX_IN * size, middle - side / 2.0, side, boxed.done);
                 }
-                let mut metrics = DWRITE_TEXT_METRICS::default();
-                unsafe { layout.GetMetrics(&mut metrics)? };
-                down += metrics.lineCount.max(1) as f32 * tall;
+                for roomed in shown.roomed.iter().filter(|roomed| words.contains(&roomed.marks.start)) {
+                    let at_x = place(roomed.marks.start)?;
+                    match roomed.drawn {
+                        Drawn::Bullet => super::canvas::bullet(self, inks, at_x, row + tall - below, size),
+                        Drawn::Bars(deep) => super::canvas::quote_bars(self, inks, (at_x, row, top + foot(line) - row), deep, size, per),
+                    }
+                }
             }
             Ok(())
         })();

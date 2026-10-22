@@ -561,11 +561,18 @@ fn outdented(text: &str, tree: &Tree, found: usize) -> Rewrite {
 
 /// Backspace pressed with the caret at `caret` (nothing chosen): at the start of a list's item's words, the item one
 /// step further out if it is in one, else its mark (and its to-do's box) taken off: its words a paragraph of the item
-/// before it (as far in as that one's words), or, the first of its list, a paragraph before the list. None elsewhere.
-pub fn backspace(text: &str, caret: usize) -> Option<Edit> {
+/// before it (as far in as that one's words), or, the first of its list, a paragraph before the list. Its Markdown shown
+/// as it reads (`formatted`: see `markdown::Shown`), where marks put away would be taken back one by one, as written:
+/// at the start of a heading's words, its `#` taken off, of a quote's line's, its `>`, of a block of code's first
+/// line, its fences; at the start of the line after a rule, the rule taken away, after a block of code, the caret to the
+/// end of its last line. None elsewhere.
+pub fn backspace(text: &str, caret: usize, formatted: bool) -> Option<Edit> {
     let tree = Tree::of(text);
     let at = byte(text, caret);
-    let found = tree.on_line(tree.line_of(at)).rev().find(|&item| tree.items[item].words == at)?;
+    let index = tree.line_of(at);
+    let Some(found) = tree.on_line(index).rev().find(|&item| tree.items[item].words == at) else {
+        return formatted.then(|| unformatted(text, &tree, at, index)).flatten();
+    };
     let item = &tree.items[found];
     if item.parent.is_some() && item.first {
         let rewrite = outdented(text, &tree, found);
@@ -593,6 +600,81 @@ pub fn backspace(text: &str, caret: usize) -> Option<Edit> {
     }
     let caret = rewrite.map(item.words);
     Some(numbered(text, &rewrite, (caret, caret)))
+}
+
+/// What Backspace does at the byte `at` (on line `index`) of a note shown as it reads, not at a list's item's words (see
+/// `backspace`).
+fn unformatted(text: &str, tree: &Tree, at: usize, index: usize) -> Option<Edit> {
+    let shown = super::markdown::Shown::of(text);
+    let line = tree.lines[index].clone();
+    let units = |bytes: &Range<usize>| unit(text, bytes.start)..unit(text, bytes.end);
+    if at == line.start && index > 0 {
+        let before = tree.lines[index - 1].clone();
+        let put_away = units(&before);
+        // After a rule: the rule taken away, its line with it.
+        if shown.rules.contains(&put_away) {
+            let mut rewrite = Rewrite::default();
+            rewrite.put(before.start..line.start, "");
+            return Some(edit(text, &rewrite.apply(text), (before.start, before.start)));
+        }
+        // After a block of code: the caret at the end of its last line (its fence between, put away).
+        if shown.codes.iter().any(|code| code.fences.len() == 2 && code.fences[1] == put_away) {
+            let to = unit(text, tree.lines[index - 2].end);
+            return Some(Edit { range: unit(text, at)..unit(text, at), with: String::new(), chosen: (to, to) });
+        }
+        // Its first line: its fences taken away (each with its line break), its lines words.
+        if let Some(code) = shown.codes.iter().find(|code| code.fences.first() == Some(&put_away)) {
+            let mut rewrite = Rewrite::default();
+            rewrite.put(before.start..line.start, "");
+            if let Some(closing) = code.fences.get(1) {
+                let closing = byte(text, closing.start)..byte(text, closing.end);
+                rewrite.put(closing.start - 1..closing.end, "");
+            }
+            let caret = rewrite.map(at);
+            return Some(edit(text, &rewrite.apply(text), (caret, caret)));
+        }
+    }
+    if tree.in_code(index) {
+        return None;
+    }
+    // At the start of a heading's words: its `#` taken off.
+    let words = tree.words_of(text, index);
+    let marks = hashes(&text[words..line.end]);
+    if marks > 0 && at == words + marks {
+        return Some(heading(text, (unit(text, at), unit(text, at)), 0));
+    }
+    // At the start of a quote's line's words: its `>` taken off.
+    let quotes = tree.quotes.iter().filter(|quote| quote.start <= line.end && line.start < quote.end).count();
+    let marks = quoted(&text[line.clone()], quotes);
+    if marks > 0 && at == line.start + marks && shown.leads.iter().any(|lead| lead.end == unit(text, at)) {
+        let mut rewrite = Rewrite::default();
+        rewrite.put(line.start..at, "");
+        return Some(edit(text, &rewrite.apply(text), (line.start, line.start)));
+    }
+    None
+}
+
+/// Delete pressed with the caret at `caret` (nothing chosen), the note shown as it reads (`formatted`): at the end of the
+/// line before a rule, the rule taken away, its line with it, before a block of code's fence (put away), nothing done
+/// (the fence would be taken into the line, the block undone). None elsewhere: the key's as always.
+pub fn delete(text: &str, caret: usize, formatted: bool) -> Option<Edit> {
+    if !formatted {
+        return None;
+    }
+    let tree = Tree::of(text);
+    let at = byte(text, caret);
+    let index = tree.line_of(at);
+    let line = tree.lines[index].clone();
+    let after = tree.lines.get(index + 1).filter(|_| at == line.end)?.clone();
+    let shown = super::markdown::Shown::of(text);
+    let put_away = unit(text, after.start)..unit(text, after.end);
+    if shown.rules.contains(&put_away) {
+        let mut rewrite = Rewrite::default();
+        rewrite.put(line.end..after.end, "");
+        return Some(edit(text, &rewrite.apply(text), (at, at)));
+    }
+    let fence = shown.fences().any(|fence| *fence == put_away);
+    fence.then(|| Edit { range: caret..caret, with: String::new(), chosen: (caret, caret) })
 }
 
 /// The first and last lines of what is chosen (from, to, bytes): a choice ending at a line's start leaves that line.
@@ -1233,7 +1315,35 @@ mod tests {
 
     fn back_at(marked: &str) -> Option<String> {
         let (text, (caret, _)) = read(marked);
-        backspace(&text, caret).map(|edit| applied(&text, &edit))
+        backspace(&text, caret, true).map(|edit| applied(&text, &edit))
+    }
+
+    /// Shown as it reads, Backspace takes back marks put away one by one, as written: a heading's `#`, a quote's line's
+    /// `>`, a block of code's fences; at the start of the line after a rule it takes the rule away, after a block of
+    /// code it goes to the end of its last line. Delete at the end of the line before a rule takes the rule away, before
+    /// a fence does nothing. Shown as written, each is the key's own.
+    #[test]
+    fn backspace_takes_back_marks_put_away() {
+        assert_eq!(back_at("a\n## ‸标题").as_deref(), Some("a\n‸标题"));
+        assert_eq!(back_at("> a\n> ‸b").as_deref(), Some("> a\n‸b"));
+        assert_eq!(back_at("> > ‸b").as_deref(), Some("‸b"));
+        assert_eq!(back_at("```\n‸x\ny\n```\nz").as_deref(), Some("‸x\ny\nz"));
+        assert_eq!(back_at("```\n‸x").as_deref(), Some("‸x"));
+        assert_eq!(back_at("a\n\n---\n‸b").as_deref(), Some("a\n\n‸b"));
+        assert_eq!(back_at("```\nx\n```\n‸b").as_deref(), Some("```\nx‸\n```\nb"));
+        assert_eq!(back_at("## 标‸题"), None);
+        assert_eq!(back_at("```\nx\n‸y\n```"), None);
+        let (text, (caret, _)) = read("a\n\n---\n‸b");
+        assert_eq!(backspace(&text, caret, false), None);
+        let delete_at = |marked: &str, formatted: bool| {
+            let (text, (caret, _)) = read(marked);
+            delete(&text, caret, formatted).map(|edit| applied(&text, &edit))
+        };
+        assert_eq!(delete_at("a\n\nb‸\n\n---\nc", true), None);
+        assert_eq!(delete_at("a‸\n---\nc", true), None);
+        assert_eq!(delete_at("a\n\n‸\n---\nc", true).as_deref(), Some("a\n\n‸\nc"));
+        assert_eq!(delete_at("a\n\n‸\n```\nx\n```", true).as_deref(), Some("a\n\n‸\n```\nx\n```"));
+        assert_eq!(delete_at("a\n\n‸\n---\nc", false), None);
     }
 
     /// Backspace at the start of an item's words moves one further in out a step, else takes its mark off (a to-do's
