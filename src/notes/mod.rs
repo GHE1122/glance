@@ -76,7 +76,7 @@ fn decoded(path: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-#[cfg(feature = "studio")]
+#[cfg(any(test, feature = "studio"))]
 thread_local! {
     /// What this thread's pictures pretend (see `pretend`): each test's its own, as tests run side by side.
     static PRETENDED: std::cell::RefCell<Option<Arc<Vec<Note>>>> = const { std::cell::RefCell::new(None) };
@@ -84,7 +84,7 @@ thread_local! {
 
 /// The notes, the last written first (none till first read).
 pub fn shown() -> Arc<Vec<Note>> {
-    #[cfg(feature = "studio")]
+    #[cfg(any(test, feature = "studio"))]
     if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
         return pretended;
     }
@@ -104,7 +104,7 @@ pub fn named(number: u64) -> Option<String> {
 }
 
 /// For pictures: as if the folder held these.
-#[cfg(feature = "studio")]
+#[cfg(any(test, feature = "studio"))]
 pub fn pretend(notes: Vec<Note>) {
     PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(notes)));
 }
