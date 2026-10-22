@@ -1296,6 +1296,7 @@ mod tests {
     #[test]
     #[ignore = "puts a window on this PC's screen and captures it"]
     fn scene_first_frame_holds_the_windows() {
+        let _device = crate::ui::gfx::held().unwrap();
         use windows::Win32::Graphics::Gdi::{CreateSolidBrush, HBRUSH};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -1431,6 +1432,7 @@ mod tests {
     #[test]
     #[ignore = "captures this PC's desktop"]
     fn scene_first_frames() {
+        let _device = crate::ui::gfx::held().unwrap();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
@@ -1486,6 +1488,7 @@ mod tests {
     #[test]
     #[ignore = "captures this PC's desktop"]
     fn scene_shows() {
+        let _device = crate::ui::gfx::held().unwrap();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
@@ -1612,6 +1615,7 @@ mod tests {
     #[test]
     #[ignore = "puts a window on this PC's screen and captures it"]
     fn wanted_while_one_is_read_no_other_is() {
+        let _device = crate::ui::gfx::held().unwrap();
         use std::time::{Duration, Instant};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -1651,6 +1655,7 @@ mod tests {
     #[test]
     #[ignore = "puts a window on this PC's screen and captures it"]
     fn wanted_once_one_is_taken_another_is_read() {
+        let _device = crate::ui::gfx::held().unwrap();
         use std::time::{Duration, Instant};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -1698,6 +1703,7 @@ mod tests {
     #[test]
     #[ignore = "captures this PC's desktop (needs a live wallpaper)"]
     fn the_feed_ends_with_the_last_scene_of_it() {
+        let _device = crate::ui::gfx::held().unwrap();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
@@ -1731,6 +1737,7 @@ mod tests {
     #[test]
     #[ignore = "captures this PC's desktop"]
     fn scene_stress() {
+        let _device = crate::ui::gfx::held().unwrap();
         use std::sync::atomic::{AtomicU64, AtomicUsize};
         use std::time::{Duration, Instant};
         use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};

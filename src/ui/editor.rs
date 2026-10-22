@@ -687,6 +687,7 @@ mod tests {
     #[test]
     #[ignore = "makes a window of this session's"]
     fn puts_the_caret_where_the_words_end() {
+        let _device = crate::ui::gfx::held().unwrap();
         unsafe {
             let _ = windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
@@ -714,6 +715,7 @@ mod tests {
     #[test]
     #[ignore = "makes a window of this session's"]
     fn sets_tabs_as_far_apart_as_said() {
+        let _device = crate::ui::gfx::held().unwrap();
         unsafe {
             let _ = windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
@@ -740,6 +742,7 @@ mod tests {
     #[test]
     #[ignore = "makes a window of this session's"]
     fn lines_with_chinese_are_as_tall_as_others() {
+        let _device = crate::ui::gfx::held().unwrap();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
             let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""), WS_POPUP, 0, 0, 600, 400, None, None, None, None).unwrap();
@@ -772,6 +775,7 @@ mod tests {
     #[test]
     #[ignore = "makes a window of this session's"]
     fn writes_dresses_and_undoes() {
+        let _device = crate::ui::gfx::held().unwrap();
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
             let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""), WS_POPUP, 0, 0, 400, 300, None, None, None, None).unwrap();
@@ -845,6 +849,7 @@ mod tests {
     #[test]
     #[ignore = "makes a window of this session's"]
     fn puts_marks_away_and_makes_room_for_a_box() {
+        let _device = crate::ui::gfx::held().unwrap();
         use crate::notes::markdown::{Shown, BOX_ROOM, NONE_WRITTEN};
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);

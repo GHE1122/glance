@@ -271,7 +271,6 @@ const FAILED_NOTED_EVERY: Duration = Duration::from_secs(60);
 pub fn let_go() {
     drop(CURRENT.with(|cell| cell.borrow_mut().take()));
 }
-
 /// Drawing failed for `what` (a window's name), with `error` where it is had. Only where the device is gone (a
 /// driver update, a graphics reset: removed, as it says; or the compositor's device no longer valid) is it let go
 /// of: the next `current` makes a new one, and each window, seeing it, makes its surfaces again. Drawing that failed
@@ -2319,6 +2318,7 @@ mod tests {
     #[test]
     #[cfg(feature = "studio")]
     fn a_note_s_tabs_are_as_far_apart_as_its_editor_s() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::super::canvas::{Color, Family, Font, Inks};
         let gfx = super::Gfx::new().expect("graphics");
         let white = Color::hex(0xffffff, 1.0);
@@ -2339,6 +2339,7 @@ mod tests {
     /// changed is drawn straight where it shows, and none is kept for it till the sizing ends.
     #[test]
     fn a_layer_sized_by_hand_is_painted_again_only_as_it_changes() {
+        let _device = crate::ui::gfx::held().unwrap();
         let gfx = super::Gfx::new().expect("graphics");
         let mut layer = super::Layer::default();
         let painted = std::cell::Cell::new(0);
@@ -2366,6 +2367,7 @@ mod tests {
 
     #[test]
     fn a_frame_failed_is_not_shown() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::Canvas;
         let gfx = super::Gfx::new().expect("graphics");
         let failed = super::Frame::whole(&gfx, (8, 8), 1.0, |frame| {
@@ -2394,6 +2396,7 @@ mod tests {
     #[test]
     #[ignore = "counts the graphics driver's threads: alone in its process"]
     fn a_device_let_go_of_leaves_no_threads() {
+        let _device = crate::ui::gfx::held().unwrap();
         let before = super::threads_now();
         let held: Vec<_> = (0..3).map(|_| super::Gfx::new().expect("graphics")).collect();
         println!("threads: {before} before, {} with three devices held", super::threads_now());
@@ -2455,6 +2458,7 @@ mod tests {
     #[test]
     #[ignore = "makes windows, and reads the graphics card's memory: alone in its process"]
     fn windows_let_go_of_take_no_more_each_time() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::Canvas;
         let gfx = super::Gfx::new().expect("graphics");
         let mut held = Vec::new();
@@ -2475,6 +2479,7 @@ mod tests {
     /// A report says what Glance draws on: the adapter by name, and its driver's version.
     #[test]
     fn says_what_it_draws_on() {
+        let _device = crate::ui::gfx::held().unwrap();
         let _gfx = super::Gfx::new().expect("graphics");
         let said = super::drawn_on().expect("not said");
         println!("{said}");
@@ -2517,6 +2522,7 @@ mod tests {
     #[test]
     #[cfg(feature = "studio")]
     fn whole_pixels_do_not_follow_the_atlas() {
+        let _device = crate::ui::gfx::held().unwrap();
         let gfx = super::Gfx::new().expect("graphics");
         for scale in [1.25f32, 1.5, 1.75] {
             gfx.draw_offscreen((4, 4), scale, |frame| {
