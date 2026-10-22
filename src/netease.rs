@@ -4,7 +4,8 @@
 //! folder. Both are other projects' (GPL-3.0, their sources served beside them: see `scripts\site.ps1`): taken from a
 //! copy on Glance's site, which is reached where GitHub is not, then from where each project publishes it, as it built
 //! it, and checked by digest. A BetterNCM already there is left as it is; the loader is taken back only if Glance put
-//! it there (see `settings::Settings::netease_loader`).
+//! it there (see `settings::Settings::netease_loader`). With InfLink-rs goes a plugin of Glance's own, the icon row,
+//! which mends what BetterNCM's button does to NetEase's title bar (see `ICON_ROW`).
 //!
 //! NetEase installed where this user may not write (Program Files), its loader is put there by Glance run elevated,
 //! the user asked to let it (`ASKED`): that run finds NetEase from what the machine lists alone, and takes and checks
@@ -37,9 +38,14 @@ const PLUGIN: Payload = Payload {
     sources: ["https://glancepc.com/dl/InfLink-rs-3.4.0.plugin", "https://github.com/apoint123/inflink-rs/releases/download/v3.4.0/InfLink-rs.plugin"],
     digest: "7d0b7b863b072a99b88eb614c788099315e690920889aaca22685d3663661468",
 };
-/// What the loader and the plugin are called where they are put.
+/// Glance's own plugin for BetterNCM (MIT, its source in `resources\netease`), put in and taken out with InfLink-rs:
+/// BetterNCM 1.3.4's button, on NetEase 3.1, pushes NetEase's icons at the top right onto a second row, and it puts
+/// them back on one (see its `main.js`). Its files, packed as BetterNCM takes a plugin (see `pack`) as it is put in.
+const ICON_ROW: [(&str, &str); 2] = [("manifest.json", include_str!("../resources/netease/manifest.json")), ("main.js", include_str!("../resources/netease/main.js"))];
+/// What the loader and the plugins are called where they are put.
 const LOADER_FILE: &str = "msimg32.dll";
 const PLUGIN_FILE: &str = "InfLink-rs.plugin";
+const ICON_ROW_FILE: &str = "Glance-Icon-Row.plugin";
 /// The versions of NetEase InfLink-rs was tested on, as its project says: 3.1.20 to 3.1.41, and of the 2s, 2.10.13.
 const TESTED: [([u32; 3], [u32; 3]); 2] = [([3, 1, 20], [3, 1, 41]), ([2, 10, 13], [2, 10, 13])];
 /// What Glance is run elevated with to put the loader in NetEase's folder, or take it back (see `run_asked`).
@@ -155,14 +161,31 @@ pub fn plugin_folder() -> PathBuf {
     data_folder(std::env::var_os("BETTERNCM_PROFILE")).join("plugins")
 }
 
-fn plugin_path() -> PathBuf {
-    plugin_folder().join(PLUGIN_FILE)
+/// Where the plugin `file` is put.
+fn plugin_path(file: &str) -> PathBuf {
+    plugin_folder().join(file)
 }
 
-/// Whether InfLink-rs is installed for `netease`: a loader in its folder (BetterNCM's, Glance's or not) and the
-/// plugin in BetterNCM's.
-pub fn installed(netease: &NetEase) -> bool {
-    netease.has_loader() && plugin_path().is_file()
+/// How much of what `install` puts in is there.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Installed {
+    /// Not InfLink-rs, or no loader to load it.
+    No,
+    /// InfLink-rs and a loader, without the icon row (put in by a Glance before it, or not by Glance): `put_icon_row`
+    /// puts it in.
+    NoIconRow,
+    /// All of it.
+    Yes,
+}
+
+/// What of InfLink-rs is installed for `netease`: a loader in its folder (BetterNCM's, Glance's or not), the plugin
+/// in BetterNCM's, and the icon row beside it.
+pub fn installed(netease: &NetEase) -> Installed {
+    match (netease.has_loader() && plugin_path(PLUGIN_FILE).is_file(), plugin_path(ICON_ROW_FILE).is_file()) {
+        (false, _) => Installed::No,
+        (true, false) => Installed::NoIconRow,
+        (true, true) => Installed::Yes,
+    }
 }
 
 /// Why installing or taking back did not go through.
@@ -174,13 +197,15 @@ pub enum Failed {
     Put,
 }
 
-/// Installs InfLink-rs for `netease`: the plugin in BetterNCM's folder, and BetterNCM's loader in NetEase's folder
-/// where none is (elevated, the user asked, where this user may not write there). Whether Glance put the loader.
+/// Installs InfLink-rs for `netease`: the plugin and the icon row in BetterNCM's folder, and BetterNCM's loader in
+/// NetEase's folder where none is (elevated, the user asked, where this user may not write there). Whether Glance put
+/// the loader.
 pub fn install(netease: &NetEase) -> Result<bool, Failed> {
     let plugin = taken(&PLUGIN).ok_or(Failed::Taken)?;
-    let path = plugin_path();
+    let path = plugin_path(PLUGIN_FILE);
     std::fs::create_dir_all(path.parent().ok_or(Failed::Put)?).map_err(|_| Failed::Put)?;
     std::fs::write(&path, plugin).map_err(|_| Failed::Put)?;
+    put_icon_row()?;
     let loader = netease.folder.join(LOADER_FILE);
     if loader.is_file() {
         crate::journal::note("netease: the plugin put in; a loader was there already");
@@ -196,13 +221,65 @@ pub fn install(netease: &NetEase) -> Result<bool, Failed> {
     Ok(true)
 }
 
-/// Takes InfLink-rs back from `netease`: the plugin, and the loader if Glance put it (`loader_ours`) and it is still
-/// the one Glance put. NetEase is closed first (a loader it holds cannot be taken), and started again after if it ran.
+/// Puts the icon row in BetterNCM's folder (it is Glance's own: nothing is taken for it). It works once NetEase
+/// starts again.
+pub fn put_icon_row() -> Result<(), Failed> {
+    let path = plugin_path(ICON_ROW_FILE);
+    std::fs::create_dir_all(path.parent().ok_or(Failed::Put)?).map_err(|_| Failed::Put)?;
+    std::fs::write(&path, pack(&ICON_ROW)).map_err(|_| Failed::Put)
+}
+
+/// `files` (each a name and what it holds) packed as BetterNCM takes a plugin: a zip, each file in it stored as it is.
+fn pack(files: &[(&str, &str)]) -> Vec<u8> {
+    // (A header for each file and the file, then a directory of them, then where the directory is. Each file is dated
+    // the first day a zip can say, 1980-01-01: the same files pack to the same bytes.)
+    const DAY: u16 = 1 << 5 | 1;
+    let (mut packed, mut directory) = (Vec::new(), Vec::new());
+    for (name, text) in files {
+        let (name, bytes) = (name.as_bytes(), text.as_bytes());
+        // (What both of its headers say: the version needed (1.0), no flags, stored, its time and day, its CRC and
+        // sizes, its name's length, nothing extra.)
+        let mut said: Vec<u8> = [10, 0, 0, 0, DAY].into_iter().flat_map(u16::to_le_bytes).collect();
+        said.extend([crc32(bytes), bytes.len() as u32, bytes.len() as u32].into_iter().flat_map(u32::to_le_bytes));
+        said.extend([name.len() as u16, 0].into_iter().flat_map(u16::to_le_bytes));
+        let at = packed.len() as u32;
+        packed.extend(0x0403_4B50u32.to_le_bytes());
+        packed.extend(&said);
+        packed.extend(name);
+        packed.extend(bytes);
+        // (In the directory: made by zip 2.0, what the header says, no comment, on the first disk, no attributes, and
+        // where its header is.)
+        directory.extend(0x0201_4B50u32.to_le_bytes());
+        directory.extend(20u16.to_le_bytes());
+        directory.extend(&said);
+        directory.extend([0u16, 0, 0].into_iter().flat_map(u16::to_le_bytes));
+        directory.extend([0, at].into_iter().flat_map(u32::to_le_bytes));
+        directory.extend(name);
+    }
+    // (Its end: the first disk, how many files, the directory's size and where it is, no comment.)
+    let (count, size, at) = (files.len() as u16, directory.len() as u32, packed.len() as u32);
+    packed.extend(directory);
+    packed.extend(0x0605_4B50u32.to_le_bytes());
+    packed.extend([0, 0, count, count].into_iter().flat_map(u16::to_le_bytes));
+    packed.extend([size, at].into_iter().flat_map(u32::to_le_bytes));
+    packed.extend(0u16.to_le_bytes());
+    packed
+}
+
+/// The CRC-32 of `bytes`, as a zip checks a file by.
+fn crc32(bytes: &[u8]) -> u32 {
+    !bytes.iter().fold(!0u32, |crc, &byte| (0..8).fold(crc ^ u32::from(byte), |crc, _| (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg())))
+}
+
+/// Takes InfLink-rs back from `netease`: the plugin and the icon row, and the loader if Glance put it (`loader_ours`)
+/// and it is still the one Glance put. NetEase is closed first (a loader it holds cannot be taken), and started again
+/// after if it ran.
 pub fn remove(netease: &NetEase, loader_ours: bool) -> Result<(), Failed> {
     let ran = close(netease);
-    let path = plugin_path();
-    if path.is_file() {
-        std::fs::remove_file(&path).map_err(|_| Failed::Put)?;
+    for path in [plugin_path(PLUGIN_FILE), plugin_path(ICON_ROW_FILE)] {
+        if path.is_file() {
+            std::fs::remove_file(&path).map_err(|_| Failed::Put)?;
+        }
     }
     let loader = netease.folder.join(LOADER_FILE);
     let result = if loader_ours && std::fs::read(&loader).is_ok_and(|bytes| is(&bytes, netease.loader())) {
@@ -413,39 +490,148 @@ mod tests {
         assert!(!is(b"a", &empty));
     }
 
+    /// The CRC-32 a zip checks a file by: the standard's own check value, and nothing's.
+    #[test]
+    fn checks_as_a_zip_does() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32(b""), 0);
+    }
+
+    /// The icon row packed is a zip its files are read back from as they are, found through its directory, each its
+    /// header's name, size and CRC; packed again, the same bytes.
+    #[test]
+    fn packs_the_icon_row_as_a_zip() {
+        let packed = pack(&ICON_ROW);
+        assert_eq!(packed, pack(&ICON_ROW));
+        let half = |at: usize| u16::from_le_bytes(packed[at..at + 2].try_into().unwrap()) as usize;
+        let word = |at: usize| u32::from_le_bytes(packed[at..at + 4].try_into().unwrap());
+        // (Its end, the last 22 bytes: how many files, and where the directory is.)
+        let end = packed.len() - 22;
+        assert_eq!(word(end), 0x0605_4B50);
+        assert_eq!(half(end + 10), ICON_ROW.len());
+        let mut entry = word(end + 16) as usize;
+        for (name, text) in ICON_ROW {
+            assert_eq!(word(entry), 0x0201_4B50);
+            let header = word(entry + 42) as usize;
+            assert_eq!(&packed[entry + 46..entry + 46 + half(entry + 28)], name.as_bytes());
+            assert_eq!(word(header), 0x0403_4B50);
+            // (Stored, its sizes and CRC as the directory has them.)
+            assert_eq!(half(header + 8), 0);
+            assert_eq!(packed[header + 14..header + 26], packed[entry + 16..entry + 28]);
+            let (size, length) = (word(header + 22) as usize, half(header + 26));
+            assert_eq!(&packed[header + 30..header + 30 + length], name.as_bytes());
+            let bytes = &packed[header + 30 + length..header + 30 + length + size];
+            assert_eq!(bytes, text.as_bytes());
+            assert_eq!(word(header + 14), crc32(bytes));
+            entry += 46 + half(entry + 28);
+        }
+        assert_eq!(entry, end);
+    }
+
+    /// The icon row's manifest is as BetterNCM 1.3.4 reads one: its first form, for NetEase 3 only, its name its
+    /// folder's (BetterNCM drops what is not a letter, a digit or `-`, and spaces become `-`), its script among its files.
+    #[test]
+    fn the_icon_rows_manifest_is_as_betterncm_reads_it() {
+        let manifest: serde_json::Value = serde_json::from_str(ICON_ROW[0].1).unwrap();
+        assert_eq!(ICON_ROW[0].0, "manifest.json");
+        assert_eq!(manifest["manifest_version"], 1);
+        assert_eq!(manifest["ncm3-compatible"], true);
+        assert_eq!(manifest["ncm-version-req"], ">=3.0.0");
+        let name = manifest["name"].as_str().unwrap();
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == ' '));
+        assert_eq!(format!("{}.plugin", name.replace(' ', "-")), ICON_ROW_FILE);
+        let script = manifest["injects"]["Main"][0]["file"].as_str().unwrap();
+        assert!(ICON_ROW.iter().any(|(file, _)| *file == script));
+    }
+
+    /// The tests that read `BETTERNCM_PROFILE` take turns (see `Scratch`).
+    static PROFILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn turn() -> std::sync::MutexGuard<'static, ()> {
+        PROFILE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A NetEase and a BetterNCM folder of a test's own: BetterNCM's where `BETTERNCM_PROFILE` says while it lasts,
+    /// the test's turn. Gone after, and the variable as it was.
+    struct Scratch {
+        folder: PathBuf,
+        netease: NetEase,
+        was: Option<std::ffi::OsString>,
+        _turn: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Scratch {
+        /// The folders, in one called `name`: NetEase's made, BetterNCM's not.
+        fn new(name: &str) -> Scratch {
+            let turn = turn();
+            let folder = std::env::temp_dir().join(format!("glance-test-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&folder);
+            std::fs::create_dir_all(folder.join("netease")).unwrap();
+            let was = std::env::var_os("BETTERNCM_PROFILE");
+            std::env::set_var("BETTERNCM_PROFILE", folder.join("betterncm"));
+            let netease = NetEase { folder: folder.join("netease"), version: [3, 1, 41], wide: true };
+            Scratch { folder, netease, was, _turn: turn }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            match self.was.take() {
+                Some(was) => std::env::set_var("BETTERNCM_PROFILE", was),
+                None => std::env::remove_var("BETTERNCM_PROFILE"),
+            }
+            let _ = std::fs::remove_dir_all(&self.folder);
+        }
+    }
+
+    /// The icon row goes with InfLink-rs: InfLink-rs and a loader without it are installed but for it, it put in makes
+    /// it whole, and taking back takes it with the plugin (another's loader kept).
+    #[test]
+    fn the_icon_row_goes_with_inflink() {
+        let scratch = Scratch::new("netease-icon-row");
+        let netease = &scratch.netease;
+        std::fs::write(netease.folder.join(LOADER_FILE), b"another's").unwrap();
+        std::fs::create_dir_all(plugin_folder()).unwrap();
+        std::fs::write(plugin_path(PLUGIN_FILE), b"InfLink-rs").unwrap();
+        assert_eq!(installed(netease), Installed::NoIconRow);
+        assert_eq!(put_icon_row(), Ok(()));
+        assert_eq!(installed(netease), Installed::Yes);
+        assert_eq!(std::fs::read(scratch.folder.join(r"betterncm\plugins").join(ICON_ROW_FILE)).unwrap(), pack(&ICON_ROW));
+        assert_eq!(remove(netease, true), Ok(()));
+        assert!(!plugin_path(PLUGIN_FILE).exists() && !plugin_path(ICON_ROW_FILE).exists() && netease.has_loader());
+        assert_eq!(installed(netease), Installed::No);
+    }
+
     /// Installed into a NetEase and a BetterNCM folder of the test's own, from where the files are published: the
-    /// plugin and the loader put in, each as it should be, and taken back; a loader that was there already is kept,
-    /// whatever is asked.
+    /// plugin, the icon row and the loader put in, each as it should be, and taken back; a loader that was there
+    /// already is kept, whatever is asked.
     #[test]
     #[ignore = "downloads the plugin and its loader"]
     fn installs_and_takes_back() {
-        let scratch = std::env::temp_dir().join(format!("glance-test-{}-netease", std::process::id()));
-        let _ = std::fs::remove_dir_all(&scratch);
-        std::fs::create_dir_all(scratch.join("netease")).unwrap();
-        // (Only this test reads the variable.)
-        std::env::set_var("BETTERNCM_PROFILE", scratch.join("betterncm"));
-        let netease = NetEase { folder: scratch.join("netease"), version: [3, 1, 41], wide: true };
-        assert!(!installed(&netease));
-        assert_eq!(install(&netease), Ok(true));
-        assert!(installed(&netease));
+        let scratch = Scratch::new("netease");
+        let (netease, plugins) = (&scratch.netease, scratch.folder.join(r"betterncm\plugins"));
+        assert_eq!(installed(netease), Installed::No);
+        assert_eq!(install(netease), Ok(true));
+        assert_eq!(installed(netease), Installed::Yes);
         assert!(is(&std::fs::read(netease.folder.join(LOADER_FILE)).unwrap(), &LOADER_64));
-        assert!(is(&std::fs::read(scratch.join(r"betterncm\plugins").join(PLUGIN_FILE)).unwrap(), &PLUGIN));
-        assert_eq!(remove(&netease, true), Ok(()));
-        assert!(!netease.has_loader() && !plugin_path().exists());
+        assert!(is(&std::fs::read(plugins.join(PLUGIN_FILE)).unwrap(), &PLUGIN));
+        assert_eq!(std::fs::read(plugins.join(ICON_ROW_FILE)).unwrap(), pack(&ICON_ROW));
+        assert_eq!(remove(netease, true), Ok(()));
+        assert!(!netease.has_loader() && !plugins.join(PLUGIN_FILE).exists() && !plugins.join(ICON_ROW_FILE).exists());
 
         std::fs::write(netease.folder.join(LOADER_FILE), b"another's").unwrap();
-        assert_eq!(install(&netease), Ok(false));
+        assert_eq!(install(netease), Ok(false));
         assert_eq!(std::fs::read(netease.folder.join(LOADER_FILE)).unwrap(), b"another's");
-        assert_eq!(remove(&netease, true), Ok(()));
-        assert!(netease.has_loader() && !plugin_path().exists());
-        std::fs::remove_dir_all(&scratch).unwrap();
+        assert_eq!(remove(netease, true), Ok(()));
+        assert!(netease.has_loader() && !plugins.join(PLUGIN_FILE).exists() && !plugins.join(ICON_ROW_FILE).exists());
     }
 
     /// NetEase on this PC, as it is found, and InfLink-rs on it (read only).
     #[test]
     #[ignore = "reads this PC's NetEase"]
     fn finds_netease_here() {
+        let _turn = turn();
         let netease = found(false).expect("NetEase");
-        println!("{:?} {} wide {} tested {} installed {} running {}", netease.folder, netease.version(), netease.wide, netease.tested(), installed(&netease), running(&netease));
+        println!("{:?} {} wide {} tested {} installed {:?} running {}", netease.folder, netease.version(), netease.wide, netease.tested(), installed(&netease), running(&netease));
     }
 }
