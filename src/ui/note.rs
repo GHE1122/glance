@@ -293,11 +293,12 @@ fn writes(key: VIRTUAL_KEY) -> bool {
 /// Enter carries a list on (Shift+Enter a line break), Ctrl+Enter ticks a to-do, Tab and Shift+Tab move a list's items in
 /// and out, Backspace takes an item's mark off, Alt+Up and Alt+Down move lines. Ctrl+B, Ctrl+I, Ctrl+Shift+X and Ctrl+E
 /// put on and take off bold, slanted, struck through and code, Ctrl+K makes a link (to the web address on the clipboard,
-/// `clipboard` asked only then), Ctrl+1 to 3 headings and Ctrl+0 none. Ctrl+V and Shift+Insert paste the clipboard's
-/// text (see `edit::paste`: the text services' own paste would bring what a note's file does not keep). Ctrl with any
+/// `clipboard` asked only then, for its text), Ctrl+1 to 3 headings and Ctrl+0 none. Ctrl+V and Shift+Insert paste what is
+/// on the clipboard as Markdown (`clipboard` asked for it so: see `clipboard_pasted`, `edit::paste`: the text services'
+/// own paste would bring what a note's file does not keep). Ctrl with any
 /// other key that writes is eaten but for choosing all, copying, cutting, undoing and redoing: the text services' own
 /// would dress the words in ways a note's file does not keep.
-fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, system: bool, clipboard: impl FnOnce() -> Option<String>) -> Option<Option<crate::notes::edit::Edit>> {
+fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, system: bool, clipboard: impl FnOnce(Taken) -> Option<String>) -> Option<Option<crate::notes::edit::Edit>> {
     use crate::notes::edit::{self, Marked};
     let caret = (chosen.0 == chosen.1).then_some(chosen.0);
     if system || held.alt {
@@ -312,15 +313,15 @@ fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, sys
         (VK_RETURN, true, false) => Some(edit::toggle_task(text, chosen.0)),
         (VK_TAB, false, back) => crate::notes::table::tab(text, chosen, back).or_else(|| edit::indent(text, chosen, back)),
         (VK_BACK, false, false) => caret.and_then(|caret| edit::backspace(text, caret)).map(Some),
-        (VK_INSERT, false, true) => Some(clipboard().map(|pasted| edit::paste(text, chosen, &pasted))),
+        (VK_INSERT, false, true) => Some(clipboard(Taken::Pasted).map(|pasted| edit::paste(text, chosen, &pasted))),
         (_, false, _) => None,
         (VK_B, true, false) => marked(Marked::Bold),
         (VK_I, true, false) => marked(Marked::Italic),
         (VK_E, true, false) => marked(Marked::Code),
         (VK_X, true, true) => marked(Marked::Struck),
-        (VK_K, true, false) => Some(edit::link(text, chosen, clipboard().as_deref().and_then(edit::web_address))),
+        (VK_K, true, false) => Some(edit::link(text, chosen, clipboard(Taken::Text).as_deref().and_then(edit::web_address))),
         (VK_0 | VK_1 | VK_2 | VK_3, true, false) => Some(Some(edit::heading(text, chosen, (key.0 - VK_0.0) as u8))),
-        (VK_V, true, false) => Some(clipboard().map(|pasted| edit::paste(text, chosen, &pasted))),
+        (VK_V, true, false) => Some(clipboard(Taken::Pasted).map(|pasted| edit::paste(text, chosen, &pasted))),
         (VK_A | VK_C | VK_X | VK_Z | VK_Y, true, false) | (VK_Z, true, true) => None,
         (key, true, _) if writes(key) => Some(None),
         _ => None,
@@ -376,31 +377,67 @@ fn bar_button(bar: &RECT, point: POINT, pixels: f32) -> Option<usize> {
     (x >= 0.0 && y >= 0.0 && y < BAR_BUTTON * per && nth < BAR.len() as f32).then_some(nth as usize)
 }
 
-/// The text on the clipboard (its line breaks `\n`), if there is any.
-fn clipboard_text(owner: HWND) -> Option<String> {
+/// What is taken off the clipboard: its text as it is (a link made of a web address), or what is on it as Markdown,
+/// to be pasted (see `clipboard_pasted`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Taken {
+    Text,
+    Pasted,
+}
+
+/// The clipboard's `format`, if it holds it: its data as far as the zero that ends it (a unit `unit` bytes long, 1 for
+/// bytes, 2 for UTF-16).
+fn clipboard_data(owner: HWND, format: u32, unit: usize) -> Option<Vec<u8>> {
     use windows::Win32::Foundation::HGLOBAL;
-    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
-    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
-    // (CF_UNICODETEXT.)
-    const TEXT: u32 = 13;
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    if unsafe { IsClipboardFormatAvailable(format) }.is_err() {
+        return None;
+    }
     let mut taken = Vec::new();
     unsafe {
         OpenClipboard(Some(owner)).ok()?;
-        if let Ok(held) = GetClipboardData(TEXT) {
+        if let Ok(held) = GetClipboardData(format) {
             let memory = HGLOBAL(held.0);
-            let units = GlobalLock(memory) as *const u16;
-            if !units.is_null() {
-                let mut at = 0;
-                while *units.add(at) != 0 {
-                    taken.push(*units.add(at));
-                    at += 1;
-                }
+            let size = GlobalSize(memory);
+            let bytes = GlobalLock(memory) as *const u8;
+            if !bytes.is_null() {
+                taken = std::slice::from_raw_parts(bytes, size).to_vec();
                 let _ = GlobalUnlock(memory);
             }
         }
         let _ = CloseClipboard();
     }
-    (!taken.is_empty()).then(|| String::from_utf16_lossy(&taken).replace("\r\n", "\n").replace('\r', "\n"))
+    // (As far as the zero that ends it: what is held past it is the memory's rounding.)
+    let end = taken.chunks(unit).position(|chunk| chunk.iter().all(|byte| *byte == 0)).map_or(taken.len(), |at| at * unit);
+    taken.truncate(end);
+    (!taken.is_empty()).then_some(taken)
+}
+
+/// The text on the clipboard (its line breaks `\n`), if there is any.
+fn clipboard_text(owner: HWND) -> Option<String> {
+    // (CF_UNICODETEXT.)
+    const TEXT: u32 = 13;
+    let bytes = clipboard_data(owner, TEXT, 2)?;
+    let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    Some(String::from_utf16_lossy(&units).replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+/// What is on the clipboard, to be pasted into a note: its HTML (a web page's, Word's) as Markdown (see `notes::html`),
+/// else its text.
+fn clipboard_pasted(owner: HWND) -> Option<String> {
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    let html = unsafe { RegisterClipboardFormatW(windows::core::w!("HTML Format")) };
+    let written = clipboard_data(owner, html, 1).and_then(|bytes| crate::notes::html::fragment(&bytes)).map(|fragment| crate::notes::html::markdown(&fragment));
+    written.filter(|written| !written.is_empty()).or_else(|| clipboard_text(owner))
+}
+
+/// What is taken off the clipboard as `taken` says.
+fn clipboard(owner: HWND, taken: Taken) -> Option<String> {
+    match taken {
+        Taken::Text => clipboard_text(owner),
+        Taken::Pasted => clipboard_pasted(owner),
+    }
 }
 
 /// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
@@ -566,7 +603,7 @@ impl Writing {
                 let _ = self.editor.send(if how == Write::Cut { WM_CUT } else { WM_COPY }, Default::default(), Default::default());
                 None
             }
-            Write::Paste => clipboard_text(owner).map(|pasted| edit::paste(&text, chosen, &pasted)),
+            Write::Paste => clipboard_pasted(owner).map(|pasted| edit::paste(&text, chosen, &pasted)),
             Write::Insert(block) => Some(edit::insert(&text, chosen, block)),
             Write::Link => edit::link(&text, chosen, clipboard_text(owner).as_deref().and_then(edit::web_address)),
             Write::Heading(level) => Some(edit::heading(&text, chosen, level)),
@@ -644,7 +681,7 @@ impl Writing {
                     return Some(Some(LRESULT(0)));
                 }
                 let (from, to) = editor.selection();
-                let made = (!editor.composing()).then(|| pressed(&editor.words(), (from.max(0) as usize, to.max(0) as usize), VIRTUAL_KEY(wparam.0 as u16), held, message == WM_SYSKEYDOWN, || clipboard_text(hwnd))).flatten();
+                let made = (!editor.composing()).then(|| pressed(&editor.words(), (from.max(0) as usize, to.max(0) as usize), VIRTUAL_KEY(wparam.0 as u16), held, message == WM_SYSKEYDOWN, |taken| clipboard(hwnd, taken))).flatten();
                 if let Some(made) = made {
                     eaten.set(true);
                     depth.set(depth.get() + 1);
@@ -1186,12 +1223,12 @@ mod tests {
         let ctrl = Held { ctrl: true, ..none };
         let shift = Held { shift: true, ..none };
         let alt = Held { alt: true, ..none };
-        let asked = std::cell::Cell::new(false);
-        let clipboard = || {
-            asked.set(true);
+        let asked = std::cell::Cell::new(None);
+        let clipboard = |taken| {
+            asked.set(Some(taken));
             Some("https://a.b".to_string())
         };
-        let made = |text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held| pressed(text, chosen, key, held, held.alt, || None).map(|edit| edit.map(|edit| edit.with));
+        let made = |text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held| pressed(text, chosen, key, held, held.alt, |_| None).map(|edit| edit.map(|edit| edit.with));
         assert_eq!(made("- a", (3, 3), VK_RETURN, none), Some(Some("\n- ".into())));
         assert_eq!(made("- a", (3, 3), VK_RETURN, shift), None);
         assert_eq!(made("- a", (2, 3), VK_RETURN, none), None);
@@ -1201,7 +1238,7 @@ mod tests {
         assert_eq!(made("- a", (3, 3), VK_TAB, none), Some(None));
         assert_eq!(made("words", (5, 5), VK_TAB, none), None);
         // In a table, Tab and Shift+Tab go from cell to cell (choosing its words, nothing written), past the last a row more.
-        let chosen = |text: &str, at: usize, held: Held| pressed(text, (at, at), VK_TAB, held, false, || None).flatten().map(|edit| (edit.with, edit.chosen));
+        let chosen = |text: &str, at: usize, held: Held| pressed(text, (at, at), VK_TAB, held, false, |_| None).flatten().map(|edit| (edit.with, edit.chosen));
         assert_eq!(chosen("| a | b |\n| - | - |", 2, none), Some((String::new(), (6, 7))));
         assert_eq!(chosen("| a | b |\n| - | - |", 6, shift), Some((String::new(), (2, 3))));
         assert_eq!(chosen("| a | b |\n| - | - |\n| c | d |", 26, none), Some(("\n|  |  |".into(), (32, 32))));
@@ -1219,11 +1256,13 @@ mod tests {
             assert_eq!(made("ab", (0, 2), key, ctrl), None, "Ctrl+{:#x}", key.0);
         }
         assert_eq!(pressed("ab", (0, 2), VK_B, ctrl, false, clipboard).map(|edit| edit.map(|edit| edit.with)), Some(Some("**ab**".into())));
-        assert!(!asked.get());
+        assert_eq!(asked.get(), None);
         assert_eq!(pressed("ab", (0, 2), VK_K, ctrl, false, clipboard).map(|edit| edit.map(|edit| edit.with)), Some(Some("[ab](https://a.b)".into())));
-        assert!(asked.get());
+        assert_eq!(asked.get(), Some(super::Taken::Text));
+        let _ = pressed("ab", (1, 1), VK_V, ctrl, false, clipboard);
+        assert_eq!(asked.get(), Some(super::Taken::Pasted));
         // Pasting: the clipboard's text, its line breaks `\n`, a web address over words a link, nothing with no text.
-        let pasted = |chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, on: Option<&str>| pressed("ab", chosen, key, held, false, || on.map(str::to_string)).map(|edit| edit.map(|edit| edit.with));
+        let pasted = |chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, on: Option<&str>| pressed("ab", chosen, key, held, false, |_| on.map(str::to_string)).map(|edit| edit.map(|edit| edit.with));
         assert_eq!(pasted((1, 1), VK_V, ctrl, Some("x\r\ny")), Some(Some("x\ny".into())));
         assert_eq!(pasted((1, 1), VK_INSERT, shift, Some("x")), Some(Some("x".into())));
         assert_eq!(pasted((0, 2), VK_V, ctrl, Some("https://a.b")), Some(Some("[ab](https://a.b)".into())));

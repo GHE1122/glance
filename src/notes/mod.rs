@@ -4,6 +4,7 @@
 //! are edited on (see `ui::beside`), as `store` says.
 
 pub mod edit;
+pub mod html;
 pub mod table;
 pub mod markdown;
 pub mod store;
