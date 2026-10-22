@@ -94,7 +94,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 WM_LBUTTONUP => crate::app().controller.open_from_tray(),
                 // Version 4: where to put the menu, in the WPARAM.
                 WM_CONTEXTMENU => menu(hwnd, (wparam.0 & 0xFFFF) as u16 as i16 as i32, ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32),
-                // A notification of ours (a new version) clicked.
+                // A notification of ours clicked: the settings, at the reports' page for news of a report.
+                NIN_BALLOONUSERCLICK if OF_REPORTS.load(Ordering::Relaxed) => crate::show_reports(),
                 NIN_BALLOONUSERCLICK => crate::show_settings(),
                 _ => {}
             }
@@ -189,6 +190,19 @@ pub fn ask_for_settings() {
 /// Shows a notification from the icon, from any thread; clicking it opens
 /// the settings.
 pub fn notify(title: &str, text: &str) {
+    show_notice(title, text, false);
+}
+
+/// The last notification shown was news of a report the user sent: clicked, it opens the reports' page.
+static OF_REPORTS: AtomicBool = AtomicBool::new(false);
+
+/// Shows news of a report the user sent, as `notify` does: clicked, it opens the settings at the reports' page.
+pub fn notify_reports(title: &str, text: &str) {
+    show_notice(title, text, true);
+}
+
+fn show_notice(title: &str, text: &str, of_reports: bool) {
+    OF_REPORTS.store(of_reports, Ordering::Relaxed);
     let hwnd = WINDOW.load(Ordering::Acquire);
     if hwnd == 0 {
         return;

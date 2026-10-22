@@ -1092,6 +1092,14 @@ pub fn put_aside_in_place(folder: &Path, name: &str, aside: &str) -> std::io::Re
     std::fs::rename(folder.join(name), folder.join(aside))
 }
 
+/// Removes `name` in `folder`, for Glance running elevated, as `remove_kept` removes a file: the folder held and
+/// checked by handle to be where its path says, the file opened as itself (a link as the link) and checked by handle
+/// to lie in it, and removed by its handle. Whether it was.
+pub fn remove_in_place(folder: &Path, name: &str) -> bool {
+    let Some(held) = held_where_it_says(folder) else { return false };
+    Held::open(&folder.join(name)).is_some_and(|file| file.lies_in(&held) && file.delete())
+}
+
 /// Writes `contents` as `name` in `folder`, for Glance running elevated: the
 /// folder held and checked by handle to be where its path says, the bytes
 /// written to a new file there (a new file follows no link) checked by
@@ -1154,7 +1162,9 @@ pub fn ensure_folder(folder: &Path) -> std::io::Result<()> {
 pub fn remove_settings() -> bool {
     // Glance's own, and the phone remote's (the phones paired and how the lights are lit, as kept and as it was being kept anew; and its log).
     let remote = std::env::var_os("APPDATA").map(|roaming| std::path::PathBuf::from(roaming).join("dev.weiyi.glance.remote"));
-    let own = remove_kept(&crate::settings::config_dir(), &["settings.json", crate::settings::UNREAD, crate::journal::FILE]);
+    // (The reports sent, and the pictures kept of them, first: their folder is in its own.)
+    let reports = remove_all_kept(&crate::settings::config_dir().join(crate::reports::PICTURES));
+    let own = remove_kept(&crate::settings::config_dir(), &["settings.json", crate::settings::UNREAD, crate::journal::FILE, crate::reports::FILE]);
     let remotes = remote.is_none_or(|folder| remove_kept(&folder, &["config.json", "config.json.new", "remote.log"]));
     // And what it fetched and kept (the lyrics found), its index of the music on this PC, the station (what was copied
     // and put on it, and what it keeps of that) and what it found of files lately, then its local folder. (The notes
@@ -1164,7 +1174,7 @@ pub fn remove_settings() -> bool {
     let station = remove_all_kept(&local.join(crate::station::folder::OWN));
     let fetched = remove_kept(&crate::lyrics::kept::folder(), &lyrics.iter().map(String::as_str).collect::<Vec<_>>())
         && remove_kept(&local, &[crate::library::INDEX_FILE, crate::serif::FILE, crate::station::recent::FILE]);
-    own && remotes && station && fetched
+    reports && own && remotes && station && fetched
 }
 
 /// Takes all that is in `folder` out of it, the folders in it each so too, then `folder`: as `remove_kept` takes each

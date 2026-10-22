@@ -13,7 +13,7 @@ use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, GetH
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, STREAM_SEEK_END};
 use windows::Win32::System::DataExchange::{GetClipboardData, IsClipboardFormatAvailable};
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
-use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+use windows::Win32::UI::Shell::{DragQueryFileW, SHCreateMemStream, HDROP};
 
 /// The clipboard's names for a picture and for files (CF_BITMAP, CF_HDROP).
 const BITMAP: u32 = 2;
@@ -38,6 +38,38 @@ pub fn from_file(path: &str, small: (u32, u32)) -> Option<Picture> {
         let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
         let decoder = factory.CreateDecoderFromFilename(&HSTRING::from(path), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).ok()?;
         made(&factory, &decoder.GetFrame(0).ok()?.cast().ok()?, small).ok()
+    }
+}
+
+/// The JPEG `jpeg` as a picture, itself as it is, with its likeness: one kept of what was sent, to be shown again.
+pub fn from_jpeg(jpeg: &[u8], small: (u32, u32)) -> Option<Picture> {
+    unsafe {
+        let (factory, image) = decoded(jpeg)?;
+        let (mut width, mut height) = (0, 0);
+        image.GetSize(&mut width, &mut height).ok()?;
+        let (small, size) = likeness(&factory, &image, (width, height), small).ok()?;
+        Some(Picture { jpeg: jpeg.to_vec(), small, size })
+    }
+}
+
+/// The JPEG `jpeg` made again no larger than `side` either way (its shape kept): a copy small enough to keep.
+pub fn shrunk(jpeg: &[u8], side: u32) -> Option<Vec<u8>> {
+    unsafe {
+        let (factory, image) = decoded(jpeg)?;
+        let (mut width, mut height) = (0, 0);
+        image.GetSize(&mut width, &mut height).ok()?;
+        self::jpeg(&factory, &within(&factory, &image, (width, height), (side, side)).ok()?.0).ok()
+    }
+}
+
+/// The picture in `bytes` (any kind Windows reads), with the factory it was read with.
+unsafe fn decoded(bytes: &[u8]) -> Option<(IWICImagingFactory, IWICBitmapSource)> {
+    unsafe {
+        let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let stream = SHCreateMemStream(Some(bytes))?;
+        let decoder = factory.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
+        let image = decoder.GetFrame(0).ok()?.cast().ok()?;
+        Some((factory, image))
     }
 }
 
@@ -87,6 +119,11 @@ mod tests {
         assert_eq!(picture.size, (84, 84));
         assert_eq!(picture.small.len(), 84 * 84 * 4);
         assert!(super::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"), (84, 52)).is_none());
+        // Made smaller to be kept, and read again as it was kept.
+        let kept = super::shrunk(&picture.jpeg, 64).expect("shrunk");
+        let again = super::from_jpeg(&kept, (32, 20)).expect("read again");
+        assert_eq!((again.jpeg, again.size), (kept, (32, 32)));
+        assert!(super::from_jpeg(b"not a picture", (32, 20)).is_none());
     }
 }
 
@@ -104,12 +141,20 @@ unsafe fn made(factory: &IWICImagingFactory, image: &IWICBitmapSource, small: (u
             }
             side /= 2;
         };
-        let (likeness, (w, h)) = covering(factory, image, (width, height), small)?;
+        let (small, size) = likeness(factory, image, (width, height), small)?;
+        Ok(Picture { jpeg, small, size })
+    }
+}
+
+/// `image`'s (of `size`) likeness, as small as covers `room`: its pixels (BGRA) and how many across and down.
+unsafe fn likeness(factory: &IWICImagingFactory, image: &IWICBitmapSource, size: (u32, u32), room: (u32, u32)) -> Result<(Vec<u8>, (u32, u32))> {
+    unsafe {
+        let (likeness, (w, h)) = covering(factory, image, size, room)?;
         let converter = factory.CreateFormatConverter()?;
         converter.Initialize(&likeness, &GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
         let mut small = vec![0u8; (w * h * 4) as usize];
         converter.CopyPixels(std::ptr::null(), w * 4, &mut small)?;
-        Ok(Picture { jpeg, small, size: (w, h) })
+        Ok((small, (w, h)))
     }
 }
 

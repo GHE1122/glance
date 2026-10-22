@@ -3,7 +3,11 @@
 //! and what it is about, and, for something sent, everything that is sent,
 //! each part under its name: the sender's own words (typed here), their
 //! pictures, and what Glance adds, whole, in a box that scrolls. Two buttons
-//! answer it; the window it is over takes nothing till it is answered.
+//! answer it; the window it is over takes nothing till it is answered. A
+//! report's thread is shown in the same window, as a conversation, kept up
+//! beside the window it is opened from (see `thread`).
+
+pub mod thread;
 
 use std::cell::RefCell;
 
@@ -35,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCaretBlinkTime, GetClientRect, GetMessageW, GetWindowRect, IsWindow, KillTimer, LoadCursorW, PostQuitMessage, RegisterClassExW, SetCursor,
     SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, HTCAPTION, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE,
     WM_DPICHANGED, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
-    WS_CAPTION, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP, WS_SYSMENU, ChangeWindowMessageFilterEx, MSGFLT_ALLOW, WM_COPYDATA, WM_DROPFILES,
+    WS_CAPTION, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP, WS_SYSMENU, ChangeWindowMessageFilterEx, MSGFLT_ALLOW, PostMessageW, WM_APP, WM_COPYDATA, WM_DESTROY, WM_DROPFILES,
 };
 
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
@@ -45,13 +49,17 @@ use super::picture::{self, Picture};
 use super::view::Rect;
 
 /// What the window asks: its title, what it is about (in as many lines as
-/// that takes), the reader's own part if they may add one, what is sent
-/// besides (under its name), the two answers, and whether it is dark.
+/// that takes), the reader's own part if they may add one, a choice they may
+/// tick under it (what it says), what is shown besides (under its name, and
+/// whether it is shown from its end, as a thread is, the newest last), the
+/// two answers, and whether it is dark.
 pub struct Asked<'a> {
     pub title: &'a str,
     pub intro: &'a str,
     pub own: Option<Own<'a>>,
+    pub option: Option<&'a str>,
     pub sent: Option<(&'a str, &'a str)>,
+    pub from_end: bool,
     pub yes: &'a str,
     pub no: &'a str,
     pub dark: bool,
@@ -120,11 +128,12 @@ fn covering(frame: &Frame, picture: &Picture, tile: Rect, radius: f32, scale: f3
     drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
 }
 
-/// What the reader gave of their own: their words (none, perhaps) and
-/// their pictures, each a JPEG.
+/// What the reader gave of their own: their words (none, perhaps), their
+/// pictures, each a JPEG, and whether they ticked the choice.
 pub struct Said {
     pub words: String,
     pub pictures: Vec<Vec<u8>>,
+    pub option: bool,
 }
 
 /// How many characters (UTF-16 units) may be written, and how many pictures added (the site takes no more).
@@ -147,6 +156,9 @@ const TILE: (f32, f32) = (120.0, 76.0);
 const TILE_GAP: f32 = 8.0;
 const INSET: (f32, f32) = (11.0, 8.0);
 const WHEEL: f32 = 48.0;
+/// The choice's line, and its box.
+const OPTION: f32 = 24.0;
+const OPTION_BOX: f32 = 18.0;
 /// How far down the window's top may be held to move it.
 const CAPTION: f32 = 56.0;
 
@@ -157,6 +169,9 @@ const SMALL: Font = Font::new(Family::Segoe, 12.0, 400.0);
 
 /// What Windows sends a window that files are dropped on, besides WM_DROPFILES (WM_COPYGLOBALDATA).
 const COPY_GLOBAL_DATA: u32 = 0x0049;
+
+/// What the window tells itself to show the file chooser: from its own turn at the messages, with nothing of it held.
+const CHOOSE: u32 = WM_APP + 1;
 
 /// The clipboard's name for text (CF_UNICODETEXT).
 const TEXT: u32 = 13;
@@ -169,13 +184,16 @@ enum Hit {
     Paste,
     Picture(usize),
     Remove(usize),
+    Option,
     Sent,
     Thumb,
     Yes,
     No,
 }
 
-/// What the window is drawn in, light or dark, as Windows 11's dialogs are.
+/// What the window is drawn in, light or dark, as Windows 11's dialogs are: and, for a thread, the accent as text
+/// is written in it, what the user's own messages are tinted with, a light ground under what is pointed at, and the
+/// colours of a fix and of a failure.
 struct Colours {
     content: Color,
     footer: Color,
@@ -190,17 +208,22 @@ struct Colours {
     button_hover: Color,
     button_stroke: Color,
     accent: Color,
+    accent_text: Color,
     selection: Color,
     scroll: Color,
     ring: Color,
     shade: Color,
+    mine: Color,
+    subtle: Color,
+    success: Color,
+    danger: Color,
 }
 
 impl Colours {
     fn new(dark: bool) -> Self {
         let white = |a| Color::hex(0xFFFFFF, a);
         let black = |a| Color::hex(0x000000, a);
-        let (accent, selection) = (super::theme::accent(false), super::theme::accent(dark).alpha(0.4));
+        let (accent, accent_text, selection) = (super::theme::accent(false), super::theme::accent(dark), super::theme::accent(dark).alpha(0.4));
         if dark {
             Colours {
                 content: Color::hex(0x2B2B2B, 1.0),
@@ -216,10 +239,15 @@ impl Colours {
                 button_hover: white(0.09),
                 button_stroke: white(0.07),
                 accent,
+                accent_text,
                 selection,
                 scroll: white(0.5),
                 ring: white(1.0),
                 shade: black(0.2),
+                mine: accent_text.alpha(0.2),
+                subtle: white(0.07),
+                success: Color::hex(0x6CCB5F, 1.0),
+                danger: Color::hex(0xFF99A4, 1.0),
             }
         } else {
             Colours {
@@ -236,10 +264,15 @@ impl Colours {
                 button_hover: Color::hex(0xF6F6F6, 1.0),
                 button_stroke: black(0.1),
                 accent,
+                accent_text,
                 selection,
                 scroll: black(0.45),
                 ring: black(0.9),
                 shade: black(0.12),
+                mine: accent.alpha(0.1),
+                subtle: black(0.05),
+                success: Color::hex(0x0F7B0F, 1.0),
+                danger: Color::hex(0xC42B1C, 1.0),
             }
         }
     }
@@ -299,6 +332,8 @@ struct Dialog {
     /// Whether the button that pastes the clipboard's picture was drawn (there was room for it).
     chip_shown: bool,
     sent: Option<(String, String)>,
+    /// The choice, what it says and whether it is ticked.
+    option: Option<(String, bool)>,
     yes: String,
     no: String,
     typing: Typing,
@@ -325,12 +360,13 @@ struct Dialog {
     words_inside: Rect,
     caret: Option<Rect>,
     answer: Option<bool>,
-    /// The file chooser asked for: it is shown from the window's loop, outside its messages.
-    choose_files: bool,
+    /// The report's thread it shows, kept up beside its owner (see `thread`), if it shows one.
+    conversation: Option<thread::Conversation>,
 }
 
 thread_local! {
-    static DIALOG: RefCell<Option<Dialog>> = const { RefCell::new(None) };
+    /// The windows up on this thread: one asking, perhaps over a thread, the window that asked over that.
+    static DIALOGS: RefCell<Vec<Dialog>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -341,8 +377,10 @@ thread_local! {
     static POINTER_FOR_TEST: std::cell::Cell<Option<(f32, f32)>> = const { std::cell::Cell::new(None) };
 }
 
-fn with<R>(act: impl FnOnce(&mut Dialog) -> R) -> Option<R> {
-    DIALOG.with(|cell| cell.try_borrow_mut().ok().and_then(|mut dialog| dialog.as_mut().map(act)))
+/// Runs `act` on the window `hwnd`'s state, unless it is already in use further up this thread's stack (a message
+/// sent while handling another), or the window is not one of these.
+fn with<R>(hwnd: HWND, act: impl FnOnce(&mut Dialog) -> R) -> Option<R> {
+    DIALOGS.with(|cell| cell.try_borrow_mut().ok().and_then(|mut dialogs| dialogs.iter_mut().find(|dialog| dialog.hwnd == hwnd).map(act)))
 }
 
 fn contains(r: Rect, x: f32, y: f32) -> bool {
@@ -350,15 +388,62 @@ fn contains(r: Rect, x: f32, y: f32) -> bool {
 }
 
 impl Dialog {
+    /// A window asking `title` and `intro`, the reader's own part `own` if they may add one, nothing chosen, typed
+    /// or added yet, drawn with `gfx`.
+    fn new(gfx: Rc<Gfx>, dark: bool, title: &str, intro: &str, own: Option<OwnText>) -> Self {
+        Dialog {
+            hwnd: HWND::default(),
+            gfx,
+            surface: None,
+            scale: 1.0,
+            dark,
+            title: title.into(),
+            intro: intro.into(),
+            focus: if own.is_some() { Hit::Words } else { Hit::Yes },
+            own,
+            chip_shown: false,
+            sent: None,
+            option: None,
+            yes: String::new(),
+            no: String::new(),
+            typing: Typing::most(WORDS_MOST),
+            pictures: Vec::new(),
+            scroll: 0.0,
+            scroll_most: 0.0,
+            track: (0.0, 0.0, 0.0),
+            pointer: None,
+            pressed: None,
+            selecting: false,
+            held: None,
+            keyboard: false,
+            caret_on: true,
+            hits: Vec::new(),
+            drawn: Vec::new(),
+            words_inside: Rect { x: 0.0, y: 0.0, w: 200.0, h: 0.0 },
+            caret: None,
+            answer: None,
+            conversation: None,
+        }
+    }
+
     fn redraw(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
     }
 
-    /// How tall it is, laid out `WIDTH` wide (DIPs): as tall as what it says, or, with a part that scrolls, `TALL`.
+    /// How wide it is (DIPs).
+    fn width(&self) -> f32 {
+        if self.conversation.is_some() {
+            thread::WIDTH
+        } else {
+            WIDTH
+        }
+    }
+
+    /// How tall it is, laid out `width` wide (DIPs): as tall as what it says, or, with a part that scrolls, `TALL`.
     fn height(&self) -> f32 {
-        if self.own.is_some() || self.sent.is_some() {
+        if self.own.is_some() || self.sent.is_some() || self.conversation.is_some() {
             return TALL;
         }
         let inner = WIDTH - 2.0 * PAD;
@@ -377,9 +462,10 @@ impl Dialog {
         self.pointer.and_then(|(x, y)| self.hit_at(x, y))
     }
 
-    /// Whether the window may be moved from `(x, y)`: its top, where nothing is to be pressed.
+    /// Whether the window may be moved from `(x, y)`: its top (a thread's whole heading), where nothing is to be pressed.
     fn caption(&self, x: f32, y: f32) -> bool {
-        y < CAPTION && self.hit_at(x, y).is_none()
+        let top = self.conversation.as_ref().map_or(CAPTION, |conversation| conversation.header);
+        y < top && self.hit_at(x, y).is_none()
     }
 
     fn over_words(&self) -> bool {
@@ -388,6 +474,9 @@ impl Dialog {
 
     /// What the keyboard can go to, in order.
     fn stops(&self) -> Vec<Hit> {
+        if self.conversation.is_some() {
+            return self.thread_stops();
+        }
         let mut stops = Vec::new();
         if self.own.is_some() {
             stops.push(Hit::Words);
@@ -398,6 +487,9 @@ impl Dialog {
                     stops.push(Hit::Paste);
                 }
             }
+        }
+        if self.option.is_some() {
+            stops.push(Hit::Option);
         }
         if self.sent.is_some() {
             stops.push(Hit::Sent);
@@ -463,10 +555,19 @@ impl Dialog {
 
     fn activate(&mut self, hit: Hit) {
         match hit {
+            Hit::Yes | Hit::No if self.conversation.is_some() => self.tell(hit == Hit::Yes),
             Hit::Yes => self.answer = Some(true),
             Hit::No => self.answer = Some(false),
-            Hit::Add => self.choose_files = true,
+            Hit::Add => unsafe {
+                let _ = PostMessageW(Some(self.hwnd), CHOOSE, WPARAM(0), LPARAM(0));
+            },
             Hit::Paste => self.paste_pictures(),
+            Hit::Option => {
+                if let Some((_, ticked)) = &mut self.option {
+                    *ticked = !*ticked;
+                }
+                self.redraw();
+            }
             Hit::Remove(index) if index < self.pictures.len() => {
                 self.pictures.remove(index);
                 // The keyboard on what took its place, or what comes after the pictures.
@@ -542,8 +643,8 @@ impl Dialog {
 
     fn key(&mut self, key: VIRTUAL_KEY, shift: bool, ctrl: bool) {
         match key {
-            VK_ESCAPE => self.answer = Some(false),
-            VK_RETURN if ctrl => self.answer = Some(true),
+            VK_ESCAPE => self.activate(Hit::No),
+            VK_RETURN if ctrl => self.activate(Hit::Yes),
             VK_TAB => {
                 let stops = self.stops();
                 let at = stops.iter().position(|&stop| stop == self.focus);
@@ -668,6 +769,10 @@ impl Dialog {
 
     fn paint(&mut self, frame: &Frame, (width, height): (f32, f32)) {
         self.drawn.clear();
+        if self.conversation.is_some() {
+            self.paint_thread(frame, (width, height));
+            return self.drawn_whole();
+        }
         let colours = Colours::new(self.dark);
         let c = &colours;
         let inner = width - 2.0 * PAD;
@@ -689,6 +794,10 @@ impl Dialog {
             self.paint_pictures(frame, c, PAD, y, inner, &own);
             y += TILE.1 + GAP;
         }
+        if let Some((words, ticked)) = self.option.clone() {
+            self.paint_option(frame, c, Rect { x: PAD, y, w: inner, h: OPTION }, &words, ticked);
+            y += OPTION + GAP;
+        }
         if let Some((name, sent)) = self.sent.clone() {
             frame.text(&name, HEADING, c.text, PAD, y, inner, Align::Start);
             y += HEAD;
@@ -700,8 +809,12 @@ impl Dialog {
         let (yes, no) = (self.yes.clone(), self.no.clone());
         self.button(frame, c, Rect { x: PAD, y: top, w: across, h: BUTTON }, &yes, Hit::Yes, true, true);
         self.button(frame, c, Rect { x: PAD + across + 8.0, y: top, w: across, h: BUTTON }, &no, Hit::No, false, true);
-        // The frame's own places from now; and drawn again where what is pointed at is another among them (a
-        // picture's button, shown as the picture was pointed at, now under the pointer).
+        self.drawn_whole();
+    }
+
+    /// The frame's own places from now, it drawn whole, and drawn again where what is pointed at is another among them
+    /// (a picture's button, shown as the picture was pointed at, now under the pointer).
+    fn drawn_whole(&mut self) {
         let before = self.hovered();
         self.hits = std::mem::take(&mut self.drawn);
         if self.hovered() != before {
@@ -727,7 +840,10 @@ impl Dialog {
     fn button(&mut self, frame: &Frame, c: &Colours, r: Rect, text: &str, hit: Hit, accent: bool, enabled: bool) {
         let hover = enabled && self.hovered() == Some(hit);
         let down = hover && self.pressed == Some(hit);
-        if accent {
+        if accent && !enabled {
+            frame.fill_rounded(c.subtle, r.x, r.y, r.w, r.h, 6.0);
+            Self::centred(frame, text, BODY, c.text3, r);
+        } else if accent {
             frame.fill_rounded(c.accent.alpha(if down { 0.8 } else if hover { 0.9 } else { 1.0 }), r.x, r.y, r.w, r.h, 6.0);
             Self::centred(frame, text, BODY, Color::hex(0xFFFFFF, 1.0), r);
         } else {
@@ -797,28 +913,7 @@ impl Dialog {
     /// wide as is left of `width`.
     fn paint_pictures(&mut self, frame: &Frame, c: &Colours, left: f32, top: f32, width: f32, own: &OwnText) {
         let hovered = self.hovered();
-        let white = Color::hex(0xFFFFFF, 1.0);
-        let mut x = left;
-        for (index, picture) in self.pictures.iter().enumerate() {
-            let tile = Rect { x, y: top, w: TILE.0, h: TILE.1 };
-            frame.fill_rounded(c.sent, tile.x, tile.y, tile.w, tile.h, 6.0);
-            covering(frame, picture, tile, 6.0, self.scale);
-            frame.stroke_rounded(Fill::Solid(c.field_stroke), tile.x, tile.y, tile.w, tile.h, 6.0, 1.0);
-            self.drawn.push((tile, Hit::Picture(index)));
-            let keyed = self.keyboard && self.focus == Hit::Remove(index);
-            if keyed || matches!(hovered, Some(Hit::Picture(at) | Hit::Remove(at)) if at == index) {
-                frame.fill_rounded(c.shade, tile.x, tile.y, tile.w, tile.h, 6.0);
-                // Its button to take it away, in the corner.
-                let centre = Point { x: tile.x + tile.w - 15.0, y: tile.y + 15.0 };
-                let on = hovered == Some(Hit::Remove(index));
-                frame.fill_circle(Color::hex(0x000000, if on { 0.82 } else { 0.6 }), centre, 11.0);
-                frame.icon(Icon::Close, centre, 13.0, white);
-                let badge = Rect { x: centre.x - 13.0, y: centre.y - 13.0, w: 26.0, h: 26.0 };
-                self.ring(frame, c, badge, 13.0, Hit::Remove(index));
-                self.drawn.push((badge, Hit::Remove(index)));
-            }
-            x += TILE.0 + TILE_GAP;
-        }
+        let x = self.paint_tiles(frame, c, left, top, TILE);
         self.chip_shown = false;
         if self.pictures.len() >= PICTURES_MOST {
             return;
@@ -845,6 +940,54 @@ impl Dialog {
             let paste = own.paste.clone();
             self.button(frame, c, Rect { x: zone.x + zone.w - 12.0 - chip, y: middle - 15.0, w: chip, h: 30.0 }, &paste, Hit::Paste, false, true);
         }
+    }
+
+    /// The pictures given, each in a `tile` (w, h) from `left` along `top` (pointed at, a button on each takes it away
+    /// again): where the next would go.
+    fn paint_tiles(&mut self, frame: &Frame, c: &Colours, left: f32, top: f32, tile: (f32, f32)) -> f32 {
+        let hovered = self.hovered();
+        let white = Color::hex(0xFFFFFF, 1.0);
+        let mut x = left;
+        for (index, picture) in self.pictures.iter().enumerate() {
+            let tile = Rect { x, y: top, w: tile.0, h: tile.1 };
+            frame.fill_rounded(c.sent, tile.x, tile.y, tile.w, tile.h, 6.0);
+            covering(frame, picture, tile, 6.0, self.scale);
+            frame.stroke_rounded(Fill::Solid(c.field_stroke), tile.x, tile.y, tile.w, tile.h, 6.0, 1.0);
+            self.drawn.push((tile, Hit::Picture(index)));
+            let keyed = self.keyboard && self.focus == Hit::Remove(index);
+            if keyed || matches!(hovered, Some(Hit::Picture(at) | Hit::Remove(at)) if at == index) {
+                frame.fill_rounded(c.shade, tile.x, tile.y, tile.w, tile.h, 6.0);
+                // Its button to take it away, in the corner.
+                let centre = Point { x: tile.x + tile.w - 15.0, y: tile.y + 15.0 };
+                let on = hovered == Some(Hit::Remove(index));
+                frame.fill_circle(Color::hex(0x000000, if on { 0.82 } else { 0.6 }), centre, 11.0);
+                frame.icon(Icon::Close, centre, 13.0, white);
+                let badge = Rect { x: centre.x - 13.0, y: centre.y - 13.0, w: 26.0, h: 26.0 };
+                self.ring(frame, c, badge, 13.0, Hit::Remove(index));
+                self.drawn.push((badge, Hit::Remove(index)));
+            }
+            x += tile.w + TILE_GAP;
+        }
+        x
+    }
+
+    /// The choice, its box ticked in the accent or ruled round, and what it says beside it.
+    fn paint_option(&mut self, frame: &Frame, c: &Colours, r: Rect, words: &str, ticked: bool) {
+        let top = r.y + (r.h - OPTION_BOX) / 2.0;
+        let over = self.hovered() == Some(Hit::Option);
+        if ticked {
+            frame.fill_rounded(c.accent.alpha(if over { 0.9 } else { 1.0 }), r.x, top, OPTION_BOX, OPTION_BOX, 4.0);
+            frame.icon(Icon::Check, Point { x: r.x + OPTION_BOX / 2.0, y: top + OPTION_BOX / 2.0 }, 14.0, Color::hex(0xFFFFFF, 1.0));
+        } else {
+            frame.fill_rounded(if over { c.button_hover } else { c.field }, r.x, top, OPTION_BOX, OPTION_BOX, 4.0);
+            frame.stroke_rounded(Fill::Solid(c.field_bottom), r.x + 0.5, top + 0.5, OPTION_BOX - 1.0, OPTION_BOX - 1.0, 4.0, 1.0);
+        }
+        let (ascent, descent) = frame.gfx.baseline(BODY);
+        let wide = frame.gfx.measure(words, BODY).min(r.w - OPTION_BOX - 10.0);
+        frame.text(words, BODY, c.text, r.x + OPTION_BOX + 10.0, r.y + (r.h - ascent - descent) / 2.0, wide + 1.0, Align::Start);
+        let hit = Rect { x: r.x, y: r.y, w: OPTION_BOX + 10.0 + wide, h: r.h };
+        self.ring(frame, c, Rect { x: r.x, y: top, w: OPTION_BOX, h: OPTION_BOX }, 4.0, Hit::Option);
+        self.drawn.push((hit, Hit::Option));
     }
 
     fn paint_sent(&mut self, frame: &Frame, c: &Colours, r: Rect, sent: &str) {
@@ -914,24 +1057,24 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             unsafe {
                 let _ = ScreenToClient(hwnd, &mut at);
             }
-            let caption = with(|dialog| dialog.caption(at.x as f32 / dialog.scale, at.y as f32 / dialog.scale)).unwrap_or(false);
+            let caption = with(hwnd, |dialog| dialog.caption(at.x as f32 / dialog.scale, at.y as f32 / dialog.scale)).unwrap_or(false);
             LRESULT(if caption { HTCAPTION } else { HTCLIENT } as isize)
         }
         WM_PAINT => {
             unsafe {
                 let _ = ValidateRect(Some(hwnd), None);
             }
-            with(Dialog::draw);
+            with(hwnd, Dialog::draw);
             LRESULT(0)
         }
         WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
-            let typing = with(|dialog| dialog.over_words()).unwrap_or(false);
+            let typing = with(hwnd, |dialog| dialog.over_words()).unwrap_or(false);
             unsafe { SetCursor(LoadCursorW(None, if typing { IDC_IBEAM } else { IDC_ARROW }).ok()) };
             LRESULT(1)
         }
         WM_MOUSEMOVE => {
             let (x, y) = point(lparam);
-            with(|dialog| {
+            with(hwnd, |dialog| {
                 if dialog.pointer.is_none() {
                     let mut track = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                     let _ = unsafe { TrackMouseEvent(&mut track) };
@@ -941,7 +1084,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
-            with(|dialog| {
+            with(hwnd, |dialog| {
                 dialog.pointer = None;
                 dialog.redraw();
             });
@@ -950,7 +1093,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_LBUTTONDOWN => {
             let (x, y) = point(lparam);
             unsafe { SetCapture(hwnd) };
-            with(|dialog| dialog.press(x / dialog.scale, y / dialog.scale, held(VK_SHIFT)));
+            with(hwnd, |dialog| dialog.press(x / dialog.scale, y / dialog.scale, held(VK_SHIFT)));
             LRESULT(0)
         }
         WM_LBUTTONUP => {
@@ -958,7 +1101,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             unsafe {
                 let _ = ReleaseCapture();
             }
-            with(|dialog| dialog.release(x / dialog.scale, y / dialog.scale));
+            with(hwnd, |dialog| dialog.release(x / dialog.scale, y / dialog.scale));
             LRESULT(0)
         }
         WM_MOUSEWHEEL => {
@@ -968,20 +1111,20 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 let _ = ScreenToClient(hwnd, &mut at);
             }
             let turns = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / 120.0;
-            with(|dialog| dialog.wheel(at.x as f32 / dialog.scale, at.y as f32 / dialog.scale, turns));
+            with(hwnd, |dialog| dialog.wheel(at.x as f32 / dialog.scale, at.y as f32 / dialog.scale, turns));
             LRESULT(0)
         }
         WM_KEYDOWN => {
-            with(|dialog| dialog.key(VIRTUAL_KEY(wparam.0 as u16), held(VK_SHIFT), held(VK_CONTROL)));
+            with(hwnd, |dialog| dialog.key(VIRTUAL_KEY(wparam.0 as u16), held(VK_SHIFT), held(VK_CONTROL)));
             LRESULT(0)
         }
         WM_CHAR => {
-            with(|dialog| dialog.char(wparam.0 as u16));
+            with(hwnd, |dialog| dialog.char(wparam.0 as u16));
             LRESULT(0)
         }
         // The caret blinks.
         WM_TIMER => {
-            with(|dialog| {
+            with(hwnd, |dialog| {
                 dialog.caret_on = !dialog.caret_on;
                 if dialog.focus == Hit::Words {
                     dialog.redraw();
@@ -1000,7 +1143,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 })
                 .collect();
             unsafe { DragFinish(files) };
-            with(|dialog| {
+            with(hwnd, |dialog| {
                 if dialog.own.is_some() {
                     let small = dialog.likeness();
                     let more = paths.iter().filter_map(|path| picture::from_file(path, small)).collect();
@@ -1009,26 +1152,44 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             });
             LRESULT(0)
         }
+        // The file chooser, which has its own turn at the messages: shown with nothing of the window's held.
+        CHOOSE => {
+            let asked = with(hwnd, |dialog| (dialog.own.as_ref().map(|own| own.kinds.clone()).unwrap_or_default(), dialog.likeness()));
+            if let Some((kinds, small)) = asked {
+                let more = chosen(hwnd, &kinds).iter().filter_map(|path| picture::from_file(path, small)).collect();
+                with(hwnd, |dialog| dialog.add(more));
+            }
+            LRESULT(0)
+        }
         // (Whether a picture may be pasted.)
         WM_CLIPBOARDUPDATE => {
-            with(|dialog| dialog.redraw());
+            with(hwnd, |dialog| dialog.redraw());
             LRESULT(0)
         }
         WM_IME_STARTCOMPOSITION => {
-            with(|dialog| dialog.place_ime());
+            with(hwnd, |dialog| dialog.place_ime());
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_DPICHANGED => {
             let suggested = unsafe { *(lparam.0 as *const RECT) };
-            with(|dialog| dialog.scale = (wparam.0 & 0xFFFF) as f32 / 96.0);
+            with(hwnd, |dialog| dialog.scale = (wparam.0 & 0xFFFF) as f32 / 96.0);
             unsafe {
                 let _ = SetWindowPos(hwnd, None, suggested.left, suggested.top, suggested.right - suggested.left, suggested.bottom - suggested.top, SWP_NOZORDER | SWP_NOACTIVATE);
             }
-            with(|dialog| dialog.redraw());
+            with(hwnd, |dialog| dialog.redraw());
             LRESULT(0)
         }
         WM_CLOSE => {
-            with(|dialog| dialog.answer = Some(false));
+            with(hwnd, |dialog| dialog.activate(Hit::No));
+            LRESULT(0)
+        }
+        // Gone with the window it is over (a thread's, kept up beside it): what it held goes with it.
+        WM_DESTROY => {
+            DIALOGS.with(|cell| {
+                if let Ok(mut dialogs) = cell.try_borrow_mut() {
+                    dialogs.retain(|dialog| dialog.hwnd != hwnd);
+                }
+            });
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
@@ -1044,6 +1205,60 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
     let gfx = gfx::current().ok()?;
     // Shown till it returns (see `life`).
     let _showing = super::life::Showing::of(&gfx);
+    let own = asked.own.as_ref().map(|own| OwnText {
+        words: own.words.into(),
+        hint: own.hint.into(),
+        pictures: own.pictures.into(),
+        add: own.add.into(),
+        ways: own.ways.into(),
+        paste: own.paste.into(),
+        waiting: own.waiting.into(),
+        kinds: own.kinds.into(),
+    });
+    let mut dialog = Dialog::new(gfx, asked.dark, asked.title, asked.intro, own);
+    dialog.sent = asked.sent.map(|(name, text)| (name.into(), text.into()));
+    dialog.option = asked.option.map(|words| (words.into(), false));
+    dialog.yes = asked.yes.into();
+    dialog.no = asked.no.into();
+    // (From its end: as far down as it goes, once it is laid out.)
+    dialog.scroll = if asked.from_end { f32::MAX } else { 0.0 };
+    let window = unsafe {
+        put_up(owner, dialog, |_dialog| {
+            // (Pictures a test has it hold as it comes up.)
+            #[cfg(test)]
+            for path in GIVEN_FOR_TEST.take() {
+                _dialog.pictures.extend(picture::from_file(&path, _dialog.likeness()));
+            }
+        })
+    }?;
+    // Its own turn at the messages, till it is answered (or gone).
+    let mut message = MSG::default();
+    let mut quit = None;
+    unsafe {
+        while with(window, |dialog| dialog.answer.is_none()).unwrap_or(false) && IsWindow(Some(window)).as_bool() {
+            if !GetMessageW(&mut message, None, 0, 0).as_bool() {
+                quit = Some(message.wParam.0 as i32);
+                break;
+            }
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    let dialog = take_down(window, owner)?;
+    if let Some(code) = quit {
+        unsafe { PostQuitMessage(code) };
+    }
+    let words = dialog.typing.string().trim().to_string();
+    let option = dialog.option.as_ref().is_some_and(|(_, ticked)| *ticked);
+    (dialog.answer == Some(true)).then(|| Said { words, pictures: dialog.pictures.into_iter().map(|picture| picture.jpeg).collect(), option })
+}
+
+/// `dialog`'s window made and put up over `owner`, which takes nothing meanwhile: in the middle of it, within its
+/// screen, no taller than the screen (what scrolls in it scrolls the more), the size `dialog` asks for at its scale.
+/// With no `owner` (asked from a thread of its own, for what was pressed on the panel or a widget), at the pointer,
+/// over the windows kept above others as the panel is. `ready` is done with it once its scale is known, before it is
+/// first drawn. The window, if it was made.
+unsafe fn put_up(owner: HWND, mut dialog: Dialog, ready: impl FnOnce(&mut Dialog)) -> Option<HWND> {
     unsafe {
         let module = GetModuleHandleW(None).ok()?;
         let class = w!("GlanceAsk");
@@ -1065,58 +1280,15 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
             let _ = windows::Win32::UI::HiDpi::GetDpiForMonitor(monitor, windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI, &mut dpi, &mut unused);
             dpi.max(96) as f32 / 96.0
         };
-        let own = asked.own.as_ref().map(|own| OwnText {
-            words: own.words.into(),
-            hint: own.hint.into(),
-            pictures: own.pictures.into(),
-            add: own.add.into(),
-            ways: own.ways.into(),
-            paste: own.paste.into(),
-            waiting: own.waiting.into(),
-            kinds: own.kinds.into(),
-        });
-        let mut dialog = Dialog {
-            hwnd: HWND::default(),
-            gfx,
-            surface: None,
-            scale,
-            dark: asked.dark,
-            title: asked.title.into(),
-            intro: asked.intro.into(),
-            own,
-            chip_shown: false,
-            sent: asked.sent.map(|(name, text)| (name.into(), text.into())),
-            yes: asked.yes.into(),
-            no: asked.no.into(),
-            typing: Typing::most(WORDS_MOST),
-            pictures: Vec::new(),
-            scroll: 0.0,
-            scroll_most: 0.0,
-            track: (0.0, 0.0, 0.0),
-            pointer: None,
-            pressed: None,
-            selecting: false,
-            held: None,
-            focus: if asked.own.is_some() { Hit::Words } else { Hit::Yes },
-            keyboard: false,
-            caret_on: true,
-            hits: Vec::new(),
-            drawn: Vec::new(),
-            words_inside: Rect { x: 0.0, y: 0.0, w: 200.0, h: 0.0 },
-            caret: None,
-            answer: None,
-            choose_files: false,
-        };
-        // In the middle of the window it is over, within that window's screen, no taller than the screen (what
-        // is sent scrolls the more).
+        dialog.scale = scale;
         let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         let _ = GetMonitorInfoW(monitor, &mut screen);
         let room = screen.rcWork;
-        let wide = ((WIDTH * scale) as i32).min(room.right - room.left);
+        let wide = ((dialog.width() * scale) as i32).min(room.right - room.left);
         let tall = ((dialog.height() * scale) as i32).min((room.bottom - room.top) * 19 / 20);
         let (x, y) = (((over.left + over.right - wide) / 2).clamp(room.left, room.right - wide), ((over.top + over.bottom - tall) / 2).clamp(room.top, room.bottom - tall));
         let above = if owned { WS_EX_NOREDIRECTIONBITMAP } else { WS_EX_NOREDIRECTIONBITMAP | windows::Win32::UI::WindowsAndMessaging::WS_EX_TOPMOST };
-        let window = CreateWindowExW(above, class, &HSTRING::from(asked.title), WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, wide, tall, owned.then_some(owner), None, Some(module.into()), None).ok()?;
+        let window = CreateWindowExW(above, class, &HSTRING::from(dialog.title.as_str()), WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, wide, tall, owned.then_some(owner), None, Some(module.into()), None).ok()?;
         dialog.hwnd = window;
         // Its shadow and (on Windows 11) its round corners, as Windows gives a window with a frame.
         let _ = DwmExtendFrameIntoClientArea(window, &MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 });
@@ -1124,19 +1296,16 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
         let _ = DwmSetWindowAttribute(window, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const _, size_of_val(&round) as u32);
         // (Its frame gone at once: the size it was made at is the size it is.)
         let _ = SetWindowPos(window, None, x, y, wide, tall, SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_FRAMECHANGED);
-        #[cfg(test)]
-        for path in GIVEN_FOR_TEST.take() {
-            dialog.pictures.extend(picture::from_file(&path, dialog.likeness()));
-        }
-        let focus = dialog.focus;
-        DIALOG.set(Some(dialog));
-        with(|dialog| {
+        ready(&mut dialog);
+        let (focus, takes_pictures) = (dialog.focus, dialog.own.is_some());
+        DIALOGS.with(|cell| cell.borrow_mut().push(dialog));
+        with(window, |dialog| {
             dialog.focus_on(focus);
             dialog.draw();
         });
         let _ = AddClipboardFormatListener(window);
         // Files dropped on it, from Explorer too (which is not elevated, as Glance is: what it sends is let through).
-        if asked.own.is_some() {
+        if takes_pictures {
             DragAcceptFiles(window, true);
             for message in [WM_DROPFILES, WM_COPYDATA, COPY_GLOBAL_DATA] {
                 let _ = ChangeWindowMessageFilterEx(window, message, MSGFLT_ALLOW, None);
@@ -1148,37 +1317,25 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
         let _ = ShowWindow(window, SW_SHOW);
         let _ = SetForegroundWindow(window);
         let _ = SetFocus(Some(window));
-        // Its own turn at the messages, till it is answered (or gone).
-        let mut message = MSG::default();
-        let mut quit = None;
-        while with(|dialog| dialog.answer.is_none()).unwrap_or(false) && IsWindow(Some(window)).as_bool() {
-            if !GetMessageW(&mut message, None, 0, 0).as_bool() {
-                quit = Some(message.wParam.0 as i32);
-                break;
-            }
-            let _ = TranslateMessage(&message);
-            DispatchMessageW(&message);
-            // The file chooser, which has its own turn at the messages: shown with nothing of the window's held.
-            if with(|dialog| std::mem::take(&mut dialog.choose_files)).unwrap_or(false) {
-                let asked = with(|dialog| (dialog.own.as_ref().map(|own| own.kinds.clone()).unwrap_or_default(), dialog.likeness()));
-                if let Some((kinds, small)) = asked {
-                    let more = chosen(window, &kinds).iter().filter_map(|path| picture::from_file(path, small)).collect();
-                    with(|dialog| dialog.add(more));
-                }
-            }
-        }
-        let dialog = DIALOG.take()?;
+        Some(window)
+    }
+}
+
+/// The window `window` taken down, and `owner` given back what it takes: its state, if it was still up.
+fn take_down(window: HWND, owner: HWND) -> Option<Dialog> {
+    let dialog = DIALOGS.with(|cell| {
+        let mut dialogs = cell.borrow_mut();
+        let at = dialogs.iter().position(|dialog| dialog.hwnd == window)?;
+        Some(dialogs.remove(at))
+    });
+    unsafe {
         let _ = KillTimer(Some(window), 1);
         let _ = RemoveClipboardFormatListener(window);
         let _ = EnableWindow(owner, true);
         let _ = DestroyWindow(window);
         let _ = SetForegroundWindow(owner);
-        if let Some(code) = quit {
-            PostQuitMessage(code);
-        }
-        let words = dialog.typing.string().trim().to_string();
-        (dialog.answer == Some(true)).then(|| Said { words, pictures: dialog.pictures.into_iter().map(|picture| picture.jpeg).collect() })
     }
+    dialog
 }
 
 #[cfg(test)]
@@ -1237,7 +1394,7 @@ mod tests {
             super::GIVEN_FOR_TEST.set(std::env::var("PICTURES").map(|paths| paths.split(';').map(str::to_string).collect()).unwrap_or_default());
             let text = (0..60).map(|line| format!("Line {line} of what is sent")).collect::<Vec<_>>().join("\n");
             let own = super::Own { words: "你想说的话（可不填）", hint: "比如：主板温度没有显示；风扇转速和别的软件里看到的不一样", pictures: "截图（可不添，最多 3 张）", add: "添加截图", ways: "点击选择、拖进窗口，或按 Ctrl+V 粘贴", paste: "粘贴剪贴板里的截图", waiting: "剪贴板里有截图，按 Ctrl+V 即可粘贴", kinds: "图片" };
-            let asked = super::Asked { title: "发送诊断信息", intro: "下面是将要发送给 Glance（glancepc.com）的全部内容：你写的话、你添加的截图，和最下面的诊断信息。不包含你的文件、账号或网络地址。", own: Some(own), sent: Some(("诊断信息", &text)), yes: "发送", no: "取消", dark };
+            let asked = super::Asked { title: "发送诊断信息", intro: "下面是将要发送给 Glance（glancepc.com）的全部内容：你写的话、你添加的截图，和最下面的诊断信息。不包含你的文件、账号或网络地址。", own: Some(own), option: std::env::var("OPTION").is_ok().then_some("附上当前的诊断信息"), sent: Some(("诊断信息", &text)), from_end: std::env::var("FROM_END").is_ok(), yes: "发送", no: "取消", dark };
             assert!(super::show(owner, &asked).is_none());
         }
     }

@@ -1,6 +1,7 @@
 //! Update checks: once a day, while the setting allows, Glance asks GitHub,
 //! and its mirror on Gitee (which mainland China can reach), for the latest
-//! release; nothing else of the user's is sent. A newer one
+//! release; nothing else of the user's is sent (Glance's site is asked
+//! besides what is new in the reports this PC sent: see `reports`). A newer one
 //! is offered in the settings (and once by the tray), and taken only when
 //! the user asks: its installer is downloaded into a folder of
 //! administrators' alone and run only if it is signed by Glance's publisher
@@ -40,14 +41,25 @@ use crate::ui::prefs::LanguagePref;
 use crate::ui::text::Lang;
 
 /// Where each site describes the latest release, in the same terms.
-/// Glance's own site, asked first of all: it says the same of the latest
-/// release as the two below do, serves the installer itself, and counts
-/// how many ask (see `site`).
-const SITE: &str = "https://glancepc.com/api/latest";
+/// Glance's own site, asked first of all (`LATEST`, there): it says the same
+/// of the latest release as the two below do, serves the installer itself,
+/// and counts how many ask (see `site`).
+const LATEST: &str = "/api/latest";
 const SOURCES: [&str; 2] = [
     "https://api.github.com/repos/lulu-loopp/glance/releases/latest",
     "https://gitee.com/api/v5/repos/lulu-loopp/glance/releases/latest",
 ];
+/// Glance's own site, where Glance asks for the latest release and sends its reports. A debug build may be pointed
+/// at another (`GLANCE_SITE`, a copy of the site run on this PC, see `on_this_pc`) to be tried against: a release
+/// build has no such switch.
+pub(crate) fn own_site() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(site) = std::env::var("GLANCE_SITE") {
+        return site.trim_end_matches('/').to_string();
+    }
+    "https://glancepc.com".to_string()
+}
+
 /// Where an installer is taken from: Glance's site, and the releases of its own repositories (each followed
 /// wherever it redirects: what is downloaded is believed only for its signature).
 const INSTALLERS_FROM: [&str; 3] = [
@@ -190,6 +202,8 @@ pub fn watch() {
                 asking = WAKE.wait_timeout(asking, wait).unwrap().0;
             }
         };
+        // What is new in the reports this PC sent, asked of Glance's site as it is asked for the latest release.
+        thread::spawn(crate::reports::ask);
         let answer = latest();
         if answer.is_some() {
             unanswered = 0;
@@ -529,7 +543,7 @@ fn site() -> String {
         (settings.began, settings.asked_as.clone())
     };
     let version = env!("CARGO_PKG_VERSION");
-    let mut url = format!("{SITE}?v={version}");
+    let mut url = format!("{}{LATEST}?v={version}", own_site());
     match (&asked_as, began) {
         (None, Some(_)) => url.push_str("&n=1"),
         (None, None) => url.push_str("&f=pre"),
@@ -561,7 +575,7 @@ fn latest() -> Option<Release> {
             if answer.is_none() {
                 let host = url.trim_start_matches("https://").split('/').next().unwrap_or(&url);
                 crate::journal::note(format!("update check: no answer from {host}"));
-            } else if url.starts_with(SITE) {
+            } else if url.starts_with(&format!("{}{LATEST}", own_site())) {
                 // Answered: the next asking is this version's, not a new Glance's nor one just updated.
                 crate::app().change(|settings| settings.asked_as = Some(env!("CARGO_PKG_VERSION").to_string()));
             }
@@ -601,7 +615,7 @@ fn release(body: &[u8]) -> Option<(String, String)> {
 
 /// Whether version `a` comes after `b`, compared number by number (1.10
 /// after 1.9; a missing number counts as 0).
-fn newer(a: &str, b: &str) -> bool {
+pub(crate) fn newer(a: &str, b: &str) -> bool {
     let numbers = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|part| part.parse().ok()).collect() };
     let (Some(mut a), Some(mut b)) = (numbers(a), numbers(b)) else { return false };
     let length = a.len().max(b.len());
@@ -651,8 +665,16 @@ fn ask(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<Vec<u8>> {
 }
 
 fn answered(url: &str, sent: Option<&[u8]>, accept: &str, referer: Option<&str>) -> Option<(u32, Vec<u8>)> {
-    let rest = url.strip_prefix("https://")?;
+    // Over HTTPS, or (a debug build only) over plain HTTP to a site run on this PC (see `own_site`).
+    let (secure, rest) = match url.strip_prefix("https://") {
+        Some(rest) => (true, rest),
+        None => (false, on_this_pc(url)?),
+    };
     let (host, path) = rest.split_at(rest.find('/')?);
+    let (host, port) = match host.rsplit_once(':') {
+        Some((name, port)) if !secure => (name, port.parse().ok()?),
+        _ => (host, INTERNET_DEFAULT_HTTPS_PORT),
+    };
     let agent = HSTRING::from(format!("Glance/{}", env!("CARGO_PKG_VERSION")));
     unsafe {
         let session = Handle(WinHttpOpen(&agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0));
@@ -666,12 +688,13 @@ fn answered(url: &str, sent: Option<&[u8]>, accept: &str, referer: Option<&str>)
         }
         // (Longer for the sending by what is sent, were the line that slow.)
         let _ = WinHttpSetTimeouts(session.0, RESOLVE_MS, CONNECT_MS, ANSWER_MS + (sent.map_or(0, <[u8]>::len) / SLOWEST) as i32, ANSWER_MS);
-        let connection = Handle(WinHttpConnect(session.0, &HSTRING::from(host), INTERNET_DEFAULT_HTTPS_PORT, 0));
+        let connection = Handle(WinHttpConnect(session.0, &HSTRING::from(host), port, 0));
         if connection.0.is_null() {
             return None;
         }
         let method = if sent.is_some() { w!("POST") } else { w!("GET") };
-        let request = Handle(WinHttpOpenRequest(connection.0, method, &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), WINHTTP_FLAG_SECURE));
+        let flags = if secure { WINHTTP_FLAG_SECURE } else { Default::default() };
+        let request = Handle(WinHttpOpenRequest(connection.0, method, &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), flags));
         if request.0.is_null() {
             return None;
         }
@@ -712,6 +735,18 @@ fn answered(url: &str, sent: Option<&[u8]>, accept: &str, referer: Option<&str>)
             }
         }
     }
+}
+
+/// What follows `http://` in `url`, where it is a site run on this PC (its address and port), for a debug build to
+/// be tried against (see `own_site`). A release build asks nothing but over HTTPS.
+#[cfg(debug_assertions)]
+fn on_this_pc(url: &str) -> Option<&str> {
+    url.strip_prefix("http://").filter(|rest| rest.starts_with("127.0.0.1:") || rest.starts_with("localhost:"))
+}
+
+#[cfg(not(debug_assertions))]
+fn on_this_pc(_url: &str) -> Option<&str> {
+    None
 }
 
 /// A file's Authenticode signature, verified (the whole chain, revocation
