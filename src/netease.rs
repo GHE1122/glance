@@ -5,7 +5,8 @@
 //! copy on Glance's site, which is reached where GitHub is not, then from where each project publishes it, as it built
 //! it, and checked by digest. A BetterNCM already there is left as it is; the loader is taken back only if Glance put
 //! it there (see `settings::Settings::netease_loader`). With InfLink-rs goes a plugin of Glance's own, the icon row,
-//! which mends what BetterNCM's button does to NetEase's title bar (see `ICON_ROW`).
+//! which mends what BetterNCM's button does to NetEase's title bar (see `ICON_ROW`): put in by itself as Glance
+//! starts where InfLink-rs is there without it (see `mend`).
 //!
 //! NetEase installed where this user may not write (Program Files), its loader is put there by Glance run elevated,
 //! the user asked to let it (`ASKED`): that run finds NetEase from what the machine lists alone, and takes and checks
@@ -227,6 +228,23 @@ pub fn put_icon_row() -> Result<(), Failed> {
     let path = plugin_path(ICON_ROW_FILE);
     std::fs::create_dir_all(path.parent().ok_or(Failed::Put)?).map_err(|_| Failed::Put)?;
     std::fs::write(&path, pack(&ICON_ROW)).map_err(|_| Failed::Put)
+}
+
+/// The icon row put in beside an InfLink-rs installed without it (by a Glance before it, or not by Glance), as Glance
+/// starts: nothing taken, nothing else touched. It works once NetEase starts again. Nothing where NetEase, or InfLink-rs,
+/// is not there.
+pub fn mend() {
+    if let Some(netease) = found(false) {
+        mend_for(&netease);
+    }
+}
+
+/// As `mend`, for `netease`.
+fn mend_for(netease: &NetEase) {
+    if installed(netease) == Installed::NoIconRow {
+        let put = put_icon_row();
+        crate::journal::note(format!("netease: the icon row put in beside InfLink-rs as Glance started: {put:?}"));
+    }
 }
 
 /// `files` (each a name and what it holds) packed as BetterNCM takes a plugin: a zip, each file in it stored as it is.
@@ -584,8 +602,8 @@ mod tests {
         }
     }
 
-    /// The icon row goes with InfLink-rs: InfLink-rs and a loader without it are installed but for it, it put in makes
-    /// it whole, and taking back takes it with the plugin (another's loader kept).
+    /// The icon row goes with InfLink-rs: InfLink-rs and a loader without it are installed but for it, it put in as
+    /// Glance starts makes it whole, and taking back takes it with the plugin (another's loader kept).
     #[test]
     fn the_icon_row_goes_with_inflink() {
         let scratch = Scratch::new("netease-icon-row");
@@ -594,7 +612,8 @@ mod tests {
         std::fs::create_dir_all(plugin_folder()).unwrap();
         std::fs::write(plugin_path(PLUGIN_FILE), b"InfLink-rs").unwrap();
         assert_eq!(installed(netease), Installed::NoIconRow);
-        assert_eq!(put_icon_row(), Ok(()));
+        // (As Glance starts: put in by itself.)
+        mend_for(netease);
         assert_eq!(installed(netease), Installed::Yes);
         assert_eq!(std::fs::read(scratch.folder.join(r"betterncm\plugins").join(ICON_ROW_FILE)).unwrap(), pack(&ICON_ROW));
         assert_eq!(remove(netease, true), Ok(()));
