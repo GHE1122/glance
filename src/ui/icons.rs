@@ -67,6 +67,19 @@ pub enum Icon {
     Italic,
     Strikethrough,
     Code,
+    /// What a note's writing menu does: cut, copy, paste, insert a to-do, a table, a rule, a block of code, make a
+    /// heading of a line (one, two, three) or words of it again.
+    Scissors,
+    Copy,
+    ClipboardPaste,
+    SquareCheck,
+    Table,
+    Minus,
+    SquareCode,
+    Heading1,
+    Heading2,
+    Heading3,
+    Pilcrow,
 }
 
 impl Icon {
@@ -75,7 +88,9 @@ impl Icon {
     /// "mouse-pointer-2", "panel-right", "undo-2", "refresh-cw", "power", "layers", "clock", "image-plus", "skip-back", "play", "pause", "skip-forward",
     /// "music", "volume-2", "volume-x" (their speaker an older Lucide's, as lines), "layout-grid", "gauge",
     /// "chevron-down", "maximize", "minimize", "file", "link", "inbox", "clipboard", "ellipsis", "list",
-    /// "image", "grip-vertical", "plus", "search", "palette", "smartphone", "pencil-ruler", "pin-off", "trash-2", "eye-off", "bold", "italic", "strikethrough", "code";
+    /// "image", "grip-vertical", "plus", "search", "palette", "smartphone", "pencil-ruler", "pin-off", "trash-2", "eye-off", "bold", "italic", "strikethrough", "code",
+    /// "scissors", "copy", "clipboard-paste", "square-check-big", "table", "minus", "square-code", "heading-1", "heading-2",
+    /// "heading-3", "pilcrow", from
     /// lucide-static 1.53.0), its
     /// rectangles and circles written as paths.
     fn data(self) -> &'static [&'static str] {
@@ -120,6 +135,20 @@ impl Icon {
             Icon::Italic => &["M19 4H10", "M14 20H5", "M15 4 9 20"],
             Icon::Strikethrough => &["M16 4H9a3 3 0 0 0-2.83 4", "M14 12a4 4 0 0 1 0 8H6", "M4 12h16"],
             Icon::Code => &["m16 18 6-6-6-6", "m8 6-6 6 6 6"],
+            Icon::Scissors => &["M9 6a3 3 0 1 1-6 0a3 3 0 1 1 6 0z", "M8.12 8.12 12 12", "M20 4 8.12 15.88", "M9 18a3 3 0 1 1-6 0a3 3 0 1 1 6 0z", "M14.8 14.8 20 20"],
+            Icon::Copy => &["M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2z", "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"],
+            Icon::ClipboardPaste => &[
+                "M11 14h10", "M16 4h2a2 2 0 0 1 2 2v1.344", "m17 18 4-4-4-4", "M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 1.793-1.113",
+                "M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z",
+            ],
+            Icon::SquareCheck => &["M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344", "m9 11 3 3L22 4"],
+            Icon::Table => &["M12 3v18", "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z", "M3 9h18", "M3 15h18"],
+            Icon::Minus => &["M5 12h14"],
+            Icon::SquareCode => &["m10 9-3 3 3 3", "m14 15 3-3-3-3", "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"],
+            Icon::Heading1 => &["M4 12h8", "M4 18V6", "M12 18V6", "m17 12 3-2v8"],
+            Icon::Heading2 => &["M4 12h8", "M4 18V6", "M12 18V6", "M21 18h-4c0-4 4-3 4-6 0-1.5-2-2.5-4-1"],
+            Icon::Heading3 => &["M4 12h8", "M4 18V6", "M12 18V6", "M17.5 10.5c1.7-1 3.5 0 3.5 1.5a2 2 0 0 1-2 2", "M17 17.5c2 1.5 4 .3 4-1.5a2 2 0 0 0-2-2"],
+            Icon::Pilcrow => &["M13 4v16", "M17 4v16", "M19 4H9.5a4.5 4.5 0 0 0 0 9H13"],
             Icon::Close => &["M18 6 6 18", "m6 6 12 12"],
             Icon::File => &["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z", "M14 2v4a2 2 0 0 0 2 2h4"],
             Icon::Link => &["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71", "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"],
@@ -395,7 +424,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid.

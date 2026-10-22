@@ -613,6 +613,12 @@ impl Controller {
             for hwnd in crate::ui::keys::took() {
                 widgets.written(hwnd);
             }
+            // A note's writing menu asked for on its words (see `Widgets::take_writing_menu_asked`).
+            if widgets.writing_menu_was_asked() {
+                self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
+                menu = widgets.take_writing_menu_asked(panels[0].lang, panels.iter().any(Panel::is_shown)).map(|(open, name, choices)| (open, MenuFor::Note(name, choices)));
+                keep_menu_above(&menu, &mut overlay);
+            }
             if !got {
                 let now = Instant::now();
                 if frame_at.is_some_and(|at| now < at) {
@@ -1124,7 +1130,7 @@ impl Controller {
                 }
                 // A note stuck on the desktop written in where it is, or to be: the pointer's on its words, and on its
                 // menu's button (see `Widgets::write`).
-                WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_MOUSEWHEEL if widgets.owns(msg.hwnd) && widgets.write(&msg) => {
+                WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_MOUSEWHEEL | windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONDOWN | WM_RBUTTONUP if widgets.owns(msg.hwnd) && widgets.write(&msg) => {
                     if let Some(number) = widgets.take_note_menu_asked() {
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                         menu = widgets.note_menu(msg.hwnd, number, panels[0].lang, panels.iter().any(Panel::is_shown)).map(|(open, name, choices)| (open, MenuFor::Note(name, choices)));

@@ -967,8 +967,20 @@ impl Beside {
                 let _ = SetTimer(Some(self.hwnd), KEEP, super::note::KEEP_AFTER_MS, None);
             }
         }
+        let asked = writing.take_menu_asked();
         self.caret_on = true;
         self.redraw();
+        if let Some(at) = asked {
+            self.writing_menu(at);
+        }
+    }
+
+    /// The note's writing menu (see `note::writing_menu`), at `at` on the screen, where it was asked for.
+    fn writing_menu(&self, at: POINT) {
+        let (items, choices) = super::note::writing_menu(self.lang);
+        if let Some(menu) = super::menu::Menu::open_at(items, super::menu::Look::of(self.theme.skin, self.theme.dark), at, false, false) {
+            MENU.with(|held| *held.borrow_mut() = Some((menu, choices)));
+        }
     }
 
     /// Glance going: what is written kept (see `keep`), or, where it cannot be, put aside (see `note::Writing::put_aside`).
@@ -1052,6 +1064,14 @@ impl Beside {
     /// `choice` made in the note's menu: done; whether the page is to go.
     fn note_chose(&mut self, choice: super::note::Choice) -> bool {
         use super::note::Choice;
+        // (Its writing menu's: done to the words, seen to as what is typed is.)
+        if let Choice::Write(how) = choice {
+            if let Some(writing) = &self.writing {
+                writing.write(how);
+            }
+            self.written();
+            return false;
+        }
         let kept = self.keep();
         let Some(writing) = self.writing.as_mut() else { return false };
         let folder = crate::notes::folder_at(writing.folder.clone());
@@ -1069,8 +1089,9 @@ impl Beside {
                 crate::app().controller.stick_note(name, POINT { x: place.left + (24.0 * self.scale) as i32, y: place.top + (24.0 * self.scale) as i32 }, Some(self.page_size(place)));
                 false
             }
-            // (Offered only where the note is stuck on the desktop, on its card there: see `widget`.)
-            Choice::Unstick => false,
+            // (Offered only where the note is stuck on the desktop, on its card there: see `widget`. Its writing menu's
+            // done above.)
+            Choice::Unstick | Choice::Write(_) => false,
             Choice::TakeAway => {
                 // (What is written not kept, the page stays, saying so: taken away, the Recycle Bin had the note as it
                 // was before, and what was written was gone with the page.)

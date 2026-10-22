@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LRESULT, POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_DOWN, VK_E, VK_ESCAPE, VK_I, VK_K, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_UP, VK_V, VK_X, VK_Y, VK_Z,
+    GetKeyState, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_DOWN, VK_E, VK_APPS, VK_ESCAPE, VK_F10, VK_I, VK_INSERT, VK_K, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_UP, VK_V, VK_X, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -156,13 +156,51 @@ pub(super) fn box_in(left: i32, baseline: i32, pixels: f32) -> (f32, f32, f32) {
 }
 
 /// What a note's menu does: its colour chosen, it stuck on the desktop, or its card there taken off it (the note kept),
-/// it taken to the Recycle Bin.
+/// it taken to the Recycle Bin. Or its writing menu's (see `writing_menu`): something done to its words.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Choice {
     Colour(crate::notes::Colour),
     Stick,
     Unstick,
     TakeAway,
+    Write(Write),
+}
+
+/// What a note's writing menu does to its words (see `Writing::write`): what is chosen cut or copied, the clipboard's
+/// text pasted, a block inserted (see `notes::edit::insert`), a link made, the lines chosen made headings of a level
+/// (0: words again).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Write {
+    Cut,
+    Copy,
+    Paste,
+    Insert(crate::notes::edit::Block),
+    Link,
+    Heading(u8),
+}
+
+/// A note's writing menu, shown on its words pressed with the right button (or the menu key, Shift+F10) while it is
+/// written in: cut, copy and paste, the blocks inserted and a link, the headings and words again. Its rows, and what
+/// each does.
+pub fn writing_menu(lang: Lang) -> (Vec<super::menu::Item<'static>>, Vec<Choice>) {
+    use super::menu::{Item, Mark};
+    use crate::notes::edit::Block;
+    let rows = [
+        (Write::Cut, lang.pick("剪切", "Cut"), Icon::Scissors, false),
+        (Write::Copy, lang.pick("复制", "Copy"), Icon::Copy, false),
+        (Write::Paste, lang.pick("粘贴", "Paste"), Icon::ClipboardPaste, false),
+        (Write::Insert(Block::Todo), lang.pick("插入待办事项", "Insert a to-do"), Icon::SquareCheck, true),
+        (Write::Insert(Block::Table), lang.pick("插入表格", "Insert a table"), Icon::Table, false),
+        (Write::Insert(Block::Code), lang.pick("插入代码块", "Insert a code block"), Icon::SquareCode, false),
+        (Write::Insert(Block::Rule), lang.pick("插入分隔线", "Insert a divider"), Icon::Minus, false),
+        (Write::Link, lang.pick("插入链接", "Insert a link"), Icon::Link, false),
+        (Write::Heading(1), lang.pick("一级标题", "Heading 1"), Icon::Heading1, true),
+        (Write::Heading(2), lang.pick("二级标题", "Heading 2"), Icon::Heading2, false),
+        (Write::Heading(3), lang.pick("三级标题", "Heading 3"), Icon::Heading3, false),
+        (Write::Heading(0), lang.pick("正文", "Body text"), Icon::Pilcrow, false),
+    ];
+    let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, mark: Some(Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
+    (items, rows.into_iter().map(|(write, ..)| Choice::Write(write)).collect())
 }
 
 /// A note's menu, of colour `colour`: its colours, each a dot of it, and kept in a file (`named`), it stuck on the desktop or
@@ -216,9 +254,10 @@ fn writes(key: VIRTUAL_KEY) -> bool {
 /// Enter carries a list on (Shift+Enter a line break), Ctrl+Enter ticks a to-do, Tab and Shift+Tab move a list's items in
 /// and out, Backspace takes an item's mark off, Alt+Up and Alt+Down move lines. Ctrl+B, Ctrl+I, Ctrl+Shift+X and Ctrl+E
 /// put on and take off bold, slanted, struck through and code, Ctrl+K makes a link (to the web address on the clipboard,
-/// `clipboard` asked only then), Ctrl+1 to 3 headings and Ctrl+0 none. Ctrl with any other key that writes is eaten but
-/// for choosing all, copying, cutting, pasting, undoing and redoing: the text services' own would dress the words in
-/// ways a note's file does not keep.
+/// `clipboard` asked only then), Ctrl+1 to 3 headings and Ctrl+0 none. Ctrl+V and Shift+Insert paste the clipboard's
+/// text (see `edit::paste`: the text services' own paste would bring what a note's file does not keep). Ctrl with any
+/// other key that writes is eaten but for choosing all, copying, cutting, undoing and redoing: the text services' own
+/// would dress the words in ways a note's file does not keep.
 fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, system: bool, clipboard: impl FnOnce() -> Option<String>) -> Option<Option<crate::notes::edit::Edit>> {
     use crate::notes::edit::{self, Marked};
     let caret = (chosen.0 == chosen.1).then_some(chosen.0);
@@ -234,6 +273,7 @@ fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, sys
         (VK_RETURN, true, false) => Some(edit::toggle_task(text, chosen.0)),
         (VK_TAB, false, out) => edit::indent(text, chosen, out),
         (VK_BACK, false, false) => caret.and_then(|caret| edit::backspace(text, caret)).map(Some),
+        (VK_INSERT, false, true) => Some(clipboard().map(|pasted| edit::paste(text, chosen, &pasted))),
         (_, false, _) => None,
         (VK_B, true, false) => marked(Marked::Bold),
         (VK_I, true, false) => marked(Marked::Italic),
@@ -241,7 +281,8 @@ fn pressed(text: &str, chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, sys
         (VK_X, true, true) => marked(Marked::Struck),
         (VK_K, true, false) => Some(edit::link(text, chosen, clipboard().as_deref().and_then(edit::web_address))),
         (VK_0 | VK_1 | VK_2 | VK_3, true, false) => Some(Some(edit::heading(text, chosen, (key.0 - VK_0.0) as u8))),
-        (VK_A | VK_C | VK_V | VK_X | VK_Z | VK_Y, true, false) | (VK_Z, true, true) => None,
+        (VK_V, true, false) => Some(clipboard().map(|pasted| edit::paste(text, chosen, &pasted))),
+        (VK_A | VK_C | VK_X | VK_Z | VK_Y, true, false) | (VK_Z, true, true) => None,
         (key, true, _) if writes(key) => Some(None),
         _ => None,
     }
@@ -358,6 +399,8 @@ pub struct Writing {
     pixels: Rc<Cell<f32>>,
     pressing: Rc<Cell<bool>>,
     over: Rc<Cell<Option<usize>>>,
+    /// Where its writing menu was asked for (on the screen), not yet shown: see `take_menu_asked`.
+    menu_asked: Rc<Cell<Option<POINT>>>,
 }
 
 impl Writing {
@@ -399,6 +442,7 @@ impl Writing {
             pixels: Rc::new(Cell::new(pixels)),
             pressing: Rc::new(Cell::new(false)),
             over: Rc::new(Cell::new(None)),
+            menu_asked: Rc::new(Cell::new(None)),
         };
         writing.dress();
         Some(writing)
@@ -452,6 +496,34 @@ impl Writing {
         self.palette.points / 0.75
     }
 
+    /// Where its writing menu was asked for (see `writing_menu`), on the screen, taken: its words pressed with the
+    /// right button there, or the menu key or Shift+F10 pressed (at the caret). Its window's to show.
+    pub fn take_menu_asked(&self) -> Option<POINT> {
+        self.menu_asked.take()
+    }
+
+    /// `how` done to its words, chosen in its writing menu (see `Write`): each change one undo.
+    pub fn write(&self, how: Write) {
+        use crate::notes::edit;
+        let (from, to) = self.editor.selection();
+        let (text, chosen) = (self.editor.words(), (from.max(0) as usize, to.max(0) as usize));
+        let owner = self.editor.window();
+        let made = match how {
+            Write::Cut | Write::Copy => {
+                let _ = self.editor.send(if how == Write::Cut { WM_CUT } else { WM_COPY }, Default::default(), Default::default());
+                None
+            }
+            Write::Paste => clipboard_text(owner).map(|pasted| edit::paste(&text, chosen, &pasted)),
+            Write::Insert(block) => Some(edit::insert(&text, chosen, block)),
+            Write::Link => edit::link(&text, chosen, clipboard_text(owner).as_deref().and_then(edit::web_address)),
+            Write::Heading(level) => Some(edit::heading(&text, chosen, level)),
+        };
+        if let Some(edit) = made {
+            self.editor.apply(&edit);
+        }
+        self.keyed.set(true);
+    }
+
     /// What its words' box answers its window's messages with, given it whatever the window is in the middle of: an input
     /// method answers inside the message that asked it (the box placing its windows as it is drawn, say), and a
     /// composition the box ends (a press on its words) comes back inside that press. (Given only while the window was
@@ -463,7 +535,7 @@ impl Writing {
     /// pressed, are followed (a web address, or a file of the PC's). Over them the pointer is the hand.
     pub fn answer(&self) -> Answer {
         let (editor, reads, keyed, depth, eaten) = (self.editor.clone(), self.reads.clone(), self.keyed.clone(), self.depth.clone(), self.eaten.clone());
-        let (pixels, pressing, over) = (self.pixels.clone(), self.pressing.clone(), self.over.clone());
+        let (pixels, pressing, over, menu_asked) = (self.pixels.clone(), self.pressing.clone(), self.over.clone(), self.menu_asked.clone());
         Rc::new(move |hwnd, message, wparam, lparam| {
             let point = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
             let pointer = || {
@@ -477,11 +549,15 @@ impl Writing {
             let its = match message {
                 // (Esc is the window's: it leaves the words.)
                 WM_KEYDOWN => wparam.0 != usize::from(VK_ESCAPE.0),
-                // (Of the system's keys, Alt+Up and Alt+Down: lines moved.)
-                WM_SYSKEYDOWN => matches!(VIRTUAL_KEY(wparam.0 as u16), VK_UP | VK_DOWN),
+                // (Of the system's keys, Alt+Up and Alt+Down: lines moved. Shift+F10: the writing menu.)
+                WM_SYSKEYDOWN => match VIRTUAL_KEY(wparam.0 as u16) {
+                    VK_UP | VK_DOWN => true,
+                    VK_F10 => (unsafe { GetKeyState(i32::from(VK_SHIFT.0)) }) < 0,
+                    _ => false,
+                },
                 WM_KEYUP | WM_CHAR | WM_SYSCHAR | WM_UNICHAR | WM_SETFOCUS | WM_KILLFOCUS => true,
                 WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION | WM_IME_NOTIFY | WM_IME_SETCONTEXT | WM_IME_CHAR | WM_IME_REQUEST | WM_IME_COMPOSITIONFULL | WM_IME_SELECT => true,
-                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN => editor.holds(point),
+                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONUP => editor.holds(point),
                 // (A press begun in it is followed till let go, wherever the pointer goes.)
                 WM_LBUTTONUP | WM_MOUSEMOVE => editor.holds(point) || unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == hwnd,
                 WM_SETCURSOR => (lparam.0 & 0xFFFF) as u32 == HTCLIENT && editor.holds(pointer()),
@@ -503,8 +579,19 @@ impl Writing {
                 eaten.set(false);
                 let held = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
                 let held = Held { ctrl: held(VK_CONTROL), shift: held(VK_SHIFT), alt: held(VK_MENU) };
+                // The writing menu asked for by its key, or Shift+F10: at the caret (its window's to show, see
+                // `take_menu_asked`). Not while the input method composes.
+                let key = VIRTUAL_KEY(wparam.0 as u16);
+                if (key == VK_APPS || key == VK_F10 && held.shift && !held.ctrl && !held.alt) && !editor.composing() {
+                    let bounds = editor.bounds();
+                    let mut at = editor.caret().map_or(POINT { x: bounds.left, y: bounds.top }, |(x, y, _, tall)| POINT { x, y: y + tall });
+                    let _ = unsafe { windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut at) };
+                    menu_asked.set(Some(at));
+                    eaten.set(true);
+                    return Some(Some(LRESULT(0)));
+                }
                 let (from, to) = editor.selection();
-                let made = (!editor.composing()).then(|| pressed(&editor.text(), (from.max(0) as usize, to.max(0) as usize), VIRTUAL_KEY(wparam.0 as u16), held, message == WM_SYSKEYDOWN, || clipboard_text(hwnd))).flatten();
+                let made = (!editor.composing()).then(|| pressed(&editor.words(), (from.max(0) as usize, to.max(0) as usize), VIRTUAL_KEY(wparam.0 as u16), held, message == WM_SYSKEYDOWN, || clipboard_text(hwnd))).flatten();
                 if let Some(made) = made {
                     eaten.set(true);
                     depth.set(depth.get() + 1);
@@ -531,7 +618,7 @@ impl Writing {
                 match (message, button) {
                     (WM_LBUTTONDOWN | WM_LBUTTONDBLCLK, Some(button)) => {
                         let (from, to) = editor.selection();
-                        let (text, chosen) = (editor.text(), (from.max(0) as usize, to.max(0) as usize));
+                        let (text, chosen) = (editor.words(), (from.max(0) as usize, to.max(0) as usize));
                         let made = match BAR[button].1 {
                             Format::Marked(how) => Some(crate::notes::edit::toggle(&text, chosen, how)),
                             Format::Link => crate::notes::edit::link(&text, chosen, clipboard_text(hwnd).as_deref().and_then(crate::notes::edit::web_address)),
@@ -549,6 +636,25 @@ impl Writing {
                     _ => {}
                 }
                 return Some(Some(LRESULT(0)));
+            }
+            // The right button on the words: pressed off what is chosen, the caret there (as pressed on, it is what the
+            // menu does its work on), let go, the writing menu asked for there.
+            match message {
+                WM_RBUTTONDOWN => {
+                    let (from, to) = editor.selection();
+                    let at = editor.at(point) as i32;
+                    if !editor.composing() && (at < from.min(to) || at > from.max(to)) {
+                        editor.select((at, at));
+                    }
+                    return Some(Some(LRESULT(0)));
+                }
+                WM_RBUTTONUP => {
+                    let mut at = point;
+                    let _ = unsafe { windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut at) };
+                    menu_asked.set(Some(at));
+                    return Some(Some(LRESULT(0)));
+                }
+                _ => {}
             }
             match message {
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => pressing.set(true),
@@ -1014,13 +1120,33 @@ mod tests {
         for key in [VK_L, VK_R, VK_J, VK_5, VK_OEM_PLUS, VK_H] {
             assert_eq!(made("ab", (0, 2), key, ctrl), Some(None), "Ctrl+{:#x}", key.0);
         }
-        for key in [VK_A, VK_C, VK_V, VK_X, VK_Z, VK_Y, VK_LEFT, VK_BACK, VK_DELETE, VK_HOME] {
+        for key in [VK_A, VK_C, VK_X, VK_Z, VK_Y, VK_LEFT, VK_BACK, VK_DELETE, VK_HOME] {
             assert_eq!(made("ab", (0, 2), key, ctrl), None, "Ctrl+{:#x}", key.0);
         }
         assert_eq!(pressed("ab", (0, 2), VK_B, ctrl, false, clipboard).map(|edit| edit.map(|edit| edit.with)), Some(Some("**ab**".into())));
         assert!(!asked.get());
         assert_eq!(pressed("ab", (0, 2), VK_K, ctrl, false, clipboard).map(|edit| edit.map(|edit| edit.with)), Some(Some("[ab](https://a.b)".into())));
         assert!(asked.get());
+        // Pasting: the clipboard's text, its line breaks `\n`, a web address over words a link, nothing with no text.
+        let pasted = |chosen: (usize, usize), key: VIRTUAL_KEY, held: Held, on: Option<&str>| pressed("ab", chosen, key, held, false, || on.map(str::to_string)).map(|edit| edit.map(|edit| edit.with));
+        assert_eq!(pasted((1, 1), VK_V, ctrl, Some("x\r\ny")), Some(Some("x\ny".into())));
+        assert_eq!(pasted((1, 1), VK_INSERT, shift, Some("x")), Some(Some("x".into())));
+        assert_eq!(pasted((0, 2), VK_V, ctrl, Some("https://a.b")), Some(Some("[ab](https://a.b)".into())));
+        assert_eq!(pasted((1, 1), VK_V, ctrl, None), Some(None));
+        assert_eq!(pasted((1, 1), VK_INSERT, none, Some("x")), None);
+    }
+
+    /// The writing menu: cut, copy, paste, the blocks and a link, the headings and words again, each row's icon its own.
+    #[test]
+    fn the_writing_menu_s_rows() {
+        use super::{writing_menu, Choice, Write};
+        use crate::notes::edit::Block;
+        let (items, choices) = writing_menu(super::Lang::Zh);
+        assert_eq!(items.len(), choices.len());
+        assert_eq!(items.iter().map(|item| item.label).collect::<Vec<_>>(), ["剪切", "复制", "粘贴", "插入待办事项", "插入表格", "插入代码块", "插入分隔线", "插入链接", "一级标题", "二级标题", "三级标题", "正文"]);
+        assert_eq!(choices[4], Choice::Write(Write::Insert(Block::Table)));
+        assert_eq!(choices[11], Choice::Write(Write::Heading(0)));
+        assert_eq!(items.iter().filter(|item| item.rule_before).count(), 2);
     }
 
     /// The format bar's buttons side by side in it, none at its edge or past its last, larger as the words are.
@@ -1081,6 +1207,60 @@ mod tests {
         assert!(writing.pressing.get());
         answer(hwnd, WM_LBUTTONUP, WPARAM(0), at(words.right + 4, words.top + 2));
         assert!(!writing.pressing.get());
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// The writing menu asked for on a note's words: the right button pressed off what is chosen puts the caret there,
+    /// let go asks for it there (on the screen), as the menu key does at the caret. What it does is done as one undo.
+    #[test]
+    fn the_writing_menu_is_asked_for_and_does_its_work() {
+        use windows::core::w;
+        use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
+        use windows::Win32::UI::Input::KeyboardAndMouse::VK_APPS;
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WM_KEYDOWN, WM_KEYUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let folder = std::env::temp_dir().join(format!("glance-note-menu-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("m.md"), "一行字\n二行字").unwrap();
+        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 50, 60, 400, 300, None, None, None, None) }.unwrap();
+        let theme = super::Theme::new(super::Skin::Paper, false);
+        let mut writing = super::Writing::open(hwnd, super::words_box(0, 0, 400, 300, 1.0), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("m.md".into()), &theme, super::WORDS).unwrap();
+        let answer = writing.answer();
+        let at = |x: i32, y: i32| LPARAM(((y as isize) << 16) | (x as isize & 0xFFFF));
+        let written = |writing: &super::Writing| writing.editor.text().strip_suffix('\n').unwrap().to_string();
+        writing.editor.select((0, 2));
+        let second = writing.editor.character(5).unwrap();
+        let (x, y) = (second.left + 1, second.top + 2);
+        answer(hwnd, WM_RBUTTONDOWN, WPARAM(2), at(x, y));
+        assert_eq!(writing.editor.selection(), (5, 5));
+        assert_eq!(writing.take_menu_asked(), None);
+        answer(hwnd, WM_RBUTTONUP, WPARAM(0), at(x, y));
+        assert_eq!(writing.take_menu_asked(), Some(POINT { x: 50 + x, y: 60 + y }));
+        // Pressed on what is chosen, it stays chosen.
+        writing.editor.select((4, 7));
+        answer(hwnd, WM_RBUTTONDOWN, WPARAM(2), at(x, y));
+        assert_eq!(writing.editor.selection(), (4, 7));
+        answer(hwnd, WM_KEYDOWN, WPARAM(usize::from(VK_APPS.0)), LPARAM(1));
+        answer(hwnd, WM_KEYUP, WPARAM(usize::from(VK_APPS.0)), LPARAM(1));
+        assert!(writing.take_menu_asked().is_some());
+        writing.editor.select((5, 5));
+        writing.write(super::Write::Heading(2));
+        writing.written();
+        assert_eq!(written(&writing), "一行字\n## 二行字");
+        writing.write(super::Write::Insert(crate::notes::edit::Block::Rule));
+        writing.written();
+        // (After the last line, before the mark the text services end the words with: a line after it to go on, the
+        // caret there.)
+        assert_eq!(written(&writing), "一行字\n## 二行字\n\n---\n");
+        assert_eq!(writing.editor.selection(), (16, 16));
+        // (EM_UNDO.)
+        writing.editor.send(0x00C7, WPARAM(0), LPARAM(0));
+        assert_eq!(written(&writing), "一行字\n## 二行字");
         unsafe {
             let _ = DestroyWindow(hwnd);
         }

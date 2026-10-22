@@ -879,6 +879,72 @@ fn destination(to: &str) -> String {
     out
 }
 
+/// What the menu inserts that stands as a block of its own: a to-do, a table (two columns, a row under its head), a
+/// rule, a block of code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Block {
+    Todo,
+    Table,
+    Rule,
+    Code,
+}
+
+/// `block` inserted where the caret is (`chosen`'s end): on its line where it is blank, else on lines of its own after
+/// it, a blank line between it and the words before and after it (a to-do's after another item, under it). The caret
+/// where its words are to be written: the to-do's, the table's first head, the code's line (after the rule, the line
+/// after it).
+pub fn insert(text: &str, chosen: (usize, usize), block: Block) -> Edit {
+    let tree = Tree::of(text);
+    let caret = byte(text, chosen.0.max(chosen.1));
+    // (In code, after the code: put in it, it would be code.)
+    let index = match tree.code.iter().find(|code| code.start <= caret && caret < code.end) {
+        Some(code) => tree.line_of(code.end - 1),
+        None => tree.line_of(caret),
+    };
+    let line = tree.lines[index].clone();
+    let words = |other: usize| other < tree.lines.len() && !text[tree.lines[other].clone()].trim().is_empty();
+    let item = |other: usize| other < tree.lines.len() && tree.on_line(other).next().is_some();
+    let blank = !words(index);
+    // Words right before it and right after it, each a blank line apart from it: but a to-do among a list's items,
+    // which goes on the list.
+    let before = if blank { index > 0 && words(index - 1) } else { true };
+    let after = words(index + 1);
+    let todo = block == Block::Todo;
+    let gap_before = before && !(todo && item(if blank { index.wrapping_sub(1) } else { index }));
+    let gap_after = after && !(todo && item(index + 1));
+    // (Its words, and how far into them the caret goes. A rule with nothing after it, a line made after it to go on.)
+    let (written, into) = match block {
+        Block::Todo => ("- [ ] ", 6),
+        Block::Table => ("|  |  |\n| --- | --- |\n|  |  |", 2),
+        Block::Rule if gap_after => ("---", 4),
+        Block::Rule => ("---\n", 4),
+        Block::Code => ("```\n\n```", 4),
+    };
+    let opened = format!("{}{}", if blank { "" } else { "\n" }, if gap_before { "\n" } else { "" });
+    let with = format!("{opened}{written}{}", if gap_after { "\n" } else { "" });
+    let range = if blank { line.clone() } else { line.end..line.end };
+    let caret = range.start + opened.len() + into;
+    let mut rewrite = Rewrite::default();
+    rewrite.put(range, with);
+    edit(text, &rewrite.apply(text), (caret, caret))
+}
+
+/// `pasted` put in place of what is chosen, its line breaks `\n`: a web address alone over words chosen on one line
+/// makes a link of them (see `link`). The caret after what is put.
+pub fn paste(text: &str, chosen: (usize, usize), pasted: &str) -> Edit {
+    let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
+    if chosen.0 != chosen.1 {
+        if let Some(made) = web_address(&pasted).and_then(|to| link(text, chosen, Some(to))) {
+            return made;
+        }
+    }
+    let (start, end) = (byte(text, chosen.0.min(chosen.1)), byte(text, chosen.0.max(chosen.1)));
+    let mut rewrite = Rewrite::default();
+    rewrite.put(start..end, pasted.as_str());
+    let caret = start + pasted.len();
+    edit(text, &rewrite.apply(text), (caret, caret))
+}
+
 /// Whether `pasted` is a web address alone (one line, `http://` or `https://`, no spaces): pasted over what is chosen,
 /// it makes a link of it (see `link`).
 pub fn web_address(pasted: &str) -> Option<&str> {
@@ -1120,5 +1186,43 @@ mod tests {
         assert_eq!(made("«a\nb»", Some("x")), None);
         assert_eq!(web_address(" https://a.b/c \n"), Some("https://a.b/c"));
         assert_eq!(web_address("see https://a.b"), None);
+    }
+
+    /// A block goes on the caret's line where it is blank, else on lines after it, a blank line between it and words
+    /// before and after it, but a to-do among a list's items goes on the list. The caret where its words go.
+    #[test]
+    fn blocks_are_inserted() {
+        let inserted = |marked: &str, block: Block| {
+            let (text, chosen) = read(marked);
+            applied(&text, &insert(&text, chosen, block))
+        };
+        assert_eq!(inserted("‸", Block::Table), "| ‸ |  |\n| --- | --- |\n|  |  |");
+        assert_eq!(inserted("文‸字", Block::Table), "文字\n\n| ‸ |  |\n| --- | --- |\n|  |  |");
+        assert_eq!(inserted("a‸\nb", Block::Table), "a\n\n| ‸ |  |\n| --- | --- |\n|  |  |\n\nb");
+        assert_eq!(inserted("a\n‸\nb", Block::Code), "a\n\n```\n‸\n```\n\nb");
+        assert_eq!(inserted("a\n\n‸\n\nb", Block::Code), "a\n\n```\n‸\n```\n\nb");
+        assert_eq!(inserted("a‸", Block::Rule), "a\n\n---\n‸");
+        assert_eq!(inserted("a‸\nb", Block::Rule), "a\n\n---\n‸\nb");
+        assert_eq!(inserted("a‸", Block::Todo), "a\n\n- [ ] ‸");
+        assert_eq!(inserted("- [ ] a‸\n- [ ] b", Block::Todo), "- [ ] a\n- [ ] ‸\n- [ ] b");
+        assert_eq!(inserted("- a\n‸", Block::Todo), "- a\n- [ ] ‸");
+        assert_eq!(inserted("‸\na", Block::Todo), "- [ ] ‸\n\na");
+        assert_eq!(inserted("```\nx‸\n```\nb", Block::Rule), "```\nx\n```\n\n---\n‸\nb");
+        assert_eq!(inserted("```\n‸\n```", Block::Table), "```\n\n```\n\n| ‸ |  |\n| --- | --- |\n|  |  |");
+    }
+
+    /// What is pasted goes in place of what is chosen with its line breaks made `\n`, the caret after it: a web
+    /// address over words chosen makes a link of them.
+    #[test]
+    fn pasting() {
+        let pasted = |marked: &str, what: &str| {
+            let (text, chosen) = read(marked);
+            applied(&text, &paste(&text, chosen, what))
+        };
+        assert_eq!(pasted("a‸b", "x\r\ny\rz"), "ax\ny\nz‸b");
+        assert_eq!(pasted("a«bc»d", "中"), "a中‸d");
+        assert_eq!(pasted("看«文档»", "https://a.b/c"), "看[文档](https://a.b/c)‸");
+        assert_eq!(pasted("看‸", "https://a.b/c"), "看https://a.b/c‸");
+        assert_eq!(pasted("«a\nb»", "https://a.b"), "https://a.b‸");
     }
 }

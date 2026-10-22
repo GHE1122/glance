@@ -1356,6 +1356,9 @@ pub struct Widgets {
     menu_asked: Option<(view::Hit, view::Tab)>,
     /// The menu of a note written in where it is asked for by its button (see `take_note_menu_asked`): the note's number.
     note_menu_asked: Option<u64>,
+    /// The writing menu of a note written in where it is asked for on its words (see `take_writing_menu_asked`): the
+    /// widget, the note's name, where on the screen.
+    writing_menu_asked: Option<(HWND, String, POINT)>,
     /// The music shown over the whole of a screen, while it is (asked for by a music widget's button).
     full: Option<crate::fullscreen::FullMusic>,
 }
@@ -1915,6 +1918,21 @@ impl Widgets {
         self.note_menu_asked.take()
     }
 
+    /// Whether a note's writing menu was asked for (see `take_writing_menu_asked`).
+    pub fn writing_menu_was_asked(&self) -> bool {
+        self.writing_menu_asked.is_some()
+    }
+
+    /// The writing menu of a note written in where it is (see `ui::note::writing_menu`), asked for on its words (the
+    /// right button, the menu key), up at where it was asked for: the note's name, and what each row does. None where
+    /// none was asked for.
+    pub fn take_writing_menu_asked(&mut self, lang: Lang, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, String, Vec<crate::ui::note::Choice>)> {
+        let (hwnd, name, at) = self.writing_menu_asked.take()?;
+        let (items, choices) = crate::ui::note::writing_menu(lang);
+        let open = crate::ui::menu::Menu::open_at(items, self.look_of(hwnd), at, false, over_the_panel)?;
+        Some((open, name, choices))
+    }
+
     /// A press, a move, a let go or a wheel's turn on the widget at `msg.hwnd`, for a note stuck on the desktop on it to
     /// be written in where it is (see `InPlace`): its words pressed, written in there (the press theirs, as the text
     /// services take it). Written in, the pointer's on its words (a press there, the hand followed by them till it is
@@ -1935,6 +1953,9 @@ impl Widgets {
         let changed = in_place.writing.written();
         if changed {
             in_place.keep_at = Some(now + Duration::from_millis(u64::from(crate::ui::note::KEEP_AFTER_MS)));
+        }
+        if let Some(at) = in_place.writing.take_menu_asked() {
+            self.writing_menu_asked = Some((hwnd, in_place.name.clone(), at));
         }
         let chosen = in_place.writing.editor.selection();
         if changed || chosen != in_place.chosen {
@@ -1978,6 +1999,15 @@ impl Widgets {
     pub fn note_chose(&mut self, name: &str, choice: crate::ui::note::Choice) {
         use crate::ui::note::Choice;
         let index = self.list.iter().position(|w| w.in_place.as_ref().is_some_and(|in_place| in_place.name == name));
+        // (Its writing menu's: done to the words, seen to as what is typed is.)
+        if let Choice::Write(how) = choice {
+            if let Some(index) = index {
+                self.list[index].in_place.as_ref().unwrap().writing.write(how);
+                let hwnd = self.list[index].window.hwnd;
+                self.written(hwnd);
+            }
+            return;
+        }
         let kept = index.is_none_or(|index| {
             let widget = &mut self.list[index];
             widget.next_frame = Instant::now();
@@ -2612,7 +2642,7 @@ impl Widget {
     /// The pointer's `msg` for its note written in where it is, or to be (see `Widgets::write`), its menu asked for by
     /// its button told in `menu_asked`. Whether it was theirs.
     fn write(&mut self, msg: &windows::Win32::UI::WindowsAndMessaging::MSG, menu_asked: &mut Option<u64>) -> bool {
-        use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL};
+        use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP};
         let px = self.contact.scale * self.zoom;
         let hwnd = self.window.hwnd;
         let mut client = POINT { x: (msg.lParam.0 & 0xFFFF) as i16 as i32, y: ((msg.lParam.0 >> 16) & 0xFFFF) as i16 as i32 };
@@ -2664,7 +2694,8 @@ impl Widget {
                 hand_on(msg.message);
                 true
             }
-            WM_MOUSEWHEEL if self.in_place.as_ref().is_some_and(|in_place| in_place.taking && in_place.writing.editor.holds(client)) => {
+            // (The right button's on its words theirs: the writing menu.)
+            WM_MOUSEWHEEL | WM_RBUTTONDOWN | WM_RBUTTONUP if self.in_place.as_ref().is_some_and(|in_place| in_place.taking && in_place.writing.editor.holds(client)) => {
                 hand_on(msg.message);
                 true
             }

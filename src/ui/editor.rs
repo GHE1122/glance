@@ -163,6 +163,16 @@ impl Editor {
         text.to_string().replace("\r\n", "\n").replace('\r', "\n")
     }
 
+    /// What is written but the paragraph mark the text services end it with (see `text`): what can be written in, as
+    /// an edit of it is made (see `apply`: an edit made of `text` could reach past that mark, where nothing goes).
+    pub fn words(&self) -> String {
+        let mut text = self.text();
+        if text.ends_with('\n') {
+            text.pop();
+        }
+        text
+    }
+
     /// `text` written in it, in place of what was: given back as it was (see `text`).
     pub fn set_text(&self, text: &str) {
         // (Each line break one carriage return, as the text services keep them: Windows' pairs as one too. The last
@@ -416,6 +426,11 @@ impl Editor {
         unsafe {
             let _ = self.services.OnTxPropertyBitsChange(TXTBIT_CLIENTRECTCHANGE, TXTBIT_CLIENTRECTCHANGE);
         }
+    }
+
+    /// The window it is written in.
+    pub fn window(&self) -> HWND {
+        self.kept.hwnd
     }
 
     pub fn caret(&self) -> Option<(i32, i32, i32, i32)> {
