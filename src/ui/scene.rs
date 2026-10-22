@@ -364,7 +364,7 @@ fn capture(shared: &Arc<Shared>, item: &GraphicsCaptureItem, size: SizeInt32) ->
     let session = pool.CreateCaptureSession(item).ok()?;
     // (Not on every system: a border no one sees is drawn then.)
     let _ = session.SetIsBorderRequired(false);
-    // (Debug builds, where GLANCE_UNPACED is set: as on a system that cannot be asked, see scripts/probe.py.)
+    // (Debug builds, where GLANCE_UNPACED is set: as on a system that cannot be asked.)
     let unpaced = cfg!(debug_assertions) && std::env::var_os("GLANCE_UNPACED").is_some();
     let paced = !unpaced && session.SetMinUpdateInterval(live_span()).is_ok();
     let _ = session.SetIsCursorCaptureEnabled(false);

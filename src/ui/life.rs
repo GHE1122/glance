@@ -1,6 +1,5 @@
 //! How long what Glance draws with lives: the same for every window that draws (the panel, a widget, the settings,
-//! the overlay, the lyrics' windows, a dialog, a menu, a tip, where a widget would stick). See docs/architecture.md,
-//! "What drawing holds, and for how long".
+//! the overlay, the lyrics' windows, a dialog, a menu, a tip, where a widget would stick).
 //!
 //! - The device's own (one a thread: see `gfx::current`), its caches among them, live as long as the thread, and are
 //!   given back as they fall due by the device itself: what painting layers took once they stay as they are, and

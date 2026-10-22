@@ -1,5 +1,5 @@
 //! The station: a shelf to put things on for a while (files, pictures, text, links) and take them off again into
-//! another program, and what was copied lately (see docs/station-and-notes.md).
+//! another program, and what was copied lately.
 
 pub mod apps;
 pub mod catch;

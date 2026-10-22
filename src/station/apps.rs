@@ -1,5 +1,5 @@
-//! Quick launch: the programs, files, folders and web addresses kept at hand on the workbench, in their order (see
-//! docs/station-and-notes.md, section 八). Each is kept as Windows names it to be opened: a program from the Start
+//! Quick launch: the programs, files, folders and web addresses kept at hand on the workbench, in their order.
+//! Each is kept as Windows names it to be opened: a program from the Start
 //! menu by its shell name (`shell:AppsFolder\…`, a Store app's and a desktop program's alike), a shortcut, file or
 //! folder by its path (a shortcut kept as the shortcut), a web address as it is. Opened as the user, by the shell, on
 //! the station's thread (see `run::Ask::Launch`): Glance's UI runs unelevated, so what it opens does too.

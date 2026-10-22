@@ -1,5 +1,5 @@
 //! Recent files: the files lately come to the user's folders, wherever they landed (downloaded, a screenshot, a
-//! document saved), newest first, shown as a page of the station (see docs/station-and-notes.md, section 八).
+//! document saved), newest first, shown as a page of the station.
 //!
 //! Read as the user, never through the elevated sensors: from each fixed drive's change journal, read the way NTFS
 //! lets anyone read it (`FSCTL_READ_UNPRIVILEGED_USN_JOURNAL`, through the drive's root folder). Its records name no

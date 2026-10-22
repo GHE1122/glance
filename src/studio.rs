@@ -131,7 +131,7 @@ struct Shot {
 }
 
 /// A song as the music widget or the full screen shows it: its lines (as Glance's lyrics hold them, in a JSON file),
-/// what is heard of it (see `studio/song.py`), its cover (a picture), what it is called and by whom, how long it is,
+/// what is heard of it, its cover (a picture), what it is called and by whom, how long it is,
 /// and how far into it the shot begins (seconds).
 #[derive(Deserialize)]
 struct MusicShot {

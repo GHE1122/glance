@@ -1,5 +1,5 @@
-//! Notes: thoughts, to-dos and things to remember, a Markdown file each in a folder of the user's (see
-//! docs/station-and-notes.md, section 二): `Documents\Glance 便签` unless another is chosen. Listed here as the folder
+//! Notes: thoughts, to-dos and things to remember, a Markdown file each in a folder of the user's:
+//! `Documents\Glance 便签` unless another is chosen. Listed here as the folder
 //! holds them, read again as it changes (by Glance, or by another program, or by a sync); written by the page they
 //! are edited on (see `ui::beside`), as `store` says.
 

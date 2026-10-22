@@ -1,4 +1,4 @@
-//! How a note's Markdown shows as it is written (see docs/station-and-notes.md, sections 二 and 六): what each stretch
+//! How a note's Markdown shows as it is written: what each stretch
 //! of it looks like, for the box it is written in to dress it, the words themselves left as they are. Parsed with
 //! pulldown-cmark, as CommonMark (and its task lists and strike-through) reads it.
 //!
