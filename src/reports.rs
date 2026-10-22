@@ -18,6 +18,9 @@ pub const FILE: &str = "reports.json";
 const MOST: u64 = 4 << 20;
 /// How long a report is followed after anything last happened in it (milliseconds).
 const FOLLOWED_FOR: u64 = 90 * 86_400_000;
+/// How often the site is asked while a report is still talked over (not fixed, not closed: see `talking`), beside the
+/// update check's daily asking: a reply heard within the hour, the user can answer it while it matters.
+const TALKING_EVERY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 /// How many reports one asking names, the latest first (the site answers no more).
 const ASKED_MOST: usize = 20;
 /// The most of the user's own words kept (characters), as the window that takes them takes no more.
@@ -367,6 +370,24 @@ pub fn ask() {
     }
 }
 
+/// Whether a report in `kept` is still talked over: neither fixed nor closed.
+fn talking(kept: &Kept) -> bool {
+    kept.reports.iter().any(|report| matches!(report.status(), Status::Open | Status::Answered))
+}
+
+/// Asks the site every `TALKING_EVERY` what is new in the reports this PC sent, while one is still talked over and
+/// updates are checked for (asking is as the update check's, which asks once a day of them all: see `ask`). Its own
+/// thread, till Glance ends.
+pub fn follow() {
+    loop {
+        std::thread::sleep(TALKING_EVERY);
+        let wanted = crate::app().settings.lock().unwrap().check_updates;
+        if wanted && with(false, |kept| talking(kept)) {
+            ask();
+        }
+    }
+}
+
 /// What is new in the reports followed, asked of the site and kept: each report with news, and what is newest in it.
 fn hear() -> Vec<(String, Message)> {
     let now = now();
@@ -496,6 +517,23 @@ mod tests {
     fn news(items: &[(&str, u64, &str, &str)]) -> Vec<u8> {
         let news: Vec<serde_json::Value> = items.iter().map(|(id, n, kind, text)| serde_json::json!({ "id": id, "n": n, "ts": 1000 + n, "kind": kind, "text": text, "version": if *kind == "fixed" { "9.0.0" } else { "" } })).collect();
         serde_json::json!({ "news": news }).to_string().into_bytes()
+    }
+
+    /// A report is talked over till it is fixed or closed (open again: talked over again), and with none of them so,
+    /// the site is not asked each hour.
+    #[test]
+    fn asked_each_hour_while_a_report_is_talked_over() {
+        let status = |kind: Kind, n: u64| Message { n, ts: 1000 + n, kind, text: String::new(), version: if kind == Kind::Fixed { "9.0.0".into() } else { String::new() }, pictures: 0, diagnostics: false };
+        let mut kept = Kept { reports: vec![report("KQRH9F", 10 * DAY), report("ABCDEF", 20 * DAY)] };
+        assert!(talking(&kept));
+        kept.reports[0].thread.push(status(Kind::Fixed, 1));
+        kept.reports[1].thread.extend([status(Kind::Reply, 1), status(Kind::Answered, 2)]);
+        assert!(talking(&kept));
+        kept.reports[1].thread.push(status(Kind::Closed, 3));
+        assert!(!talking(&kept));
+        kept.reports[0].thread.push(status(Kind::Open, 2));
+        assert!(talking(&kept));
+        assert!(!talking(&Kept::default()));
     }
 
     #[test]
