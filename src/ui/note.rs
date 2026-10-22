@@ -425,14 +425,14 @@ enum Taken {
 /// bytes, 2 for UTF-16).
 fn clipboard_data(owner: HWND, format: u32, unit: usize) -> Option<Vec<u8>> {
     use windows::Win32::Foundation::HGLOBAL;
-    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard};
+    use windows::Win32::System::DataExchange::{GetClipboardData, IsClipboardFormatAvailable};
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     if unsafe { IsClipboardFormatAvailable(format) }.is_err() {
         return None;
     }
     let mut taken = Vec::new();
+    let _opened = crate::clipboard::open(owner)?;
     unsafe {
-        OpenClipboard(Some(owner)).ok()?;
         if let Ok(held) = GetClipboardData(format) {
             let memory = HGLOBAL(held.0);
             let size = GlobalSize(memory);
@@ -442,7 +442,6 @@ fn clipboard_data(owner: HWND, format: u32, unit: usize) -> Option<Vec<u8>> {
                 let _ = GlobalUnlock(memory);
             }
         }
-        let _ = CloseClipboard();
     }
     // (As far as the zero that ends it: what is held past it is the memory's rounding.)
     let end = taken.chunks(unit).position(|chunk| chunk.iter().all(|byte| *byte == 0)).map_or(taken.len(), |at| at * unit);

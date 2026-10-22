@@ -18,7 +18,7 @@ use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_HIT_TEST_M
 use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, ScreenToClient, ValidateRect, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
-use windows::Win32::System::DataExchange::{AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RemoveClipboardFormatListener, SetClipboardData};
+use windows::Win32::System::DataExchange::{AddClipboardFormatListener, EmptyClipboard, GetClipboardData, RemoveClipboardFormatListener, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
@@ -248,10 +248,8 @@ impl Colours {
 /// The text on the clipboard, its lines broken by `\n` alone, its tabs as spaces and nothing else unprintable.
 fn clipboard_text(owner: HWND) -> Vec<u16> {
     let mut taken = Vec::new();
+    let Some(opened) = crate::clipboard::open(owner) else { return taken };
     unsafe {
-        if OpenClipboard(Some(owner)).is_err() {
-            return taken;
-        }
         if let Ok(held) = GetClipboardData(TEXT) {
             let memory = HGLOBAL(held.0);
             let units = GlobalLock(memory) as *const u16;
@@ -264,18 +262,16 @@ fn clipboard_text(owner: HWND) -> Vec<u16> {
                 let _ = GlobalUnlock(memory);
             }
         }
-        let _ = CloseClipboard();
     }
+    drop(opened);
     let text = String::from_utf16_lossy(&taken).replace("\r\n", "\n").replace(['\r'], "\n").replace('\t', " ");
     text.chars().filter(|&c| c == '\n' || !c.is_control()).collect::<String>().encode_utf16().collect()
 }
 
 /// `text` put on the clipboard.
 fn copy_text(owner: HWND, text: &[u16]) {
+    let Some(_opened) = crate::clipboard::open(owner) else { return };
     unsafe {
-        if OpenClipboard(Some(owner)).is_err() {
-            return;
-        }
         let _ = EmptyClipboard();
         if let Ok(memory) = GlobalAlloc(GMEM_MOVEABLE, (text.len() + 1) * 2) {
             let units = GlobalLock(memory) as *mut u16;
@@ -287,7 +283,6 @@ fn copy_text(owner: HWND, text: &[u16]) {
                 let _ = SetClipboardData(TEXT, Some(HANDLE(memory.0)));
             }
         }
-        let _ = CloseClipboard();
     }
 }
 

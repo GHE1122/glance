@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, GetHGlobalFromStream};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, STREAM_SEEK_END};
-use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard};
+use windows::Win32::System::DataExchange::{GetClipboardData, IsClipboardFormatAvailable};
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
@@ -50,11 +50,9 @@ pub fn on_clipboard() -> bool {
 /// pictures, or the one picture copied there (a screenshot, as Windows
 /// takes them). `owner` is the window asking.
 pub fn from_clipboard(owner: HWND, small: (u32, u32)) -> Vec<Picture> {
+    let Some(_opened) = crate::clipboard::open(owner) else { return Vec::new() };
     unsafe {
-        if OpenClipboard(Some(owner)).is_err() {
-            return Vec::new();
-        }
-        let taken = if let Ok(files) = GetClipboardData(FILES) {
+        if let Ok(files) = GetClipboardData(FILES) {
             let files = HDROP(files.0);
             (0..DragQueryFileW(files, u32::MAX, None))
                 .filter_map(|index| {
@@ -71,9 +69,7 @@ pub fn from_clipboard(owner: HWND, small: (u32, u32)) -> Vec<Picture> {
             read().into_iter().collect()
         } else {
             Vec::new()
-        };
-        let _ = CloseClipboard();
-        taken
+        }
     }
 }
 

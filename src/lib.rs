@@ -15,6 +15,8 @@ mod push;
 mod handoff;
 mod frames;
 #[cfg(windows)]
+mod clipboard;
+#[cfg(windows)]
 mod diagnostics;
 #[cfg(windows)]
 mod dimm;

@@ -201,7 +201,9 @@ pub fn tab(text: &str, chosen: (usize, usize), back: bool) -> Option<Option<supe
     let to = match (within, back) {
         (Some(index), false) => Some(index + 1),
         (Some(index), true) => index.checked_sub(1),
-        (None, false) => cells.iter().position(|(.., cell)| cell.room.start > at),
+        // (Between cells, or after a row's last pipe: the next that begins there or after, one left out among them, or
+        // past the last.)
+        (None, false) => Some(cells.iter().position(|(.., cell)| cell.room.start >= at).unwrap_or(cells.len())),
         (None, true) => cells.iter().rposition(|(.., cell)| cell.room.end < at),
     };
     let choose = |range: &Range<usize>| super::edit::Edit { range: range.start..range.start, with: String::new(), chosen: (range.start, range.end) };
@@ -325,5 +327,14 @@ mod tests {
         assert!(!tables(listed)[0].own);
         let more = tab(listed, (listed.len() - 2, listed.len() - 2), false).unwrap().unwrap();
         assert_eq!(more.with, "\n  |  |");
+        // After a row's last pipe, as the caret is once it has been typed: the next row's first cell, else a row more.
+        let typed = "| a | b |\n| - | - |\n| c | d |\n| e | f |";
+        let end = typed.find("\n| e").unwrap();
+        let next = tab(typed, (end, end), false).unwrap().unwrap();
+        assert_eq!(&typed[next.chosen.0..next.chosen.1], "e");
+        let more = tab(typed, (typed.len(), typed.len()), false).unwrap().unwrap();
+        assert_eq!((more.with.as_str(), more.chosen), ("\n|  |  |", (typed.len() + 3, typed.len() + 3)));
+        let left = tab(piped, (piped.len(), piped.len()), false).unwrap().unwrap();
+        assert_eq!((left.with.as_str(), left.chosen), ("  |", (piped.len() + 1, piped.len() + 1)));
     }
 }
