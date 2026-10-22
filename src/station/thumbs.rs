@@ -42,7 +42,8 @@ enum Made {
 }
 
 /// The most pictures kept (those asked for longest ago go first: never one drawn now, as a list turned through many
-/// others pictured, else the first made, quick launch's, went and showed none till made again).
+/// others pictured, else the first made, quick launch's, went and showed none till made again). Past it, those asked
+/// for within `DRAWN_STILL` are kept too.
 const KEPT_MOST: usize = 256;
 
 struct Kept {
@@ -54,17 +55,24 @@ struct Kept {
     looking: HashSet<PathBuf>,
 }
 
-/// What is kept, as many as `most`: those asked for longest ago let go of first, as more come.
+/// How long after it was last asked for a picture counts as drawn still: kept past `KEPT_MOST`. (More drawn at once
+/// than the most kept, each let go of as the next was made, then made again: every picture shown came and went, over
+/// and over.)
+const DRAWN_STILL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// What is kept, as many as `most`: those asked for longest ago let go of first, as more come, but never one asked for
+/// within `fresh` (more than `most` kept while more are asked for at once).
 struct Used<K, V> {
-    kept: HashMap<K, (V, u64)>,
+    kept: HashMap<K, (V, u64, std::time::Instant)>,
     /// How many times one was asked for or kept, each so numbered.
     asked: u64,
     most: usize,
+    fresh: std::time::Duration,
 }
 
 impl<K: std::hash::Hash + Eq + Clone, V> Used<K, V> {
-    fn new(most: usize) -> Used<K, V> {
-        Used { kept: HashMap::new(), asked: 0, most }
+    fn new(most: usize, fresh: std::time::Duration) -> Used<K, V> {
+        Used { kept: HashMap::new(), asked: 0, most, fresh }
     }
 
     /// What is kept for `key`, asked for now.
@@ -74,18 +82,22 @@ impl<K: std::hash::Hash + Eq + Clone, V> Used<K, V> {
     {
         self.asked += 1;
         let asked = self.asked;
-        self.kept.get_mut(key).map(|(value, when)| {
-            *when = asked;
+        self.kept.get_mut(key).map(|(value, when, at)| {
+            (*when, *at) = (asked, std::time::Instant::now());
             &*value
         })
     }
 
-    /// `value` kept for `key`, asked for now; past `most`, the one asked for longest ago let go of.
+    /// `value` kept for `key`, asked for now, and past `most`, the one asked for longest ago let go of, where it was asked
+    /// for longer ago than `fresh`.
     fn insert(&mut self, key: K, value: V) {
         self.asked += 1;
-        self.kept.insert(key, (value, self.asked));
+        self.kept.insert(key, (value, self.asked, std::time::Instant::now()));
         while self.kept.len() > self.most {
-            let Some(oldest) = self.kept.iter().min_by_key(|(_, (_, when))| *when).map(|(key, _)| key.clone()) else { break };
+            let Some((oldest, at)) = self.kept.iter().min_by_key(|(_, (_, when, _))| *when).map(|(key, (_, _, at))| (key.clone(), *at)) else { break };
+            if at.elapsed() < self.fresh {
+                break;
+            }
             self.kept.remove(&oldest);
         }
     }
@@ -110,6 +122,23 @@ static ASKS: OnceLock<Mutex<Sender<Key>>> = OnceLock::new();
 static LOOKS: OnceLock<Mutex<Sender<PathBuf>>> = OnceLock::new();
 /// Called (on the pictures' thread) as one is made.
 static TOLD: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+/// How many times a picture was made, or a path found to be other than it was (see `changes`).
+static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A picture made, or a path found to be other than it was: counted, and told.
+fn tell() {
+    CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some(told) = TOLD.get() {
+        told();
+    }
+}
+
+/// How many times a picture was made, or a path found to be other than it was, so far: for a drawing to tell that
+/// what it shows may have changed since, without asking for each picture it may show (asked for, those not shown
+/// were made too, and as many as there are files listed kept, those shown let go of to make room).
+pub fn changes() -> u64 {
+    CHANGES.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Starts the pictures' thread; `told` is called as each is made.
 pub fn start(told: impl Fn() + Send + Sync + 'static) {
@@ -118,7 +147,7 @@ pub fn start(told: impl Fn() + Send + Sync + 'static) {
     if ASKS.set(Mutex::new(sender)).is_err() {
         return;
     }
-    *KEPT.lock().unwrap() = Some(Kept { made: Used::new(KEPT_MOST), asked: HashSet::new(), looked: Used::new(LOOKED_MOST), looking: HashSet::new() });
+    *KEPT.lock().unwrap() = Some(Kept { made: Used::new(KEPT_MOST, DRAWN_STILL), asked: HashSet::new(), looked: Used::new(LOOKED_MOST, LOOK_AGAIN), looking: HashSet::new() });
     std::thread::Builder::new().name("glance: station pictures".into()).spawn(move || make(asks)).expect("a thread started");
     let (sender, looks) = std::sync::mpsc::channel();
     let _ = LOOKS.set(Mutex::new(sender));
@@ -156,9 +185,7 @@ fn look(looks: Receiver<PathBuf>) {
             changed
         };
         if changed {
-            if let Some(told) = TOLD.get() {
-                told();
-            }
+            tell();
         }
     }
 }
@@ -227,9 +254,7 @@ fn make(asks: Receiver<Key>) {
             kept.asked.remove(&key);
             kept.made.insert(key, made);
         }
-        if let Some(told) = TOLD.get() {
-            told();
-        }
+        tell();
     }
 }
 
@@ -404,7 +429,7 @@ mod made {
     /// as many more come and go.
     #[test]
     fn what_is_asked_for_all_along_is_kept() {
-        let mut used = Used::new(3);
+        let mut used = Used::new(3, std::time::Duration::ZERO);
         used.insert("quick launch", 0);
         for file in 1..10 {
             assert_eq!(used.get(&"quick launch"), Some(&0), "after {file}");
@@ -415,6 +440,25 @@ mod made {
         assert_eq!(used.get(&"i"), Some(&9));
         assert_eq!(used.get(&"g"), None);
         assert_eq!(used.kept.len(), 3);
+    }
+
+    /// More asked for at once than the most kept: none let go of while it was asked for lately (each let go of as the
+    /// next came, every picture drawn went and was made again, over and over), those asked for long ago let go of then.
+    #[test]
+    fn what_is_drawn_now_is_kept_past_the_most() {
+        let mut used = Used::new(3, std::time::Duration::from_millis(200));
+        for file in 0..5 {
+            used.insert(file, file);
+        }
+        assert_eq!(used.kept.len(), 5);
+        assert!((0..5).all(|file| used.get(&file) == Some(&file)));
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        used.get(&4);
+        used.insert(5, 5);
+        assert_eq!(used.kept.len(), 3);
+        assert_eq!(used.get(&4), Some(&4));
+        assert_eq!(used.get(&5), Some(&5));
+        assert_eq!(used.get(&0), None);
     }
 
     /// A thumbnail larger than the side asked for is made smaller to fit, its shape and colours kept, and centred:

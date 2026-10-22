@@ -1780,29 +1780,22 @@ impl Hash for Block {
             Block::StuckNote(note) => note.hash(state),
             Block::Apps { apps, rows, named, over } => {
                 (apps, rows, named, over).hash(state);
-                apps.iter().for_each(|(_, target)| face_key(std::path::Path::new(target), APP_PIXELS).hash(state));
+                crate::station::thumbs::changes().hash(state);
             }
             Block::Recent { rows, filter, view, tall } => {
                 (rows, filter, view, tall.to_bits()).hash(state);
-                rows.iter().for_each(|row| face_key(&row.path, TILE_PIXELS).hash(state));
+                crate::station::thumbs::changes().hash(state);
             }
             Block::Shelf { tiles, shows, tall, said, over } => {
                 (tiles, shows, tall.to_bits(), said, over).hash(state);
-                pictures_made(tiles, if let Shows::View(view) = shows { pixels_for(*view) } else { TILE_PIXELS }, state);
+                crate::station::thumbs::changes().hash(state);
             }
             Block::Copies { rows, view, tall } => {
                 (rows, view, tall.to_bits()).hash(state);
-                pictures_made(rows, pixels_for(*view), state);
+                crate::station::thumbs::changes().hash(state);
             }
         }
     }
-}
-
-/// Each of `tiles`' pictures as it is now (`side` px), for a drawing to tell one made since.
-fn pictures_made<H: Hasher>(tiles: &[Tile], side: u32, state: &mut H) {
-    tiles.iter().for_each(|tile| if let Face::Picture { path, .. } = &tile.face {
-        face_key(path, side).hash(state);
-    });
 }
 
 /// How much of its module a lane shows (see `arrange::Form`).
@@ -3950,17 +3943,6 @@ fn paint_shell_icon(frame: &dyn Canvas, theme: &Theme, path: &std::path::Path, c
             paint_file_mark(frame, theme, folder, path, centre, side * 0.8, side >= 40.0, looked == Some(crate::station::thumbs::Looked::Gone));
         }
     }
-}
-
-/// What tells a thing's face as it is drawn now (see `paint_face`, `paint_app`): the picture it is drawn with, made
-/// or not yet; for a drawing to tell one made since.
-fn face_key(path: &std::path::Path, side: u32) -> Option<u64> {
-    let picture = if shows_itself(path) {
-        crate::station::thumbs::filling(path, side)
-    } else {
-        crate::station::thumbs::icon(path, side)
-    };
-    picture.map(|picture| picture.key)
 }
 
 /// A folder's or a file's mark, as the panel's icons are drawn (a line, not the shell's picture of it), `side` wide
