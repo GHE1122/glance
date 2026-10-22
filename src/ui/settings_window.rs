@@ -5838,6 +5838,37 @@ mod tests {
 
     /// What the preview measures of its desktop is what the desktop is where it is asked: kept while it is asked of
     /// the same place, measured again for another.
+    /// Opens a report's thread (one with a reply not yet read) on this PC's desktop for a few seconds, to be looked
+    /// at: `cargo test --lib --features studio shows_a_report_s_thread -- --ignored` (`DARK` set: dark).
+    #[cfg(feature = "studio")]
+    #[test]
+    #[ignore = "puts a window up on this PC's desktop"]
+    fn shows_a_report_s_thread() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, FindWindowW, PostMessageW, WM_CLOSE};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let info = crate::metrics::Sampler::new().info;
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let history = (0..120).map(|i| crate::studio::made_up(&info, now_ms as f64 - (120 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
+        crate::pictured(info, history);
+        crate::reports::pretend(now_ms);
+        let gfx = gfx::held().unwrap();
+        let hwnd = make(gfx.clone(), false).unwrap();
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(std::env::var("FOR").ok().and_then(|s| s.parse().ok()).unwrap_or(8)));
+            let _ = unsafe { PostMessageW(FindWindowW(w!("GlanceAsk"), None).ok(), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        });
+        with_ui(|ui| {
+            ui.dark = std::env::var("DARK").is_ok();
+            ui.open_thread("KQRH9F");
+        });
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
     #[test]
     fn the_preview_measures_its_desktop_where_asked() {
         // Black on the left half, white on the right.
