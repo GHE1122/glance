@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use super::super::canvas::{Align, Canvas, Color, Family, Font};
 use super::super::editor::Editor;
 use super::super::text::Lang;
-use super::super::theme::{Skin, Theme};
+use super::super::theme::Theme;
 use super::{HEAD, PAD, FOOT, WORDS};
 
 /// Its measures (DIPs, for words `WORDS` high: larger as they are): as wide as it is at most, the room round what is
@@ -338,21 +338,19 @@ impl Linking {
         Some(Some(LRESULT(0)))
     }
 
-    /// It drawn on `frame` (DIPs), its window's corner at `window` on it and `scale` pixels a DIP: a plate as the note's
-    /// menus are (see `menu::plate`), on it each field's name and its room, the words in it as its box draws them (or,
-    /// none, what goes there, faint), the one with the keys ringed in the accent and its caret where it is
+    /// It drawn on `frame` (DIPs), its window's corner at `window` on it and `scale` pixels a DIP: a plate of the note's
+    /// (of its `colour`: see `note_plate`), on it each field's name and its room, the words in it as its box draws them
+    /// (or, none, what goes there, faint), the one with the keys ringed in the note's accent and its caret where it is
     /// (`caret_on`: in its blink, shown), the button that writes the link, faint till it can.
-    pub fn paint(&self, frame: &super::super::gfx::Frame, theme: &Theme, lang: Lang, window: (f32, f32), scale: f32, caret_on: bool) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint(&self, frame: &super::super::gfx::Frame, theme: &Theme, colour: crate::notes::Colour, lang: Lang, window: (f32, f32), scale: f32, caret_on: bool) {
         let laid = self.lay();
         let in_window = |rect: &RECT| (window.0 + rect.left as f32 / scale, window.1 + rect.top as f32 / scale, (rect.right - rect.left) as f32 / scale, (rect.bottom - rect.top) as f32 / scale);
         let per = self.per / scale;
-        let plate = super::super::menu::plate(frame, super::super::menu::Look::of(theme.skin, theme.dark), in_window(&laid.plate));
+        let plate = super::note_plate(frame, theme, colour, in_window(&laid.plate));
         let small = Font { size: SMALL * per, ..Font::new(Family::YaHei, SMALL, 400.0) };
         let typed = Font { size: TYPED * per, ..small };
-        let accent = match theme.skin {
-            Skin::Paper => theme.text,
-            _ => super::super::theme::accent(theme.dark),
-        };
+        let (accent, on_accent) = super::super::view::note_accent(theme, colour);
         // (Written in the middle of `rect`, across from `x` as wide as `wide`.)
         let middle = |text: &str, font: Font, ink: Color, (x, y, wide, tall): (f32, f32, f32, f32), align: Align| {
             let high = frame.gfx.wrapped_height(text, font, wide);
@@ -391,12 +389,7 @@ impl Linking {
         let radius = (plate.radius - INSET * per).clamp(3.0 * per, 8.0 * per);
         let ready = self.ready();
         let lit = ready && inside(&laid.button, self.pointer(self.page.window()));
-        let (ground, ink) = match (ready, theme.skin) {
-            (false, _) => (plate.highlight, theme.text3),
-            (true, Skin::Paper) => (theme.text, Color { a: 1.0, ..theme.paper }),
-            (true, _) if theme.dark => (accent, Color::hex(0x000000, 0.9)),
-            (true, _) => (accent, Color::hex(0xFFFFFF, 1.0)),
-        };
+        let (ground, ink) = if ready { (accent, on_accent) } else { (plate.highlight, theme.text3) };
         frame.fill_rounded(if lit { ground.alpha(ground.a * 0.85) } else { ground }, x, y, wide, tall, radius);
         let (said, bold) = (lang.pick("确定", "OK"), Font { weight: 600.0, ..small });
         let across = frame.measure(said, bold);
