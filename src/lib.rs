@@ -106,6 +106,8 @@ mod source;
 #[cfg(windows)]
 mod update;
 #[cfg(windows)]
+mod reports;
+#[cfg(windows)]
 mod station;
 
 mod notes;
@@ -303,6 +305,12 @@ impl App {
 pub(crate) fn show_settings() {
     app().controller.dismiss();
     ui::settings_window::show();
+}
+
+/// The settings shown at the page of the reports this PC sent.
+pub(crate) fn show_reports() {
+    app().controller.dismiss();
+    ui::settings_window::open_at_reports();
 }
 
 /// The settings shown at the workbench's page (the station's choices are there).

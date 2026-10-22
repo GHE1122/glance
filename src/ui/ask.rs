@@ -45,13 +45,17 @@ use super::picture::{self, Picture};
 use super::view::Rect;
 
 /// What the window asks: its title, what it is about (in as many lines as
-/// that takes), the reader's own part if they may add one, what is sent
-/// besides (under its name), the two answers, and whether it is dark.
+/// that takes), the reader's own part if they may add one, a choice they may
+/// tick under it (what it says), what is shown besides (under its name, and
+/// whether it is shown from its end, as a thread is, the newest last), the
+/// two answers, and whether it is dark.
 pub struct Asked<'a> {
     pub title: &'a str,
     pub intro: &'a str,
     pub own: Option<Own<'a>>,
+    pub option: Option<&'a str>,
     pub sent: Option<(&'a str, &'a str)>,
+    pub from_end: bool,
     pub yes: &'a str,
     pub no: &'a str,
     pub dark: bool,
@@ -120,11 +124,12 @@ fn covering(frame: &Frame, picture: &Picture, tile: Rect, radius: f32, scale: f3
     drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
 }
 
-/// What the reader gave of their own: their words (none, perhaps) and
-/// their pictures, each a JPEG.
+/// What the reader gave of their own: their words (none, perhaps), their
+/// pictures, each a JPEG, and whether they ticked the choice.
 pub struct Said {
     pub words: String,
     pub pictures: Vec<Vec<u8>>,
+    pub option: bool,
 }
 
 /// How many characters (UTF-16 units) may be written, and how many pictures added (the site takes no more).
@@ -147,6 +152,9 @@ const TILE: (f32, f32) = (120.0, 76.0);
 const TILE_GAP: f32 = 8.0;
 const INSET: (f32, f32) = (11.0, 8.0);
 const WHEEL: f32 = 48.0;
+/// The choice's line, and its box.
+const OPTION: f32 = 24.0;
+const OPTION_BOX: f32 = 18.0;
 /// How far down the window's top may be held to move it.
 const CAPTION: f32 = 56.0;
 
@@ -169,6 +177,7 @@ enum Hit {
     Paste,
     Picture(usize),
     Remove(usize),
+    Option,
     Sent,
     Thumb,
     Yes,
@@ -299,6 +308,8 @@ struct Dialog {
     /// Whether the button that pastes the clipboard's picture was drawn (there was room for it).
     chip_shown: bool,
     sent: Option<(String, String)>,
+    /// The choice, what it says and whether it is ticked.
+    option: Option<(String, bool)>,
     yes: String,
     no: String,
     typing: Typing,
@@ -399,6 +410,9 @@ impl Dialog {
                 }
             }
         }
+        if self.option.is_some() {
+            stops.push(Hit::Option);
+        }
         if self.sent.is_some() {
             stops.push(Hit::Sent);
         }
@@ -467,6 +481,12 @@ impl Dialog {
             Hit::No => self.answer = Some(false),
             Hit::Add => self.choose_files = true,
             Hit::Paste => self.paste_pictures(),
+            Hit::Option => {
+                if let Some((_, ticked)) = &mut self.option {
+                    *ticked = !*ticked;
+                }
+                self.redraw();
+            }
             Hit::Remove(index) if index < self.pictures.len() => {
                 self.pictures.remove(index);
                 // The keyboard on what took its place, or what comes after the pictures.
@@ -689,6 +709,10 @@ impl Dialog {
             self.paint_pictures(frame, c, PAD, y, inner, &own);
             y += TILE.1 + GAP;
         }
+        if let Some((words, ticked)) = self.option.clone() {
+            self.paint_option(frame, c, Rect { x: PAD, y, w: inner, h: OPTION }, &words, ticked);
+            y += OPTION + GAP;
+        }
         if let Some((name, sent)) = self.sent.clone() {
             frame.text(&name, HEADING, c.text, PAD, y, inner, Align::Start);
             y += HEAD;
@@ -845,6 +869,25 @@ impl Dialog {
             let paste = own.paste.clone();
             self.button(frame, c, Rect { x: zone.x + zone.w - 12.0 - chip, y: middle - 15.0, w: chip, h: 30.0 }, &paste, Hit::Paste, false, true);
         }
+    }
+
+    /// The choice, its box ticked in the accent or ruled round, and what it says beside it.
+    fn paint_option(&mut self, frame: &Frame, c: &Colours, r: Rect, words: &str, ticked: bool) {
+        let top = r.y + (r.h - OPTION_BOX) / 2.0;
+        let over = self.hovered() == Some(Hit::Option);
+        if ticked {
+            frame.fill_rounded(c.accent.alpha(if over { 0.9 } else { 1.0 }), r.x, top, OPTION_BOX, OPTION_BOX, 4.0);
+            frame.icon(Icon::Check, Point { x: r.x + OPTION_BOX / 2.0, y: top + OPTION_BOX / 2.0 }, 14.0, Color::hex(0xFFFFFF, 1.0));
+        } else {
+            frame.fill_rounded(if over { c.button_hover } else { c.field }, r.x, top, OPTION_BOX, OPTION_BOX, 4.0);
+            frame.stroke_rounded(Fill::Solid(c.field_bottom), r.x + 0.5, top + 0.5, OPTION_BOX - 1.0, OPTION_BOX - 1.0, 4.0, 1.0);
+        }
+        let (ascent, descent) = frame.gfx.baseline(BODY);
+        let wide = frame.gfx.measure(words, BODY).min(r.w - OPTION_BOX - 10.0);
+        frame.text(words, BODY, c.text, r.x + OPTION_BOX + 10.0, r.y + (r.h - ascent - descent) / 2.0, wide + 1.0, Align::Start);
+        let hit = Rect { x: r.x, y: r.y, w: OPTION_BOX + 10.0 + wide, h: r.h };
+        self.ring(frame, c, Rect { x: r.x, y: top, w: OPTION_BOX, h: OPTION_BOX }, 4.0, Hit::Option);
+        self.drawn.push((hit, Hit::Option));
     }
 
     fn paint_sent(&mut self, frame: &Frame, c: &Colours, r: Rect, sent: &str) {
@@ -1086,11 +1129,13 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
             own,
             chip_shown: false,
             sent: asked.sent.map(|(name, text)| (name.into(), text.into())),
+            option: asked.option.map(|words| (words.into(), false)),
             yes: asked.yes.into(),
             no: asked.no.into(),
             typing: Typing::most(WORDS_MOST),
             pictures: Vec::new(),
-            scroll: 0.0,
+            // (From its end: as far down as it goes, once it is laid out.)
+            scroll: if asked.from_end { f32::MAX } else { 0.0 },
             scroll_most: 0.0,
             track: (0.0, 0.0, 0.0),
             pointer: None,
@@ -1177,7 +1222,8 @@ pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
             PostQuitMessage(code);
         }
         let words = dialog.typing.string().trim().to_string();
-        (dialog.answer == Some(true)).then(|| Said { words, pictures: dialog.pictures.into_iter().map(|picture| picture.jpeg).collect() })
+        let option = dialog.option.as_ref().is_some_and(|(_, ticked)| *ticked);
+        (dialog.answer == Some(true)).then(|| Said { words, pictures: dialog.pictures.into_iter().map(|picture| picture.jpeg).collect(), option })
     }
 }
 
@@ -1237,7 +1283,7 @@ mod tests {
             super::GIVEN_FOR_TEST.set(std::env::var("PICTURES").map(|paths| paths.split(';').map(str::to_string).collect()).unwrap_or_default());
             let text = (0..60).map(|line| format!("Line {line} of what is sent")).collect::<Vec<_>>().join("\n");
             let own = super::Own { words: "你想说的话（可不填）", hint: "比如：主板温度没有显示；风扇转速和别的软件里看到的不一样", pictures: "截图（可不添，最多 3 张）", add: "添加截图", ways: "点击选择、拖进窗口，或按 Ctrl+V 粘贴", paste: "粘贴剪贴板里的截图", waiting: "剪贴板里有截图，按 Ctrl+V 即可粘贴", kinds: "图片" };
-            let asked = super::Asked { title: "发送诊断信息", intro: "下面是将要发送给 Glance（glancepc.com）的全部内容：你写的话、你添加的截图，和最下面的诊断信息。不包含你的文件、账号或网络地址。", own: Some(own), sent: Some(("诊断信息", &text)), yes: "发送", no: "取消", dark };
+            let asked = super::Asked { title: "发送诊断信息", intro: "下面是将要发送给 Glance（glancepc.com）的全部内容：你写的话、你添加的截图，和最下面的诊断信息。不包含你的文件、账号或网络地址。", own: Some(own), option: std::env::var("OPTION").is_ok().then_some("附上当前的诊断信息"), sent: Some(("诊断信息", &text)), from_end: std::env::var("FROM_END").is_ok(), yes: "发送", no: "取消", dark };
             assert!(super::show(owner, &asked).is_none());
         }
     }

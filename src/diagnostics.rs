@@ -67,17 +67,18 @@ pub fn report() -> String {
     lines.join("\n")
 }
 
-/// Where a report is sent: Glance's own site.
-const REPORTS: &str = "https://glancepc.com/api/report";
-
-/// Sends `text` (the report, as the user was shown it) to Glance's site:
-/// the short name it was given there, to quote when asking about it; none
-/// if it did not get there.
-pub fn send(text: &str, pictures: &[Vec<u8>]) -> Option<String> {
+/// Sends `text` (the report, as the user was shown it, their own `words` in it) to Glance's site (see
+/// `update::own_site`), with a secret made for it alone, which the report is followed by (see `reports`): the short
+/// name it was given there, to quote when asking about it, and the report remembered to be followed. None if it
+/// did not get there.
+pub fn send(text: &str, words: &str, pictures: &[Vec<u8>]) -> Option<String> {
+    let secret = crate::reports::secret()?;
     let pictures: Vec<String> = pictures.iter().map(|picture| base64(picture)).collect();
-    let sent = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "text": text, "pictures": pictures }).to_string();
-    let answer: serde_json::Value = serde_json::from_slice(&crate::update::post(REPORTS, sent.as_bytes())?).ok()?;
-    answer.get("id")?.as_str().map(str::to_string)
+    let sent = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "text": text, "pictures": pictures, "secret": secret }).to_string();
+    let answer: serde_json::Value = serde_json::from_slice(&crate::update::post(&format!("{}/api/report", crate::update::own_site()), sent.as_bytes())?).ok()?;
+    let id = answer.get("id")?.as_str()?.to_string();
+    crate::reports::remember(&id, secret, words);
+    Some(id)
 }
 
 /// `bytes` in base64 (RFC 4648), as JSON carries a picture.
@@ -235,7 +236,7 @@ mod tests {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         let picture = std::mem::take(&mut crate::ui::picture::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/128x128@2x.png"), (84, 52)).expect("a picture to send").jpeg);
-        let id = super::send("Glance (a test of sending from this program; nothing is wrong)", &[picture]);
+        let id = super::send("Glance (a test of sending from this program; nothing is wrong)", "", &[picture]);
         println!("sent as {id:?}");
         assert!(id.is_some_and(|id| id.len() == 6));
     }

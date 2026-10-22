@@ -187,6 +187,8 @@ const PERF_TURN: u32 = WM_APP + 90;
 const PERF_LIVE: u32 = WM_APP + 91;
 /// Asked to turn to the workbench's page.
 const TO_WORKBENCH: u32 = WM_APP + 42;
+/// Asked to turn to the page of the reports sent.
+const TO_REPORTS: u32 = WM_APP + 44;
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
@@ -239,11 +241,17 @@ pub fn open_at_workbench() {
     open_at(Some(To::Workbench));
 }
 
+/// Opens the window (as `open`) at the page of the reports this PC sent: from a notification of news of one.
+pub fn open_at_reports() {
+    open_at(Some(To::Reports));
+}
+
 /// A page the window is opened at, other than the one last shown.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum To {
     Overlay,
     Workbench,
+    Reports,
 }
 
 impl To {
@@ -253,6 +261,7 @@ impl To {
             None => 0,
             Some(To::Overlay) => 1,
             Some(To::Workbench) => 2,
+            Some(To::Reports) => 3,
         }
     }
 
@@ -260,6 +269,7 @@ impl To {
         match told {
             1 => Some(To::Overlay),
             2 => Some(To::Workbench),
+            3 => Some(To::Reports),
             _ => None,
         }
     }
@@ -271,6 +281,7 @@ fn open_at(to: Option<To>) {
         let message = match to {
             Some(To::Overlay) => Some(TO_OVERLAY),
             Some(To::Workbench) => Some(TO_WORKBENCH),
+            Some(To::Reports) => Some(TO_REPORTS),
             None => None,
         };
         if let Some(message) = message {
@@ -410,6 +421,7 @@ fn up(to: Option<To>) -> Option<Option<Option<To>>> {
     match to {
         Some(To::Overlay) => to_overlay(),
         Some(To::Workbench) => to_workbench(),
+        Some(To::Reports) => to_reports(),
         None => {}
     }
     let mut msg = MSG::default();
@@ -471,6 +483,14 @@ fn to_workbench() {
     with_ui(|ui| {
         WORKBENCH_OWED.store(false, Ordering::Release);
         ui.turn_to(Page::Workbench);
+    });
+}
+
+/// The page of the reports sent, turned to, as they are now.
+fn to_reports() {
+    with_ui(|ui| {
+        ui.followed = crate::reports::list();
+        ui.turn_to(Page::Reports);
     });
 }
 
@@ -650,6 +670,8 @@ struct RemoteAnswer {
 enum ReportFor {
     Copy,
     Send,
+    /// To go with what the user adds to a report they sent (see `Ui::adding_asked`).
+    Add,
 }
 
 /// The window's own colours: Windows 11's, whatever skin the panel wears.
@@ -765,6 +787,8 @@ enum Page {
     Music,
     Phone,
     General,
+    /// The reports this PC sent, as threads: a page of General's, opened from it (see `Row::MyReports`).
+    Reports,
 }
 
 /// The monitor's settings, a group to a tab: what it shows, how it reads and warns, and its overlay.
@@ -815,7 +839,7 @@ impl NavItem {
             NavItem::Page(Page::Workbench) => pick(lang, "工作台", "Workbench"),
             NavItem::Page(Page::Music) => pick(lang, "音乐", "Music"),
             NavItem::Page(Page::Phone) => pick(lang, "手机互联", "Phone"),
-            NavItem::Page(Page::General) => pick(lang, "通用", "General"),
+            NavItem::Page(Page::General | Page::Reports) => pick(lang, "通用", "General"),
         }
     }
 
@@ -830,12 +854,15 @@ impl Page {
             Page::Workbench => Icon::PencilRuler,
             Page::Music => Icon::Music,
             Page::Phone => Icon::Smartphone,
-            Page::General => Icon::Settings,
+            Page::General | Page::Reports => Icon::Settings,
         }
     }
 
     fn name(self, lang: Lang) -> &'static str {
-        NavItem::Page(self).name(lang)
+        match self {
+            Page::Reports => pick(lang, "我的反馈", "My reports"),
+            page => NavItem::Page(page).name(lang),
+        }
     }
 }
 
@@ -886,6 +913,87 @@ enum Button {
 /// A row of buttons: its name, its word, and its buttons, right to left
 /// (text, what each does, how it looks).
 type ButtonRow = (String, String, Vec<(String, Target, Button)>);
+
+/// How a report sent stands, in a few words.
+fn status_words(lang: Lang, status: &crate::reports::Status) -> String {
+    use crate::reports::Status;
+    match (status, lang) {
+        (Status::Open, _) => pick(lang, "待处理", "Open").into(),
+        (Status::Answered, _) => pick(lang, "已回复", "Answered").into(),
+        (Status::Fixed(version), Lang::Zh) => format!("已在 {version} 修复"),
+        (Status::Fixed(version), Lang::En) => format!("Fixed in {version}"),
+        (Status::Closed, _) => pick(lang, "已关闭", "Closed").into(),
+    }
+}
+
+/// When `ts` (ms since 1970) was, as a thread says it: its day and time.
+fn thread_time(lang: Lang, ts: u64) -> String {
+    let at = crate::ui::text::Local::at(ts);
+    format!("{} {}", at.date(lang), at.time(false, lang).0)
+}
+
+/// What a report's thread says above it: how it stands, what that means for this Glance, and what may be done.
+fn thread_intro(lang: Lang, report: &crate::reports::Report) -> String {
+    let status = report.status();
+    let words = status_words(lang, &status);
+    let fix = match &status {
+        crate::reports::Status::Fixed(version) => match (update::newer(version, env!("CARGO_PKG_VERSION")), lang) {
+            (true, Lang::Zh) => format!("当前版本为 {}，更新到 {version} 即可获得此修复。", env!("CARGO_PKG_VERSION")),
+            (true, Lang::En) => format!("This is {}. Update to {version} to have the fix. ", env!("CARGO_PKG_VERSION")),
+            (false, Lang::Zh) => "当前版本已包含此修复。".to_string(),
+            (false, Lang::En) => "This version has the fix. ".to_string(),
+        },
+        _ => String::new(),
+    };
+    match lang {
+        Lang::Zh => format!("状态：{words}。{fix}以下为这份反馈的全部往来，最新的在最下方。如需补充说明或截图，可在下方填写，将发送至同一份反馈。"),
+        Lang::En => format!("Status: {words}. {fix}Below is all that was said about this report, the newest last. To add words or pictures, write them below: they go to the same report."),
+    }
+}
+
+/// A report's thread as text, in time order: what the user sent, the developer's replies, the user's additions,
+/// and each change of its status.
+fn thread_text(lang: Lang, report: &crate::reports::Report) -> String {
+    use crate::reports::Kind;
+    let you = pick(lang, "你", "You");
+    let what = |words: &str, pictures: usize, diagnostics: bool| {
+        let mut said = if words.is_empty() { pick(lang, "（未填写说明）", "(No words)").to_string() } else { words.to_string() };
+        let attached = match (lang, diagnostics, pictures) {
+            (_, false, 0) => String::new(),
+            (Lang::Zh, true, 0) => "（附诊断信息）".into(),
+            (Lang::Zh, false, n) => format!("（附截图 {n} 张）"),
+            (Lang::Zh, true, n) => format!("（附诊断信息及截图 {n} 张）"),
+            (Lang::En, true, 0) => "(With the diagnostics)".into(),
+            (Lang::En, false, n) => format!("(With {n} pictures)"),
+            (Lang::En, true, n) => format!("(With the diagnostics and {n} pictures)"),
+        };
+        if !attached.is_empty() {
+            said = format!("{said}\n{attached}");
+        }
+        said
+    };
+    let mut parts = vec![format!("{you} · {}\n{}", thread_time(lang, report.sent), what(&report.words, 0, true))];
+    for message in &report.thread {
+        let when = thread_time(lang, message.ts);
+        parts.push(match message.kind {
+            Kind::User => format!("{you} · {when}\n{}", what(&message.text, message.pictures, message.diagnostics)),
+            Kind::Reply => format!("{} · {when}\n{}", pick(lang, "Glance 开发者", "Glance's developer"), message.text),
+            kind => {
+                let status = match kind {
+                    Kind::Fixed => crate::reports::Status::Fixed(message.version.clone()),
+                    Kind::Closed => crate::reports::Status::Closed,
+                    Kind::Answered => crate::reports::Status::Answered,
+                    _ => crate::reports::Status::Open,
+                };
+                match lang {
+                    Lang::Zh => format!("状态改为“{}” · {when}", status_words(lang, &status)),
+                    Lang::En => format!("Status set to {} · {when}", status_words(lang, &status)),
+                }
+            }
+        });
+    }
+    parts.join("\n\n")
+}
 
 /// A row that is on or off.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -975,6 +1083,10 @@ enum Target {
     /// Sends the diagnostics to Glance's site, shown first in a window of
     /// their own to be read and agreed to.
     SendReport,
+    /// Turns to the page of the reports sent.
+    MyReports,
+    /// Opens the thread of the report sent of that id.
+    Thread(String),
     /// Installs NetEase Cloud Music's lyrics plugin (asked first), takes it back (asked first), or starts NetEase
     /// again to load it.
     NetEase(NetEaseWork),
@@ -1021,6 +1133,10 @@ enum Row {
     /// This Glance's version, how the last asking went, and asking now.
     Version,
     Diagnostics,
+    /// The reports this PC sent, how many and with how much unread: opens their page.
+    MyReports,
+    /// A report sent, by its id, on their page.
+    Report(String),
     Update,
     Uninstall,
     Quit,
@@ -1242,6 +1358,15 @@ struct Ui {
     /// last sending went: the name the site gave them, or none.
     sending: Option<std::thread::JoinHandle<Option<String>>>,
     sent: Option<Option<String>>,
+    /// The reports sent, as last read (see `reports`), and when.
+    followed: Vec<crate::reports::Report>,
+    followed_at: Instant,
+    /// What the user adds to a report (its id, and what they gave), waiting for the diagnostics to go with it, to be
+    /// shown first.
+    adding_asked: Option<(String, super::ask::Said)>,
+    /// What the user adds to a report, being sent (on a thread of its own), and how the last went.
+    adding: Option<(String, std::thread::JoinHandle<bool>)>,
+    added: Option<(String, bool)>,
     /// Since when the fans in the phone remote's picture have been turning.
     phone_from: Instant,
     phone: PhonePage,
@@ -1453,6 +1578,11 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             web_address: None,
             sending: None,
             sent: None,
+            followed: crate::reports::list(),
+            followed_at: Instant::now(),
+            adding_asked: None,
+            adding: None,
+            added: None,
             phone_from: Instant::now(),
             phone: PhonePage { state: None, parts: Vec::new(), at: None, scroll: 0.0, most: 0.0, slid: None, pressed: None, making: None, held_since: Instant::now(), removing: false, link: None, asked: Instant::now(), waiting: 0 },
             uninstaller: std::env::current_exe().ok().and_then(|exe| elevation::trusted(&exe.with_file_name("uninstall.exe"))),
@@ -1566,6 +1696,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         TO_WORKBENCH => {
             WORKBENCH_OWED.store(true, Ordering::Release);
             to_workbench();
+            LRESULT(0)
+        }
+        TO_REPORTS => {
+            to_reports();
             LRESULT(0)
         }
         // (Measuring: a page, and a tab of the monitor's, turned to as a press on it turns to it; see `perf`.)
@@ -1871,6 +2005,14 @@ impl Ui {
                 )));
             }
             (Page::Phone, _) => self.remote_rows(&mut rows),
+            (Page::Reports, _) => {
+                rows.extend(self.followed.iter().map(|report| Row::Report(report.id.clone())));
+                rows.push(Row::Note(pick(
+                    self.lang,
+                    "此处列出近 90 天内从本机发送的诊断信息。Glance 检查更新时一并获取开发者的回复与处理状态，有新消息时会提示。打开一份反馈可查看全部往来，并补充说明、截图或新的诊断信息。",
+                    "Here are the diagnostics sent from this PC in the last 90 days. As Glance checks for updates, it also fetches the developer's replies and how each report stands, and tells you of anything new. Open a report to read all that was said and to add words, pictures or fresh diagnostics.",
+                )));
+            }
             (Page::General, _) => {
                 rows.push(Row::Choice(Field::Language));
                 rows.push(Row::Group(pick(self.lang, "系统", "System")));
@@ -1880,6 +2022,9 @@ impl Ui {
                     rows.push(Row::Update);
                 }
                 rows.push(Row::Diagnostics);
+                if !self.followed.is_empty() {
+                    rows.push(Row::MyReports);
+                }
                 if self.uninstaller.is_some() {
                     rows.push(Row::Uninstall);
                 }
@@ -2412,6 +2557,39 @@ impl Ui {
                 };
                 (p("诊断信息", "Diagnostics"), detail, vec![(action, Target::Diagnostics, Button::Plain), send])
             }
+            Row::MyReports => {
+                let unread = self.followed.iter().filter(|report| report.unread()).count();
+                let detail = match (lang, unread) {
+                    (Lang::Zh, 0) => format!("已发送 {} 份，可查看回复与处理状态", self.followed.len()),
+                    (Lang::En, 0) => format!("{} sent. See the replies and how each stands", self.followed.len()),
+                    (Lang::Zh, unread) => format!("已发送 {} 份，其中 {unread} 份有新消息", self.followed.len()),
+                    (Lang::En, unread) => format!("{} sent, {unread} with news", self.followed.len()),
+                };
+                let kind = if unread > 0 { Button::Accent } else { Button::Plain };
+                (p("我的反馈", "My reports"), detail, vec![(p("查看", "View"), Target::MyReports, kind)])
+            }
+            Row::Report(id) => {
+                let report = self.followed.iter().find(|report| report.id == *id)?;
+                let first = report.first_line();
+                let name = if first.is_empty() { id.clone() } else { format!("{id} · {first}") };
+                let sent = crate::ui::text::Local::at(report.sent).date(lang);
+                let detail = match (&self.adding, &self.added) {
+                    (Some((adding, _)), _) if adding == id => p("正在发送补充内容…", "Sending what you added…"),
+                    (None, Some((added, true))) if added == id => p("补充内容已发送", "What you added was sent"),
+                    (None, Some((added, false))) if added == id => p("补充内容发送失败，请稍后重试", "What you added could not be sent. Try again later"),
+                    _ => {
+                        let status = status_words(lang, &report.status());
+                        match (lang, report.unread()) {
+                            (Lang::Zh, true) => format!("有新消息 · {status} · {sent}发送"),
+                            (Lang::En, true) => format!("News · {status} · sent {sent}"),
+                            (Lang::Zh, false) => format!("{status} · {sent}发送"),
+                            (Lang::En, false) => format!("{status} · sent {sent}"),
+                        }
+                    }
+                };
+                let kind = if report.unread() { Button::Accent } else { Button::Plain };
+                (name, detail, vec![(p("打开", "Open"), Target::Thread(id.clone()), kind)])
+            }
             Row::NetEase => {
                 let netease = self.netease.as_ref()?;
                 let install = |text| (text, Target::NetEase(NetEaseWork::Install), Button::Accent);
@@ -2817,7 +2995,7 @@ impl Ui {
             }
             // The version this is, where the user looks for a newer one.
             Switch::Updates => {
-                return (p("自动检查更新", "Check for updates"), Some(Cow::Borrowed(p("每天检查一次，并向 Glance 网站告知当前版本，用于统计使用情况。不包含可识别这台电脑的信息", "Once a day. Glance's site is told this version, to count how many run it. Nothing that tells this PC from another"))), self.settings.check_updates);
+                return (p("自动检查更新", "Check for updates"), Some(Cow::Borrowed(p("每天检查一次，并向 Glance 网站告知当前版本，用于统计使用情况。发送过诊断信息时，一并获取其回复。不包含可识别这台电脑的信息", "Once a day. Glance's site is told this version, to count how many run it, and asked for replies to the diagnostics sent. Nothing that tells this PC from another"))), self.settings.check_updates);
             }
         };
         (name, hint.map(Cow::Borrowed), on)
@@ -2917,7 +3095,9 @@ impl Ui {
                 waiting: pick(lang, "剪贴板中有截图，按 Ctrl+V 即可粘贴", "There is a picture on the clipboard: Ctrl+V pastes it"),
                 kinds: pick(lang, "图片", "Pictures"),
             }),
+            option: None,
             sent: Some((pick(lang, "诊断信息", "Diagnostics"), &report)),
+            from_end: false,
             yes: pick(lang, "发送", "Send"),
             no: pick(lang, "取消", "Cancel"),
             dark: self.dark,
@@ -2928,7 +3108,82 @@ impl Ui {
 
 {report}", said.words) };
             self.sent = None;
-            self.sending = Some(std::thread::spawn(move || crate::diagnostics::send(&report, &said.pictures)));
+            self.sending = Some(std::thread::spawn(move || crate::diagnostics::send(&report, &said.words, &said.pictures)));
+        }
+    }
+
+    /// The thread of the report `id` sent from here, shown whole, the newest last, with room to add to it: the user's
+    /// words and pictures, and, if they choose, fresh diagnostics (shown first, see `add_with_diagnostics`).
+    fn open_thread(&mut self, id: &str) {
+        let Some(report) = crate::reports::list().into_iter().find(|report| report.id == id) else { return };
+        let lang = self.lang;
+        let title = match lang {
+            Lang::Zh => format!("反馈 {id}"),
+            Lang::En => format!("Report {id}"),
+        };
+        let intro = thread_intro(lang, &report);
+        let thread = thread_text(lang, &report);
+        let asked = super::ask::Asked {
+            title: &title,
+            intro: &intro,
+            own: Some(super::ask::Own {
+                words: pick(lang, "补充说明（选填）", "What you add (may be left empty)"),
+                hint: pick(lang, "例如：更新后问题是否仍然存在", "For instance: whether the problem remains after updating"),
+                pictures: pick(lang, "截图（选填，最多 3 张）", "Pictures (if you like, up to 3)"),
+                add: pick(lang, "添加截图", "Add a picture"),
+                ways: pick(lang, "点击选择、拖入窗口，或按 Ctrl+V 粘贴", "Click to choose one, drop it here, or paste it with Ctrl+V"),
+                paste: pick(lang, "粘贴剪贴板中的截图", "Paste the clipboard's"),
+                waiting: pick(lang, "剪贴板中有截图，按 Ctrl+V 即可粘贴", "There is a picture on the clipboard: Ctrl+V pastes it"),
+                kinds: pick(lang, "图片", "Pictures"),
+            }),
+            option: Some(pick(lang, "附上当前的诊断信息（发送前完整显示，供确认）", "Attach the current diagnostics (shown whole before they are sent)")),
+            sent: Some((pick(lang, "往来记录", "What was said"), &thread)),
+            from_end: true,
+            yes: pick(lang, "补充", "Add to it"),
+            no: pick(lang, "关闭", "Close"),
+            dark: self.dark,
+        };
+        let said = super::ask::show(self.hwnd, &asked);
+        crate::reports::read(id);
+        self.followed = crate::reports::list();
+        let Some(said) = said else { return };
+        self.added = None;
+        if said.option {
+            // The diagnostics put together first, then shown whole (see `tick`).
+            if self.reporting.is_none() {
+                self.adding_asked = Some((id.to_string(), said));
+                self.reporting = Some((ReportFor::Add, std::thread::spawn(crate::diagnostics::report)));
+            }
+        } else if !said.words.is_empty() || !said.pictures.is_empty() {
+            let id = id.to_string();
+            self.adding = Some((id.clone(), std::thread::spawn(move || crate::reports::add(&id, &said.words, None, &said.pictures))));
+        }
+        self.next_frame = Instant::now();
+    }
+
+    /// The fresh diagnostics the user chose to add to a report, put together: shown whole, and sent with what they
+    /// added if they agree. Nothing is sent if they do not.
+    fn add_with_diagnostics(&mut self, report: String) {
+        let Some((id, said)) = self.adding_asked.take() else { return };
+        let lang = self.lang;
+        let intro = match lang {
+            Lang::Zh => format!("以下诊断信息将连同补充说明与截图一并发送至反馈 {id}。不包含任何文件、账号或网络地址。"),
+            Lang::En => format!("These diagnostics go to report {id}, with the words and pictures you added. Nothing of your files, accounts or network address."),
+        };
+        let asked = super::ask::Asked {
+            title: pick(lang, "发送诊断信息", "Send diagnostics"),
+            intro: &intro,
+            own: None,
+            option: None,
+            sent: Some((pick(lang, "诊断信息", "Diagnostics"), &report)),
+            from_end: false,
+            yes: pick(lang, "发送", "Send"),
+            no: pick(lang, "取消", "Cancel"),
+            dark: self.dark,
+        };
+        if super::ask::show(self.hwnd, &asked).is_some() {
+            self.adding = Some((id.clone(), std::thread::spawn(move || crate::reports::add(&id, &said.words, Some(&report), &said.pictures))));
+            self.next_frame = Instant::now();
         }
     }
 
@@ -2980,7 +3235,7 @@ impl Ui {
                 ("Remove the NetEase Cloud Music lyrics plugin?", intro, "Remove")
             }
         };
-        let asked = super::ask::Asked { title, intro: &intro, own: None, sent: None, yes, no: pick(lang, "取消", "Cancel"), dark: self.dark };
+        let asked = super::ask::Asked { title, intro: &intro, own: None, option: None, sent: None, from_end: false, yes, no: pick(lang, "取消", "Cancel"), dark: self.dark };
         if super::ask::show(self.hwnd, &asked).is_none() {
             return;
         }
@@ -3514,6 +3769,12 @@ impl Ui {
             // Put together first (see `tick`), then shown whole: nothing leaves this PC that was not read and agreed to.
             Target::SendReport if self.sending.is_none() && self.reporting.is_none() => self.reporting = Some((ReportFor::Send, std::thread::spawn(crate::diagnostics::report))),
             Target::SendReport => {}
+            Target::MyReports => {
+                self.followed = crate::reports::list();
+                self.turn_to(Page::Reports);
+            }
+            Target::Thread(id) if self.adding.is_none() && self.adding_asked.is_none() => self.open_thread(&id),
+            Target::Thread(_) => {}
             // (Pressed again, its code is put away.)
             Target::GetApp if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) => self.code = None,
             // (Each asked of the remote's helper on another thread: see `tick`.)
@@ -3578,6 +3839,8 @@ impl Ui {
                 Row::Update if update::available().is_some_and(|(_, state)| state == update::State::Downloading) => vec![],
                 Row::Update => vec![Target::Update],
                 Row::Diagnostics => vec![Target::SendReport, Target::Diagnostics],
+                Row::MyReports => vec![Target::MyReports],
+                Row::Report(id) => vec![Target::Thread(id)],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::NetEase if self.netease_work.is_some() => vec![],
                 Row::NetEase if self.netease_has && self.netease_restart && self.netease_failed.is_none() => vec![Target::NetEaseRestart, Target::NetEase(NetEaseWork::Remove)],
@@ -3725,6 +3988,8 @@ impl Ui {
             (Row::Pair, Target::Pair(_) | Target::GetApp) | (Row::WebPage, Target::OpenPage) => true,
             (Row::NetEase, Target::NetEase(_) | Target::NetEaseRestart) => true,
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
+            (Row::MyReports, Target::MyReports) => true,
+            (Row::Report(a), Target::Thread(b)) => a == b,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Element(a), Target::Element(b)) => a == b,
@@ -4016,7 +4281,8 @@ impl Ui {
             let r = Rect { x: left, y, w: width, h: NAV_ITEM };
             y += NAV_ITEM + 4.0;
             let target = Target::Nav(page);
-            let (shown, hover) = (page == self.page, hovered.as_ref() == Some(&target));
+            // (The reports' page is General's own.)
+            let (shown, hover) = (page == self.page || (page == Page::General && self.page == Page::Reports), hovered.as_ref() == Some(&target));
             if shown || hover {
                 fill(frame, if shown { palette.control } else { palette.hover }, r.x, r.y, r.w, r.h, 6.0);
             }
@@ -4026,8 +4292,8 @@ impl Ui {
             let cy = r.y + r.h / 2.0;
             frame.icon(page.icon(), Point { x: r.x + 22.0, y: cy }, 16.0, palette.text);
             text_centred(frame, item.name(lang), label, palette.text, r.x + 46.0, cy, r.w - 50.0, Align::Start);
-            // A newer Glance is out: a dot on the page it is taken from.
-            if page == Page::General && update::available().is_some() {
+            // A newer Glance is out, or a report sent has news unread: a dot on the page they are seen from.
+            if page == Page::General && (update::available().is_some() || self.followed.iter().any(crate::reports::Report::unread)) {
                 fill(frame, palette.selection, r.x + r.w - 20.0, cy - 3.0, 6.0, 6.0, 3.0);
             }
             self.targets.push((r, target));
@@ -4054,6 +4320,20 @@ impl Ui {
         }
         if self.sending.is_some() {
             self.next_frame = now + Duration::from_millis(300);
+        }
+        // What was added to a report: how that went, once it is over.
+        if self.adding.as_ref().is_some_and(|(_, adding)| adding.is_finished()) {
+            let (id, adding) = self.adding.take().unwrap();
+            self.added = Some((id, adding.join().unwrap_or(false)));
+            self.followed = crate::reports::list();
+        }
+        if self.adding.is_some() {
+            self.next_frame = now + Duration::from_millis(300);
+        }
+        // The reports sent, as they are now (news is heard on the update check's thread).
+        if now.duration_since(self.followed_at) > Duration::from_secs(1) {
+            self.followed = crate::reports::list();
+            self.followed_at = now;
         }
         // The switches as they are, read.
         if self.reading_switches.as_ref().is_some_and(|reading| reading.is_finished()) {
@@ -4091,6 +4371,7 @@ impl Ui {
                         }
                     }
                     ReportFor::Send => self.send_report(report),
+                    ReportFor::Add => self.add_with_diagnostics(report),
                 }
             }
             self.next_frame = now;
@@ -4415,7 +4696,7 @@ impl Ui {
 
                     }
                 }
-                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase => {
+                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;
@@ -4858,7 +5139,9 @@ impl Ui {
                         "Everything on the PC stops: downloads, remote connections, programs at work. To turn off only the screens and the lights and leave the PC running, use night mode.",
                     ),
                     own: None,
+                    option: None,
                     sent: None,
+                    from_end: false,
                     yes: pick(lang, "睡眠", "Sleep"),
                     no: pick(lang, "取消", "Cancel"),
                     dark: self.dark,
@@ -5437,6 +5720,8 @@ mod pictures {
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
         let history = (0..120).map(|i| crate::studio::made_up(&info, now_ms - (120 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
         crate::pictured(info, history);
+        // Reports sent from here, followed (see `Page::Reports`).
+        crate::reports::pretend(now_ms as u64);
         // The station holding a few things (files of this repository, pictured as Explorer shows them).
         {
             use crate::station::shelf::{Item, What};
@@ -5469,6 +5754,7 @@ mod pictures {
             (Page::Music, Tab::Shown, "music"),
             (Page::Phone, Tab::Shown, "phone"),
             (Page::General, Tab::Shown, "general"),
+            (Page::Reports, Tab::Shown, "reports"),
         ];
         let scale = with_ui(|ui| ui.scale).unwrap();
         for (w, h) in [MIN_SIZE, SIZE, (1700.0, 900.0)] {

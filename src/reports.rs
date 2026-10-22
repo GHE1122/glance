@@ -1,0 +1,569 @@
+//! The reports this PC sent, followed as threads till their problems are fixed. Each was sent with a secret of its
+//! own (random, made for it alone), of which Glance's site keeps only a hash: with the report's id it proves that
+//! whoever asks sent it. Along with each update check, Glance asks the site what is new in the reports it sent (the
+//! owner's replies, and changes of their status), with nothing but their ids, their secrets and how far it has
+//! heard, and tells the user once of each report with news. The user reads a thread, and adds to it, from the
+//! settings. Kept beside the settings (`FILE`), and forgotten 90 days after anything last happened in it.
+
+use std::path::Path;
+use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+
+use crate::ui::text::Lang;
+
+/// Where they are kept, in the settings' folder, and the most of it that is read.
+const FILE: &str = "reports.json";
+const MOST: u64 = 4 << 20;
+/// How long a report is followed after anything last happened in it (milliseconds).
+const FOLLOWED_FOR: u64 = 90 * 86_400_000;
+/// How many reports one asking names, the latest first (the site answers no more).
+const ASKED_MOST: usize = 20;
+/// The most of the user's own words kept (characters), as the window that takes them takes no more.
+const WORDS_MOST: usize = 500;
+
+/// The reports sent from this PC.
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq)]
+pub struct Kept {
+    pub reports: Vec<Report>,
+}
+
+/// A report sent: its id as the site gave it, the secret sent with it, when it was sent (ms since 1970), the user's
+/// own words with it, its thread since, the highest number of the site's that asking has heard (what is asked
+/// past), and the highest the user has read.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub struct Report {
+    pub id: String,
+    secret: String,
+    pub sent: u64,
+    #[serde(default)]
+    pub words: String,
+    #[serde(default)]
+    pub thread: Vec<Message>,
+    #[serde(default)]
+    heard: u64,
+    #[serde(default)]
+    read: u64,
+}
+
+/// One message of a thread, numbered as the site numbers them: who said it (or the status it was set to), when
+/// (ms), its words, a version (the Glance a user's addition came from, or the one with the fix), and, for the user's
+/// own, how many pictures and whether the diagnostics went with it.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub struct Message {
+    pub n: u64,
+    pub ts: u64,
+    pub kind: Kind,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub pictures: usize,
+    #[serde(default)]
+    pub diagnostics: bool,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// The user's own addition.
+    User,
+    /// The owner's reply.
+    Reply,
+    /// The status set: open again, answered, fixed (in the message's version), closed.
+    Open,
+    Answered,
+    Fixed,
+    Closed,
+}
+
+/// Where a report stands, as the owner last set it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Status {
+    Open,
+    Answered,
+    Fixed(String),
+    Closed,
+}
+
+impl Report {
+    /// The latest status set, or open, none set.
+    pub fn status(&self) -> Status {
+        self.thread
+            .iter()
+            .rev()
+            .find_map(|message| match message.kind {
+                Kind::Open => Some(Status::Open),
+                Kind::Answered => Some(Status::Answered),
+                Kind::Fixed => Some(Status::Fixed(message.version.clone())),
+                Kind::Closed => Some(Status::Closed),
+                Kind::User | Kind::Reply => None,
+            })
+            .unwrap_or(Status::Open)
+    }
+
+    /// Whether the site has told something the user has not read.
+    pub fn unread(&self) -> bool {
+        self.thread.iter().any(|message| message.kind != Kind::User && message.n > self.read)
+    }
+
+    /// When anything last happened in it.
+    pub fn active(&self) -> u64 {
+        self.thread.iter().map(|message| message.ts).fold(self.sent, u64::max)
+    }
+
+    /// The first line of the user's words.
+    pub fn first_line(&self) -> &str {
+        self.words.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("")
+    }
+}
+
+/// What the site says is new, as it says it.
+#[derive(Deserialize)]
+struct News {
+    news: Vec<Told>,
+}
+
+#[derive(Deserialize)]
+struct Told {
+    id: String,
+    n: u64,
+    ts: u64,
+    kind: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    version: String,
+}
+
+/// The reports followed no longer: nothing has happened in them for `FOLLOWED_FOR` by `now`. Whether any was.
+fn forget_old(kept: &mut Kept, now: u64) -> bool {
+    let before = kept.reports.len();
+    kept.reports.retain(|report| report.active().saturating_add(FOLLOWED_FOR) >= now);
+    kept.reports.len() != before
+}
+
+/// What the site is asked, of the reports kept (the latest first, as many as it answers): each one's id, its secret
+/// and the highest number heard of it. Nothing else. None with no report to ask about.
+fn asking(kept: &Kept) -> Option<String> {
+    let mut latest: Vec<&Report> = kept.reports.iter().collect();
+    latest.sort_by_key(|report| std::cmp::Reverse(report.active()));
+    let asked: Vec<serde_json::Value> = latest
+        .into_iter()
+        .take(ASKED_MOST)
+        .map(|report| serde_json::json!({ "id": report.id, "secret": report.secret, "after": report.heard }))
+        .collect();
+    (!asked.is_empty()).then(|| serde_json::json!({ "reports": asked }).to_string())
+}
+
+/// The site's answer (`body`) taken into `kept`: each message of a report kept, of a kind Glance knows and not heard
+/// before, put in its thread. The reports with news, each once, with what is newest in it.
+fn heard(kept: &mut Kept, body: &[u8]) -> Vec<(String, Message)> {
+    let Ok(news) = serde_json::from_slice::<News>(body) else { return Vec::new() };
+    let mut told: Vec<(String, Message)> = Vec::new();
+    for item in news.news {
+        let kind = match item.kind.as_str() {
+            "reply" => Kind::Reply,
+            "open" => Kind::Open,
+            "answered" => Kind::Answered,
+            "fixed" => Kind::Fixed,
+            "closed" => Kind::Closed,
+            _ => continue,
+        };
+        let Some(report) = kept.reports.iter_mut().find(|report| report.id == item.id) else { continue };
+        if item.n <= report.heard || report.thread.iter().any(|message| message.n == item.n) {
+            continue;
+        }
+        report.heard = item.n;
+        let message = Message { n: item.n, ts: item.ts, kind, text: item.text, version: item.version, pictures: 0, diagnostics: false };
+        report.thread.push(message.clone());
+        report.thread.sort_by_key(|message| message.n);
+        // A reply is told over a status set with it (the site marks a report answered as it is replied to).
+        match told.iter_mut().find(|(id, _)| *id == item.id) {
+            Some((_, newest)) if newest.kind == Kind::Reply && kind != Kind::Reply => {}
+            Some((_, newest)) => *newest = message,
+            None => told.push((item.id, message)),
+        }
+    }
+    told
+}
+
+/// What the user is told of `id`'s news, `newest`: its title and words.
+fn notice(lang: Lang, id: &str, newest: &Message) -> (String, String) {
+    let first = newest.text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
+    let first: String = first.chars().take(120).collect();
+    let see = lang.pick("点击此处查看。", "Click here to see it.").to_string();
+    match (newest.kind, lang) {
+        (Kind::Reply, Lang::Zh) => (format!("你的反馈 {id} 有新回复"), if first.is_empty() { see } else { first }),
+        (Kind::Reply, Lang::En) => (format!("New reply to your report {id}"), if first.is_empty() { see } else { first }),
+        (Kind::Fixed, _) => {
+            let version = &newest.version;
+            let words = match (crate::update::newer(version, env!("CARGO_PKG_VERSION")), lang) {
+                (true, Lang::Zh) => format!("更新到 {version} 即可获得此修复。"),
+                (true, Lang::En) => format!("Update to {version} to have the fix."),
+                (false, Lang::Zh) => "当前版本已包含此修复。".to_string(),
+                (false, Lang::En) => "This version has the fix.".to_string(),
+            };
+            (lang.pick(&format!("你的反馈 {id} 已在 {version} 修复"), &format!("Your report {id} is fixed in {version}")).to_string(), words)
+        }
+        (Kind::Closed, _) => (lang.pick(&format!("你的反馈 {id} 已关闭"), &format!("Your report {id} is closed")).to_string(), see),
+        (Kind::Answered, _) => (lang.pick(&format!("你的反馈 {id} 已回复"), &format!("Your report {id} is answered")).to_string(), see),
+        (Kind::Open | Kind::User, _) => (lang.pick(&format!("你的反馈 {id} 已重新打开"), &format!("Your report {id} is open again")).to_string(), see),
+    }
+}
+
+/// The reports, as read from `dir`: none where there are none, or what is there does not read.
+fn load(dir: &Path) -> Kept {
+    crate::elevation::read_in_place(dir, FILE, MOST).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+/// The reports written to `dir`, whole or not at all.
+fn save(kept: &Kept, dir: &Path) -> std::io::Result<()> {
+    crate::elevation::ensure_folder(dir)?;
+    crate::elevation::write_in_place(dir, FILE, serde_json::to_string_pretty(kept).expect("the reports are written").as_bytes())
+}
+
+/// The reports as held while Glance runs (read the first time they are wanted).
+static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
+/// The latest of them still to be written, and whether they are being written (see `save_later`).
+static UNSAVED: Mutex<(Option<Kept>, bool)> = Mutex::new((None, false));
+
+/// `act` done with the reports held (`changes`: they are written after, on a thread of their own).
+fn with<R>(changes: bool, act: impl FnOnce(&mut Kept) -> R) -> R {
+    with_changing(|kept| (act(kept), changes))
+}
+
+/// `act` done with the reports held, written after if it says they changed.
+fn with_changing<R>(act: impl FnOnce(&mut Kept) -> (R, bool)) -> R {
+    let mut held = KEPT.lock().unwrap();
+    let kept = held.get_or_insert_with(|| load(&crate::settings::config_dir()));
+    let (result, changed) = act(kept);
+    if changed {
+        save_later(kept.clone());
+    }
+    result
+}
+
+/// `kept` written on the thread that writes them, after those before (as the settings are: see `save_later` in lib.rs).
+fn save_later(kept: Kept) {
+    let mut unsaved = UNSAVED.lock().unwrap();
+    let idle = unsaved.0.is_none() && !unsaved.1;
+    unsaved.0 = Some(kept);
+    if !idle {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("glance: reports saved".into())
+        .spawn(|| loop {
+            let kept = {
+                let mut unsaved = UNSAVED.lock().unwrap();
+                match unsaved.0.take() {
+                    Some(next) => {
+                        unsaved.1 = true;
+                        next
+                    }
+                    None => {
+                        unsaved.1 = false;
+                        return;
+                    }
+                }
+            };
+            if let Err(error) = save(&kept, &crate::settings::config_dir()) {
+                crate::journal::note(format!("could not save the reports sent: {error}"));
+            }
+        })
+        .expect("a thread started");
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
+}
+
+/// A new secret to send a report with: 32 bytes from the system's random number generator, in hex.
+pub fn secret() -> Option<String> {
+    use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+    let mut bytes = [0u8; 32];
+    unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }.ok().ok()?;
+    Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// The report the site took as `id`, sent with `secret` and the user's `words`, remembered to be followed.
+pub fn remember(id: &str, secret: String, words: &str) {
+    let words: String = words.chars().take(WORDS_MOST).collect();
+    let report = Report { id: id.to_string(), secret, sent: now(), words, thread: Vec::new(), heard: 0, read: 0 };
+    with(true, |kept| kept.reports.push(report));
+}
+
+/// Asks Glance's site what is new in the reports this PC sent, and tells the user once of each with news (on the
+/// update check's thread, as it asks for the latest release).
+pub fn ask() {
+    let told = hear();
+    if told.is_empty() {
+        return;
+    }
+    let lang = crate::update::language();
+    for (id, newest) in told {
+        crate::journal::note(format!("reports: news of {id}"));
+        let (title, text) = notice(lang, &id, &newest);
+        crate::tray::notify_reports(&title, &text);
+    }
+}
+
+/// What is new in the reports followed, asked of the site and kept: each report with news, and what is newest in it.
+fn hear() -> Vec<(String, Message)> {
+    let now = now();
+    let asked = with_changing(|kept| {
+        let forgotten = forget_old(kept, now);
+        (asking(kept), forgotten)
+    });
+    let Some(asked) = asked else { return Vec::new() };
+    let Some(answer) = crate::update::post(&format!("{}/api/report/news", crate::update::own_site()), asked.as_bytes()) else {
+        crate::journal::note("reports: no answer from the site");
+        return Vec::new();
+    };
+    with_changing(|kept| {
+        let told = heard(kept, &answer);
+        let changed = !told.is_empty();
+        (told, changed)
+    })
+}
+
+/// Adds the user's `words` (and `diagnostics`, if they agreed to send them), with their `pictures`, to the report
+/// `id`, in its thread on the site, and to the thread kept here. Whether it got there.
+pub fn add(id: &str, words: &str, diagnostics: Option<&str>, pictures: &[Vec<u8>]) -> bool {
+    let Some(secret) = with(false, |kept| kept.reports.iter().find(|report| report.id == id).map(|report| report.secret.clone())) else { return false };
+    let text = match diagnostics {
+        Some(diagnostics) if words.is_empty() => diagnostics.to_string(),
+        Some(diagnostics) => format!("The user says: {words}\n\n{diagnostics}"),
+        None => words.to_string(),
+    };
+    let encoded: Vec<String> = pictures.iter().map(|picture| crate::diagnostics::base64(picture)).collect();
+    let sent = serde_json::json!({ "id": id, "secret": secret, "version": env!("CARGO_PKG_VERSION"), "text": text, "pictures": encoded }).to_string();
+    let Some(answer) = crate::update::post(&format!("{}/api/report/add", crate::update::own_site()), sent.as_bytes()) else { return false };
+    let Ok(answer) = serde_json::from_slice::<serde_json::Value>(&answer) else { return false };
+    let (Some(n), Some(ts)) = (answer["n"].as_u64(), answer["ts"].as_u64()) else { return false };
+    let message = Message {
+        n,
+        ts,
+        kind: Kind::User,
+        text: words.chars().take(WORDS_MOST).collect(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        pictures: pictures.len(),
+        diagnostics: diagnostics.is_some(),
+    };
+    with(true, |kept| {
+        if let Some(report) = kept.reports.iter_mut().find(|report| report.id == id) {
+            report.thread.push(message);
+            report.thread.sort_by_key(|message| message.n);
+        }
+    });
+    true
+}
+
+/// The reports followed, the latest activity first.
+pub fn list() -> Vec<Report> {
+    let mut reports = with(false, |kept| kept.reports.clone());
+    reports.sort_by_key(|report| std::cmp::Reverse(report.active()));
+    reports
+}
+
+/// The report `id` as the user has now read it whole.
+pub fn read(id: &str) {
+    with(true, |kept| {
+        if let Some(report) = kept.reports.iter_mut().find(|report| report.id == id) {
+            report.read = report.thread.iter().map(|message| message.n).max().unwrap_or(0).max(report.read);
+        }
+    });
+}
+
+/// Reports as pictures of the settings need them, held and never written: one with a reply unread, one fixed, one
+/// waiting, sent `now` (ms) and before.
+#[cfg(all(test, feature = "studio"))]
+pub fn pretend(now: u64) {
+    const HOUR: u64 = 3_600_000;
+    let message = |n: u64, ts: u64, kind: Kind, text: &str, version: &str| Message { n, ts, kind, text: text.into(), version: version.into(), pictures: 0, diagnostics: false };
+    let report = |id: &str, sent: u64, words: &str, thread: Vec<Message>, read: u64| Report { id: id.into(), secret: String::new(), sent, words: words.into(), heard: thread.iter().map(|message| message.n).max().unwrap_or(0), thread, read };
+    let reports = vec![
+        report(
+            "KQRH9F",
+            now - 30 * HOUR,
+            "主板温度未显示\n华硕 B650 主板，其他软件可以读到",
+            vec![message(11, now - 2 * HOUR, Kind::Reply, "已收到。请问开启“以管理员身份读取传感器”后是否仍然没有显示？", ""), message(12, now - 2 * HOUR, Kind::Answered, "", "")],
+            0,
+        ),
+        report("7MPA2D", now - 300 * HOUR, "风扇转速与其他软件不一致", vec![message(3, now - 250 * HOUR, Kind::Reply, "已找到原因，下个版本修复。", ""), message(5, now - 100 * HOUR, Kind::Fixed, "", "0.4.0")], 5),
+        report("ZX3W8N", now - 5 * HOUR, "", Vec::new(), 0),
+    ];
+    *KEPT.lock().unwrap() = Some(Kept { reports });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DAY: u64 = 86_400_000;
+
+    fn report(id: &str, sent: u64) -> Report {
+        Report { id: id.into(), secret: format!("{:0>64}", id.to_lowercase()), sent, words: "主板温度未显示\n第二行".into(), thread: Vec::new(), heard: 0, read: 0 }
+    }
+
+    fn news(items: &[(&str, u64, &str, &str)]) -> Vec<u8> {
+        let news: Vec<serde_json::Value> = items.iter().map(|(id, n, kind, text)| serde_json::json!({ "id": id, "n": n, "ts": 1000 + n, "kind": kind, "text": text, "version": if *kind == "fixed" { "9.0.0" } else { "" } })).collect();
+        serde_json::json!({ "news": news }).to_string().into_bytes()
+    }
+
+    #[test]
+    fn secrets_are_long_random_and_never_the_same() {
+        let (a, b) = (secret().unwrap(), secret().unwrap());
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(a, b);
+    }
+
+    /// What is asked carries each report's id, its secret and how far it was heard, and nothing else: no version, no
+    /// time, no words, nothing of the PC.
+    #[test]
+    fn the_asking_names_nothing_but_the_reports_and_their_proof() {
+        let mut kept = Kept { reports: vec![report("KQRH9F", 10 * DAY), report("ABCDEF", 20 * DAY)] };
+        kept.reports[1].heard = 7;
+        let asked: serde_json::Value = serde_json::from_str(&asking(&kept).unwrap()).unwrap();
+        let fields: Vec<&String> = asked.as_object().unwrap().keys().collect();
+        assert_eq!(fields, ["reports"]);
+        let reports = asked["reports"].as_array().unwrap();
+        // (The latest first.)
+        assert_eq!(reports[0], serde_json::json!({ "id": "ABCDEF", "secret": kept.reports[1].secret, "after": 7 }));
+        assert_eq!(reports[1], serde_json::json!({ "id": "KQRH9F", "secret": kept.reports[0].secret, "after": 0 }));
+        for one in reports {
+            let mut keys: Vec<&String> = one.as_object().unwrap().keys().collect();
+            keys.sort();
+            assert_eq!(keys, ["after", "id", "secret"]);
+        }
+        let text = asking(&kept).unwrap();
+        for absent in [env!("CARGO_PKG_VERSION"), "主板", "sent", "words"] {
+            assert!(!text.contains(absent), "{absent} in {text}");
+        }
+        // None kept: nothing asked at all.
+        assert_eq!(asking(&Kept::default()), None);
+        // No more than the site answers.
+        let many = Kept { reports: (0..30).map(|at| report(&format!("R{at:05}"), at * DAY)).collect() };
+        let asked: serde_json::Value = serde_json::from_str(&asking(&many).unwrap()).unwrap();
+        assert_eq!(asked["reports"].as_array().unwrap().len(), ASKED_MOST);
+    }
+
+    /// A report is followed for 90 days after anything last happened in it, then forgotten.
+    #[test]
+    fn reports_quiet_for_90_days_are_forgotten() {
+        let now = 200 * DAY;
+        let mut active = report("ACTIVE", 50 * DAY);
+        active.thread.push(Message { n: 1, ts: 150 * DAY, kind: Kind::Reply, text: "x".into(), version: String::new(), pictures: 0, diagnostics: false });
+        let mut kept = Kept { reports: vec![report("RECENT", 120 * DAY), report("STALEX", 109 * DAY), active, report("EDGEXX", 110 * DAY)] };
+        forget_old(&mut kept, now);
+        let ids: Vec<&str> = kept.reports.iter().map(|report| report.id.as_str()).collect();
+        assert_eq!(ids, ["RECENT", "ACTIVE", "EDGEXX"]);
+    }
+
+    /// News is heard once: the same answer again (or a number already in the thread) tells nothing more, and what
+    /// is asked next goes past it.
+    #[test]
+    fn each_piece_of_news_is_told_once() {
+        let mut kept = Kept { reports: vec![report("KQRH9F", 0), report("ABCDEF", 0)] };
+        let answer = news(&[("KQRH9F", 3, "reply", "已收到，正在排查"), ("KQRH9F", 4, "answered", ""), ("ABCDEF", 5, "fixed", ""), ("NOTOUR", 6, "reply", "x"), ("ABCDEF", 7, "someday", "")]);
+        let told = heard(&mut kept, &answer);
+        assert_eq!(told.len(), 2);
+        // A reply is told over the status set with it.
+        assert_eq!((told[0].0.as_str(), told[0].1.kind), ("KQRH9F", Kind::Reply));
+        assert_eq!((told[1].0.as_str(), told[1].1.kind), ("ABCDEF", Kind::Fixed));
+        assert!(heard(&mut kept, &answer).is_empty());
+        assert_eq!(kept.reports[0].thread.len(), 2);
+        let asked: serde_json::Value = serde_json::from_str(&asking(&kept).unwrap()).unwrap();
+        assert!(asked["reports"].as_array().unwrap().iter().any(|one| one["id"] == "KQRH9F" && one["after"] == 4));
+        // Unread till read, and the status as last set.
+        assert!(kept.reports.iter().all(Report::unread));
+        assert_eq!(kept.reports[1].status(), Status::Fixed("9.0.0".into()));
+        assert_eq!(kept.reports[0].status(), Status::Answered);
+        // The next reply is told.
+        let told = heard(&mut kept, &news(&[("KQRH9F", 9, "reply", "请更新后再试")]));
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].1.text, "请更新后再试");
+    }
+
+    /// The user's own addition, numbered past a reply not yet heard, does not keep that reply from being heard.
+    #[test]
+    fn an_addition_does_not_hide_a_reply_not_yet_heard() {
+        let mut kept = Kept { reports: vec![report("KQRH9F", 0)] };
+        kept.reports[0].thread.push(Message { n: 8, ts: 5, kind: Kind::User, text: "补充".into(), version: String::new(), pictures: 1, diagnostics: false });
+        let told = heard(&mut kept, &news(&[("KQRH9F", 6, "reply", "先前的回复")]));
+        assert_eq!(told.len(), 1);
+        let ns: Vec<u64> = kept.reports[0].thread.iter().map(|message| message.n).collect();
+        assert_eq!(ns, [6, 8]);
+        // The user's own messages are never unread.
+        kept.reports[0].read = 6;
+        assert!(!kept.reports[0].unread());
+    }
+
+    #[test]
+    fn a_fix_is_told_as_this_version_has_it_or_not() {
+        let fixed = |version: &str| Message { n: 1, ts: 1, kind: Kind::Fixed, text: String::new(), version: version.into(), pictures: 0, diagnostics: false };
+        let (title, words) = notice(Lang::Zh, "KQRH9F", &fixed("999.0"));
+        assert_eq!(title, "你的反馈 KQRH9F 已在 999.0 修复");
+        assert_eq!(words, "更新到 999.0 即可获得此修复。");
+        let (_, words) = notice(Lang::En, "KQRH9F", &fixed("0.0.1"));
+        assert_eq!(words, "This version has the fix.");
+        let reply = Message { kind: Kind::Reply, text: "\n  请问是哪块主板？\n更多".into(), ..fixed("") };
+        assert_eq!(notice(Lang::Zh, "KQRH9F", &reply), ("你的反馈 KQRH9F 有新回复".to_string(), "请问是哪块主板？".to_string()));
+    }
+
+    /// Over a copy of Glance's site run on this PC (`GLANCE_SITE`, a debug build's): a report is sent and followed.
+    /// Its id is written to the file `REPORT_ID_FILE` names, for whoever answers as the site's owner: a reply is
+    /// heard, and told once, an addition with pictures and diagnostics goes into the same thread, and then the fix.
+    #[test]
+    #[ignore = "needs a copy of Glance's site run on this PC (GLANCE_SITE) and its owner to answer"]
+    fn follows_a_report_on_a_site_run_here() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let waited = |what: &str| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(180);
+            loop {
+                let told = hear();
+                if !told.is_empty() {
+                    println!("told {what}: {told:?}");
+                    return told;
+                }
+                assert!(std::time::Instant::now() < until, "no {what} heard");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        };
+        let id = crate::diagnostics::send("Glance (a test of following a report)", "风扇转速不显示\n其余正常", &[]).expect("the report sent");
+        std::fs::write(std::env::var("REPORT_ID_FILE").unwrap(), &id).unwrap();
+        let told = waited("a reply");
+        assert_eq!(told.len(), 1);
+        assert_eq!((told[0].0.as_str(), told[0].1.kind), (id.as_str(), Kind::Reply));
+        assert!(hear().is_empty(), "told twice");
+        let picture = std::mem::take(&mut crate::ui::picture::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/128x128@2x.png"), (84, 52)).expect("a picture").jpeg);
+        assert!(add(&id, "更新后仍然存在", Some("Diagnostics, again"), &[picture]));
+        println!("ADDED");
+        let told = waited("the fix");
+        assert_eq!(told[0].1.kind, Kind::Fixed);
+        let report = list().into_iter().find(|report| report.id == id).unwrap();
+        assert_eq!(report.status(), Status::Fixed(told[0].1.version.clone()));
+        let kinds: Vec<Kind> = report.thread.iter().map(|message| message.kind).collect();
+        assert_eq!(kinds, [Kind::Reply, Kind::Answered, Kind::User, Kind::Fixed]);
+        assert!(report.unread());
+        read(&id);
+        assert!(!list().into_iter().find(|report| report.id == id).unwrap().unread());
+    }
+
+    /// Written and read again as they were, in a folder of the test's own.
+    #[test]
+    fn reports_are_kept_as_they_were() {
+        let dir = std::env::temp_dir().join(format!("glance-reports-test-{}", std::process::id()));
+        let mut kept = Kept { reports: vec![report("KQRH9F", 3)] };
+        heard(&mut kept, &news(&[("KQRH9F", 2, "reply", "好的")]));
+        save(&kept, &dir).unwrap();
+        assert_eq!(load(&dir), kept);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(load(&dir), Kept::default());
+    }
+}
