@@ -1992,7 +1992,8 @@ impl Widgets {
     /// none was asked for.
     pub fn take_writing_menu_asked(&mut self, lang: Lang, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, String, Vec<crate::ui::note::Choice>)> {
         let (hwnd, name, at) = self.writing_menu_asked.take()?;
-        let (items, choices) = crate::ui::note::writing_menu(lang);
+        let in_cell = self.list.iter().find(|w| w.window.hwnd == hwnd).and_then(|w| w.in_place.as_ref()).is_some_and(|in_place| in_place.writing.in_cell());
+        let (items, choices) = crate::ui::note::writing_menu(lang, in_cell);
         let open = crate::ui::menu::Menu::open_at(items, self.look_of(hwnd), at, false, over_the_panel)?;
         Some((open, name, choices))
     }
@@ -2021,7 +2022,7 @@ impl Widgets {
         if let Some(at) = in_place.writing.take_menu_asked() {
             self.writing_menu_asked = Some((hwnd, in_place.name.clone(), at));
         }
-        let chosen = in_place.writing.editor.selection();
+        let chosen = in_place.writing.chosen();
         if changed || chosen != in_place.chosen {
             (in_place.chosen, in_place.blink_from) = (chosen, now);
         }
@@ -2653,7 +2654,7 @@ impl Widget {
     /// shown at once.
     fn take_keys(&mut self) {
         use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
-        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, WM_SETFOCUS};
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
         let Some(in_place) = self.in_place.as_mut() else { return };
         let now = Instant::now();
         (in_place.blink_from, self.next_frame) = (now, now);
@@ -2668,20 +2669,20 @@ impl Widget {
         let focused = unsafe { GetFocus() } == self.window.hwnd;
         self.window.take_keys(true);
         if focused {
-            let _ = in_place.writing.editor.send(WM_SETFOCUS, WPARAM(0), LPARAM(0));
+            in_place.writing.focus(true);
         }
     }
 
     /// The keys its note written in where it is takes given back (see `InPlace`): what was written kept (not kept, tried
     /// again a while after, saying so), the front given back to the window that had it where `escaped` (Esc pressed).
     fn stop_writing(&mut self, escaped: bool) {
-        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow, WM_KILLFOCUS};
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
         let Some(in_place) = self.in_place.as_mut().filter(|in_place| in_place.taking) else { return };
         in_place.taking = false;
         (in_place.selecting, in_place.menu_pressed) = (false, false);
         crate::ui::keys::give_back(self.window.hwnd);
         // (What the input method is composing written, the caret hidden.)
-        let _ = in_place.writing.editor.send(WM_KILLFOCUS, WPARAM(0), LPARAM(0));
+        in_place.writing.focus(false);
         let _ = in_place.writing.written();
         let now = Instant::now();
         in_place.keep_at = (!in_place.writing.keep(in_place.lang)).then_some(now + KEEP_AGAIN);

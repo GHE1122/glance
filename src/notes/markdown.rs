@@ -280,20 +280,6 @@ pub struct Linked {
     pub span: Range<usize>,
 }
 
-/// Where a note is written at: what is chosen in it (from, to: UTF-16 units, the caret where they are one). None: a
-/// note shown, not written in. A table it touches shows as written, marks and all: the caret in it or at either end
-/// of it, what is chosen over any of it.
-pub type At = Option<(usize, usize)>;
-
-/// Whether `at` touches `span` (see `At`): the caret at its end too where `closed`.
-fn touches(span: &Range<usize>, at: At, closed: bool) -> bool {
-    match at {
-        None => false,
-        Some((from, to)) if from == to => span.start <= from && (from < span.end || closed && from == span.end),
-        Some((from, to)) => from.min(to) < span.end && span.start < from.max(to),
-    }
-}
-
 /// How wide the room a to-do's box is drawn in is, its words' size over (the box in it, `BOX_SIDE` of their size,
 /// `BOX_IN` from its start, its middle `BOX_RISE` over its words' baseline, as a Chinese character's is; the rest a gap
 /// before its words).
@@ -575,19 +561,9 @@ impl Shown {
         shown.roomed.sort_by_key(|roomed| roomed.marks.start);
     }
 
-    /// Whether `span` is a table's (drawn laid out) that `at` touches: it shows as written, marks and all.
-    fn written_at(&self, span: &Range<usize>, at: At) -> bool {
-        self.tables.iter().any(|table| table.span == *span) && touches(span, at, true)
-    }
-
-    /// Its tables drawn laid out where it is written at `at`: those it does not touch (see `At`).
-    pub fn tables_drawn(&self, at: At) -> impl Iterator<Item = &super::table::Table> + '_ {
-        self.tables.iter().filter(move |table| !touches(&table.span, at, true))
-    }
-
-    /// Its marks hidden where it is written at `at`: all but those of a table it touches.
-    pub fn hidden(&self, at: At) -> Vec<Range<usize>> {
-        self.marks.iter().filter(|(_, span)| !self.written_at(span, at)).map(|(range, _)| range.clone()).collect()
+    /// Its marks hidden: all of them (a table's, written in, written in its cell's own box: see `ui::note`).
+    pub fn hidden(&self) -> Vec<Range<usize>> {
+        self.marks.iter().map(|(range, _)| range.clone()).collect()
     }
 
     /// Its blocks of code's fences' lines, set low (`FENCE`).
@@ -604,10 +580,10 @@ impl Shown {
         drawn
     }
 
-    /// What is put away where it is written at `at`: its marks hidden, and its to-dos', bullets' and quotes' marks
-    /// (each drawn in its room, the rooms given too, each with how wide it is, its words' size over).
-    pub fn put_away(&self, at: At) -> (Vec<Range<usize>>, Vec<(usize, f32)>) {
-        let mut hidden = self.hidden(at);
+    /// What is put away: its marks hidden, and its to-dos', bullets' and quotes' marks (each drawn in its room, the
+    /// rooms given too, each with how wide it is, its words' size over).
+    pub fn put_away(&self) -> (Vec<Range<usize>>, Vec<(usize, f32)>) {
+        let mut hidden = self.hidden();
         hidden.extend(self.boxes.iter().map(|boxed| boxed.marks.clone()));
         hidden.extend(self.roomed.iter().map(|roomed| roomed.marks.clone()));
         let mut rooms: Vec<(usize, f32)> = self.boxes.iter().map(|boxed| (boxed.room, BOX_ROOM)).collect();
@@ -615,9 +591,10 @@ impl Shown {
         (hidden, rooms)
     }
 
-    /// The link whose words are at `unit` (UTF-16 units), where they show as it reads (not in a table written at: `at`).
-    pub fn link_at(&self, unit: usize, at: At) -> Option<&Linked> {
-        self.links.iter().find(|link| link.words.contains(&unit) && !self.written_at(&link.span, at))
+    /// The link whose words are at `unit` (UTF-16 units), where they show as it reads: not in a table's cell (its words
+    /// drawn in the table, not where they are written).
+    pub fn link_at(&self, unit: usize) -> Option<&Linked> {
+        self.links.iter().find(|link| link.words.contains(&unit) && !self.tables.iter().any(|table| table.span.start == link.span.start))
     }
 
     /// Where the caret at `caret` in its words (`units`, as it was read) is to rest, moved `way`: not on a line put
@@ -836,8 +813,7 @@ mod tests {
     }
 
     /// A table on lines of its own, and a rule, put away, to be drawn (a table from its line's start, spaces before it
-    /// with it), one in a quote left as written. Written at (the caret in it, or at its end), a table shows as
-    /// written, a rule stays drawn.
+    /// with it), one in a quote left as written.
     #[test]
     fn puts_tables_and_rules_away() {
         let text = "a\n\n  | x | y |\n| - | - |\n| 1 | 2 |\n\n---\n> | q |\n> | - |";
@@ -847,31 +823,26 @@ mod tests {
         assert_eq!(shown.tables.len(), 1);
         assert_eq!(of(&shown.tables[0].span), "  | x | y |\n| - | - |\n| 1 | 2 |");
         assert_eq!(shown.rules.iter().map(of).collect::<Vec<_>>(), ["---"]);
-        let hidden: Vec<String> = shown.hidden(None).iter().map(of).collect();
+        let hidden: Vec<String> = shown.hidden().iter().map(of).collect();
         for line in ["  | x | y |", "| - | - |", "| 1 | 2 |", "---"] {
             assert!(hidden.contains(&line.to_string()), "{line} in {hidden:?}");
         }
         assert!(!hidden.iter().any(|hidden| hidden.contains('q')));
-        let table = shown.tables[0].span.clone();
-        assert_eq!(shown.tables_drawn(Some((table.start + 4, table.start + 4))).count(), 0);
-        assert_eq!(shown.tables_drawn(Some((table.end, table.end))).count(), 0);
-        assert_eq!(shown.tables_drawn(Some((0, 0))).count(), 1);
-        let rule = shown.rules[0].clone();
-        assert!(shown.hidden(Some((rule.end, rule.end))).iter().any(|hidden| of(hidden) == "---"));
     }
 
-    /// Written at anywhere in a table, all of it shows as written, its words' marks too, and its links are not gone
-    /// to. One in a list's item (only spaces before it on its line) is the item's: left as written.
+    /// A table's links are its cells' (drawn in the table, not where they are written): not followed from where they
+    /// are written. One in a list's item (only spaces before it on its line) is the item's: left as written.
     #[test]
-    fn a_table_written_in_shows_all_its_marks() {
-        let text = "| **粗** | [链](https://a.b) |\n| --- | --- |\n| x | https://c.d |";
+    fn a_table_s_links_are_its_cells() {
+        let text = "| **粗** | [链](https://a.b) |\n| --- | --- |\n| x | https://c.d |\n\n[外](https://e.f)";
         let shown = Shown::of(text);
-        let x = text.encode_utf16().collect::<Vec<_>>().len() - " | https://c.d |".encode_utf16().count() - 1;
-        assert!(shown.hidden(Some((x, x))).is_empty());
-        assert!(!shown.hidden(None).is_empty());
-        assert!(shown.links.iter().all(|link| link.span == shown.tables[0].span));
-        assert_eq!(shown.links.len(), 2);
-        assert!(shown.link_at(shown.links[0].words.start, Some((x, x))).is_none());
+        assert_eq!(shown.links.len(), 3);
+        let to = |to: &str| shown.links.iter().find(|link| link.to == to).unwrap();
+        for inside in ["https://a.b", "https://c.d"] {
+            assert_eq!(to(inside).span.start, shown.tables[0].span.start);
+            assert!(shown.link_at(to(inside).words.start).is_none());
+        }
+        assert!(shown.link_at(to("https://e.f").words.start).is_some());
         let listed = Shown::of("- 项\n\n  | a |\n  | - |\n  | b |\n\n  ---");
         assert!(listed.tables.is_empty() && listed.rules.is_empty());
     }
@@ -885,7 +856,7 @@ mod tests {
         let units: Vec<u16> = text.encode_utf16().collect();
         let of = |range: &Range<usize>| String::from_utf16(&units[range.clone()]).unwrap();
         let shown = Shown::of(text);
-        let hidden: Vec<String> = shown.hidden(None).iter().map(of).collect();
+        let hidden: Vec<String> = shown.hidden().iter().map(of).collect();
         assert_eq!(hidden, ["## ", " ##", "**", "**", "*", "*", "`", "`", "~~", "~~", "[", "](https://a.b/c)"]);
         let boxes: Vec<(String, String, bool)> = shown.boxes.iter().map(|boxed| (of(&boxed.marks), of(&(boxed.room..boxed.room + 1)), boxed.done)).collect();
         assert_eq!(boxes, [("- [ ]".to_string(), " ".to_string(), false), ("- [x]".to_string(), " ".to_string(), true)]);
@@ -894,34 +865,13 @@ mod tests {
         let links: Vec<(String, &str)> = shown.links.iter().map(|link| (of(&link.words), link.to.as_str())).collect();
         assert_eq!(links, [("链接".to_string(), "https://a.b/c"), ("https://x.y/z?q=1".to_string(), "https://x.y/z?q=1")]);
         // What is put away of it, its rooms with how wide each is.
-        let (put, rooms) = shown.put_away(None);
+        let (put, rooms) = shown.put_away();
         assert!(put.iter().map(of).any(|put| put == "- [ ]") && put.iter().map(of).any(|put| put == ">"));
         assert_eq!(rooms.iter().map(|(_, wide)| *wide).collect::<Vec<_>>(), [BOX_ROOM, BOX_ROOM, QUOTE_ROOM, BULLET_ROOM, BULLET_ROOM]);
         // A numbered list's number as words, a bullet faint.
         let looks = looks(text);
         assert!(!look_of(&looks, text.encode_utf16().count() - "1. 一".encode_utf16().count()).contains(&Look::Faint));
         assert!(look_of(&looks, text.encode_utf16().count() - "- 点\n  * 里\n1. 一".encode_utf16().count()).contains(&Look::Faint));
-    }
-
-    /// Written in, its marks stay put away wherever the caret is, what is chosen too: a link the caret is in followed
-    /// still. Only a table the caret is in shows as written.
-    #[test]
-    fn puts_away_marks_wherever_the_caret_is() {
-        let text = "## 本周 ##\n**粗**与*斜*\n- [ ] 买\n- 点\n> 引\n[链接](https://a.b/c)\n\n| **x** |\n| - |\n| y |";
-        let at = |what: &str| text[..text.find(what).unwrap()].encode_utf16().count();
-        let shown = Shown::of(text);
-        let caret = |unit: usize| Some((unit, unit));
-        let table = shown.tables[0].span.clone();
-        let everywhere = shown.put_away(None);
-        for at in [caret(at("粗")), caret(at("与")), caret(at("周")), caret(at(" 买")), caret(at("- [")), caret(at("点")), caret(at("引")), caret(at("接")), Some((at("粗"), at("斜")))] {
-            assert_eq!(shown.put_away(at), everywhere, "{at:?}");
-            assert_eq!(shown.tables_drawn(at).count(), 1);
-        }
-        let link = shown.links[0].words.start;
-        assert!(shown.link_at(link, caret(at("接"))).is_some());
-        let inside = caret(table.start + 3);
-        assert_eq!(shown.tables_drawn(inside).count(), 0);
-        assert_eq!(shown.put_away(inside).0.len(), everywhere.0.len() - 5);
     }
 
     /// A fenced block of code on lines of its own: its fences put away and set low, its box all its lines; with no line
@@ -934,7 +884,7 @@ mod tests {
         let shown = Shown::of(text);
         let codes: Vec<(String, Vec<String>)> = shown.codes.iter().map(|code| (of(&code.span), code.fences.iter().map(of).collect())).collect();
         assert_eq!(codes, [("```rust\nlet x = 1;\n\n```".to_string(), vec!["```rust".to_string(), "```".to_string()])]);
-        let hidden: Vec<String> = shown.hidden(None).iter().map(of).collect();
+        let hidden: Vec<String> = shown.hidden().iter().map(of).collect();
         assert_eq!(hidden.iter().filter(|hidden| hidden.contains('`') || hidden.contains('~')).collect::<Vec<_>>(), ["```rust", "```"]);
         // Its fences' lines set low, the rest as their words set them.
         let drawn = shown.drawn_lines(20.0, []);

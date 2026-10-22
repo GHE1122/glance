@@ -585,8 +585,11 @@ pub fn backspace(text: &str, caret: usize, formatted: bool) -> Option<Edit> {
     let place = list.iter().position(|&other| other == found).expect("an item in its list");
     let mut rewrite = Rewrite::default();
     if place > 0 {
+        // (Shown as written, a paragraph of the item before, as far in as its words. Shown as it reads, an item of no
+        // other at the line's start, as a line of words is written: else it stood in, past nothing to be seen.)
         let before = &tree.items[list[place - 1]];
-        rewrite.put(start..item.words, " ".repeat(column(text, before.column).saturating_sub(column(text, start))));
+        let wanted = if formatted && item.parent.is_none() { 0 } else { column(text, before.column).saturating_sub(column(text, start)) };
+        rewrite.put(start..item.words, " ".repeat(wanted));
     } else {
         rewrite.put(start..item.words, "");
         // (The list goes on from the number it began with, under a paragraph a list only if that is one: else a blank
@@ -637,8 +640,21 @@ fn unformatted(text: &str, tree: &Tree, at: usize, index: usize) -> Option<Edit>
     if tree.in_code(index) {
         return None;
     }
-    // At the start of a heading's words: its `#` taken off.
     let words = tree.words_of(text, index);
+    // At the start of the words of a line under a list's item (not its mark's line), as far in as the item's words: the
+    // line out of it, as far in as the item it is in (in none, at the line's start).
+    if let Some(holding) = tree.item_holding(index).filter(|&item| tree.line_of(tree.items[item].marker) != index) {
+        let item = &tree.items[holding];
+        let from = line.start + quoted(&text[line.clone()], item.quotes);
+        if at == words && words > from && words < line.end {
+            let wanted = item.parent.map_or(0, |parent| column(text, tree.items[parent].column).saturating_sub(column(text, from)));
+            let mut rewrite = Rewrite::default();
+            rewrite.put(from..words, " ".repeat(wanted));
+            let caret = rewrite.map(at);
+            return Some(numbered(text, &rewrite, (caret, caret)));
+        }
+    }
+    // At the start of a heading's words: its `#` taken off.
     let marks = hashes(&text[words..line.end]);
     if marks > 0 && at == words + marks {
         return Some(heading(text, (unit(text, at), unit(text, at)), 0));
@@ -1354,8 +1370,20 @@ mod tests {
         assert_eq!(back_at("- [ ] ‸买").as_deref(), Some("‸买"));
         assert_eq!(back_at("- a\n  - ‸b").as_deref(), Some("- a\n- ‸b"));
         assert_eq!(back_at("- a\n  - ‸").as_deref(), Some("- a\n- ‸"));
-        assert_eq!(back_at("- a\n- ‸b").as_deref(), Some("- a\n  ‸b"));
-        assert_eq!(back_at("1. a\n2. ‸b\n3. c").as_deref(), Some("1. a\n   ‸b\n2. c"));
+        assert_eq!(back_at("- a\n- ‸b").as_deref(), Some("- a\n‸b"));
+        assert_eq!(back_at("1. a\n2. ‸b\n3. c").as_deref(), Some("1. a\n‸b\n2. c"));
+        let written_at = |marked: &str| {
+            let (text, (caret, _)) = read(marked);
+            backspace(&text, caret, false).map(|edit| applied(&text, &edit))
+        };
+        assert_eq!(written_at("- a\n- ‸b").as_deref(), Some("- a\n  ‸b"));
+        assert_eq!(written_at("1. a\n2. ‸b\n3. c").as_deref(), Some("1. a\n   ‸b\n2. c"));
+        // Shown as it reads, at the start of a line's words under an item, the line out of it a step.
+        assert_eq!(back_at("1. a\n   ‸b\n2. c").as_deref(), Some("1. a\n‸b\n2. c"));
+        assert_eq!(back_at("- a\n  - b\n    ‸c").as_deref(), Some("- a\n  - b\n  ‸c"));
+        assert_eq!(back_at("> - a\n>   ‸b").as_deref(), Some("> - a\n> ‸b"));
+        assert_eq!(back_at("1. a\n‸b"), None);
+        assert_eq!(written_at("1. a\n   ‸b"), None);
         assert_eq!(back_at("1. ‸a\n2. b").as_deref(), Some("‸a\n1. b"));
         assert_eq!(back_at("3. ‸a\n4. b").as_deref(), Some("‸a\n\n3. b"));
         assert_eq!(back_at("- ‸a\n- b").as_deref(), Some("‸a\n- b"));

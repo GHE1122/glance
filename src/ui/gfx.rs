@@ -516,7 +516,17 @@ impl Gfx {
         // (On one line: as wide as words go.)
         let across = wide.map_or(1.0e6, |wide| wide.max(0.0) / per);
         let layout = unsafe { factory.CreateGdiCompatibleTextLayout(&wide_units, &format, across, f32::MAX, per, None, false)? };
+        // Its lines set as a note's are, as tall as its plain words' line (whole pixels), the baseline as far above each
+        // line's foot as its plain words reach below theirs: as the text services set a cell's words written in it (see
+        // `ui::note`), drawn alike.
+        let plain_format = unsafe { factory.CreateTextFormat(face, collection, DWRITE_FONT_WEIGHT(400), DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, pixels / per, w!("zh-cn"))? };
+        let plain = unsafe { factory.CreateGdiCompatibleTextLayout(&[u16::from(b' ')], &plain_format, f32::MAX, f32::MAX, per, None, false)? };
+        let (mut count, mut row) = (0, [DWRITE_LINE_METRICS::default()]);
+        unsafe { plain.GetLineMetrics(Some(&mut row), &mut count)? };
+        let below = ((row[0].height - row[0].baseline) * per).round();
+        let line = (pixels * crate::notes::markdown::LEADING).round();
         unsafe {
+            layout.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line / per, (line - below) / per)?;
             layout.SetWordWrapping(if wide.is_some() { DWRITE_WORD_WRAPPING_WRAP } else { DWRITE_WORD_WRAPPING_NO_WRAP })?;
             layout.SetTextAlignment(match align {
                 Align::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
@@ -1024,6 +1034,32 @@ pub struct TableLaid {
     rows_at: Vec<f32>,
     side: f32,
     cells: Vec<Vec<(usize, IDWriteTextLayout, f32)>>,
+}
+
+impl TableLaid {
+    /// Where the words of its cell `row`, `column` are drawn (see `Frame::table`), from its corner, in pixels: across,
+    /// down, how wide they may go and how tall they are. None where it has no such cell.
+    pub fn words_at(&self, row: usize, column: usize) -> Option<(f32, f32, f32, f32)> {
+        let (_, _, tall) = self.cells.get(row)?.iter().find(|(at, ..)| *at == column)?;
+        let down = self.rows_at[row] + 1.0 + ((self.laid.rows[row] - 1.0 - tall) / 2.0).round();
+        let along = self.columns_at[column] + 1.0 + self.side;
+        Some((along, down, self.laid.columns[column] - 1.0 - 2.0 * self.side, *tall))
+    }
+
+    /// The cell (row, column) the point `x`, `y` from its corner (pixels) is in: none off it.
+    pub fn cell_at(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        if x < 0.0 || y < 0.0 || x >= self.laid.width() || y >= self.laid.height() {
+            return None;
+        }
+        // (The one whose room it is in, a line counted with the one after it: the last's, past the end.)
+        let nth = |starts: &[f32], count: usize, along: f32| starts[..count].partition_point(|start| *start <= along).saturating_sub(1);
+        Some((nth(&self.rows_at, self.laid.rows.len(), y), nth(&self.columns_at, self.laid.columns.len(), x)))
+    }
+
+    /// The column `x` from its corner (pixels) is over: before its first, the first, past its last, the last.
+    pub fn column_at(&self, x: f32) -> usize {
+        self.columns_at[..self.laid.columns.len()].partition_point(|start| *start <= x).saturating_sub(1)
+    }
 }
 
 /// One frame being drawn onto a surface.
@@ -1783,18 +1819,21 @@ impl<'a> Frame<'a> {
             let size = whole(font.size);
             let out = CODE_OUT * size;
             let dressing = crate::notes::markdown::dressing(text);
+            // What its faces have no glyphs for, in the faces the system falls back on (as the text services are given).
+            let code: Vec<_> = dressing.iter().filter(|(_, dress)| dress.code).map(|(range, _)| range.clone()).collect();
+            let fallen = fallen_back(&wide, &code, &unsafe { face.to_string() }.unwrap_or_default(), super::canvas::CODE_FACE);
             // Its marks put away, as a note shows (see `notes::markdown::Shown`; none, its source asked for): each
             // stood in for by nothing; a to-do's list mark, box and the space after them, a bullet and the space after
             // it, a quote's marks and the space after them, by the room what stands in for them is drawn in, as wide as
             // the text services make that space where it is written.
             let shown = crate::notes::shown_as(text);
-            let hidden = shown.hidden(None);
+            let hidden = shown.hidden();
             let nothing: IDWriteInlineObject = Room { width: 0.0 }.into();
             let room = |wide: f32| -> IDWriteInlineObject { Room { width: (wide * size * per).round() / per }.into() };
             let (left, top) = self.on_pixel(x, y);
             // Its tables laid out in its room (in pixels), their lines as tall as they take, and its rules.
             let pixels = size * per;
-            let tables: Vec<_> = shown.tables_drawn(None).map(|table| (table, self.gfx.table_laid(table, font.family, pixels, per, (width * per).floor()))).collect();
+            let tables: Vec<_> = shown.tables.iter().map(|table| (table, self.gfx.table_laid(table, font.family, pixels, per, (width * per).floor()))).collect();
             let drawn = shown.drawn_lines(pixels, tables.iter().map(|(table, laid)| (table.span.clone(), laid.laid.height())));
             // Each line laid out on its own, as tall as it is set, under the one before: all laid out first, its blocks
             // of code's boxes drawn under them.
@@ -1845,6 +1884,10 @@ impl<'a> Frame<'a> {
                         }
                         layout.SetDrawingEffect(&brush(dress.ink)?, range)?;
                     }
+                }
+                for (range, family) in &fallen {
+                    let Some(range) = on_line(range) else { continue };
+                    unsafe { layout.SetFontFamilyName(&HSTRING::from(family.as_str()), range)? };
                 }
                 for range in hidden.iter().filter_map(on_line) {
                     unsafe { layout.SetInlineObject(&nothing, range)? };
@@ -1904,7 +1947,7 @@ impl<'a> Frame<'a> {
             for line in &laid {
                 let (words, down, tall) = (&line.words, line.down, line.tall);
                 if let Some((_, laid)) = tables.iter().find(|(table, _)| table.span.start == words.start) {
-                    self.table(laid, inks, left, top + down, (y, y + height));
+                    self.table(laid, inks, left, top + down, (y, y + height), None);
                 }
                 if shown.rules.iter().any(|rule| rule.start == words.start) {
                     self.rule(inks, left, top + down, width, tall * per);
@@ -1945,8 +1988,9 @@ impl<'a> Frame<'a> {
     /// `inks`: its lines a pixel wide (`rule_ink`), its head's row tinted and its words bold, each cell's words set in it
     /// as its column says, in the middle of its row's height. Only its rows within `within` (from, to: DIPs down) are
     /// drawn: those out of it would not show. The same for a note written in and one shown (see `Writing::paint`,
-    /// `markdown`): pixel for pixel alike.
-    pub fn table(&self, laid: &TableLaid, inks: Inks, x: f32, y: f32, within: (f32, f32)) {
+    /// `markdown`): pixel for pixel alike. The words of the cell `written_in` (row, column) are not drawn: they are being
+    /// written in, in a box of their own over it.
+    pub fn table(&self, laid: &TableLaid, inks: Inks, x: f32, y: f32, within: (f32, f32), written_in: Option<(usize, usize)>) {
         let per = self.axes().map_or(1.0, |(t, device)| t.M11 * device);
         let (left, top) = self.on_pixel(x, y);
         let (width, height) = (laid.laid.width(), laid.laid.height());
@@ -1966,7 +2010,7 @@ impl<'a> Frame<'a> {
             self.fill(line, left, top + start / per, width / per, 1.0 / per);
         }
         for (row, cells) in laid.cells.iter().enumerate().take(last).skip(first) {
-            for (column, layout, tall) in cells {
+            for (column, layout, tall) in cells.iter().filter(|(column, ..)| written_in != Some((row, *column))) {
                 // (In the middle of its row, under the row's line, on a whole pixel.)
                 let down = laid.rows_at[row] + 1.0 + ((laid.laid.rows[row] - 1.0 - tall) / 2.0).round();
                 let along = laid.columns_at[*column] + 1.0 + laid.side;
@@ -2040,6 +2084,105 @@ impl IDWriteInlineObject_Impl for Room_Impl {
             *after = windows::Win32::Graphics::DirectWrite::DWRITE_BREAK_CONDITION_NEUTRAL;
         }
         Ok(())
+    }
+}
+
+/// What of a note's words, `words`, its faces have no glyphs for, and the face the system falls back on for each: its
+/// words in the face `face`, those in `code` (UTF-16 units) in the face `code_face`, all of the system's. Both the text
+/// services and a note's face are given these faces (the services, their font binding turned off, drew boxes, as for
+/// Chinese in a block of code): what is drawn written in and not is drawn alike.
+pub fn fallen_back(words: &[u16], code: &[std::ops::Range<usize>], face: &str, code_face: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    use windows::Win32::Graphics::DirectWrite::{IDWriteFactory2, IDWriteFont, IDWriteTextAnalysisSource, DWRITE_FONT_WEIGHT_NORMAL};
+    let mut fallen = Vec::new();
+    let Ok(factory) = (unsafe { DWriteCreateFactory::<IDWriteFactory2>(DWRITE_FACTORY_TYPE_SHARED) }) else { return fallen };
+    let Ok(fallback) = (unsafe { factory.GetSystemFontFallback() }) else { return fallen };
+    // (The faces asked of among the system's: else none is, and every word is given the one fallen back on.)
+    let mut system = None;
+    if unsafe { factory.GetSystemFontCollection(&mut system, false) }.is_err() {
+        return fallen;
+    }
+    let source: IDWriteTextAnalysisSource = Words { words: words.to_vec(), locale: "zh-cn\0".encode_utf16().collect() }.into();
+    // (Each stretch in one face asked of on its own: from where it begins, how much of it the face, or the one fallen
+    // back on, has.)
+    let in_code = |at: usize| code.iter().any(|range| range.contains(&at));
+    let mut start = 0;
+    while start < words.len() {
+        let coded = in_code(start);
+        let end = (start..words.len()).find(|&at| in_code(at) != coded).unwrap_or(words.len());
+        let base = if coded { code_face } else { face };
+        let family = HSTRING::from(base);
+        let mut at = start;
+        while at < end {
+            let (mut length, mut font, mut scale): (u32, Option<IDWriteFont>, f32) = (0, None, 1.0);
+            let asked = unsafe { fallback.MapCharacters(&source, at as u32, (end - at) as u32, system.as_ref(), &family, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, &mut length, &mut font, &mut scale) };
+            if asked.is_err() || length == 0 {
+                break;
+            }
+            let name = font.and_then(|font| family_name(&font));
+            if let Some(name) = name.filter(|name| !name.eq_ignore_ascii_case(base)) {
+                fallen.push((at..at + length as usize, name));
+            }
+            at += length as usize;
+        }
+        start = end;
+    }
+    fallen
+}
+
+/// The name of `font`'s family, as the system's fonts know it (in English, else its first).
+fn family_name(font: &windows::Win32::Graphics::DirectWrite::IDWriteFont) -> Option<String> {
+    let names = unsafe { font.GetFontFamily().and_then(|family| family.GetFamilyNames()).ok()? };
+    let (mut index, mut found) = (0, windows::core::BOOL(0));
+    unsafe { names.FindLocaleName(w!("en-us"), &mut index, &mut found).ok()? };
+    let index = if found.as_bool() { index } else { 0 };
+    let length = unsafe { names.GetStringLength(index).ok()? };
+    let mut name = vec![0u16; length as usize + 1];
+    unsafe { names.GetString(index, &mut name).ok()? };
+    Some(String::from_utf16_lossy(&name[..length as usize]))
+}
+
+/// A note's words, as DirectWrite asks for them to find the faces that have them (see `fallen_back`): all of them one
+/// paragraph, left to right, in the locale `locale` (ended by a nul).
+#[windows::core::implement(windows::Win32::Graphics::DirectWrite::IDWriteTextAnalysisSource)]
+struct Words {
+    words: Vec<u16>,
+    locale: Vec<u16>,
+}
+
+impl windows::Win32::Graphics::DirectWrite::IDWriteTextAnalysisSource_Impl for Words_Impl {
+    fn GetTextAtPosition(&self, at: u32, text: *mut *mut u16, length: *mut u32) -> Result<()> {
+        let at = (at as usize).min(self.words.len());
+        unsafe {
+            *text = if at < self.words.len() { self.words.as_ptr().add(at).cast_mut() } else { std::ptr::null_mut() };
+            *length = (self.words.len() - at) as u32;
+        }
+        Ok(())
+    }
+
+    fn GetTextBeforePosition(&self, at: u32, text: *mut *mut u16, length: *mut u32) -> Result<()> {
+        let at = (at as usize).min(self.words.len());
+        unsafe {
+            *text = if at > 0 { self.words.as_ptr().cast_mut() } else { std::ptr::null_mut() };
+            *length = at as u32;
+        }
+        Ok(())
+    }
+
+    fn GetParagraphReadingDirection(&self) -> windows::Win32::Graphics::DirectWrite::DWRITE_READING_DIRECTION {
+        windows::Win32::Graphics::DirectWrite::DWRITE_READING_DIRECTION_LEFT_TO_RIGHT
+    }
+
+    fn GetLocaleName(&self, at: u32, length: *mut u32, locale: *mut *mut u16) -> Result<()> {
+        unsafe {
+            *length = (self.words.len() as u32).saturating_sub(at);
+            *locale = self.locale.as_ptr().cast_mut();
+        }
+        Ok(())
+    }
+
+    fn GetNumberSubstitution(&self, at: u32, length: *mut u32, substitution: windows::core::OutRef<windows::Win32::Graphics::DirectWrite::IDWriteNumberSubstitution>) -> Result<()> {
+        unsafe { *length = (self.words.len() as u32).saturating_sub(at) };
+        substitution.write(None)
     }
 }
 
@@ -2873,4 +3016,15 @@ mod tests {
         assert!(w >= 1000 && w < 1000 + 64 && h >= 400 && h < 400 + 64);
         assert_eq!(room(Some((w, h)), (1000, 400)), None);
     }
+
+    /// What a note's faces have no glyphs for is given the face the system falls back on, and only that: Chinese in a
+    /// block of code (its face has none), nothing in words its own face has.
+    #[test]
+    fn what_a_face_has_not_falls_back() {
+        let words: Vec<u16> = "#include 你好 正文 words".encode_utf16().collect();
+        let fallen = super::fallen_back(&words, std::slice::from_ref(&(0..11)), "Microsoft YaHei UI", super::super::canvas::CODE_FACE);
+        assert_eq!(fallen.iter().map(|(range, _)| range.clone()).collect::<Vec<_>>(), vec![9..11]);
+        assert!(!fallen[0].1.eq_ignore_ascii_case(super::super::canvas::CODE_FACE));
+    }
 }
+

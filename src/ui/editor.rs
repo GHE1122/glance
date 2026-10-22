@@ -309,10 +309,21 @@ impl Editor {
                     Look::Plain => font.SetForeColor(color(palette.text)),
                 };
             }
+            // What its faces have no glyphs for, in the faces the system falls back on.
+            let units: Vec<u16> = self.text().encode_utf16().collect();
+            let code: Vec<_> = looks.iter().filter(|(_, look)| matches!(look, Look::Code)).map(|(range, _)| range.clone()).collect();
+            for (range, family) in super::gfx::fallen_back(&units, &code, &palette.face, &palette.code_face) {
+                if let Ok(font) = document.Range(range.start as i32, range.end as i32).and_then(|range| range.GetFont()) {
+                    let _ = font.SetName(&BSTR::from(family.as_str()));
+                }
+            }
             // Each line set exactly as tall as `markdown::line_heights` says (as a note's face sets it). (tomLineSpaceExactly;
             // points.)
             const EXACTLY: i32 = 4;
-            for (range, height) in crate::notes::markdown::line_heights(&self.text(), pixels.round(), drawn) {
+            // (Its words without the break the text services end them with: else a line after it, none, was found, and
+            // set as tall as a line of words, its last line with it, which the break ends: a block of code's fence
+            // there, as a note ending in one has, stood a line tall.)
+            for (range, height) in crate::notes::markdown::line_heights(&self.words(), pixels.round(), drawn) {
                 if let Ok(para) = document.Range(range.start as i32, range.end as i32).and_then(|range| range.GetPara()) {
                     let _ = para.SetLineSpacing(EXACTLY, height * 0.75);
                 }
@@ -345,6 +356,27 @@ impl Editor {
             let _ = document.Undo(tomResume.0);
         }
         // (Dressing is no writing.)
+        self.kept.changed.set(false);
+    }
+
+    /// All its words set in their lines as `align` says (a table's cell's, as its column is set), kept out of what undo
+    /// takes back.
+    pub fn align(&self, align: crate::notes::table::Align) {
+        use crate::notes::table::Align;
+        let Ok(document) = self.services.cast::<ITextDocument>() else { return };
+        // (tomAlignLeft, tomAlignCenter, tomAlignRight.)
+        let set = match align {
+            Align::Left => 0,
+            Align::Centre => 1,
+            Align::Right => 2,
+        };
+        unsafe {
+            let _ = document.Undo(tomSuspend.0);
+            if let Ok(para) = document.Range(0, i32::MAX).and_then(|all| all.GetPara()) {
+                let _ = para.SetAlignment(set);
+            }
+            let _ = document.Undo(tomResume.0);
+        }
         self.kept.changed.set(false);
     }
 
@@ -456,11 +488,12 @@ impl Editor {
         }
     }
 
-    /// The caret, where it is shown now (in the window): its left, top, width and height.
+    /// Its words written at `rect` (in the window), laid out again in it now (its size told as changed too: told only
+    /// that it moved, the text services laid them out as wide as it was till they were next drawn).
     pub fn place(&self, rect: RECT) {
         self.kept.rect.set(rect);
         unsafe {
-            let _ = self.services.OnTxPropertyBitsChange(TXTBIT_CLIENTRECTCHANGE, TXTBIT_CLIENTRECTCHANGE);
+            let _ = self.services.OnTxPropertyBitsChange(TXTBIT_CLIENTRECTCHANGE | TXTBIT_EXTENTCHANGE, TXTBIT_CLIENTRECTCHANGE | TXTBIT_EXTENTCHANGE);
         }
     }
 
@@ -469,6 +502,7 @@ impl Editor {
         self.kept.hwnd
     }
 
+    /// The caret, where it is shown now (in the window): its left, top, width and height.
     pub fn caret(&self) -> Option<(i32, i32, i32, i32)> {
         self.kept.caret_shown.get().then(|| self.kept.caret.get()).flatten()
     }
@@ -748,6 +782,27 @@ mod tests {
         }
     }
 
+    /// Its box made wider: its words laid out again in it, on one line where they now fit (as a table's cell written in
+    /// grows as its words do).
+    #[test]
+    fn widened_its_words_are_laid_out_again() {
+        let _device = crate::ui::gfx::held().unwrap();
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""), WS_POPUP, 0, 0, 400, 300, None, None, None, None).unwrap();
+            let editor = Editor::new(hwnd, RECT { left: 10, top: 10, right: 19, bottom: 34 }, "Segoe UI", 16.0, COLORREF(0)).expect("text services");
+            editor.set_text("yz");
+            assert_ne!(editor.character_anywhere(0).unwrap().top, editor.character_anywhere(1).unwrap().top, "narrow: broken");
+            editor.place(RECT { left: 10, top: 10, right: 200, bottom: 34 });
+            assert_eq!(editor.character_anywhere(0).unwrap().top, editor.character_anywhere(1).unwrap().top, "wide: one line");
+            // (Just as wide as they are: on one line still.)
+            let wide = editor.character_anywhere(1).unwrap().right;
+            editor.place(RECT { left: 10, top: 10, right: wide, bottom: 34 });
+            assert_eq!(editor.character_anywhere(0).unwrap().top, editor.character_anywhere(1).unwrap().top, "as wide: one line");
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
     /// The caret where the words drawn end, the window aware of its screen's scale as Glance's are (on a screen scaled
     /// past 100%: the text services count in the window's pixels whatever the scale, as Glance draws them).
     #[test]
@@ -931,7 +986,7 @@ mod tests {
             let dress = |editor: &Editor| {
                 let text = editor.text();
                 let shown = Shown::of(&text);
-                let (hidden, rooms) = shown.put_away(None);
+                let (hidden, rooms) = shown.put_away();
                 editor.dress(&looks(&text), &hidden, &rooms, &[], &shown.leads, &palette);
             };
             // "买" at 6, "粗" at 10 (after "**").

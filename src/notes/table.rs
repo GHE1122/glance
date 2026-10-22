@@ -20,14 +20,34 @@ pub enum Align {
 }
 
 /// A table's cell: its words as written (their spaces round them left out: where it holds none, where they would go),
-/// all of it between its pipes (one not written, its row's end), its words as they read (marks off), and whether it
-/// is written (a row may leave out its last cells).
+/// all of it between its pipes (one not written, its row's end), its words as they read (marks off), where in its words
+/// as written those are (in order: the rest of them marks), and whether it is written (a row may leave out its last
+/// cells).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cell {
     pub words: Range<usize>,
     pub room: Range<usize>,
     pub reads: String,
+    pub read_at: Vec<Range<usize>>,
     pub written: bool,
+}
+
+impl Cell {
+    /// What of its words as written is marks (put away where its words show as they read): all but where they read.
+    pub fn marks(&self) -> Vec<Range<usize>> {
+        let mut marks = Vec::new();
+        let mut at = self.words.start;
+        for read in &self.read_at {
+            if read.start > at {
+                marks.push(at..read.start);
+            }
+            at = at.max(read.end);
+        }
+        if at < self.words.end {
+            marks.push(at..self.words.end);
+        }
+        marks
+    }
 }
 
 /// A table: all of it (its rows, the line break after its last left out, from its line's start where it stands on its
@@ -47,7 +67,7 @@ pub struct Table {
 pub fn tables(text: &str) -> Vec<Table> {
     let units = Units::of(text);
     let mut tables = Vec::new();
-    let mut cell: Option<(Range<usize>, String)> = None;
+    let mut cell: Option<(Range<usize>, String, Vec<Range<usize>>)> = None;
     // (Where the row under way ends, its line break left out: a cell not written is there.)
     let mut row_end = 0;
     // (How many quotes and items what is read is in.)
@@ -78,9 +98,9 @@ pub fn tables(text: &str) -> Vec<Table> {
                     table.rows.push(Vec::new());
                 }
             }
-            Event::Start(Tag::TableCell) => cell = Some((range, String::new())),
+            Event::Start(Tag::TableCell) => cell = Some((range, String::new(), Vec::new())),
             Event::End(TagEnd::TableCell) => {
-                let (Some((room, reads)), Some(row)) = (cell.take(), tables.last_mut().and_then(|table| table.rows.last_mut())) else { continue };
+                let (Some((room, reads, read_at)), Some(row)) = (cell.take(), tables.last_mut().and_then(|table| table.rows.last_mut())) else { continue };
                 // (A cell not written is read at its row's end, one with nothing between its pipes before it.)
                 let left_out = room.is_empty() && room.start >= row_end;
                 let room = if left_out { row_end..row_end } else { room };
@@ -93,11 +113,16 @@ pub fn tables(text: &str) -> Vec<Table> {
                 } else {
                     start..start + written.trim().len()
                 };
-                row.push(Cell { words: units.range(&words), room: units.range(&room), reads, written: !left_out });
+                row.push(Cell { words: units.range(&words), room: units.range(&room), reads, read_at, written: !left_out });
             }
             Event::Text(words) | Event::Code(words) => {
-                if let Some((_, reads)) = cell.as_mut() {
+                if let Some((_, reads, read_at)) = cell.as_mut() {
                     reads.push_str(&words);
+                    // (Where they are as written: within what was read for them, past its marks (a code span's
+                    // backticks, an escape's backslash). Written otherwise (an entity), all of it.)
+                    let written = &text[range.clone()];
+                    let within = written.find(&*words).map_or(range.clone(), |at| range.start + at..range.start + at + words.len());
+                    read_at.push(units.range(&within));
                 }
             }
             _ => {}
@@ -220,13 +245,97 @@ pub fn tab(text: &str, chosen: (usize, usize), back: bool) -> Option<Option<supe
             Some(super::edit::Edit { range: cell.room.start..cell.room.start, with, chosen: (caret, caret) })
         }
         // (Past the last: a row more.)
-        Some(_) => {
-            let row = format!("\n{}|{}", table.lead, "  |".repeat(table.aligns.len()));
-            let caret = table.span.end + 1 + table.lead.encode_utf16().count() + 2;
-            Some(super::edit::Edit { range: table.span.end..table.span.end, with: row, chosen: (caret, caret) })
-        }
+        Some(_) => Some(row_after(&table)),
         None => None,
     })
+}
+
+/// A row more made under `table`'s last (as many cells as it has columns, begun as its lines are), the caret in its first.
+pub fn row_after(table: &Table) -> super::edit::Edit {
+    let row = format!("\n{}|{}", table.lead, "  |".repeat(table.aligns.len()));
+    let caret = table.span.end + 1 + table.lead.encode_utf16().count() + 2;
+    super::edit::Edit { range: table.span.end..table.span.end, with: row, chosen: (caret, caret) }
+}
+
+/// The cell of `table` (row, column) whose room `at` (UTF-16 units) is in, or at either end of: none written there.
+pub fn cell_of(table: &Table, at: usize) -> Option<(usize, usize)> {
+    table.rows.iter().enumerate().find_map(|(row, cells)| cells.iter().position(|cell| cell.written && cell.room.start <= at && at <= cell.room.end).map(|column| (row, column)))
+}
+
+/// What is done to a table's rows and columns, at one of its cells (see `changed`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    RowAbove,
+    RowBelow,
+    ColumnLeft,
+    ColumnRight,
+    TakeRow,
+    TakeColumn,
+    TakeTable,
+}
+
+/// `table` (in words `units`, UTF-16 units) changed as `change` says at its cell `at` (row, column): written anew, each
+/// cell's words as they were written, each row on a line of its own begun as its lines are (its cells between pipes,
+/// a space round each one's words), its delimiter row as its columns are set. And the cell the caret is to be in
+/// after (none: the table taken away, its line break after it with it). None where it cannot be: no row goes above
+/// its head, nor is its head taken away. Its last column taken away takes it away.
+pub fn changed(units: &[u16], table: &Table, at: (usize, usize), change: Change) -> Option<(super::edit::Edit, Option<(usize, usize)>)> {
+    let (row, column) = at;
+    let mut rows: Vec<Vec<String>> = table.rows.iter().map(|cells| cells.iter().map(|cell| if cell.written { String::from_utf16_lossy(&units[cell.words.clone()]) } else { String::new() }).collect()).collect();
+    let mut aligns = table.aligns.clone();
+    let count = aligns.len();
+    let empty = || vec![String::new(); count];
+    let to = match change {
+        Change::RowAbove if row == 0 => return None,
+        Change::RowAbove => {
+            rows.insert(row, empty());
+            Some((row, column))
+        }
+        Change::RowBelow => {
+            rows.insert(row + 1, empty());
+            Some((row + 1, column))
+        }
+        Change::ColumnLeft | Change::ColumnRight => {
+            let at = column + usize::from(change == Change::ColumnRight);
+            for cells in &mut rows {
+                cells.insert(at, String::new());
+            }
+            aligns.insert(at, Align::Left);
+            Some((row, at))
+        }
+        Change::TakeRow if row == 0 => return None,
+        Change::TakeRow => {
+            rows.remove(row);
+            Some((row.min(rows.len() - 1), column))
+        }
+        Change::TakeColumn if count > 1 => {
+            for cells in &mut rows {
+                cells.remove(column);
+            }
+            aligns.remove(column);
+            Some((row, column.min(count - 2)))
+        }
+        Change::TakeColumn | Change::TakeTable => None,
+    };
+    let Some(to) = to else {
+        // (Taken away, its line break after it with it, where there is one.)
+        let end = table.span.end + usize::from(units.get(table.span.end) == Some(&u16::from(b'\n')));
+        let edit = super::edit::Edit { range: table.span.start..end, with: String::new(), chosen: (table.span.start, table.span.start) };
+        return Some((edit, None));
+    };
+    let line = |cells: &[String]| format!("{}| {} |", table.lead, cells.join(" | "));
+    let delimiter: Vec<String> = aligns
+        .iter()
+        .map(|align| match align {
+            Align::Left => "---",
+            Align::Centre => ":---:",
+            Align::Right => "---:",
+        }.to_string())
+        .collect();
+    let mut lines = vec![line(&rows[0]), format!("{}|{}|", table.lead, delimiter.join("|"))];
+    lines.extend(rows[1..].iter().map(|cells| line(cells)));
+    let edit = super::edit::Edit { range: table.span.clone(), with: lines.join("\n"), chosen: (table.span.start, table.span.start) };
+    Some((edit, Some(to)))
 }
 
 #[cfg(test)]
@@ -336,5 +445,54 @@ mod tests {
         assert_eq!((more.with.as_str(), more.chosen), ("\n|  |  |", (typed.len() + 3, typed.len() + 3)));
         let left = tab(piped, (piped.len(), piped.len()), false).unwrap().unwrap();
         assert_eq!((left.with.as_str(), left.chosen), ("  |", (piped.len() + 1, piped.len() + 1)));
+    }
+
+    /// A cell's marks are what of its words as written does not read: emphasis's, a code span's backticks, an
+    /// escape's backslash, where a link goes. The cell a place is in, or at either end of.
+    #[test]
+    fn a_cell_s_marks_and_the_cell_a_place_is_in() {
+        let text = "| **粗**`码` | a\\|b [链](https://c.d) |\n| - | - |\n| x |  |";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let of = |range: &Range<usize>| String::from_utf16(&units[range.clone()]).unwrap();
+        let table = &tables(text)[0];
+        let marks = |cell: &Cell| cell.marks().iter().map(of).collect::<Vec<_>>();
+        assert_eq!(marks(&table.rows[0][0]), ["**", "**`", "`"]);
+        assert_eq!(marks(&table.rows[0][1]), ["\\", "[", "](https://c.d)"]);
+        assert_eq!(table.rows[0][1].reads, "a|b 链");
+        assert!(marks(&table.rows[1][1]).is_empty());
+        let x = text[..text.find('x').unwrap()].encode_utf16().count();
+        assert_eq!(cell_of(table, x), Some((1, 0)));
+        assert_eq!(cell_of(table, table.rows[1][1].words.start), Some((1, 1)));
+        assert_eq!(cell_of(table, text[..text.find('\n').unwrap()].encode_utf16().count() + 2), None);
+    }
+
+    /// A table changed at a cell: written anew, a row above or below it, a column left or right of it, its row or column
+    /// taken away, and the cell the caret goes to. No row above its head, its head not taken away. Its last column, or
+    /// it, taken away: it is gone, its line break after it with it.
+    #[test]
+    fn a_table_changed_at_a_cell() {
+        let text = "a\n\n| A | B |\n| :-: | --: |\n| x | y |\n\nb";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let table = &tables(text)[0];
+        let changed = |at: (usize, usize), change: Change| {
+            changed(&units, table, at, change).map(|(edit, to)| {
+                let mut after = text.to_string();
+                after.replace_range(edit.range.clone(), &edit.with);
+                (after, to)
+            })
+        };
+        assert_eq!(changed((1, 1), Change::RowAbove), Some(("a\n\n| A | B |\n|:---:|---:|\n|  |  |\n| x | y |\n\nb".to_string(), Some((1, 1)))));
+        assert_eq!(changed((0, 0), Change::RowBelow), Some(("a\n\n| A | B |\n|:---:|---:|\n|  |  |\n| x | y |\n\nb".to_string(), Some((1, 0)))));
+        assert_eq!(changed((1, 0), Change::ColumnRight), Some(("a\n\n| A |  | B |\n|:---:|---|---:|\n| x |  | y |\n\nb".to_string(), Some((1, 1)))));
+        assert_eq!(changed((1, 1), Change::ColumnLeft), Some(("a\n\n| A |  | B |\n|:---:|---|---:|\n| x |  | y |\n\nb".to_string(), Some((1, 1)))));
+        assert_eq!(changed((1, 1), Change::TakeRow), Some(("a\n\n| A | B |\n|:---:|---:|\n\nb".to_string(), Some((0, 1)))));
+        assert_eq!(changed((1, 1), Change::TakeColumn), Some(("a\n\n| A |\n|:---:|\n| x |\n\nb".to_string(), Some((1, 0)))));
+        assert_eq!(changed((1, 1), Change::TakeTable), Some(("a\n\n\nb".to_string(), None)));
+        assert_eq!(changed((0, 0), Change::RowAbove), None);
+        assert_eq!(changed((0, 0), Change::TakeRow), None);
+        let one = "| A |\n| - |";
+        let units: Vec<u16> = one.encode_utf16().collect();
+        let (edit, to) = super::changed(&units, &tables(one)[0], (0, 0), Change::TakeColumn).unwrap();
+        assert_eq!((edit.range, edit.with.as_str(), to), (0..one.len(), "", None));
     }
 }

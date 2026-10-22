@@ -977,7 +977,7 @@ impl Beside {
 
     /// The note's writing menu (see `note::writing_menu`), at `at` on the screen, where it was asked for.
     fn writing_menu(&self, at: POINT) {
-        let (items, choices) = super::note::writing_menu(self.lang);
+        let (items, choices) = super::note::writing_menu(self.lang, self.writing.as_ref().is_some_and(|writing| writing.in_cell()));
         if let Some(menu) = super::menu::Menu::open_at(items, super::menu::Look::of(self.theme.skin, self.theme.dark), at, false, false) {
             MENU.with(|held| *held.borrow_mut() = Some((menu, choices)));
         }
