@@ -5196,6 +5196,7 @@ mod tests {
     #[ignore = "writes a picture to look at"]
     #[cfg(feature = "studio")]
     fn glass_sliders() {
+        let _device = crate::ui::gfx::held().unwrap();
         use crate::ui::theme::{Skin, Theme};
         let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
         let (w, h) = (360.0f32, 200.0f32);
@@ -5221,6 +5222,7 @@ mod tests {
     #[ignore = "writes a picture to look at"]
     #[cfg(feature = "studio")]
     fn workbench_rails() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::*;
         let _pretending = crate::pretending();
         unsafe {
@@ -5284,6 +5286,7 @@ otepad.exe", "Notepad"),
     #[ignore = "writes pictures to look at"]
     #[cfg(feature = "studio")]
     fn workbench_looks() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::*;
         let _pretending = crate::pretending();
         unsafe {
@@ -5346,6 +5349,7 @@ otepad.exe", "Notepad"),
     #[ignore = "writes pictures to look at"]
     #[cfg(feature = "studio")]
     fn workbench_shapes() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::*;
         let _pretending = crate::pretending();
         unsafe {
@@ -5427,6 +5431,7 @@ otepad.exe", "Notepad"),
     #[ignore = "writes pictures to look at"]
     #[cfg(feature = "studio")]
     fn notes_lanes() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::*;
         let _pretending = crate::pretending();
         use crate::notes::{Colour, Note};
@@ -5489,6 +5494,7 @@ otepad.exe", "Notepad"),
     #[ignore = "writes a picture to look at"]
     #[cfg(feature = "studio")]
     fn station_pages() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::*;
         let _pretending = crate::pretending();
         use crate::station::shelf::{Item, What};
@@ -5500,10 +5506,10 @@ otepad.exe", "Notepad"),
         let now = crate::station::now_ms();
         let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied, stays_here: false, own_bytes: 0 };
         let items = || vec![
-            item(10, What::Files { paths: vec![file("docs/station-and-notes.md")], kept: Vec::new() }, true, 2),
+            item(10, What::Files { paths: vec![file("README.zh-CN.md")], kept: Vec::new() }, true, 2),
             item(11, What::Link { url: "https://glancepc.com/app".into() }, true, 9),
             item(12, What::Text { text: "cargo build --profile fast".into() }, true, 30),
-            item(1, What::Files { paths: vec![file("website/apple-touch-icon.png")], kept: Vec::new() }, false, 400),
+            item(1, What::Files { paths: vec![file("icons/128x128@2x.png")], kept: Vec::new() }, false, 400),
             item(2, What::Text { text: "会议改到周四下午三点
 地点：二楼小会议室
 记得带上季度报表".into() }, false, 180),
@@ -5519,8 +5525,8 @@ otepad.exe", "Notepad"),
             crate::station::recent::pretend(vec![
                 came(1, "docs/images/banner-zh.webp", 3, 182_000, Kind::Screenshot, None),
                 came(2, "Cargo.toml", 25, 6_100_000, Kind::Archive, Some("github.com")),
-                came(3, "docs/station-and-notes.md", 70, 21_000, Kind::Document, None),
-                came(4, "website/apple-touch-icon.png", 26 * 60, 5_600_000, Kind::Picture, Some("wallhaven.cc")),
+                came(3, "README.zh-CN.md", 70, 21_000, Kind::Document, None),
+                came(4, "icons/128x128@2x.png", 26 * 60, 5_600_000, Kind::Picture, Some("wallhaven.cc")),
                 came(5, "README.md", 4 * 24 * 60, 64_000, Kind::Document, None),
             ]);
         }

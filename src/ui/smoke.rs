@@ -199,6 +199,7 @@ mod tests {
     #[test]
     #[ignore = "draws on this machine's graphics card"]
     fn draws_the_smoke() {
+        let _device = crate::ui::gfx::held().unwrap();
         let gfx = super::Gfx::new().unwrap();
         let mut smoke = super::Smoke::new(&gfx).unwrap();
         let size = (960u32, 540u32);

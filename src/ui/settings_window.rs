@@ -5445,7 +5445,7 @@ mod pictures {
             let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: 0, pinned: id == 2, copied, stays_here: false, own_bytes: 0 };
             crate::station::thumbs::start(|| {});
             crate::station::run::pretend(vec![
-                item(1, What::Files { paths: vec![file("website/apple-touch-icon.png")], kept: Vec::new() }, false),
+                item(1, What::Files { paths: vec![file("icons/128x128@2x.png")], kept: Vec::new() }, false),
                 item(2, What::Text { text: "会议改到周四下午三点
 地点：二楼小会议室
 记得带上季度报表".into() }, false),
@@ -5453,7 +5453,7 @@ mod pictures {
                 item(4, What::Files { paths: vec![file("Cargo.toml"), file("README.md"), file("LICENSE")], kept: Vec::new() }, false),
                 item(5, What::Text { text: "cargo build --profile fast".into() }, true),
                 item(6, What::Link { url: "https://glancepc.com/app".into() }, true),
-                item(7, What::Files { paths: vec![file("docs/station-and-notes.md")], kept: Vec::new() }, true),
+                item(7, What::Files { paths: vec![file("README.zh-CN.md")], kept: Vec::new() }, true),
             ], crate::settings::ShelfView::Cards);
         }
         let gfx = gfx::held().unwrap();

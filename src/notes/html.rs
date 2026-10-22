@@ -1,4 +1,4 @@
-//! What is pasted into a note as HTML (a web page's, Word's: see docs/station-and-notes.md, section 九 8), written as
+//! What is pasted into a note as HTML (a web page's, Word's), written as
 //! the Markdown a note is: headings, bold, slanted and struck words, links, code, code blocks, lists (nested, and
 //! to-dos), quotes, tables, rules, paragraphs and line breaks. What it does not know only its words are kept of, an
 //! image as a link to it, and what would read as Markdown's marks in its words is escaped.

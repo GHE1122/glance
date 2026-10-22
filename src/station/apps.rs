@@ -1,5 +1,5 @@
-//! Quick launch: the programs, files, folders and web addresses kept at hand on the workbench, in their order (see
-//! docs/station-and-notes.md, section 八). Each is kept as Windows names it to be opened: a program from the Start
+//! Quick launch: the programs, files, folders and web addresses kept at hand on the workbench, in their order.
+//! Each is kept as Windows names it to be opened: a program from the Start
 //! menu by its shell name (`shell:AppsFolder\…`, a Store app's and a desktop program's alike), a shortcut, file or
 //! folder by its path (a shortcut kept as the shortcut), a web address as it is. Opened as the user, by the shell, on
 //! the station's thread (see `run::Ask::Launch`): Glance's UI runs unelevated, so what it opens does too.
@@ -42,7 +42,7 @@ impl App {
 
 static SHOWN: Mutex<Option<Arc<Vec<App>>>> = Mutex::new(None);
 
-#[cfg(feature = "studio")]
+#[cfg(any(test, feature = "studio"))]
 thread_local! {
     /// What this thread's pictures pretend (see `pretend`): each test's its own, as tests run side by side.
     static PRETENDED: std::cell::RefCell<Option<Arc<Vec<App>>>> = const { std::cell::RefCell::new(None) };
@@ -50,7 +50,7 @@ thread_local! {
 
 /// What is kept at hand, in its order.
 pub fn shown() -> Arc<Vec<App>> {
-    #[cfg(feature = "studio")]
+    #[cfg(any(test, feature = "studio"))]
     if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
         return pretended;
     }
@@ -78,7 +78,7 @@ pub fn follow(apps: &[App]) {
 }
 
 /// For pictures: as if these were kept at hand.
-#[cfg(feature = "studio")]
+#[cfg(any(test, feature = "studio"))]
 pub fn pretend(apps: Vec<App>) {
     PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(apps)));
 }

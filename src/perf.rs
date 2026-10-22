@@ -1,4 +1,4 @@
-//! Marks for the performance pass (docs/performance.md): moments of Glance's (a panel asked to open, its first frame
+//! Marks for the performance pass: moments of Glance's (a panel asked to open, its first frame
 //! shown, a frame of the settings drawn), written with when they came to the file the GLANCE_PERF variable names, one
 //! a line: the time (seconds, on the performance counter, as Python's `time.perf_counter` reads it, so that what drives
 //! Glance and what Glance did are on one clock), the thread, and what. Without the variable (as Glance runs for its

@@ -1,5 +1,5 @@
-//! A box words are written in, written as Windows writes them: its RichEdit text services, windowless (see
-//! docs/station-and-notes.md, sections 三 and 六). They take the keys, the input method's words, the selection, undo and
+//! A box words are written in, written as Windows writes them: its RichEdit text services, windowless.
+//! They take the keys, the input method's words, the selection, undo and
 //! the clipboard; Glance hosts them in a window it draws itself, and they draw their words with Direct2D into what
 //! Glance draws (`ITextServices2::TxDrawD2D`), the caret drawn by Glance where they say it is.
 //!

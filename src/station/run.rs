@@ -203,7 +203,7 @@ pub fn ask(ask: Ask) {
     }
 }
 
-#[cfg(feature = "studio")]
+#[cfg(any(test, feature = "studio"))]
 thread_local! {
     /// What this thread's pictures pretend (see `pretend`): each test's its own, as tests run side by side.
     static PRETENDED: std::cell::RefCell<Option<Arc<Shown>>> = const { std::cell::RefCell::new(None) };
@@ -211,7 +211,7 @@ thread_local! {
 
 /// What the station shows now.
 pub fn shown() -> Arc<Shown> {
-    #[cfg(feature = "studio")]
+    #[cfg(any(test, feature = "studio"))]
     if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
         return pretended;
     }
@@ -219,7 +219,7 @@ pub fn shown() -> Arc<Shown> {
 }
 
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
-#[cfg(feature = "studio")]
+#[cfg(any(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
     PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false })));
 }

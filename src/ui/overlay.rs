@@ -1037,6 +1037,7 @@ mod tests {
     #[test]
     #[cfg(feature = "studio")]
     fn it_is_drawn_the_same_wherever_in_the_atlas() {
+        let _device = crate::ui::gfx::held().unwrap();
         use crate::ui::canvas::{Color, Point};
         let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
         let mut s = sample(true);

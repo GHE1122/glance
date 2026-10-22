@@ -1,4 +1,4 @@
-//! A note written (see docs/station-and-notes.md, sections 三 and 六): its words in a box the text services write (see
+//! A note written: its words in a box the text services write (see
 //! `editor`: the keys, the input method, selection, undo and the clipboard theirs), dressed as their Markdown reads,
 //! kept in its file as they are typed (a moment after the last key), its to-dos ticked and its links followed where they
 //! show. Written on its page beside the panel (see `beside`), or where it is stuck on the desktop, on the widget it is
@@ -371,7 +371,7 @@ enum Format {
     Link,
 }
 
-/// The format bar's buttons (see docs/station-and-notes.md, section 九 6): bold, slanted, struck through, code, link.
+/// The format bar's buttons: bold, slanted, struck through, code, link.
 const BAR: [(Icon, Format); 5] = {
     use crate::notes::edit::Marked;
     [(Icon::Bold, Format::Marked(Marked::Bold)), (Icon::Italic, Format::Marked(Marked::Italic)), (Icon::Strikethrough, Format::Marked(Marked::Struck)), (Icon::Code, Format::Marked(Marked::Code)), (Icon::Link, Format::Link)]

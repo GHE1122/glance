@@ -664,7 +664,7 @@ pub fn run() {
 /// For tests: what is pretended shown (the notes, the station's things, the programs found, files lately) is one for
 /// all of them, so a test pretending it holds this while it looks at it (tests run side by side: one pretending other
 /// notes in the middle of another's made it fail now and then).
-#[cfg(all(test, feature = "studio"))]
+#[cfg(test)]
 pub fn pretending() -> std::sync::MutexGuard<'static, ()> {
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner)

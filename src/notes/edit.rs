@@ -1,4 +1,4 @@
-//! What the keys that write Markdown for the writer do to a note's words (see docs/station-and-notes.md, section 九):
+//! What the keys that write Markdown for the writer do to a note's words:
 //! a list carried on to the next line, moved in and out, its mark taken off, a to-do ticked, lines moved, emphasis,
 //! code and headings put on and taken off, a link made. Each is an `Edit` (one replacement, one step for undo to take
 //! back), or none where the key is to do what it always does. Lists are read as the note is shown (`markdown::READ`),

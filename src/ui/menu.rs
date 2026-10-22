@@ -489,6 +489,7 @@ mod tests {
     /// A choice marked by a colour (a note's) shows a dot of that colour where an icon stands, round, in every look.
     #[test]
     fn a_colour_s_choice_shows_a_dot_of_it() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::super::theme::Skin;
         let gfx = gfx::Gfx::new().expect("graphics");
         let pink = Color::hex(0xEE556D, 1.0);
@@ -513,6 +514,7 @@ mod tests {
     #[test]
     #[ignore = "writes a picture to look at"]
     fn menu_looks() {
+        let _device = crate::ui::gfx::held().unwrap();
         use super::super::theme::Skin;
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);

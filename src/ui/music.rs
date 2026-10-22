@@ -2880,6 +2880,7 @@ mod tests {
     #[test]
     #[cfg(feature = "studio")]
     fn a_turned_lines_chip_keeps_its_place_as_the_line_grows() {
+        let _device = crate::ui::gfx::held().unwrap();
         let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
         let full = Font::new(crate::ui::canvas::Family::Segoe, 26.0, 700.0);
         gfx.draw_offscreen((8, 8), 1.0, |frame| {

@@ -280,15 +280,15 @@ makensis installer\glance.nsi
 
 `scripts\release.ps1` does both, and builds the phone remote (`remote\`, a
 crate of its own); with `-Sign` it signs the executables, the uninstaller
-and the installer (`scripts\sign.ps1`, Microsoft Artifact Signing). The
+and the installer (Microsoft Artifact Signing, through the publisher's own
+`scripts\sign.ps1`, which the repository does not hold). The
 Android app is in `android\` (`gradlew assembleRelease`, JDK 17). A debug build runs without asking for administrator rights, and so
 without the driver's sensors.
 
 The pictures here and the promotional video are drawn by Glance itself:
 `cargo build --release --features studio` adds `glance --studio script.json
 out-folder`, which renders the panel off screen, frame by frame, from a
-script of shots; `studio\readme.py` and `studio\compose.py` put the frames
-together (`studio\`).
+script of shots.
 
 ## Licence
 

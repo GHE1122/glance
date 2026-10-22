@@ -1,0 +1,5 @@
+# The C runtime linked into each program rather than loaded from Windows: a PC without the Visual C++ runtime
+# installed (VCRUNTIME140.dll) could not start Glance, nor the copy of it the installer runs to check the folder.
+# (Found here from the repository's root, it holds for the phone remote built from there too: see scripts/release.ps1.)
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

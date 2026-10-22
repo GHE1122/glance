@@ -1,6 +1,6 @@
 //! Where what is dragged from another program is caught: windows of the station's own thread (OLE gives a drop to the
-//! thread a window is of, and the panel's and the widgets' thread has none: see docs/station-and-notes.md, section
-//! 七), put over each station shown (see `run::shows_at`) and along the screen edges that hold one, only while
+//! thread a window is of, and the panel's and the widgets' thread has
+//! none), put over each station shown (see `run::shows_at`) and along the screen edges that hold one, only while
 //! something is dragged. Else there are none: they would take presses meant for what is under them (a maximized
 //! window's scroll bar along the screen's edge).
 //!

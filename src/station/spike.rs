@@ -1,4 +1,4 @@
-//! Whether the station's drag and drop works as it is built (see docs/station-and-notes.md, section 七): a drag
+//! Whether the station's drag and drop works as it is built: a drag
 //! begun on the station's thread (an STA) as the button is pressed in a window a multithreaded thread owns (as the
 //! panel's thread owns its windows), its input shared meanwhile, dropped on a window of the station's own (as its
 //! catchers are). (Registered for the other thread's window, a drop target saw nothing, and the drag never ended.)

@@ -1,4 +1,4 @@
-//! The page beside the panel or a widget (see docs/station-and-notes.md, section 八): what opens from them and needs
+//! The page beside the panel or a widget: what opens from them and needs
 //! more room than they have, laid out beside them on their inner side, as tall as they are:
 //!
 //! - quick launch's adding: what is kept, in its order (dragged into another, taken off by its cross), and what may

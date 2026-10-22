@@ -752,6 +752,7 @@ mod tests {
     /// rest, at each scale as it is.
     #[test]
     fn a_shadow_sized_by_hand_is_made_once_for_scales_near_one_another() {
+        let _device = crate::ui::gfx::held().unwrap();
         let gfx = super::super::gfx::Gfx::new().expect("graphics");
         let shapes = [(Rect { x: 10.0, y: 10.0, w: 200.0, h: 120.0 }, 8.0)];
         let specs = [Shadow { y: 2.0, blur: 8.0, spread: 0.0, color: Color::hex(0, 0.2) }];

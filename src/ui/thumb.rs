@@ -451,6 +451,7 @@ mod tests {
     #[test]
     #[cfg(feature = "studio")]
     fn the_dot_is_in_the_middle_of_its_face() {
+        let _device = crate::ui::gfx::held().unwrap();
         let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
         for scale in [1.0f32, 1.25, 1.5] {
             for x in [20.0f32, 20.2, 20.33, 20.5, 20.7] {

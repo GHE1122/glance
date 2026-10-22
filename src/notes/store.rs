@@ -1,4 +1,4 @@
-//! The notes' folder: a note a Markdown file each (see docs/station-and-notes.md, sections 二 and 六), readable without
+//! The notes' folder: a note a Markdown file each, readable without
 //! Glance and synced as the user syncs the folder. What Glance keeps of them besides their words (each one's colour)
 //! is in a file of its own beside them (`.glance-notes.json`), so the notes stay plain Markdown.
 //!

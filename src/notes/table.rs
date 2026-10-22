@@ -1,4 +1,4 @@
-//! A note's tables, as GitHub's Markdown writes them (see docs/station-and-notes.md, section 九 4): read from its words,
+//! A note's tables, as GitHub's Markdown writes them: read from its words,
 //! laid out to be drawn where they are not written at (in a note shown, or written in elsewhere), the same way for the
 //! box a note is written in and for its face drawn (see `ui::table`), and the cell Tab goes to as one is written.
 //!

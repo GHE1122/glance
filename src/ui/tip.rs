@@ -195,6 +195,7 @@ mod tests {
     /// its lines whole, whole.
     #[test]
     fn a_long_tip_is_cut_to_its_room() {
+        let _device = crate::ui::gfx::held().unwrap();
         let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
         let font = super::Font::new(super::Family::Segoe, 12.0, 400.0);
         let long = "先看一下安装脚本的用法，再备份设置： Ran 1 shell command 用正式版配置编译 0.4，同时备份设置： ".repeat(12);

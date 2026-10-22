@@ -126,9 +126,9 @@ cargo build --release
 makensis installer\glance.nsi
 ```
 
-`scripts\release.ps1` 会完成以上两步，并构建手机遥控程序（`remote\`，独立的 crate）；加上 `-Sign` 时，还会为可执行文件、卸载程序和安装程序签名（`scripts\sign.ps1`，使用 Microsoft Artifact Signing）。安卓 APP 在 `android\` 目录（`gradlew assembleRelease`，需要 JDK 17）。调试版本启动时不请求管理员权限，因此也没有驱动提供的传感器读数。
+`scripts\release.ps1` 会完成以上两步，并构建手机遥控程序（`remote\`，独立的 crate）。加上 `-Sign` 时，还会为可执行文件、卸载程序和安装程序签名（使用 Microsoft Artifact Signing，通过发布者自己的 `scripts\sign.ps1`，该脚本不在仓库中）。安卓 APP 在 `android\` 目录（`gradlew assembleRelease`，需要 JDK 17）。调试版本启动时不请求管理员权限，因此也没有驱动提供的传感器读数。
 
-本页的图片和宣传视频都由 Glance 自己绘制：`cargo build --release --features studio` 会加入 `glance --studio script.json out-folder` 命令，按镜头脚本在屏幕外逐帧渲染面板，再由 `studio\readme.py` 和 `studio\compose.py` 合成（见 `studio\`）。
+本页的图片和宣传视频都由 Glance 自己绘制：`cargo build --release --features studio` 会加入 `glance --studio script.json out-folder` 命令，按镜头脚本在屏幕外逐帧渲染面板。
 
 ## 许可证
 
