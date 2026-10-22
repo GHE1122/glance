@@ -1032,27 +1032,51 @@ fn note_card_rim(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour
 /// a little of the colour, ruled round; chart paper's its paper.
 pub(crate) fn note_page(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (x, y, width, height): (f32, f32, f32, f32)) {
     match theme.skin {
-        Skin::Glass => {
-            // (Lighter than its card: over a page's breadth the card's own reads as a sheet of paint, the desktop frosted
-            // under it no longer seen through; at half of it, it read as another colour.)
-            // (No rim of its own: the sheet's is round it, the two a thick frame.)
-            // (In the dark, less of the pane of light under it than a card has: its words, the skin's light ones, read
-            // on it; with more, a light colour's page, yellow's, came to a middle grey no words read well on.)
-            if let Some(light) = note_light(theme.dark) {
-                frame.fill_rounded(light.alpha(0.2), x, y, width, height, theme.radius);
-            }
-            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark) * 0.45), x, y, width, height, theme.radius);
-        }
+        // (No rim of its own: the sheet's is round it, the two a thick frame.)
+        Skin::Glass => note_tint(frame, theme, colour, (x, y, width, height), theme.radius),
         // Windows 11's: its acrylic through it, a little of the note's colour over it, the band of it along its top
         // its card has (near opaque, the acrylic was lost and the card's band with it).
         Skin::Fluent => {
-            frame.fill_rounded(note_colour(colour).alpha(if theme.dark { 0.1 } else { 0.08 }), x, y, width, height, theme.radius);
+            note_tint(frame, theme, colour, (x, y, width, height), theme.radius);
             frame.clip(x, y, width, 4.0);
             frame.fill_rounded(note_colour(colour), x, y, width, 2.0 * theme.radius + 4.0, theme.radius);
             frame.unclip();
         }
         Skin::Paper => {}
     }
+}
+
+/// A note's colour laid over what is under it (`width` × `height` from (`x`, `y`), its corners `radius` round), as its
+/// page has it (see `note_page`), and a plate over its page (its format bar, the plate a link is written on: see
+/// `note::note_plate`): glass's a pane of its coloured glass, Windows 11's a little of the colour, chart paper's none.
+pub(crate) fn note_tint(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, (x, y, width, height): (f32, f32, f32, f32), radius: f32) {
+    match theme.skin {
+        Skin::Glass => {
+            // (Lighter than its card: over a page's breadth the card's own reads as a sheet of paint, the desktop frosted
+            // under it no longer seen through; at half of it, it read as another colour.)
+            // (In the dark, less of the pane of light under it than a card has: its words, the skin's light ones, read
+            // on it; with more, a light colour's page, yellow's, came to a middle grey no words read well on.)
+            if let Some(light) = note_light(theme.dark) {
+                frame.fill_rounded(light.alpha(0.2), x, y, width, height, radius);
+            }
+            frame.fill_rounded(note_glass(colour).0.alpha(glass_tint(theme.dark) * 0.45), x, y, width, height, radius);
+        }
+        Skin::Fluent => frame.fill_rounded(note_colour(colour).alpha(if theme.dark { 0.1 } else { 0.08 }), x, y, width, height, radius),
+        Skin::Paper => {}
+    }
+}
+
+/// What is in a note's accent on a plate over its page (the field with the keys ringed, the button that does the
+/// plate's work): its ground and the words on it. Glass's its glass's deep ink, Windows 11's its colour, chart paper's
+/// the paper's ink, as each skin's note is marked.
+pub(crate) fn note_accent(theme: &Theme, colour: crate::notes::Colour) -> (Color, Color) {
+    let on = |ground: Color| if super::overlay::luminance(ground.r, ground.g, ground.b) > 0.4 { Color::hex(0x000000, 0.88) } else { Color::hex(0xFFFFFF, 1.0) };
+    let ground = match theme.skin {
+        Skin::Glass => note_glass(colour).1,
+        Skin::Fluent => note_colour(colour),
+        Skin::Paper => return (theme.text, Color { a: 1.0, ..theme.paper }),
+    };
+    (ground, on(ground))
 }
 
 /// `top` laid over `under` (an opaque colour): the opaque colour they make.
