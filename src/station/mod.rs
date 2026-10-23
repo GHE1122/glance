@@ -53,7 +53,7 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
             *last = (!again).then(|| (entry, std::time::Instant::now()));
             if let Some(paths) = recent::paths_of(entry) {
                 let opened = if matches!(entry, recent::Entry::Burst(..)) { run::FilesAct::Show } else { run::FilesAct::Open };
-                run::ask(run::Ask::Files(paths, if again { opened } else { run::FilesAct::Copy }));
+                run::ask(run::Ask::Files(paths, if again { opened } else { run::FilesAct::Copy(entry) }));
             }
         }
         _ => return false,
@@ -185,7 +185,7 @@ pub fn recent_chose(entry: recent::Entry, choice: RecentChoice) {
                 recent::Entry::Burst(..) => folder,
             };
             if let Some(copied) = copied {
-                run::ask(run::Ask::CopyText(copied.display().to_string()));
+                run::ask(run::Ask::CopyText(copied.display().to_string(), Some(run::Copied::Recent(entry))));
             }
         }
         RecentChoice::Hide => {

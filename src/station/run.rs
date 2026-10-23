@@ -50,19 +50,31 @@ pub enum Ask {
     /// window of the thread numbered so).
     Files(Vec<std::path::PathBuf>, FilesAct),
     DragFiles(Vec<std::path::PathBuf>, u32),
-    /// Text put on the clipboard (a file's path).
-    CopyText(String),
+    /// Text put on the clipboard (a file's path), and what it was copied from, to be marked copied.
+    CopyText(String, Option<Copied>),
     /// What is kept at hand opened, as the shell opens it (see `apps`).
     Launch(String),
 }
 
-/// What is done with files not on the station (see `Ask::Files`).
+/// What is done with files not on the station (see `Ask::Files`): put on the clipboard (copied from the files come
+/// lately of the entry, to be marked copied), opened, shown in Explorer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FilesAct {
-    Copy,
+    Copy(super::recent::Entry),
     Open,
     Show,
 }
+
+/// What was put on the clipboard from where it shows (marked copied there a moment: see `Shown::copied`): a thing on
+/// the station or copied lately, by its number, or files come lately, by their entry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Copied {
+    Item(u64),
+    Recent(super::recent::Entry),
+}
+
+/// How long what was copied is marked so (see `Shown::copied`).
+pub const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1400);
 
 /// What is to be dragged off the station: a thing on it, by its number, or files not on it.
 enum Leaving {
@@ -85,6 +97,9 @@ pub struct Shown {
     /// Something is dragged over a station, to be dropped; over what is kept at hand, to be kept there.
     pub over: bool,
     pub apps_over: bool,
+    /// What was last put on the clipboard from where it shows, and when (the clipboard took it): marked copied there
+    /// for `COPIED_FOR`.
+    pub copied: Option<(Copied, std::time::Instant)>,
 }
 
 /// Its window's message: asked something (see `ask`).
@@ -221,7 +236,7 @@ pub fn shown() -> Arc<Shown> {
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(any(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
-    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false })));
+    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, copied: None })));
 }
 
 /// For pictures: what is pretended (see `pretend`) with Recently copied shown as `copies` and Recent files as `recent`.
@@ -362,6 +377,8 @@ struct Station {
     /// Something dragged over a station, to be dropped (see `drop`).
     over: bool,
     apps_over: bool,
+    /// What was last put on the clipboard from where it shows, and when (see `Shown::copied`).
+    copied: Option<(Copied, std::time::Instant)>,
     /// Where drops are caught while something is dragged (see `catch`).
     catchers: super::catch::Catchers,
     /// What is to be dragged off it, asked, and the thread it was pressed on (dragged once it is done answering: see
@@ -388,7 +405,7 @@ fn run(asks: Receiver<Ask>) {
         let settings = crate::app().settings.lock().unwrap().station;
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
         keep.expire(super::now_ms());
-        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, catchers: Default::default(), dragging: None }));
+        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, copied: None, catchers: Default::default(), dragging: None }));
         WINDOW.store(window.0 as isize, Ordering::Release);
         let _ = SetTimer(Some(window), EXPIRE, EXPIRE_EVERY_MS, None);
         let _ = SetTimer(Some(window), WATCH, WATCH_EVERY_MS, None);
@@ -505,9 +522,7 @@ impl Station {
                 Ask::Copy(id) => {
                     let given = self.keep.shelf.get(id).and_then(|item| Some((self.keep.content_of(item)?, item.stays_here)));
                     if let Some((content, stays_here)) = given {
-                        if let Some(sequence) = clipboard::put(self.window, &content, stays_here) {
-                            self.ours = sequence;
-                        }
+                        self.copy(&content, stays_here, Some(Copied::Item(id)));
                     }
                 }
                 Ask::Open(id) => {
@@ -526,11 +541,7 @@ impl Station {
                 Ask::DragOut(id, thread) => self.dragging = Some((Leaving::Item(id), thread)),
                 Ask::DragFiles(paths, thread) => self.dragging = Some((Leaving::Files(paths), thread)),
                 Ask::Files(paths, act) => match act {
-                    FilesAct::Copy => {
-                        if let Some(sequence) = clipboard::put(self.window, &Content::Files(paths), false) {
-                            self.ours = sequence;
-                        }
-                    }
+                    FilesAct::Copy(entry) => self.copy(&Content::Files(paths), false, Some(Copied::Recent(entry))),
                     FilesAct::Open => by_the_shell(move || open(&Content::Files(paths))),
                     FilesAct::Show => by_the_shell(move || show_in_explorer(&paths)),
                 },
@@ -545,11 +556,7 @@ impl Station {
                         windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(target.as_str()), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
                     }
                 }),
-                Ask::CopyText(text) => {
-                    if let Some(sequence) = clipboard::put(self.window, &Content::Text(text), false) {
-                        self.ours = sequence;
-                    }
-                }
+                Ask::CopyText(text, from) => self.copy(&Content::Text(text), false, from),
             }
         }
         self.show();
@@ -629,9 +636,18 @@ impl Station {
     }
 
     /// What it shows now, for the other threads, who are told.
+    /// `content` put on the clipboard (not to leave this PC where `stays_here`): once it took it, what it was copied
+    /// from marked copied.
+    fn copy(&mut self, content: &Content, stays_here: bool, from: Option<Copied>) {
+        if let Some(sequence) = clipboard::put(self.window, content, stays_here) {
+            self.ours = sequence;
+            self.copied = from.map(|from| (from, std::time::Instant::now()));
+        }
+    }
+
     fn show(&self) {
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over };
+        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();
