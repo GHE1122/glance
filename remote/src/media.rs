@@ -15,7 +15,7 @@ use windows::Media::MediaPlaybackType;
 use windows::Win32::Media::Audio::{eConsole, eRender, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
 use windows::core::PCWSTR;
-use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, QueryDosDeviceW, VerQueryValueW};
 use windows::Win32::UI::Shell::{IShellItem, SHCreateItemFromParsingName, SIGDN_NORMALDISPLAY};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK};
 
@@ -318,12 +318,27 @@ fn named(session: &str) -> Option<(String, String)> {
     (!name.is_empty()).then(|| (name.to_string(), path.to_string()))
 }
 
-/// What a program's file says the program is ("NetEase Cloud Music"), in
-/// the first language it says it in. `path` as a sound's session has it:
-/// from the device up.
+/// What a program is called, by its file (`path` as a sound's session has it: from the device up): as the Start menu
+/// names it, where it does ("QQ音乐"); else as the file says the program is, in the first language it says it in
+/// (which may be more than its name: "QQ音乐 听我想听").
 fn described(path: &str) -> Option<String> {
     static DESCRIBED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-    once(&DESCRIBED, path, || read_description(path))
+    once(&DESCRIBED, path, || on_drives(path).and_then(|path| shown_as(&path)).or_else(|| read_description(path)))
+}
+
+/// `path` from the device up (`\Device\HarddiskVolume3\App\x.exe`) as from its drive (`D:\App\x.exe`), as the Start
+/// menu knows a program by its file; none where it is on no drive.
+fn on_drives(path: &str) -> Option<String> {
+    (b'A'..=b'Z').find_map(|letter| {
+        let drive = format!("{}:", letter as char);
+        let named: Vec<u16> = drive.encode_utf16().chain([0]).collect();
+        let mut device = [0u16; 512];
+        let length = unsafe { QueryDosDeviceW(PCWSTR(named.as_ptr()), Some(&mut device)) } as usize;
+        // (The first of the names it is a link to, each ended.)
+        let device = String::from_utf16_lossy(&device[..device[..length].iter().position(|unit| *unit == 0)?]);
+        let rest = path.get(device.len()..).filter(|_| path[..device.len()].eq_ignore_ascii_case(&device))?;
+        rest.starts_with('\\').then(|| format!("{drive}{rest}"))
+    })
 }
 
 fn read_description(path: &str) -> Option<String> {
@@ -535,5 +550,22 @@ mod tests {
         // A session with no program's path in it.
         assert_eq!(super::named("{0.0.0.00000000}.{6f2a}|#%b{6f2a}|1%b#"), None);
         assert_eq!(super::named("nothing of the kind"), None);
+    }
+
+    /// A program's file from the device up is found on its drive (as the Start menu knows it), its case aside; one on
+    /// no drive is not.
+    #[test]
+    fn a_path_from_the_device_is_found_on_its_drive() {
+        let windows = std::env::var("SystemRoot").unwrap();
+        let (drive, rest) = windows.split_at(2);
+        let named: Vec<u16> = drive.encode_utf16().chain([0]).collect();
+        let mut device = [0u16; 512];
+        let length = unsafe { super::QueryDosDeviceW(super::PCWSTR(named.as_ptr()), Some(&mut device)) } as usize;
+        let device = String::from_utf16_lossy(&device[..device[..length].iter().position(|unit| *unit == 0).unwrap()]);
+        assert_eq!(super::on_drives(&format!(r"{device}{rest}\explorer.exe")), Some(format!(r"{windows}\explorer.exe")));
+        assert_eq!(super::on_drives(&format!(r"{}{rest}\explorer.exe", device.to_uppercase())), Some(format!(r"{windows}\explorer.exe")));
+        assert_eq!(super::on_drives(r"\Device\NoSuchVolume\App\x.exe"), None);
+        // (A volume's name with another's in front of it, "...Volume3" and "...Volume31", is not taken for it.)
+        assert_eq!(super::on_drives(&format!(r"{device}1\x.exe")), None);
     }
 }

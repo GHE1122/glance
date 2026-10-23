@@ -465,9 +465,22 @@ fn moment() -> Moment {
         Some(Sung::Untimed { netease: false }) => moment.said = Some(lang.pick("此播放器没有提供播放进度", "This player does not say how far into the track it is").into()),
         Some(Sung::Asking) => moment.said = Some(lang.pick("正在查找歌词…", "Finding the lyrics…").into()),
         Some(Sung::Unknown) => moment.said = Some(lang.pick("没有找到这首歌的歌词", "No lyrics were found for this track").into()),
-        None => moment.said = Some(lang.pick("当前没有正在播放的歌曲", "Nothing is playing").into()),
+        None => moment.said = Some(unsaid(heard.as_ref(), lang)),
     }
     moment
+}
+
+/// What is said with no lyrics to show and no word of how far in a track is: that nothing plays; or, a player heard
+/// that does not tell Windows what it plays (its sound alone heard: an old version of one, or one whose telling is
+/// turned off), that it does not (it is heard to play, and can be paused and played, but no more is known of it).
+fn unsaid(heard: Option<&crate::playing::Now>, lang: crate::ui::text::Lang) -> String {
+    match heard {
+        Some(heard) if heard.title.is_empty() => {
+            let app = if heard.app.is_empty() { lang.pick("此播放器", "This player") } else { heard.app.as_str() };
+            lang.pick(&format!("{app}未向系统提供歌曲信息"), &format!("{app} does not tell Windows what it plays")).to_string()
+        }
+        _ => lang.pick("当前没有正在播放的歌曲", "Nothing is playing").into(),
+    }
 }
 
 /// The example the settings show while no music plays: its lines (each with its translation), a line every
@@ -2864,6 +2877,19 @@ fn outlined(frame: &Frame, text: &str, font: Font, colour: Color, x: f32, y: f32
 mod tests {
     use super::*;
     use crate::lyrics::Word;
+
+    /// A player heard but not telling Windows what it plays is said to be so, by its name; with nothing heard,
+    /// nothing plays.
+    #[test]
+    fn a_player_that_tells_nothing_is_said_to() {
+        use crate::ui::text::Lang;
+        let heard = crate::playing::Now { app: "QQ音乐".into(), playing: true, ..Default::default() };
+        assert_eq!(unsaid(Some(&heard), Lang::Zh), "QQ音乐未向系统提供歌曲信息");
+        assert_eq!(unsaid(Some(&crate::playing::Now { app: String::new(), ..heard.clone() }), Lang::En), "This player does not tell Windows what it plays");
+        assert_eq!(unsaid(None, Lang::Zh), "当前没有正在播放的歌曲");
+        // (One that says what it plays, with no lyrics shown, is not said to tell nothing.)
+        assert_eq!(unsaid(Some(&crate::playing::Now { title: "渡尘寰".into(), ..heard }), Lang::Zh), "当前没有正在播放的歌曲");
+    }
 
     fn line(text: &str, words: Vec<Word>) -> Line {
         Line { at: 10.0, end: None, text: text.into(), words, backing: None, translation: None }
