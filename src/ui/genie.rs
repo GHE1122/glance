@@ -289,8 +289,9 @@ pub fn opening(gfx: &Gfx, window: HWND, place: RECT) -> Option<Genie> {
 
 /// Where `window`, going, pours into, out of `place` as it came: there where it is still seen (one of Glance's own
 /// windows shows at its middle, a widget whose button it was, or it is the tray's icon), else into Glance's icon in the
-/// tray, where Glance stays (as a window put away goes into the Dock). None where the one seen is out of reach (see
-/// `reachable`): the place under the window, the window moved over it, or neither seen: it closes without pouring.
+/// tray, where Glance stays (as a window put away goes into the Dock), where that is on the window's screen, else into
+/// the place still (the panel, gone from its edge as the pointer left it, comes out of there again). None where the
+/// place is out of reach (see `reachable`: under the window, the window moved over it): it closes without pouring.
 pub fn back_into(window: HWND, place: RECT) -> Option<RECT> {
     use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
     let mut shows = RECT::default();
@@ -299,7 +300,9 @@ pub fn back_into(window: HWND, place: RECT) -> Option<RECT> {
     if icon == Some(place) || glance_shows_at(window, place) {
         return reachable(shows, place).then_some(place);
     }
-    icon.filter(|icon| reachable(shows, *icon))
+    // (The tray's icon on another screen: into the place still, where what it was asked from comes back, as the panel
+    // gone from its edge comes out of it again.)
+    icon.filter(|icon| reachable(shows, *icon)).or_else(|| reachable(shows, place).then_some(place))
 }
 
 /// Whether a window showing at `shows` pours into the place `place` or out of it: on its screen (see `on_one_screen`),
