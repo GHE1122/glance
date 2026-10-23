@@ -39,6 +39,8 @@ pub struct Dots<K> {
     slides: Vec<Slide<K>>,
     /// What is kept at hand, as it moves among itself: see `apps`.
     apps: Apps,
+    /// What was just copied, marked so (see `copied`): by the keys it shows as, and how clear the mark is.
+    copied: Option<(Vec<K>, f32)>,
 }
 
 /// What is kept at hand moving among itself (one dragged along the others, or their order changed): the order they
@@ -81,6 +83,10 @@ struct Move {
     done: f32,
 }
 
+/// Of the time a copied thing is marked so: the share its mark takes to come on, and to fade out at the end.
+const COPIED_IN: f32 = 0.1;
+const COPIED_OUT: f32 = 0.25;
+
 /// How long a thing kept at hand takes to its new place.
 const SHIFT: f32 = 0.2;
 
@@ -121,7 +127,23 @@ pub struct Slid<K> {
 
 impl<K: Copy + PartialEq> Dots<K> {
     pub const fn new() -> Self {
-        Dots { now: Vec::new(), at: None, slides: Vec::new(), apps: Apps { order: Vec::new(), moves: Vec::new(), held: None } }
+        Dots { now: Vec::new(), at: None, slides: Vec::new(), apps: Apps { order: Vec::new(), moves: Vec::new(), held: None }, copied: None }
+    }
+
+    /// What was just copied as of `now` (`copied`: when, and the keys it shows as), marked so for `lasts`: the mark
+    /// coming on at once, held, and fading out over its last part. Whether it is still marked (more frames wanted).
+    pub fn mark_copied(&mut self, now: Instant, copied: Option<(Instant, Vec<K>)>, lasts: std::time::Duration) -> bool {
+        self.copied = copied.and_then(|(at, keys)| {
+            let since = now.saturating_duration_since(at).as_secs_f32() / lasts.as_secs_f32();
+            let clear = (since / COPIED_IN).min(1.0).min((1.0 - since) / COPIED_OUT);
+            (since < 1.0).then_some((keys, clear.max(0.0)))
+        });
+        self.copied.is_some()
+    }
+
+    /// How clear the mark of `key` copied is now (0: not marked).
+    pub fn copied(&self, key: K) -> f32 {
+        self.copied.as_ref().filter(|(keys, _)| keys.contains(&key)).map_or(0.0, |(_, clear)| *clear)
     }
 
     /// What is chosen now of each choice (`chosen`: each choice's number, and what of it is chosen): each that changed
@@ -293,6 +315,9 @@ impl<K: std::hash::Hash> std::hash::Hash for Dots<K> {
             (held, x.to_bits(), y.to_bits()).hash(state);
             self.apps.order.hash(state);
         }
+        if let Some((keys, clear)) = &self.copied {
+            (keys, clear.to_bits()).hash(state);
+        }
     }
 }
 
@@ -305,6 +330,29 @@ impl<K: Copy + PartialEq> Default for Dots<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What was just copied is marked by each key it shows as: the mark comes on quickly, holds, fades at the end and
+    /// is gone after (nothing more wanted); what else shows is never marked.
+    #[test]
+    fn what_was_copied_is_marked_a_moment() {
+        let start = Instant::now();
+        let lasts = std::time::Duration::from_millis(1000);
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut marks: Dots<u8> = Dots::new();
+        assert!(!marks.mark_copied(start, None, lasts));
+        assert_eq!(marks.copied(1), 0.0);
+        let copied = || Some((start, vec![1, 2]));
+        assert!(marks.mark_copied(at(50), copied(), lasts));
+        let coming = marks.copied(1);
+        assert!(coming > 0.0 && coming < 1.0, "{coming}");
+        assert!(marks.mark_copied(at(400), copied(), lasts));
+        assert_eq!((marks.copied(1), marks.copied(2), marks.copied(3)), (1.0, 1.0, 0.0));
+        assert!(marks.mark_copied(at(900), copied(), lasts));
+        let going = marks.copied(2);
+        assert!(going > 0.0 && going < 1.0, "{going}");
+        assert!(!marks.mark_copied(at(1000), copied(), lasts));
+        assert_eq!(marks.copied(1), 0.0);
+    }
 
     /// What is first chosen is marked where it is; another chosen, its mark slides there from the one before, slowing as
     /// it comes, and is there at the slide's end (no further, and nothing more wanted after).

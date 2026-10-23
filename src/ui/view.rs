@@ -4089,6 +4089,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         frame.key(&format!("tile.{pressed:?}"));
         let lit = scene.hover == Some(pressed);
         let words = if lit { theme.text } else { theme.text2 };
+        let copied = scene.thumbs.copied(pressed);
         let shown = match shows {
             Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
                 let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
@@ -4100,6 +4101,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 let shown = fitted(frame, &tile.label, theme.small, place.w);
                 frame.text(&shown, theme.small, theme.text, x, y + plate + 5.0, place.w, Align::Start);
                 frame.text(&fitted(frame, &tile.about, theme.small, place.w), theme.small, theme.text3, x, y + plate + 5.0 + LINE, place.w, Align::Start);
+                copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + place.w / 2.0, y + plate / 2.0, place.w - 8.0));
                 shown
             }
             Shows::Row => {
@@ -4110,6 +4112,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 paint_face(frame, theme, ink, tile, px, y, TILE_PICTURE, TILE_PICTURE, TILE_PIXELS);
                 let shown = fitted(frame, &tile.label, theme.small, TILE_W);
                 centred(frame, &shown, theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
+                copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + TILE_W / 2.0, y + TILE_PICTURE / 2.0, TILE_W));
                 shown
             }
             Shows::View(ShelfView::List) => {
@@ -4125,6 +4128,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 if tile.pinned {
                     frame.icon(Icon::Pin, Point { x: x + width - 7.0, y: y + LIST_ROW / 2.0 }, 12.0, ink.trace);
                 }
+                copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Right(x + width, y + LIST_ROW / 2.0));
                 shown
             }
         };
@@ -4265,6 +4269,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         frame.text(&shown, theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
         frame.text(&row.when, theme.small, theme.text3, left + width - when_w, y + (LIST_ROW - LINE) / 2.0, when_w + 1.0, Align::Start);
+        copied_mark(frame, theme, scene.lang, ink.trace, scene.thumbs.copied(Hit::Recent(row.entry)), Mark::Right(left + width, y + LIST_ROW / 2.0));
         hits.extend(shown_in((left, y, width, LIST_ROW, Hit::Recent(row.entry)), (left - 4.0, list_top, width + 8.0, list_tall)));
         name_shown(hits, Hit::Recent(row.entry), &row.label, &shown);
     }
@@ -4274,6 +4279,55 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         hits.push((left, list_top, width, list_tall, Hit::List(List::Recent, most.to_bits())));
     }
     scroll_thumb(frame, theme, left + width + 6.0, list_top, list_tall, whole, scroll, most);
+}
+
+/// Where a thing just copied is marked: in the middle of its picture at (x, y), in that much room across; at the end
+/// of its row, its right edge at x, its middle at y.
+#[derive(Clone, Copy)]
+enum Mark {
+    Centre(f32, f32, f32),
+    Right(f32, f32),
+}
+
+/// The mark on a thing just copied (see `copied`), as clear as `clear` (none at 0): a pill of the lane's `ink`, a tick
+/// and "Copied" on it in white (the tick alone where the word does not fit).
+fn copied_mark(frame: &dyn Canvas, theme: &Theme, lang: Lang, ink: Color, clear: f32, at: Mark) {
+    if clear <= 0.0 {
+        return;
+    }
+    const TALL: f32 = 22.0;
+    const TICK: f32 = 13.0;
+    const PAD: f32 = 9.0;
+    let white = Color::hex(0xFFFFFF, clear);
+    let word = lang.pick("已复制", "Copied");
+    let whole = PAD + TICK + 4.0 + frame.measure(word, theme.small) + PAD;
+    let (fits, middle_y) = match at {
+        Mark::Centre(_, y, room) => (whole <= room, y),
+        Mark::Right(_, y) => (true, y),
+    };
+    let wide = if fits { whole } else { TALL };
+    let left = match at {
+        Mark::Centre(x, ..) => x - wide / 2.0,
+        Mark::Right(right, _) => right - wide,
+    };
+    let top = middle_y - TALL / 2.0;
+    frame.fill_rounded(ink.alpha(clear), left, top, wide, TALL, TALL / 2.0);
+    let tick_x = if fits { left + PAD + TICK / 2.0 } else { left + wide / 2.0 };
+    frame.icon(Icon::Check, Point { x: tick_x, y: middle_y }, TICK, white);
+    if fits {
+        frame.text(word, theme.small, white, left + PAD + TICK + 4.0, middle_y - LINE / 2.0, whole, Align::Start);
+    }
+}
+
+/// What was just put on the clipboard from where it shows (see `station::run::Shown::copied`): when, and what it is
+/// pressed as (a thing on the station or copied lately as either, files come lately by their entry).
+pub fn copied() -> Option<(std::time::Instant, Vec<Hit>)> {
+    use crate::station::run::Copied;
+    let (copied, at) = crate::station::run::shown().copied?;
+    Some((at, match copied {
+        Copied::Item(id) => vec![Hit::Shelf(id), Hit::Copied(id)],
+        Copied::Recent(entry) => vec![Hit::Recent(entry)],
+    }))
 }
 
 /// Recent files' filter choices: their height and the room round each name; a day's heading over its files.
@@ -4362,6 +4416,7 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         let room = width - LIST_PICTURE - 10.0;
         frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
+        copied_mark(frame, theme, scene.lang, ink.trace, scene.thumbs.copied(Hit::Copied(row.id)), Mark::Right(left + width, y + LIST_ROW / 2.0));
         hits.extend(shown_in((left, y, width, LIST_ROW, Hit::Copied(row.id)), (left - 4.0, top, width + 8.0, tall)));
     }
     frame.unclip();

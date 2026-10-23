@@ -3253,6 +3253,10 @@ impl Widget {
         if shows(|hit| matches!(hit, view::Hit::Tab(_) | view::Hit::NotesShow(_))) {
             moving |= self.thumbs.choose(now, &view::choices(self.content.tab()));
         }
+        // What was just copied from what it shows of the station, marked so a moment.
+        if shows(|hit| matches!(hit, view::Hit::Shelf(_) | view::Hit::Copied(_) | view::Hit::Recent(_))) {
+            moving |= self.thumbs.mark_copied(now, view::copied(), crate::station::run::COPIED_FOR);
+        }
         if shows(|hit| matches!(hit, view::Hit::App(_) | view::Hit::AppsArea)) {
             let order: Vec<String> = crate::station::apps::shown().iter().map(|app| app.target.clone()).collect();
             moving |= self.thumbs.apps(now, &order, None);
