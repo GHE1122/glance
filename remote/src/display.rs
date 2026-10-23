@@ -884,9 +884,18 @@ pub fn turn(index: usize, on: bool) -> std::result::Result<(), &'static str> {
                 None => Ok(()),
             }
         }
-        // Off by other means than this helper's: told to turn on. One that says it is on, or says nothing of
-        // its power (on, as `monitors` has it), is told nothing.
-        (true, None) => match with_monitor(index, |name, _, _, monitor| matches!(ask(monitor, POWER_MODE), None | Some(POWER_ON)) || turn_on(index, &name, monitor)) {
+        // Off by other means than this helper's: told to turn on. One that says it is on is told nothing. One that
+        // says nothing of its power (as one in standby may not) is told once, taken at its word that it took it: it
+        // cannot be asked whether it came on.
+        (true, None) => match with_monitor(index, |name, _, _, monitor| match ask(monitor, POWER_MODE) {
+            Some(POWER_ON) => true,
+            Some(_) => turn_on(index, &name, monitor),
+            None => {
+                let told = unsafe { SetVCPFeature(monitor, POWER_MODE, POWER_ON) } != 0;
+                crate::journal::note(format!("monitor {index} {name}: says nothing of its power, told to turn on ({})", if told { "it took it" } else { "it did not take it" }));
+                told
+            }
+        }) {
             Some(true) => Ok(()),
             Some(false) => Err(NOT_ON),
             None => Err(NO_SUCH),
