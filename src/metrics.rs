@@ -116,6 +116,8 @@ pub struct Sampler {
     /// was), from the last reading of the engine counters; `None` while
     /// they cannot be read.
     gpu_by_pid: Option<HashMap<usize, Option<f32>>>,
+    /// The engine counters' instances at their last reading (see `engine_use`).
+    engines_read: HashSet<String>,
     /// The adapter each process uses most, from the same reading.
     adapter_by_pid: HashMap<usize, (u32, i32)>,
     /// Each process's video memory, its dedicated part.
@@ -227,6 +229,7 @@ impl Sampler {
             dimms_awaited,
             mic: Microphone::open(),
             gpu_by_pid: None,
+            engines_read: HashSet::new(),
             adapter_by_pid: HashMap::new(),
             gpu_process_memory,
             playing: None,
@@ -543,7 +546,15 @@ impl Sampler {
         // Each process's use of each engine; unread where an instance of it is.
         let mut by_process: HashMap<(usize, (u32, i32), u32), Option<f64>> = HashMap::new();
         let mut unread = HashSet::new();
-        for (name, value) in read_array(self.gpu_engine?, &mut self.buf)? {
+        let read = read_array(self.gpu_engine?, &mut self.buf)?;
+        let before = std::mem::replace(&mut self.engines_read, read.iter().map(|(name, _)| name.clone()).collect());
+        for (name, value) in read {
+            // (An instance new since the last reading, a process just begun on an engine, has no use yet: a rate is
+            // told from two readings, and its first comes unread. Counted from its second; taken as unread, every
+            // process begun left the whole card's use unknown, the chart broken for a second.)
+            if not_yet_counted(&name, value, &before) {
+                continue;
+            }
             if let (Some(luid), Some(engine), Some(kind)) = (parse_luid(&name), parse_engine(&name), parse_kind(&name)) {
                 if let Some(pid) = parse_pid(&name) {
                     let total = by_process.entry((pid, luid, engine)).or_insert(Some(0.0));
@@ -594,6 +605,12 @@ impl Sampler {
             ..gpu
         }
     }
+}
+
+/// Whether the engine counter's instance `name`, read as `value`, is one new since the reading before (`before`, its
+/// instances) that has no use yet (see `Sampler::engine_use`): left out of this reading, not unread.
+fn not_yet_counted(name: &str, value: Option<f64>, before: &HashSet<String>) -> bool {
+    value.is_none() && !before.contains(name)
 }
 
 /// One processor's times since boot, as the kernel keeps them (100 ns units;
@@ -1478,6 +1495,16 @@ pub fn reg_string(key: PCWSTR, value: PCWSTR) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A process just begun on the GPU, its engine's instance new and not yet read, is left out of that reading (the
+    /// card's use known still); one read before and unread now leaves it unknown; one read is counted.
+    #[test]
+    fn a_process_just_begun_on_the_gpu_leaves_its_use_known() {
+        let before: std::collections::HashSet<String> = ["pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_3D".to_string()].into();
+        assert!(super::not_yet_counted("pid_2_luid_0x0_0x1_phys_0_eng_0_engtype_3D", None, &before));
+        assert!(!super::not_yet_counted("pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_3D", None, &before));
+        assert!(!super::not_yet_counted("pid_2_luid_0x0_0x1_phys_0_eng_0_engtype_3D", Some(3.0), &before));
+    }
+
     use super::*;
 
     #[test]
