@@ -5108,6 +5108,10 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                     }
                 }
                 paint_face(frame, theme, ink, tile, cx, cy, side, side, pixels);
+                // (Copied by a press: marked so on its picture, as on the station's pages.)
+                if current {
+                    copied_mark(frame, theme, scene.lang, ink.trace, scene.thumbs.copied(*hit), Mark::Centre(cx + side / 2.0, cy + side / 2.0, side));
+                }
                 let shown = if named { fitted(frame, &tile.label, theme.small, side + GRID_GAP - 2.0).to_string() } else { String::new() };
                 if named {
                     centred(frame, &shown, theme.small, theme.text2, cx - GRID_GAP / 2.0, cy + side + 2.0, side + GRID_GAP);
