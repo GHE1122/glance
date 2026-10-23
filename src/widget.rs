@@ -3242,6 +3242,7 @@ impl Widget {
         let margin = self.margin_px();
         let (x, y) = ((client.x - margin) as f32 / px, (client.y - margin) as f32 / px);
         let (w, h) = self.surface_size;
+        crate::perf::mark(|| format!("widget pressed at {x:.0},{y:.0} on {:?}, the pointer over it {}", self.button_at(x, y), self.hover));
         if self.button_at(x, y).is_none() && (x < -EDGE || y < -EDGE || x > w + EDGE || y > h + EDGE) {
             note(format!("widget: press at ({x:.0}, {y:.0}) outside its {w:.0} x {h:.0}"));
             return;
@@ -3525,6 +3526,7 @@ impl Widget {
                     let px = self.contact.scale * self.zoom;
                     let Some(cursor) = cursor_position() else { return Released::Nothing };
                     let (x, y) = ((cursor.x - self.at.x) as f32 / px, (cursor.y - self.at.y) as f32 / px);
+                    crate::perf::mark(|| format!("widget let go at {x:.0},{y:.0} on {:?}", self.button_at(x, y)));
                     return match self.button_at(x, y) {
                         Some(Button::Pin) => {
                             self.pinned ^= true;
@@ -3742,7 +3744,8 @@ impl Widget {
     /// How far past its surface its buttons' row reaches, above, under, left and right of it (physical px): none but
     /// on the side they are at, and there only while they show (the pointer over it).
     fn reach(&self) -> (i32, i32, i32, i32) {
-        let reach = if self.hover { ((BUTTON + 2.0 * BUTTON_INSET) * self.contact.scale * self.zoom) as i32 } else { 0 };
+        // (Its buttons' room taken where they show: the pointer over it, or the settings asked from it open.)
+        let reach = if self.hover || self.settings_asked_here() { ((BUTTON + 2.0 * BUTTON_INSET) * self.contact.scale * self.zoom) as i32 } else { 0 };
         match self.rack() {
             Rack::Above => (reach, 0, 0, 0),
             Rack::Under => (0, reach, 0, 0),
@@ -4668,15 +4671,20 @@ mod tests {
         widget.hover = false;
         let gear = widget.button_rect(Button::Settings).unwrap();
         let settings_shown = |widget: &Widget| widget.offered().iter().any(|(_, button)| *button == Button::Settings);
-        let closed = settings_shown(&widget);
+        // (Pressed where it shows: the pointer taken there, not let through to what is under it.)
+        let takes_it = |widget: &Widget, gear: RECT| {
+            let (taking, x, y) = (widget.taking(), (gear.left + gear.right) / 2, (gear.top + gear.bottom) / 2);
+            (taking.left..taking.right).contains(&x) && (taking.top..taking.bottom).contains(&y)
+        };
+        let closed = (settings_shown(&widget), takes_it(&widget, gear));
         crate::ui::settings_window::pretend_asked_from(Some(gear));
-        let asked_here = (settings_shown(&widget), widget.button_on_screen(Button::Settings));
+        let asked_here = (settings_shown(&widget), widget.button_on_screen(Button::Settings), takes_it(&widget, gear));
         widget.follow_settings();
         widget.at.x += 200;
         widget.at.y -= 50;
         widget.follow_settings();
         let moved_gear = widget.button_rect(Button::Settings).unwrap();
-        let moved = (settings_shown(&widget), crate::ui::settings_window::asked_from());
+        let moved = (settings_shown(&widget), crate::ui::settings_window::asked_from(), takes_it(&widget, moved_gear));
         crate::ui::settings_window::pretend_asked_from(Some(RECT { left: 10, top: 10, right: 40, bottom: 40 }));
         let asked_elsewhere = settings_shown(&widget);
         crate::ui::settings_window::pretend_asked_from(None);
@@ -4684,10 +4692,10 @@ mod tests {
         // (Its window and device let go of before anything is asserted: a thread ending with them held hangs.)
         drop(widget);
         gfx::let_go();
-        assert!(!closed);
-        assert_eq!(asked_here, (true, Some(gear)));
+        assert_eq!(closed, (false, false));
+        assert_eq!(asked_here, (true, Some(gear), true));
         assert_ne!(moved_gear, gear);
-        assert_eq!(moved, (true, Some(moved_gear)));
+        assert_eq!(moved, (true, Some(moved_gear), true));
         assert!(!asked_elsewhere && !closed_again);
     }
 

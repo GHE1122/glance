@@ -1937,6 +1937,8 @@ struct Panel<'a> {
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
     hits: Vec<HitBox>,
+    /// Where its settings' button was as the settings were asked from it, while they are (see `settings_here`).
+    settings_from: Option<RECT>,
     corner: (f32, f32),
     /// Sized by hand in a frame since it was last drawn at rest (see `Gfx::settle`).
     was_sized: bool,
@@ -2083,6 +2085,7 @@ impl<'a> Panel<'a> {
             held: None,
             style: String::new(),
             hits: Vec::new(),
+            settings_from: None,
             corner: (0.0, 0.0),
             was_sized: false,
             last_layout: None,
@@ -2713,6 +2716,8 @@ impl<'a> Panel<'a> {
     /// desktop is taken again once the settings have gone, without them.
     fn settings_front(&mut self, settings: Option<HWND>) {
         let was = self.window.yielding();
+        // (Drawn again: its settings' button lit while the settings asked from it are open.)
+        self.next_frame = Instant::now();
         self.window.yield_to(settings);
         // (Said as it changes: a panel left under the settings is under every window over its edge.)
         if was != settings.is_some() {
@@ -3472,7 +3477,7 @@ impl<'a> Panel<'a> {
             _ => None,
         };
         let thumbs_moving = self.thumbs.apps(now, &order, hold) | thumbs_moving;
-        let scene = Scene { thumbs: &self.thumbs, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
+        let scene = Scene { thumbs: &self.thumbs, settings_open: self.settings_here(), ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -3584,6 +3589,7 @@ impl<'a> Panel<'a> {
         }
         if let Some(hits) = hits {
             self.hits = hits;
+            self.follow_settings();
             self.hover_again();
         }
         // (In the window: where it is painted in it, and where in that.)
@@ -3657,6 +3663,7 @@ impl<'a> Panel<'a> {
         let within = |(px_x, px_y): (f32, f32), (rx, ry, rw, rh): (f32, f32, f32, f32)| px_x >= rx && px_y >= ry && px_x < rx + rw && px_y < ry + rh;
         let pointer = at.filter(|at| within(*at, (0.0, 0.0, size.0, size.1)));
         let at_buttons = at.filter(|at| pointer.is_some() || rack.is_some_and(|rack| within(*at, rack)));
+        let settings_here = self.settings_here();
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
         let music = &mut self.music;
         let layer = &mut self.music_layer;
@@ -3685,7 +3692,9 @@ impl<'a> Panel<'a> {
             if drew.is_err() {
                 painted = None;
             }
-            if let Some((px_x, px_y)) = at_buttons {
+            if at_buttons.is_some() || settings_here {
+                // (The pointer away: over none of them.)
+                let (px_x, px_y) = at_buttons.unwrap_or((f32::NEG_INFINITY, f32::NEG_INFINITY));
                 let ground = music.ground_colour(size);
                 let (side, gap) = (crate::ui::buttons::SIZE, crate::ui::buttons::GAP);
                 // (In its corner, or in their row.)
@@ -3696,7 +3705,7 @@ impl<'a> Panel<'a> {
                 for (index, (button, hit)) in [(crate::ui::buttons::Button::Pin, Hit::Pin), (crate::ui::buttons::Button::Settings, Hit::Settings), (crate::ui::buttons::Button::Full, Hit::Full)].into_iter().enumerate() {
                     let (bx, by) = (right - side - index as f32 * (side + gap), top);
                     let over = px_x >= bx && px_x < bx + side && px_y >= by && px_y < by + side;
-                    let lit = (button == crate::ui::buttons::Button::Pin && pinned) || over;
+                    let lit = (button == crate::ui::buttons::Button::Pin && pinned) || (button == crate::ui::buttons::Button::Settings && settings_here) || over;
                     crate::ui::buttons::paint_on(frame, crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 }, button, lit, ground);
                     buttons.push((bx, by, side, side, hit));
                 }
@@ -3715,12 +3724,33 @@ impl<'a> Panel<'a> {
         self.gfx.sweep();
         // (Its buttons over what is under them.)
         self.hits = buttons.into_iter().chain(painted.hits).collect();
+        self.follow_settings();
         self.corner = (x + offset.0 as f32 / px, y + offset.1 as f32 / px);
         self.show_stations();
         self.bar = view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         // (Settling after it was sized, too: see `music_settle`.)
         let moving = !self.shift.done(now) || !self.opacity.done(now) || painted.busy || self.music_settle.is_some();
         self.next_frame = if moving { now } else { now + Duration::from_millis(250) };
+    }
+
+    /// Whether the settings, open, were asked from its settings' button (it shows so, lit, and they pour back into it).
+    fn settings_here(&self) -> bool {
+        let from = settings_window::asked_from();
+        from.is_some() && from == self.settings_from
+    }
+
+    /// The settings asked from its settings' button, open: told where it is now, drawn somewhere else (the panel laid
+    /// out anew), so they pour back into it there. Asked from elsewhere, or closed: no longer its.
+    fn follow_settings(&mut self) {
+        if !self.settings_here() {
+            self.settings_from = None;
+            return;
+        }
+        let Some(now) = self.on_screen(Hit::Settings) else { return };
+        if let Some(from) = self.settings_from.filter(|from| *from != now) {
+            settings_window::asked_from_moved(from, Some(now));
+            self.settings_from = Some(now);
+        }
     }
 
     /// Where on the screen the region `hit` was last drawn (physical px), if it was.
@@ -3849,7 +3879,8 @@ impl<'a> Panel<'a> {
         }
         match self.hit_at(client) {
             Some(Hit::Settings) => {
-                crate::show_settings(self.on_screen(Hit::Settings));
+                self.settings_from = self.on_screen(Hit::Settings);
+                crate::show_settings(self.settings_from);
             }
             Some(Hit::Full) => {
                 self.full_asked = self.placement.as_ref().map(|placement| placement.contact);
@@ -3963,6 +3994,7 @@ fn scene<'s>(
         overlay,
         buttons: true,
         newer: crate::update::available().is_some(),
+        settings_open: false,
         music_apart: false,
     }
 }
