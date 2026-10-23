@@ -189,13 +189,14 @@ const PERF_LIVE: u32 = WM_APP + 91;
 const TO_WORKBENCH: u32 = WM_APP + 42;
 /// Asked to turn to the page of the reports sent.
 const TO_REPORTS: u32 = WM_APP + 44;
-/// What the window of a report's thread tells it (see `ask::thread::open`): the user sent what they wrote there, or
-/// closed it. Kept as told (`THREAD_SEND`, `THREAD_CLOSE`), and seen to as the window is next looked at (see `tick`),
-/// outside whatever holds its state then.
+/// What the window of a report's thread tells it (see `ask::thread::open`): the user sent what they wrote there,
+/// closed the report or opened it again, or closed the window. Kept as told (`THREAD_SEND`, `THREAD_TURN`,
+/// `THREAD_CLOSE`), and seen to as the window is next looked at (see `tick`), outside whatever holds its state then.
 const THREAD_TOLD: u32 = WM_APP + 45;
 static THREAD_OWED: AtomicUsize = AtomicUsize::new(0);
 const THREAD_SEND: usize = 1;
 const THREAD_CLOSE: usize = 2;
+const THREAD_TURN: usize = 4;
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
@@ -570,6 +571,9 @@ fn tick(now: Instant) -> Option<Duration> {
         let told = THREAD_OWED.swap(0, Ordering::AcqRel);
         if told & THREAD_SEND != 0 {
             ui.send_in_thread();
+        }
+        if told & THREAD_TURN != 0 {
+            ui.turn_in_thread();
         }
         if told & THREAD_CLOSE != 0 {
             ui.close_thread();
@@ -987,9 +991,13 @@ fn thread_of(lang: Lang, report: &crate::reports::Report) -> super::ask::thread:
                     Kind::Answered => Status::Answered,
                     _ => Status::Open,
                 };
-                let words = match lang {
-                    Lang::Zh => format!("状态改为“{}” · {when}", status_words(lang, &status)),
-                    Lang::En => format!("Status set to {} · {when}", status_words(lang, &status)),
+                let words = match (message.mine, &status, lang) {
+                    (true, Status::Closed, Lang::Zh) => format!("你关闭了此反馈 · {when}"),
+                    (true, Status::Closed, Lang::En) => format!("You closed this report · {when}"),
+                    (true, _, Lang::Zh) => format!("你重新打开了此反馈 · {when}"),
+                    (true, _, Lang::En) => format!("You reopened this report · {when}"),
+                    (false, _, Lang::Zh) => format!("状态改为“{}” · {when}", status_words(lang, &status)),
+                    (false, _, Lang::En) => format!("Status set to {} · {when}", status_words(lang, &status)),
                 };
                 Some(Item::Event { tone: tone_of(&status), words })
             }
@@ -1017,7 +1025,7 @@ fn thread_of(lang: Lang, report: &crate::reports::Report) -> super::ask::thread:
         Lang::Zh => format!("反馈 {id} · {sent} 发送"),
         Lang::En => format!("Report {id} · sent {sent}"),
     };
-    Thread { title, about, status: status_words(lang, &status), tone: tone_of(&status), note, items }
+    Thread { title, about, status: status_words(lang, &status), tone: tone_of(&status), note, items, closable: report.closable() }
 }
 
 /// What a report's thread's window says besides the thread.
@@ -1027,8 +1035,10 @@ fn thread_talk(lang: Lang, dark: bool) -> super::ask::thread::Talk<'static> {
         add: pick(lang, "添加截图", "Add a picture"),
         paste: pick(lang, "粘贴截图", "Paste the picture"),
         kinds: pick(lang, "图片", "Pictures"),
-        option: pick(lang, "附上当前的诊断信息", "Attach the current diagnostics"),
+        option: pick(lang, "附上当前的诊断信息", "Attach diagnostics"),
         send: pick(lang, "发送", "Send"),
+        close_report: pick(lang, "关闭反馈", "Close report"),
+        reopen: pick(lang, "重新打开", "Reopen"),
         close: pick(lang, "关闭", "Close"),
         you: pick(lang, "你", "You"),
         dark,
@@ -1409,6 +1419,8 @@ struct Ui {
     /// What the user adds to a report, being sent (on a thread of its own), and how the last went.
     adding: Option<(String, std::thread::JoinHandle<bool>)>,
     added: Option<(String, bool)>,
+    /// A report being closed by the user, or opened again (on a thread of its own): its id.
+    turning: Option<(String, std::thread::JoinHandle<bool>)>,
     /// The report whose thread is open in its window (see `ask::thread`): its id, the window, and the report as the
     /// window was last given it.
     thread: Option<(String, HWND, crate::reports::Report)>,
@@ -1627,6 +1639,7 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             followed_at: Instant::now(),
             adding_asked: None,
             adding: None,
+            turning: None,
             added: None,
             thread: None,
             phone_from: Instant::now(),
@@ -1749,7 +1762,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         THREAD_TOLD => {
-            THREAD_OWED.fetch_or(if wparam.0 == 1 { THREAD_SEND } else { THREAD_CLOSE }, Ordering::AcqRel);
+            THREAD_OWED.fetch_or(
+                match wparam.0 {
+                    1 => THREAD_SEND,
+                    2 => THREAD_TURN,
+                    _ => THREAD_CLOSE,
+                },
+                Ordering::AcqRel,
+            );
             LRESULT(0)
         }
         // (Measuring: a page, and a tab of the monitor's, turned to as a press on it turns to it; see `perf`.)
@@ -3232,6 +3252,19 @@ impl Ui {
         self.next_frame = Instant::now();
     }
 
+    /// The report of the thread open closed by the user, or opened again, as its window told and as it stands: on a
+    /// thread of its own, while nothing is being sent to it.
+    fn turn_in_thread(&mut self) {
+        let Some((id, window)) = self.thread.as_ref().map(|(id, window, _)| (id.clone(), *window)) else { return };
+        if self.turning.is_some() || self.adding.as_ref().is_some_and(|(adding, _)| *adding == id) || self.adding_asked.as_ref().is_some_and(|(asked, _)| *asked == id) {
+            return;
+        }
+        let Some(close) = self.followed.iter().find(|report| report.id == id).map(crate::reports::Report::closable) else { return };
+        super::ask::thread::sending(window, if close { pick(self.lang, "正在关闭…", "Closing…") } else { pick(self.lang, "正在重新打开…", "Reopening…") });
+        self.turning = Some((id.clone(), std::thread::spawn(move || crate::reports::turn(&id, close))));
+        self.next_frame = Instant::now();
+    }
+
     /// The thread open, closed by the user: its window taken down, it read, and the reports as they are now.
     fn close_thread(&mut self) {
         let Some((id, window, _)) = self.thread.take() else { return };
@@ -4441,6 +4474,23 @@ impl Ui {
             self.follow_thread();
         }
         if self.adding.is_some() {
+            self.next_frame = now + Duration::from_millis(300);
+        }
+        // A report closed or opened again: how that went, once it is over.
+        if self.turning.as_ref().is_some_and(|(_, turning)| turning.is_finished()) {
+            let (id, turning) = self.turning.take().unwrap();
+            let done = turning.join().unwrap_or(false);
+            if let Some(window) = self.thread_window(&id) {
+                if done {
+                    super::ask::thread::writing(window);
+                } else {
+                    super::ask::thread::failed(window, pick(lang, "操作失败，请稍后重试", "It could not be done. Try again later"));
+                }
+            }
+            self.followed = crate::reports::list();
+            self.follow_thread();
+        }
+        if self.turning.is_some() {
             self.next_frame = now + Duration::from_millis(300);
         }
         // The reports sent, as they are now (news is heard on the update check's thread), and the thread open with them.
@@ -6007,6 +6057,12 @@ mod pictures {
                 let ((w, h), pixels) = super::super::ask::thread::pictured(&gfx, thread_of(lang, &report), &thread_talk(lang, dark), scale);
                 crate::studio::save_png(&out.join(format!("thread-{said}-{shade}.png")), w, h, &pixels).unwrap();
             }
+            // Opened again by the user after the fix: its button closes it.
+            let mut reopened = report.clone();
+            let fixed = reopened.thread.last().unwrap().clone();
+            reopened.thread.push(crate::reports::Message { n: fixed.n + 1, ts: fixed.ts + 1_800_000, kind: crate::reports::Kind::Open, version: String::new(), mine: true, ..fixed });
+            let ((w, h), pixels) = super::super::ask::thread::pictured(&gfx, thread_of(lang, &reopened), &thread_talk(lang, false), scale);
+            crate::studio::save_png(&out.join(format!("thread-{said}-reopened.png")), w, h, &pixels).unwrap();
         }
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);

@@ -2,8 +2,8 @@
 //! own (random, made for it alone), of which Glance's site keeps only a hash: with the report's id it proves that
 //! whoever asks sent it. Along with each update check, Glance asks the site what is new in the reports it sent (the
 //! owner's replies, and changes of their status), with nothing but their ids, their secrets and how far it has
-//! heard, and tells the user once of each report with news. The user reads a thread, and adds to it, from the
-//! settings. Kept beside the settings (`FILE`), with small copies of the pictures sent (`PICTURES`), and forgotten 90
+//! heard, and tells the user once of each report with news. The user reads a thread, adds to it, and closes it or
+//! opens it again, from the settings. Kept beside the settings (`FILE`), with small copies of the pictures sent (`PICTURES`), and forgotten 90
 //! days after anything last happened in it.
 
 use std::path::Path;
@@ -58,8 +58,8 @@ pub struct Report {
 }
 
 /// One message of a thread, numbered as the site numbers them: who said it (or the status it was set to), when
-/// (ms), its words, a version (the Glance a user's addition came from, or the one with the fix), and, for the user's
-/// own, how many pictures and whether the diagnostics went with it.
+/// (ms), its words, a version (the Glance a user's addition came from, or the one with the fix), for the user's
+/// own, how many pictures and whether the diagnostics went with it, and, of a status, whether the user set it.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct Message {
     pub n: u64,
@@ -73,6 +73,8 @@ pub struct Message {
     pub pictures: usize,
     #[serde(default)]
     pub diagnostics: bool,
+    #[serde(default)]
+    pub mine: bool,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq)]
@@ -89,7 +91,7 @@ pub enum Kind {
     Closed,
 }
 
-/// Where a report stands, as the owner last set it.
+/// Where a report stands, as the owner or the user last set it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
     Open,
@@ -116,7 +118,13 @@ impl Report {
 
     /// Whether the site has told something the user has not read.
     pub fn unread(&self) -> bool {
-        self.thread.iter().any(|message| message.kind != Kind::User && message.n > self.read)
+        self.thread.iter().any(|message| message.kind != Kind::User && !message.mine && message.n > self.read)
+    }
+
+    /// Whether the user may close it (it is still talked over), or else open it again (it is fixed or closed: the fix
+    /// did not help, or more is to be said).
+    pub fn closable(&self) -> bool {
+        matches!(self.status(), Status::Open | Status::Answered)
     }
 
     /// When anything last happened in it.
@@ -187,7 +195,7 @@ fn heard(kept: &mut Kept, body: &[u8]) -> Vec<(String, Message)> {
             continue;
         }
         report.heard = item.n;
-        let message = Message { n: item.n, ts: item.ts, kind, text: item.text, version: item.version, pictures: 0, diagnostics: false };
+        let message = Message { n: item.n, ts: item.ts, kind, text: item.text, version: item.version, pictures: 0, diagnostics: false, mine: false };
         report.thread.push(message.clone());
         report.thread.sort_by_key(|message| message.n);
         // A reply is told over a status set with it (the site marks a report answered as it is replied to).
@@ -432,6 +440,7 @@ pub fn add(id: &str, words: &str, diagnostics: Option<&str>, pictures: &[Vec<u8>
         version: env!("CARGO_PKG_VERSION").to_string(),
         pictures: pictures.len(),
         diagnostics: diagnostics.is_some(),
+        mine: false,
     };
     with(true, |kept| {
         if let Some(report) = kept.reports.iter_mut().find(|report| report.id == id) {
@@ -440,6 +449,30 @@ pub fn add(id: &str, words: &str, diagnostics: Option<&str>, pictures: &[Vec<u8>
         }
     });
     keep(id, n, pictures);
+    true
+}
+
+/// The report `id` closed by the user (`close`), or opened again, on the site and in the thread kept here: whether
+/// that got there. One the site says stands so already (the owner set it so meanwhile, to be heard as the site is
+/// next asked) is left as it is here. On a thread of the caller's.
+pub fn turn(id: &str, close: bool) -> bool {
+    let Some(secret) = with(false, |kept| kept.reports.iter().find(|report| report.id == id).map(|report| report.secret.clone())) else { return false };
+    let status = if close { "closed" } else { "open" };
+    let sent = serde_json::json!({ "id": id, "secret": secret, "status": status, "version": env!("CARGO_PKG_VERSION") }).to_string();
+    let Some(answer) = crate::update::post(&format!("{}/api/report/status", crate::update::own_site()), sent.as_bytes()) else { return false };
+    let Ok(answer) = serde_json::from_slice::<serde_json::Value>(&answer) else { return false };
+    if answer["same"] == true {
+        return true;
+    }
+    let (Some(n), Some(ts)) = (answer["n"].as_u64(), answer["ts"].as_u64()) else { return false };
+    let kind = if close { Kind::Closed } else { Kind::Open };
+    let message = Message { n, ts, kind, text: String::new(), version: String::new(), pictures: 0, diagnostics: false, mine: true };
+    with(true, |kept| {
+        if let Some(report) = kept.reports.iter_mut().find(|report| report.id == id) {
+            report.thread.push(message);
+            report.thread.sort_by_key(|message| message.n);
+        }
+    });
     true
 }
 
@@ -465,7 +498,7 @@ pub fn read(id: &str) {
 #[cfg(all(test, feature = "studio"))]
 pub fn pretend(now: u64, pictures: &[Vec<u8>]) {
     const HOUR: u64 = 3_600_000;
-    let message = |n: u64, ts: u64, kind: Kind, text: &str, version: &str| Message { n, ts, kind, text: text.into(), version: version.into(), pictures: 0, diagnostics: false };
+    let message = |n: u64, ts: u64, kind: Kind, text: &str, version: &str| Message { n, ts, kind, text: text.into(), version: version.into(), pictures: 0, diagnostics: false, mine: false };
     let report = |id: &str, sent: u64, words: &str, thread: Vec<Message>, read: u64| Report {
         id: id.into(),
         secret: String::new(),
@@ -477,7 +510,7 @@ pub fn pretend(now: u64, pictures: &[Vec<u8>]) {
         read,
     };
     let (first, added) = (&pictures[..pictures.len().min(2)], &pictures[pictures.len().min(2)..]);
-    let addition = Message { n: 14, ts: now - 6 * HOUR, kind: Kind::User, text: "开启后仍然没有显示。附上新的截图与诊断信息。".into(), version: "0.4.1".into(), pictures: added.len(), diagnostics: true };
+    let addition = Message { n: 14, ts: now - 6 * HOUR, kind: Kind::User, text: "开启后仍然没有显示。附上新的截图与诊断信息。".into(), version: "0.4.1".into(), pictures: added.len(), diagnostics: true, mine: false };
     let mut followed = report(
         "KQRH9F",
         now - 30 * HOUR,
@@ -523,7 +556,7 @@ mod tests {
     /// the site is not asked each hour.
     #[test]
     fn asked_each_hour_while_a_report_is_talked_over() {
-        let status = |kind: Kind, n: u64| Message { n, ts: 1000 + n, kind, text: String::new(), version: if kind == Kind::Fixed { "9.0.0".into() } else { String::new() }, pictures: 0, diagnostics: false };
+        let status = |kind: Kind, n: u64| Message { n, ts: 1000 + n, kind, text: String::new(), version: if kind == Kind::Fixed { "9.0.0".into() } else { String::new() }, pictures: 0, diagnostics: false, mine: false };
         let mut kept = Kept { reports: vec![report("KQRH9F", 10 * DAY), report("ABCDEF", 20 * DAY)] };
         assert!(talking(&kept));
         kept.reports[0].thread.push(status(Kind::Fixed, 1));
@@ -534,6 +567,24 @@ mod tests {
         kept.reports[0].thread.push(status(Kind::Open, 2));
         assert!(talking(&kept));
         assert!(!talking(&Kept::default()));
+    }
+
+    /// A change of status the user made sets where the report stands as the owner's do, but is nothing to read.
+    #[test]
+    fn the_user_s_own_status_is_not_news() {
+        let mut followed = report("KQRH9F", 10 * DAY);
+        let fixed = Message { n: 3, ts: 3, kind: Kind::Fixed, text: String::new(), version: "0.4.2".into(), pictures: 0, diagnostics: false, mine: false };
+        followed.thread.push(fixed);
+        followed.read = 3;
+        assert!(!followed.closable());
+        followed.thread.push(Message { n: 4, ts: 4, kind: Kind::Open, version: String::new(), mine: true, ..followed.thread[0].clone() });
+        assert_eq!(followed.status(), Status::Open);
+        assert!(followed.closable());
+        assert!(!followed.unread());
+        followed.thread.push(Message { n: 5, ts: 5, kind: Kind::Closed, mine: true, ..followed.thread[1].clone() });
+        assert_eq!(followed.status(), Status::Closed);
+        assert!(!followed.closable());
+        assert!(!followed.unread());
     }
 
     #[test]
@@ -579,7 +630,7 @@ mod tests {
     fn reports_quiet_for_90_days_are_forgotten() {
         let now = 200 * DAY;
         let mut active = report("ACTIVE", 50 * DAY);
-        active.thread.push(Message { n: 1, ts: 150 * DAY, kind: Kind::Reply, text: "x".into(), version: String::new(), pictures: 0, diagnostics: false });
+        active.thread.push(Message { n: 1, ts: 150 * DAY, kind: Kind::Reply, text: "x".into(), version: String::new(), pictures: 0, diagnostics: false, mine: false });
         let mut kept = Kept { reports: vec![report("RECENT", 120 * DAY), report("STALEX", 109 * DAY), active, report("EDGEXX", 110 * DAY)] };
         forget_old(&mut kept, now);
         let ids: Vec<&str> = kept.reports.iter().map(|report| report.id.as_str()).collect();
@@ -615,7 +666,7 @@ mod tests {
     #[test]
     fn an_addition_does_not_hide_a_reply_not_yet_heard() {
         let mut kept = Kept { reports: vec![report("KQRH9F", 0)] };
-        kept.reports[0].thread.push(Message { n: 8, ts: 5, kind: Kind::User, text: "补充".into(), version: String::new(), pictures: 1, diagnostics: false });
+        kept.reports[0].thread.push(Message { n: 8, ts: 5, kind: Kind::User, text: "补充".into(), version: String::new(), pictures: 1, diagnostics: false, mine: false });
         let told = heard(&mut kept, &news(&[("KQRH9F", 6, "reply", "先前的回复")]));
         assert_eq!(told.len(), 1);
         let ns: Vec<u64> = kept.reports[0].thread.iter().map(|message| message.n).collect();
@@ -627,7 +678,7 @@ mod tests {
 
     #[test]
     fn a_fix_is_told_as_this_version_has_it_or_not() {
-        let fixed = |version: &str| Message { n: 1, ts: 1, kind: Kind::Fixed, text: String::new(), version: version.into(), pictures: 0, diagnostics: false };
+        let fixed = |version: &str| Message { n: 1, ts: 1, kind: Kind::Fixed, text: String::new(), version: version.into(), pictures: 0, diagnostics: false, mine: false };
         let (title, words) = notice(Lang::Zh, "KQRH9F", &fixed("999.0"));
         assert_eq!(title, "你的反馈 KQRH9F 已在 999.0 修复");
         assert_eq!(words, "更新到 999.0 即可获得此修复。");
@@ -676,6 +727,20 @@ mod tests {
         assert!(report.unread());
         read(&id);
         assert!(!list().into_iter().find(|report| report.id == id).unwrap().unread());
+        // Fixed, the user opens it again, then closes it: theirs, never news, nothing to read.
+        assert!(turn(&id, false));
+        assert_eq!(list().into_iter().find(|report| report.id == id).unwrap().status(), Status::Open);
+        assert!(turn(&id, true));
+        let report = list().into_iter().find(|report| report.id == id).unwrap();
+        assert_eq!(report.status(), Status::Closed);
+        assert!(!report.closable());
+        let mine: Vec<(Kind, bool)> = report.thread.iter().map(|message| (message.kind, message.mine)).collect();
+        assert_eq!(mine[4..], [(Kind::Open, true), (Kind::Closed, true)]);
+        assert!(!report.unread());
+        assert!(hear().is_empty());
+        // (Closed already: closing it again changes nothing.)
+        assert!(turn(&id, true));
+        assert_eq!(list().into_iter().find(|report| report.id == id).unwrap().thread.len(), 6);
     }
 
     /// The pictures sent are kept small, under the report and the message that carried them, read again as they
@@ -701,7 +766,7 @@ mod tests {
         assert_eq!(picture_name("../x", 0, 0), None);
         let mut report = report("PICTRS", 0);
         report.pictures = 2;
-        report.thread.push(Message { n: 9, ts: 1, kind: Kind::User, text: String::new(), version: String::new(), pictures: 1, diagnostics: false });
+        report.thread.push(Message { n: 9, ts: 1, kind: Kind::User, text: String::new(), version: String::new(), pictures: 1, diagnostics: false, mine: false });
         forget_pictures(&report);
         assert!(pictures("PICTRS", 0, 2).is_empty());
         assert!(pictures("PICTRS", 9, 1).is_empty());
