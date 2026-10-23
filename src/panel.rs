@@ -3600,13 +3600,13 @@ impl<'a> Panel<'a> {
         self.bar = layout.bar();
 
         // At rest only the charts move, a plot's width over its span: the
-        // panel is drawn again when they have crept a quarter of a pixel.
+        // panel is drawn again when they have crept a quarter of a pixel (or, with none, four times a second).
         let moving = thumbs_moving || settings_window::bounce(self.settings_from).is_some() || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turning.is_some();
         self.next_frame = if moving {
             now
         } else {
-            let speed = layout.plot_width(&self.theme) * px / self.prefs.chart_seconds as f32;
-            now + Duration::from_secs_f32(0.25 / speed)
+            let speed = layout.plot_width(&self.theme, &lanes).map(|width| width * px / self.prefs.chart_seconds as f32);
+            now + settings_window::creeping(speed)
         };
     }
 

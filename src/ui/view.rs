@@ -1942,6 +1942,11 @@ impl Lane {
     pub fn id(&self) -> &str {
         &self.id
     }
+
+    /// Whether it draws a chart, which creeps along as time goes.
+    fn charts(&self) -> bool {
+        self.blocks.iter().any(|block| matches!(block, Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. } | Block::Trace { .. }))
+    }
 }
 
 impl Hash for Lane {
@@ -3124,9 +3129,10 @@ impl Layout {
         Rect { x: 0.0, y, w: self.width(), h: self.bar_height }
     }
 
-    /// How wide a percentage chart is (rate charts are a little narrower).
-    pub fn plot_width(&self, theme: &Theme) -> f32 {
-        self.lanes().first().map_or(COLUMN_WIDTH, |lane| lane.w) - 2.0 * theme.pad_x - LABEL - LABEL_GAP
+    /// How wide a percentage chart is (rate charts are a little narrower), in the first of `lanes` (laid out here)
+    /// that draws one: none where none does (a workbench, or quick launch alone on its rail).
+    pub fn plot_width(&self, theme: &Theme, lanes: &[Lane]) -> Option<f32> {
+        lanes.iter().zip(self.lanes()).find(|(lane, _)| lane.charts()).map(|(_, area)| area.w - 2.0 * theme.pad_x - LABEL - LABEL_GAP)
     }
 }
 

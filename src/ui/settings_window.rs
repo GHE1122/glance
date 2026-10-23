@@ -186,6 +186,12 @@ static LANDED: std::sync::Mutex<Option<(RECT, Instant)>> = std::sync::Mutex::new
 /// How long the button the settings poured into bounces as they land in it.
 pub const BOUNCE: Duration = Duration::from_millis(450);
 
+/// How long till charts creeping at `speed` (physical pixels a second) have crept a quarter of a pixel, when what they
+/// are on is drawn again at rest: with no chart, a quarter of a second.
+pub fn creeping(speed: Option<f32>) -> Duration {
+    speed.map_or(Duration::from_millis(250), |speed| Duration::from_secs_f32(0.25 / speed))
+}
+
 /// The button at `button` (physical px) as the settings pour into it: how large it is drawn now (1: as it is), while it
 /// bounces (see `BOUNCE`), they having landed in it. Up at once, a little under, settling: a spring let go.
 pub fn bounce(button: Option<RECT>) -> Option<f32> {
@@ -4732,7 +4738,7 @@ impl Ui {
             now
         } else {
             // Otherwise as often as the preview's charts creep a quarter pixel.
-            now + creep.map_or(Duration::from_millis(250), |speed: f32| Duration::from_secs_f32((0.25 / speed).min(0.25)))
+            now + creeping(creep).min(Duration::from_millis(250))
         };
     }
 
@@ -6058,7 +6064,7 @@ impl Ui {
             // (Not shown, the frame: see `Frame::fail`.)
             Err(error) => frame.fail(error),
         }
-        (Some(layout.plot_width(&theme) * self.scale * zoom * k / prefs.chart_seconds as f32), Rect { x: ox, y: oy, w: sw * k, h: sh * k })
+        (layout.plot_width(&theme, &lanes).map(|width| width * self.scale * zoom * k / prefs.chart_seconds as f32), Rect { x: ox, y: oy, w: sw * k, h: sh * k })
     }
 
     /// The stage's desktop at `at`, `k` DIPs to one of its own, clipped to `area`: made a bitmap for the panel's
@@ -6489,6 +6495,41 @@ mod pictures {
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
             }
+        }
+    }
+
+    /// The preview's charts set how soon the window is drawn again: the readings' creep along, and a workbench with
+    /// none (quick launch alone, on its rail, the rest turned off) has none to set it. Its lane's width was taken for a
+    /// chart's, too narrow for one, and the time till the next frame came out below nothing: Glance stopped.
+    #[test]
+    fn a_workbench_without_charts_sets_no_pace() {
+        let (gfx, hwnd) = pretended();
+        let creep = |page: Page| {
+            with_ui(|ui| ui.turn_to(page));
+            with_ui(|ui| {
+                let (cw, ch) = ui.client();
+                let mut creep = None;
+                gfx.draw_offscreen(((cw * ui.scale) as u32, (ch * ui.scale) as u32), ui.scale, |frame| creep = ui.paint(frame, Instant::now())).unwrap();
+                ui.draw(Instant::now());
+                creep
+            })
+            .unwrap()
+        };
+        assert!(creep(Page::Monitor).is_some_and(|speed| speed > 0.0));
+        // (Turned off as their switches do, kept to the window alone: these settings are this PC's own.)
+        with_ui(|ui| {
+            for entry in &mut ui.prefs.workbench {
+                entry.on = entry.id == "apps";
+            }
+            ui.settings.view = crate::ui::prefs::kept(&ui.prefs, &ui.settings.view);
+            let settings = ui.settings.clone();
+            ui.take(settings);
+            assert_eq!(ui.prefs.workbench.iter().filter(|entry| entry.on).map(|entry| entry.id.as_str()).collect::<Vec<_>>(), ["apps"]);
+        });
+        assert_eq!(creep(Page::Workbench), None);
+        assert_eq!(super::creeping(None), Duration::from_millis(250));
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
         }
     }
 
