@@ -20,16 +20,18 @@ use super::gfx::{Frame, Gfx, Surface};
 use super::window::Window;
 
 /// How long the window takes to pour out of its place, or back into it.
-pub const LASTS: Duration = Duration::from_millis(250);
+pub const LASTS: Duration = Duration::from_millis(320);
 
 /// Of the way from the whole window (0) into its place (1): how far its sides have bent into the funnel by then
-/// (they bend first), and how far it has slid along it (it slides from a while after they begin to bend).
+/// (over the first half of the way), and how far it has slid along it (from the start, together with the bending).
+/// Both start from rest at the window, so the window sets off softly and, opening, lands softly as one: its sides
+/// straight as it stops, not straightening after. The slide keeps gathering speed to the place and is at half as
+/// much again as its mean there: closing, the window goes into the place at speed, opening, it leaves it at once
+/// (the way is the time run backwards).
 fn phases(p: f32) -> (f32, f32) {
-    let smooth = |t: f32| {
-        let t = t.clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    };
-    (smooth(p / 0.45), smooth((p - 0.2) / 0.8))
+    let bend = (p / 0.5).clamp(0.0, 1.0);
+    let slide = p.clamp(0.0, 1.0);
+    (bend * bend * (3.0 - 2.0 * bend), slide * slide * (1.5 - 0.5 * slide))
 }
 
 /// A window's picture: its pixels (blue, green, red, alpha, its colours multiplied by its alpha), row by row from its
@@ -492,6 +494,22 @@ mod tests {
         // Across the way as the place is.
         let top = Way::between(window, rect(880, 20, 920, 60));
         assert_eq!((top.window_along, top.place_along, top.place_across), ((-900.0, -200.0), (-60.0, -20.0), (880.0, 920.0)));
+    }
+
+    /// The window bends and slides together from rest: wherever its sides are bent at all it is still on its way (it
+    /// never stops first and straightens after), both at rest at the window, the slide at speed at the place.
+    #[test]
+    fn it_bends_and_slides_as_one() {
+        let speed = |p: f32, which: fn((f32, f32)) -> f32| (which(phases(p + 1e-3)) - which(phases(p))) / 1e-3;
+        for step in 1..=100 {
+            let p = step as f32 / 100.0;
+            let (bend, slide) = phases(p);
+            assert!(bend > 0.0 && slide > 0.0 && slide < 1.0 + 1e-6, "at {p}: {bend} {slide}");
+            assert!(speed(p - 1e-3, |(_, slide)| slide) > 0.0, "at {p}");
+        }
+        assert_eq!(phases(0.0), (0.0, 0.0));
+        assert!(speed(0.0, |(bend, _)| bend) < 0.05 && speed(0.0, |(_, slide)| slide) < 0.05);
+        assert!((speed(1.0 - 1e-3, |(_, slide)| slide) - 1.5).abs() < 0.01);
     }
 
     /// At the start the window is drawn whole where it is, each line of its picture on its own line of the screen.
