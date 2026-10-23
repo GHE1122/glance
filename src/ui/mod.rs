@@ -11,6 +11,7 @@ pub mod canvas;
 pub mod editor;
 pub mod note;
 #[cfg(windows)]
+pub mod genie;
 pub mod gfx;
 pub mod life;
 pub mod forms;

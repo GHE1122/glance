@@ -303,7 +303,7 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
 
 /// `choice` made in a menu of the station's head (see `head_menu`): done (the settings changed off the calling thread,
 /// which they tell to restyle).
-pub fn head_chose(choice: HeadChoice) {
+pub fn head_chose(choice: HeadChoice, place: Option<windows::Win32::Foundation::RECT>) {
     match choice {
         HeadChoice::View(page, view) => {
             std::thread::spawn(move || {
@@ -322,7 +322,7 @@ pub fn head_chose(choice: HeadChoice) {
         HeadChoice::StopRecent => {
             std::thread::spawn(|| crate::app().change(|settings| settings.station.recent = false));
         }
-        HeadChoice::Settings => crate::show_workbench_settings(),
+        HeadChoice::Settings => crate::show_workbench_settings(place),
         // (Shown by what it was chosen on: see the panel's `end_menu`.)
         HeadChoice::Page(_) => {}
     }

@@ -1639,8 +1639,12 @@ impl Widgets {
         if self.settings.is_some() && settings.is_none() {
             for widget in &mut self.list {
                 widget.retake = true;
-                widget.next_frame = Instant::now();
             }
+        }
+        // (Drawn again as the settings come or go: a widget they were asked from shows its settings' button while they
+        // are open.)
+        for widget in &mut self.list {
+            widget.next_frame = Instant::now();
         }
         self.settings = settings;
         for widget in &self.list {
@@ -1942,12 +1946,12 @@ impl Widgets {
         match widget.release(now, cancelled) {
             Released::Closed => self.put_away_at(index),
             Released::Changed => {}
-            Released::Settings => {
+            Released::Settings(place) => {
                 // (What its button said goes with the settings coming.)
                 if self.list[index].tip.take().is_some() {
                     crate::ui::tip::hide();
                 }
-                crate::show_settings();
+                crate::show_settings(place);
                 return;
             }
             Released::Full => {
@@ -2505,7 +2509,8 @@ enum Released {
     Nothing,
     Changed,
     Closed,
-    Settings,
+    /// Its settings' button pressed, where it is on the screen (physical px).
+    Settings(Option<RECT>),
     /// Its music asked to be shown over the whole of its screen.
     Full,
     /// One of its station's head's buttons pressed: its menu asked for.
@@ -3169,15 +3174,38 @@ impl Widget {
 
     /// The buttons that show now: all of them, the pointer over it; while
     /// it lets clicks through, the one that ends that, once the pointer has
-    /// stayed over it a while.
+    /// stayed over it a while. And its settings' button while the settings asked
+    /// from it are open, the pointer over it or not: they pour back into it.
     fn offered(&self) -> Vec<(Point, Button)> {
         let all = self.buttons();
-        match (self.hover, self.click_through) {
+        let mut offered = match (self.hover, self.click_through) {
             (false, _) => Vec::new(),
-            (true, false) => all,
-            (true, true) if self.lingered.is_some_and(|since| since.elapsed() >= buttons::LINGER) => all.into_iter().filter(|(_, button)| *button == Button::Through).collect(),
+            (true, false) => all.clone(),
+            (true, true) if self.lingered.is_some_and(|since| since.elapsed() >= buttons::LINGER) => all.iter().copied().filter(|(_, button)| *button == Button::Through).collect(),
             (true, true) => Vec::new(),
+        };
+        if self.settings_asked_here() && !offered.iter().any(|(_, button)| *button == Button::Settings) {
+            offered.extend(all.into_iter().filter(|(_, button)| *button == Button::Settings));
         }
+        offered
+    }
+
+    /// Where its button `button` is on the screen (physical px), whether it shows or not.
+    fn button_rect(&self, button: Button) -> Option<RECT> {
+        let px = self.contact.scale * self.zoom;
+        let (middle, _) = self.buttons().into_iter().find(|(_, one)| *one == button)?;
+        let (x, y, half) = (self.at.x as f32 + middle.x * px, self.at.y as f32 + middle.y * px, BUTTON / 2.0 * px);
+        Some(RECT { left: (x - half).round() as i32, top: (y - half).round() as i32, right: (x + half).round() as i32, bottom: (y + half).round() as i32 })
+    }
+
+    /// Where its button `button` is on the screen (physical px), while it is offered.
+    fn button_on_screen(&self, button: Button) -> Option<RECT> {
+        self.offered().iter().any(|(_, offered)| *offered == button).then(|| self.button_rect(button)).flatten()
+    }
+
+    /// Whether the settings, open, were asked from its settings' button, where it is now.
+    fn settings_asked_here(&self) -> bool {
+        crate::ui::settings_window::asked_from().is_some_and(|from| self.button_rect(Button::Settings) == Some(from))
     }
 
     fn button_at(&self, x: f32, y: f32) -> Option<Button> {
@@ -3489,7 +3517,7 @@ impl Widget {
                             Released::Changed
                         }
                         Some(Button::Close) => Released::Closed,
-                        Some(Button::Settings) => Released::Settings,
+                        Some(Button::Settings) => Released::Settings(self.button_on_screen(Button::Settings)),
                         Some(Button::Full) => Released::Full,
                         Some(Button::Game) => {
                             press_game();
@@ -4259,6 +4287,7 @@ impl Widget {
         let rough = matches!(self.drag, Some(Drag::Move { moved: true, .. })) || self.fling.is_some();
         let contact_scale = self.contact.scale;
         let offered = self.offered();
+        let asked_here = self.settings_asked_here();
         let frost = if self.content.skinned() { self.frost(now, theme) } else { 0.0 };
         // What plays: as its switches say, the pointer where it is over it (letting clicks through, it is not).
         let shows = (!matches!(self.content, Content::Readings(_))).then(|| Shows::from(&crate::app().settings.lock().unwrap().view));
@@ -4388,7 +4417,8 @@ impl Widget {
             let front_is_game = crate::ui::view::game_shown(scene.history);
             for (centre, button) in offered {
                 // Lit while on: pinned, letting clicks through, the window in front a game.
-                let lit = (button == Button::Pin && pinned) || (button == Button::Through && through) || (button == Button::Game && front_is_game);
+                // (Its settings' button, while the settings asked from it are open.)
+                let lit = (button == Button::Pin && pinned) || (button == Button::Through && through) || (button == Button::Game && front_is_game) || (button == Button::Settings && asked_here);
                 match button_ground {
                     Some(ground) => buttons::paint_on(frame, centre, button, lit, ground),
                     None => buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5)),
@@ -4605,6 +4635,32 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A widget's settings' button shows while the settings asked from it are open, the pointer away from it, lit: they
+    /// pour back into it as they close. Asked from elsewhere, or closed, it shows no more.
+    #[test]
+    fn its_settings_button_shows_while_the_settings_asked_from_it_are_open() {
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let contact = Contact { monitor: RECT { left: 0, top: 0, right: 1920, bottom: 1080 }, work: RECT { left: 0, top: 0, right: 1920, bottom: 1040 }, scale: 1.5 };
+        let mut widget = Widget::new(contact, POINT { x: 400, y: 300 }, Content::Readings(Readings::new(choice))).unwrap();
+        widget.surface_size = (300.0, 200.0);
+        widget.hover = false;
+        let gear = widget.button_rect(Button::Settings).unwrap();
+        let settings_shown = |widget: &Widget| widget.offered().iter().any(|(_, button)| *button == Button::Settings);
+        let closed = settings_shown(&widget);
+        crate::ui::settings_window::pretend_asked_from(Some(gear));
+        let asked_here = (settings_shown(&widget), widget.button_on_screen(Button::Settings));
+        crate::ui::settings_window::pretend_asked_from(Some(RECT { left: 10, top: 10, right: 40, bottom: 40 }));
+        let asked_elsewhere = settings_shown(&widget);
+        crate::ui::settings_window::pretend_asked_from(None);
+        let closed_again = settings_shown(&widget);
+        // (Its window and device let go of before anything is asserted: a thread ending with them held hangs.)
+        drop(widget);
+        gfx::let_go();
+        assert!(!closed);
+        assert_eq!(asked_here, (true, Some(gear)));
+        assert!(!asked_elsewhere && !closed_again);
+    }
 
     /// A note stuck on the desktop found where it is alone, and where it was merged with what plays (which part); one
     /// not there not found.

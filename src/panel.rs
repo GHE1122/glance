@@ -284,9 +284,13 @@ impl Controller {
     }
 
     fn post(&self, message: u32) {
+        self.post_with(message, 0);
+    }
+
+    fn post_with(&self, message: u32, lparam: isize) {
         let sink = self.sink.load(Ordering::Acquire);
         if sink != 0 {
-            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), message, WPARAM(0), LPARAM(0)) };
+            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), message, WPARAM(0), LPARAM(lparam)) };
         }
     }
 
@@ -449,10 +453,10 @@ impl Controller {
         }
     }
 
-    /// Opens the settings window (on a thread of its own: see `settings_window::open`), asked of this thread, which
-    /// takes the tray's and the overlay's asking.
-    pub fn open_settings(&self) {
-        self.post(OPEN_SETTINGS);
+    /// Opens the settings window (on a thread of its own: see `settings_window::open`), poured out of `place`, asked of
+    /// this thread, which takes the tray's and the overlay's asking.
+    pub fn open_settings(&self, place: Option<RECT>) {
+        self.post_with(OPEN_SETTINGS, crate::ui::genie::told(place));
     }
 
     /// The note `name` stuck on the desktop with its corner at `at`, `size` large (DIPs: the page's it is stuck from;
@@ -919,7 +923,7 @@ impl Controller {
                 }
                 crate::ui::window::SCREENS_CHANGED if widgets.owns(msg.hwnd) || widgets.full_owns(msg.hwnd) => widgets.screens_changed(),
                 crate::widget::CAPTURED if widgets.owns(msg.hwnd) => widgets.captured(msg.hwnd),
-                OPEN_SETTINGS => settings_window::open(),
+                OPEN_SETTINGS => settings_window::open(crate::ui::genie::of_told(msg.lParam.0)),
                 STICK_NOTES => {
                     for (name, asked) in std::mem::take(&mut *STUCK.lock().unwrap()) {
                         match asked {
@@ -1307,8 +1311,8 @@ impl Controller {
                     keep_menu_above(&menu, &mut overlay);
                 }
                 WM_LBUTTONUP if overlay.as_ref().is_some_and(|o| o.owns_bar(msg.hwnd)) => {
-                    if let Some(choice) = overlay.as_mut().unwrap().bar_press() {
-                        self.overlay_chosen(choice, &mut panels);
+                    if let Some((choice, place)) = overlay.as_mut().unwrap().bar_press() {
+                        self.overlay_chosen(choice, Some(place), &mut panels);
                     }
                 }
                 WM_MOUSEMOVE if owner.is_some() => panels[owner.unwrap()].hover_at(lparam_point(msg.lParam)),
@@ -1497,6 +1501,8 @@ impl Controller {
     fn end_menu(&self, menu: &mut Option<(crate::ui::menu::Menu, MenuFor)>, choice: Option<usize>, panels: &mut [Panel], menu_of: &mut Option<usize>, widgets: &mut crate::widget::Widgets, overlay: &mut Option<Overlay>) {
         let Some((open, of)) = menu.take() else { return };
         let menu_panel = menu_of.take();
+        // (Where the choice was on the screen: what it opens comes out of there, but for the tray icon's menu.)
+        let place = choice.and_then(|row| open.row_on_screen(row));
         open.close();
         if let Some(overlay) = overlay.as_mut() {
             overlay.under_menu(None);
@@ -1511,12 +1517,12 @@ impl Controller {
             MenuFor::Tray(choices) => crate::tray::chosen(choice, &choices),
             MenuFor::Widget(hwnd) => {
                 if let Some(crate::widget::WidgetChoice::Settings) = choice.and_then(|row| widgets.chose(hwnd, row)) {
-                    crate::show_settings();
+                    crate::show_settings(place);
                 }
             }
             MenuFor::Overlay => {
                 if let (Some(row), Some(overlay)) = (choice, overlay.as_ref()) {
-                    self.overlay_chosen(overlay.chose(row), panels);
+                    self.overlay_chosen(overlay.chose(row), place, panels);
                 }
             }
             MenuFor::Station(id, choices, on) => match (choice.and_then(|row| choices.get(row)), on) {
@@ -1556,20 +1562,20 @@ impl Controller {
                     }
                     (None, None) => {}
                 },
-                Some(choice) => crate::station::head_chose(*choice),
+                Some(choice) => crate::station::head_chose(*choice, place),
                 None => {}
             },
         }
     }
 
-    /// What was chosen of the overlay, in its menu or by one of its buttons: done.
-    fn overlay_chosen(&self, choice: OverlayChoice, panels: &mut [Panel]) {
+    /// What was chosen of the overlay, in its menu or by one of its buttons (at `place` on the screen): done.
+    fn overlay_chosen(&self, choice: OverlayChoice, place: Option<RECT>, panels: &mut [Panel]) {
         match choice {
             OverlayChoice::Settings => {
                 for panel in panels.iter_mut().filter(|panel| !panel.stays()) {
                     panel.dismiss();
                 }
-                settings_window::open_at_overlay();
+                settings_window::open_at_overlay(place);
             }
             OverlayChoice::Lock(locked) => {
                 std::thread::spawn(move || crate::app().lock_overlay(locked));
@@ -3717,6 +3723,15 @@ impl<'a> Panel<'a> {
         self.next_frame = if moving { now } else { now + Duration::from_millis(250) };
     }
 
+    /// Where on the screen the region `hit` was last drawn (physical px), if it was.
+    fn on_screen(&self, hit: Hit) -> Option<RECT> {
+        let placement = self.placement.as_ref()?;
+        let (px, window) = (placement.px, placement.window);
+        let screen = |at: f32, from: f32, origin: i32| origin + ((at + from) * px).round() as i32;
+        let (x, y, w, h, _) = self.hits.iter().find(|region| region.4 == hit)?;
+        Some(RECT { left: screen(*x, self.corner.0, window.left), top: screen(*y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) })
+    }
+
     /// Which hit region a point in the window's client area (physical px) is in.
     fn hit_at(&self, client: POINT) -> Option<Hit> {
         self.hits_at(client).next()
@@ -3834,7 +3849,7 @@ impl<'a> Panel<'a> {
         }
         match self.hit_at(client) {
             Some(Hit::Settings) => {
-                crate::show_settings();
+                crate::show_settings(self.on_screen(Hit::Settings));
             }
             Some(Hit::Full) => {
                 self.full_asked = self.placement.as_ref().map(|placement| placement.contact);
@@ -4107,7 +4122,7 @@ fn tag(frame: &gfx::Frame, theme: &Theme, text: &str, centre: (f32, f32), heed: 
 
 /// Whether Windows has animations turned off ("Animation effects" in its
 /// accessibility settings).
-fn reduced_motion() -> bool {
+pub(crate) fn reduced_motion() -> bool {
     let mut animate = windows::core::BOOL(1);
     let read = unsafe {
         SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut animate as *mut _ as *mut _), Default::default())

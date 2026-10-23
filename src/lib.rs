@@ -300,23 +300,24 @@ impl App {
     }
 }
 
-/// Brings the settings window up; the panel gives way to it.
+/// Brings the settings window up, poured out of `place` (what it was asked from on the screen, physical px: see
+/// `ui::genie`), the panel giving way to it.
 #[cfg(windows)]
-pub(crate) fn show_settings() {
+pub(crate) fn show_settings(place: Option<windows::Win32::Foundation::RECT>) {
     app().controller.dismiss();
-    ui::settings_window::show();
+    ui::settings_window::show(place);
 }
 
-/// The settings shown at the page of the reports this PC sent.
-pub(crate) fn show_reports() {
+/// The settings shown at the page of the reports this PC sent, poured out of `place`.
+pub(crate) fn show_reports(place: Option<windows::Win32::Foundation::RECT>) {
     app().controller.dismiss();
-    ui::settings_window::open_at_reports();
+    ui::settings_window::open_at_reports(place);
 }
 
-/// The settings shown at the workbench's page (the station's choices are there).
-pub(crate) fn show_workbench_settings() {
+/// The settings shown at the workbench's page (the station's choices are there), poured out of `place`.
+pub(crate) fn show_workbench_settings(place: Option<windows::Win32::Foundation::RECT>) {
     app().controller.dismiss();
-    ui::settings_window::open_at_workbench();
+    ui::settings_window::open_at_workbench(place);
 }
 
 #[cfg(windows)]
