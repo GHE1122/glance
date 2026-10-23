@@ -1687,24 +1687,24 @@ impl Writing {
     /// composed): read again, what was chosen kept as far as the words go. (With something waiting, it is kept apart as it
     /// is kept: see `keep`. Deleted outside: left as it is, kept apart likewise.)
     pub fn read_outside(&mut self) {
-        if !self.readable() {
-            return;
-        }
-        let Some(name) = self.name.clone() else { return };
-        let Some((text, stamp)) = crate::notes::folder_at(self.folder.clone()).read(&name) else { return };
+        let Some((folder, name)) = self.to_read() else { return };
+        let Some((text, stamp)) = crate::notes::folder_at(folder).read(&name) else { return };
         self.take_outside(&text, stamp);
     }
 
-    /// Whether it may be read again: not over what is written here and not yet taken in, in its words or in a table's
-    /// cell, nor as the input method composes in either (taken in, it is kept, and that is read again then).
-    fn readable(&self) -> bool {
+    /// Where its file is to be read for a change made outside (its folder and its name), while it may be read again:
+    /// not over what is written here and not yet taken in, in its words or in a table's cell, nor as the input method
+    /// composes in either (taken in, it is kept, and that is read again then). None for a note in no file yet.
+    pub fn to_read(&self) -> Option<(std::path::PathBuf, String)> {
         let cell_busy = self.cell.borrow().as_ref().is_some_and(|cell| cell.editor.composing() || cell.editor.changed());
-        !(self.unkept || self.editor.composing() || self.editor.changed() || cell_busy)
+        let busy = self.unkept || self.editor.composing() || self.editor.changed() || cell_busy;
+        Some((self.folder.clone(), self.name.clone()?)).filter(|_| !busy)
     }
 
-    /// Its file as read (`text`, as `stamp` says it was) taken in, where it changed since it was last read or kept.
-    fn take_outside(&mut self, text: &str, stamp: crate::notes::store::Stamp) {
-        if self.stamp.is_some_and(|was| was.same(&stamp)) {
+    /// Its file as read (`text`, as `stamp` says it was) taken in, where it changed since it was last read or kept, and
+    /// it may still be read again (read elsewhere meanwhile: see `to_read`).
+    pub fn take_outside(&mut self, text: &str, stamp: crate::notes::store::Stamp) {
+        if self.to_read().is_none() || self.stamp.is_some_and(|was| was.same(&stamp)) {
             return;
         }
         // (A link being written there left: what it was for is written anew.)
@@ -2522,7 +2522,7 @@ mod tests {
         writing.unkept = false;
         let store = crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" };
         let read_outside = |writing: &mut super::Writing| {
-            if writing.readable() {
+            if writing.to_read().is_some() {
                 let (text, stamp) = store.read("t.md").unwrap();
                 writing.take_outside(&text, stamp);
             }

@@ -684,6 +684,9 @@ struct InPlace {
     /// When what was written is next kept, and its file next looked at (see `READ_OUTSIDE`).
     keep_at: Option<Instant>,
     read_at: Instant,
+    /// Its file being read on a thread of its own (a drive slow to answer, one on the network gone, never holds the
+    /// panel's thread): what it was found to be, told as it is read.
+    reading: Option<std::sync::mpsc::Receiver<Option<(String, crate::notes::store::Stamp)>>>,
     /// Since when the caret blinks (it shows at once as it moves, or as a key comes), and what was chosen then.
     blink_from: Instant,
     chosen: (i32, i32),
@@ -2658,7 +2661,7 @@ impl Widget {
             let now = Instant::now();
             let chosen = writing.editor.selection();
             let hwnd = self.window.hwnd;
-            self.in_place = Some(InPlace { writing, number, name, hwnd, lang: crate::update::language(), taking: false, before: HWND::default(), clicks: Default::default(), selecting: false, menu_pressed: false, keep_at: None, read_at: now + READ_OUTSIDE, blink_from: now, chosen, styled: (px, theme.skin, theme.dark), card });
+            self.in_place = Some(InPlace { writing, number, name, hwnd, lang: crate::update::language(), taking: false, before: HWND::default(), clicks: Default::default(), selecting: false, menu_pressed: false, keep_at: None, read_at: now + READ_OUTSIDE, reading: None, blink_from: now, chosen, styled: (px, theme.skin, theme.dark), card });
         }
         self.take_keys();
         true
@@ -2721,10 +2724,30 @@ impl Widget {
             in_place.keep_at = (!in_place.writing.keep(in_place.lang)).then_some(now + KEEP_AGAIN);
             self.next_frame = now;
         }
+        // Its file read (on a thread of its own, one reading at a time), and what was read taken in.
+        if let Some(reading) = &in_place.reading {
+            match reading.try_recv() {
+                Ok(read) => {
+                    in_place.reading = None;
+                    if let Some((text, stamp)) = read {
+                        in_place.writing.take_outside(&text, stamp);
+                        self.next_frame = now;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => in_place.reading = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
         if in_place.taking && now >= in_place.read_at {
             in_place.read_at = now + READ_OUTSIDE;
-            in_place.writing.read_outside();
-            self.next_frame = now;
+            if let (None, Some((folder, name))) = (&in_place.reading, in_place.writing.to_read()) {
+                let (told, reading) = std::sync::mpsc::channel();
+                let folder = crate::notes::folder_at(folder);
+                let started = std::thread::Builder::new().name("glance: note read".into()).spawn(move || {
+                    let _ = told.send(folder.read(&name));
+                });
+                in_place.reading = started.is_ok().then_some(reading);
+            }
         }
         if !in_place.taking && in_place.keep_at.is_none() && in_place.writing.read_as_written() {
             self.in_place = None;
