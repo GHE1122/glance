@@ -411,6 +411,9 @@ fn open_at(asked: Asked) {
         crate::perf::mark(|| "settings asked while being made: left".into());
         return;
     }
+    // (Where it was asked from told at once, not as its thread comes up: what it was asked from, looking meanwhile,
+    // would find it asked from nowhere and forget it.)
+    *ASKED_FROM.lock().unwrap() = asked.place;
     let mut kept = THREAD.lock().unwrap();
     crate::perf::mark(|| format!("settings asked of its thread, {}", match &*kept { Kept::None => "none", Kept::Starting(_) => "starting", Kept::Running(_) => "running" }));
     match &mut *kept {
@@ -421,6 +424,7 @@ fn open_at(asked: Asked) {
             *kept = Kept::None;
             if !start(&mut kept, Some(asked)) {
                 OPENING.store(false, Ordering::Release);
+                *ASKED_FROM.lock().unwrap() = None;
             }
         }
     }
@@ -530,7 +534,7 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
     crate::perf::mark(|| "settings to make".into());
     // (Before the window is: shown, it tells the widgets, and the one it was asked from shows so at once.)
     *ASKED_FROM.lock().unwrap() = asked.place;
-    let made = gfx::current().ok().and_then(|gfx| make(gfx, Some(asked.place)));
+    let made = gfx::current().ok().and_then(|gfx| make(gfx, Some(asked.place), asked.to));
     crate::perf::mark(|| "settings made".into());
     if made.is_none() {
         *ASKED_FROM.lock().unwrap() = None;
@@ -543,12 +547,6 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
     OPENING.store(false, Ordering::Release);
     // (Not made: the thread ends, and what it made of it with it.)
     made?;
-    match asked.to {
-        Some(To::Overlay) => to_overlay(),
-        Some(To::Workbench) => to_workbench(),
-        Some(To::Reports) => to_reports(),
-        None => {}
-    }
     let mut msg = MSG::default();
     let mut again = None;
     loop {
@@ -597,26 +595,16 @@ impl Drop for Ending {
 
 /// The overlay's page, turned to.
 fn to_overlay() {
-    with_ui(|ui| {
-        OVERLAY_OWED.store(false, Ordering::Release);
-        ui.tab = Tab::Overlay;
-        ui.turn_to(Page::Monitor);
-    });
+    with_ui(|ui| ui.turn_as_asked(To::Overlay));
 }
 
 fn to_workbench() {
-    with_ui(|ui| {
-        WORKBENCH_OWED.store(false, Ordering::Release);
-        ui.turn_to(Page::Workbench);
-    });
+    with_ui(|ui| ui.turn_as_asked(To::Workbench));
 }
 
 /// The page of the reports sent, turned to, as they are now.
 fn to_reports() {
-    with_ui(|ui| {
-        ui.followed = crate::reports::list();
-        ui.turn_to(Page::Reports);
-    });
+    with_ui(|ui| ui.turn_as_asked(To::Reports));
 }
 
 /// Takes up settings changed elsewhere (the panel's bar, the overlay's menu, a drag), from any thread: an open window
@@ -1744,7 +1732,7 @@ fn placed_clear_of(work: RECT, (width, height): (i32, i32), from: Option<RECT>, 
     .unwrap_or(middle)
 }
 
-fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>) -> Option<HWND> {
+fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWND> {
     let (work, scale) = crate::panel::work_area_at_cursor()?;
     let scale = scale as f32;
     unsafe {
@@ -1918,6 +1906,10 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>) -> Option<HWND> {
         }
         ui.read_stages();
         ui.restyle();
+        // (At the page asked for before it is first drawn: it pours out showing it, not the last shown.)
+        if let Some(to) = to {
+            ui.turn_as_asked(to);
+        }
         crate::perf::mark(|| "settings dressed".into());
         ui.draw(Instant::now());
         let gfx = ui.gfx.clone();
@@ -2515,6 +2507,25 @@ impl Ui {
     }
 
     /// Shows page `page`, from its top.
+    /// The page `to` turned to: the overlay's, the workbench's, or that of the reports sent (as they are now).
+    fn turn_as_asked(&mut self, to: To) {
+        match to {
+            To::Overlay => {
+                OVERLAY_OWED.store(false, Ordering::Release);
+                self.tab = Tab::Overlay;
+                self.turn_to(Page::Monitor);
+            }
+            To::Workbench => {
+                WORKBENCH_OWED.store(false, Ordering::Release);
+                self.turn_to(Page::Workbench);
+            }
+            To::Reports => {
+                self.followed = crate::reports::list();
+                self.turn_to(Page::Reports);
+            }
+        }
+    }
+
     fn turn_to(&mut self, page: Page) {
         if page != self.page {
             self.page = page;
@@ -6301,7 +6312,7 @@ mod pictures {
             ], crate::settings::ShelfView::Cards);
         }
         let gfx = gfx::held().unwrap();
-        let hwnd = make(gfx.clone(), None).unwrap();
+        let hwnd = make(gfx.clone(), None, None).unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/settings", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         let shown = [
@@ -6464,6 +6475,23 @@ mod pictures {
         }
     }
 
+    /// Asked for at a page (the overlay's, the workbench's), the window is at it as it is first drawn: it pours out
+    /// showing that page, not the one shown last.
+    #[test]
+    fn the_settings_are_at_the_page_asked_for_from_their_first_frame() {
+        let (gfx, hwnd) = pretended();
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+        }
+        for (to, page) in [(To::Overlay, Page::Monitor), (To::Workbench, Page::Workbench), (To::Reports, Page::Reports)] {
+            let hwnd = make(gfx.clone(), None, Some(to)).unwrap();
+            assert!(with_ui(|ui| ui.page == page && ui.drawn_size.is_some()).unwrap());
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+            }
+        }
+    }
+
     /// Glance pictured with made-up readings, the settings window made (not shown), and reports sent from here
     /// pretended (see `reports::pretend`), the first carrying pictures taken of that window: the device, the window.
     fn pretended() -> (gfx::Held, HWND) {
@@ -6476,7 +6504,7 @@ mod pictures {
         crate::pictured(info, history);
         crate::reports::pretend(now_ms, &[]);
         let gfx = gfx::held().unwrap();
-        let hwnd = make(gfx.clone(), None).unwrap();
+        let hwnd = make(gfx.clone(), None, None).unwrap();
         // Pictures taken of the window's pages, as a user takes them of what is wrong.
         let scale = with_ui(|ui| ui.scale).unwrap();
         let mut taken = Vec::new();
