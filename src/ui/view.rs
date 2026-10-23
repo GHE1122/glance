@@ -316,23 +316,29 @@ pub enum List {
     Notes,
 }
 
-/// Which of its pages the station's lane shows: what is on it, what was copied lately, or the files come lately (those
-/// the filter takes).
+/// Which of its pages the station's lane shows: what is on it, what was copied lately, or the files come lately (each
+/// of the last two, those its filter takes).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Tab {
     #[default]
     Shelf,
-    Copies,
+    Copies(crate::station::shelf::Filter),
     Recent(crate::station::recent::Filter),
 }
 
 impl Tab {
-    /// Which page it is (Recent files' whatever it shows of them).
+    /// Which page it is (whatever its filter shows of it).
     pub fn page(self) -> Tab {
         match self {
+            Tab::Copies(_) => Tab::Copies(Default::default()),
             Tab::Recent(_) => Tab::Recent(Default::default()),
             page => page,
         }
+    }
+
+    /// The page chosen again, with the filter it has while it is the one shown (`now`).
+    pub fn again(self, now: Tab) -> Tab {
+        if self.page() == now.page() { now } else { self.page() }
     }
 }
 
@@ -437,10 +443,11 @@ impl Scrolls {
 }
 
 /// What each list shows, as far as one is scrolled for it alone (see `Scrolls::follow`): the station's things in their
-/// view, the files come lately under the filter chosen on `tab`, the notes in their view.
+/// view, what was copied lately and the files come lately under the filters chosen on `tab`, the notes in their view.
 pub fn lists_show(tab: Tab) -> [u8; 6] {
     let mut shows = [0; 6];
     shows[List::Shelf as usize] = crate::station::run::shown().view as u8;
+    shows[List::Copies as usize] = if let Tab::Copies(filter) = tab { filter as u8 + 1 } else { 0 };
     shows[List::Recent as usize] = if let Tab::Recent(filter) = tab { filter as u8 + 1 } else { 0 };
     shows[List::Notes as usize] = crate::notes::view() as u8;
     shows
@@ -595,8 +602,9 @@ enum Block {
     /// it; `said`, what it says instead of them (nothing on it), or over them (no room left); `over`, something
     /// dragged over it, to be dropped.
     Shelf { tiles: Vec<Tile>, shows: Shows, tall: f32, said: Option<String>, over: bool },
-    /// What was copied lately, the newest first, as `view` shows them, in room `tall` high, scrolled through past it.
-    Copies { rows: Vec<Tile>, view: ShelfView, tall: f32 },
+    /// What was copied lately, the newest first, of those `filter` takes (its choices over them), as `view` shows
+    /// them, in room `tall` high, scrolled through past it.
+    Copies { rows: Vec<Tile>, filter: crate::station::shelf::Filter, view: ShelfView, tall: f32 },
     /// The notes, the last written first, as `view` shows them, in room `tall` high (scrolled through past it); in a
     /// small lane, the last written alone.
     Notes { notes: Vec<NoteCard>, view: crate::settings::NotesView, tall: f32 },
@@ -1752,21 +1760,26 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
         return vec![head(lang.pick("中转站", "Station"), count, "", false), Block::Shelf { tiles, shows: Shows::Row, tall: TILE_H, said, over: shown.over }];
     }
     let copies = shown.history;
-    let tab = if !copies && tab == Tab::Copies { Tab::Shelf } else { tab };
+    let tab = if !copies && matches!(tab, Tab::Copies(_)) { Tab::Shelf } else { tab };
     let recent = crate::station::recent::on();
     let tab = if !recent && matches!(tab, Tab::Recent(_)) { Tab::Shelf } else { tab };
     let view = match tab {
         Tab::Shelf => shown.view,
-        Tab::Copies => shown.copies_view,
+        Tab::Copies(_) => shown.copies_view,
         Tab::Recent(_) => shown.recent_view,
     };
     let mut blocks = vec![Block::Tabs { tab, count: tiles.len(), copies, recent, view }];
     blocks.push(match tab {
         Tab::Shelf => Block::Shelf { tiles, shows: Shows::View(view), tall: STATION_TALL, said, over: shown.over },
-        Tab::Copies => Block::Copies { rows: shown.items.iter().rev().filter(|item| item.copied).map(|item| Tile::of(item, &folder, lang, now)).collect(), view, tall: STATION_TALL },
+        Tab::Copies(filter) => Block::Copies { rows: copied_lately(&shown.items, filter).map(|item| Tile::of(item, &folder, lang, now)).collect(), filter, view, tall: STATION_TALL },
         Tab::Recent(filter) => Block::Recent { rows: Lately::rows(&crate::station::recent::shown(), filter, lang, now), filter, view, tall: STATION_TALL, nowhere: crate::station::recent::nowhere() },
     });
     blocks
+}
+
+/// What was copied lately of `items` (the station's), the newest first, of those `filter` takes.
+fn copied_lately(items: &[crate::station::shelf::Item], filter: crate::station::shelf::Filter) -> impl Iterator<Item = &crate::station::shelf::Item> {
+    items.iter().rev().filter(move |item| item.copied && filter.takes(&item.what))
 }
 
 /// The least a list at a lane's foot is shown in (a couple of rows; the rest scrolled to), as its lane is made
@@ -1849,8 +1862,8 @@ impl Hash for Block {
                 (tiles, shows, tall.to_bits(), said, over).hash(state);
                 crate::station::thumbs::changes().hash(state);
             }
-            Block::Copies { rows, view, tall } => {
-                (rows, view, tall.to_bits()).hash(state);
+            Block::Copies { rows, filter, view, tall } => {
+                (rows, filter, view, tall.to_bits()).hash(state);
                 crate::station::thumbs::changes().hash(state);
             }
         }
@@ -3578,8 +3591,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (Block::Shelf { tiles, shows, tall, said, over }, Pass::Content) => {
                 paint_shelf(frame, scene, ink, (left, y + SHELF_GAP, width), tiles, *shows, *tall + spare, said.as_deref(), *over, hits);
             }
-            (Block::Copies { rows, view, tall }, Pass::Content) => {
-                paint_copies(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *view, *tall + spare, hits);
+            (Block::Copies { rows, filter, view, tall }, Pass::Content) => {
+                paint_copies(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *filter, *view, *tall + spare, hits);
             }
         }
         frame.key("");
@@ -3599,13 +3612,12 @@ fn paint_tabs(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     let pad = if theme.skin == Skin::Paper { 0.0 } else { TAB_PAD };
     let start = left - pad;
     let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), if count > 0 { count.to_string() } else { String::new() })];
+    // (Each chosen again with the filter it has.)
     if copies {
-        pages.push((Tab::Copies, lang.pick("最近复制", "Copied"), String::new()));
+        pages.push((Tab::Copies(Default::default()).again(tab), lang.pick("最近复制", "Copied"), String::new()));
     }
     if recent {
-        // (Chosen again, with the filter it had.)
-        let filter = if let Tab::Recent(filter) = tab { filter } else { Default::default() };
-        pages.push((Tab::Recent(filter), lang.pick("最近文件", "Recent"), String::new()));
+        pages.push((Tab::Recent(Default::default()).again(tab), lang.pick("最近文件", "Recent"), String::new()));
     }
     // (In the room the buttons at the end leave, whichever page shows: names that do not fit there set a size smaller,
     // and shortened, each to a like share of it, only where they still do not. A tab's room never reaches a button's.)
@@ -3827,11 +3839,11 @@ pub const CHOICE_PAGE: usize = 0;
 pub const CHOICE_NOTES: usize = 1;
 pub const CHOICE_FILTER: usize = 2;
 
-/// What is chosen of the station's pages, of the notes' views and of the recent files' filters (that one while its
-/// page shows), for their marks to slide (see `thumb::Dots::choose`).
+/// What is chosen of the station's pages, of the notes' views and of the filter of the page shown (what was copied
+/// lately, or the files come lately), for their marks to slide (see `thumb::Dots::choose`).
 pub fn choices(tab: Tab) -> Vec<(usize, Hit)> {
     let mut chosen = vec![(CHOICE_PAGE, Hit::Tab(tab.page())), (CHOICE_NOTES, Hit::NotesShow(crate::notes::view()))];
-    if matches!(tab, Tab::Recent(_)) {
+    if matches!(tab, Tab::Copies(_) | Tab::Recent(_)) {
         chosen.push((CHOICE_FILTER, Hit::Tab(tab)));
     }
     chosen
@@ -4179,62 +4191,17 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
     use crate::station::recent::Filter;
     let theme = scene.theme;
     let lang = scene.lang;
-    // The choices, all in the row: the room round their names narrowed where they do not fit, then their names
-    // shortened, each to a like share of it.
-    let names = Filter::ALL.map(|choice| match choice {
-        Filter::All => lang.pick("全部", "All"),
-        Filter::Downloads => lang.pick("下载", "Downloads"),
-        Filter::Screenshots => lang.pick("截图", "Screenshots"),
-        Filter::Documents => lang.pick("文档", "Documents"),
-        Filter::Pictures => lang.pick("图片和视频", "Pictures"),
+    let choices = Filter::ALL.map(|choice| {
+        let name = match choice {
+            Filter::All => lang.pick("全部", "All"),
+            Filter::Downloads => lang.pick("下载", "Downloads"),
+            Filter::Screenshots => lang.pick("截图", "Screenshots"),
+            Filter::Documents => lang.pick("文档", "Documents"),
+            Filter::Pictures => lang.pick("图片和视频", "Pictures"),
+        };
+        (Tab::Recent(choice), name)
     });
-    let gaps = 4.0 * (names.len() - 1) as f32;
-    let words: f32 = names.iter().map(|name| frame.measure(name, theme.small)).sum();
-    let pad = ((width - gaps - words) / (2.0 * names.len() as f32)).clamp(4.0, CHIP_PAD);
-    let share = (width - gaps) / names.len() as f32;
-    let shortened = words + 2.0 * pad * names.len() as f32 + gaps > width;
-    let mut x = left;
-    let laid: Vec<(Filter, String, f32, f32)> = Filter::ALL
-        .into_iter()
-        .zip(names)
-        .map(|(choice, name)| {
-            let name = if shortened { fitted(frame, name, theme.small, share - 2.0 * pad).into_owned() } else { name.to_string() };
-            let wide = frame.measure(&name, theme.small) + 2.0 * pad;
-            let at = x;
-            x += wide + 4.0;
-            (choice, name, at, wide)
-        })
-        .collect();
-    // The one chosen marked as the station's page over them is, sliding to it (glass's on a pill of its glass, Windows
-    // 11's a bar of its accent under it, chart paper's underlined in ink: filled, they were a second way of choosing
-    // under the first).
-    {
-        let boxes: Vec<(f32, f32)> = laid.iter().map(|one| (one.2, one.3)).collect();
-        let at = |choice: Filter| laid.iter().position(|one| one.0 == choice);
-        let slid = slid_at(scene.thumbs.slid(CHOICE_FILTER, Hit::Tab(Tab::Recent(filter))), |from| match from {
-            Hit::Tab(Tab::Recent(from)) => at(from),
-            _ => None,
-        });
-        let chosen = at(filter).unwrap_or(0);
-        if theme.skin == Skin::Glass {
-            let hovered = laid.iter().position(|one| scene.hover == Some(Hit::Tab(Tab::Recent(one.0))));
-            glass_choice(frame, theme, (top, CHIP_H), &boxes, chosen, slid, hovered);
-        } else {
-            let under = if theme.skin == Skin::Paper { top + CHIP_H - 2.0 } else { top + CHIP_H - 3.0 };
-            choice_mark(frame, theme, &boxes, chosen, slid, under, 14.0, 4.0);
-        }
-    }
-    for (choice, name, x, wide) in laid {
-        let chosen = choice == filter;
-        let hit = Hit::Tab(Tab::Recent(choice));
-        let hovered = scene.hover == Some(hit);
-        if hovered && !chosen && theme.skin != Skin::Glass {
-            frame.fill_rounded(theme.hover, x, top, wide, CHIP_H, theme.control_radius.min(CHIP_H / 2.0));
-        }
-        let words = if chosen || hovered { theme.text } else { theme.text2 };
-        centred(frame, &name, theme.small, words, x, top + (CHIP_H - LINE) / 2.0, wide);
-        hits.push((x, top, wide, CHIP_H, hit));
-    }
+    paint_filter(frame, scene, (left, top, width), &choices, Tab::Recent(filter), hits);
     let list_top = top + CHIP_H + 6.0;
     let list_tall = tall - CHIP_H - 6.0;
     if rows.is_empty() {
@@ -4307,6 +4274,61 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
     scroll_thumb(frame, theme, left + width + 6.0, list_top, list_tall, whole, scroll, most);
 }
 
+/// A page's filter (what was copied lately, the files come lately) at `top` from `left`, `width` across: its
+/// `choices` (each the page with that filter, and its name) in a row, `chosen` marked as the station's page over them
+/// is, sliding to it.
+fn paint_filter(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), choices: &[(Tab, &str)], chosen: Tab, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    // The choices, all in the row: the room round their names narrowed where they do not fit, then their names
+    // shortened, each to a like share of it.
+    let gaps = 4.0 * (choices.len() - 1) as f32;
+    let words: f32 = choices.iter().map(|(_, name)| frame.measure(name, theme.small)).sum();
+    let pad = ((width - gaps - words) / (2.0 * choices.len() as f32)).clamp(4.0, CHIP_PAD);
+    let share = (width - gaps) / choices.len() as f32;
+    let shortened = words + 2.0 * pad * choices.len() as f32 + gaps > width;
+    let mut x = left;
+    let laid: Vec<(Tab, String, f32, f32)> = choices
+        .iter()
+        .map(|&(choice, name)| {
+            let name = if shortened { fitted(frame, name, theme.small, share - 2.0 * pad).into_owned() } else { name.to_string() };
+            let wide = frame.measure(&name, theme.small) + 2.0 * pad;
+            let at = x;
+            x += wide + 4.0;
+            (choice, name, at, wide)
+        })
+        .collect();
+    // The one chosen marked as the station's page over them is, sliding to it (glass's on a pill of its glass, Windows
+    // 11's a bar of its accent under it, chart paper's underlined in ink: filled, they were a second way of choosing
+    // under the first).
+    {
+        let boxes: Vec<(f32, f32)> = laid.iter().map(|one| (one.2, one.3)).collect();
+        let at = |choice: Tab| laid.iter().position(|one| one.0 == choice);
+        let slid = slid_at(scene.thumbs.slid(CHOICE_FILTER, Hit::Tab(chosen)), |from| match from {
+            Hit::Tab(from) => at(from),
+            _ => None,
+        });
+        let marked = at(chosen).unwrap_or(0);
+        if theme.skin == Skin::Glass {
+            let hovered = laid.iter().position(|one| scene.hover == Some(Hit::Tab(one.0)));
+            glass_choice(frame, theme, (top, CHIP_H), &boxes, marked, slid, hovered);
+        } else {
+            let under = if theme.skin == Skin::Paper { top + CHIP_H - 2.0 } else { top + CHIP_H - 3.0 };
+            choice_mark(frame, theme, &boxes, marked, slid, under, 14.0, 4.0);
+        }
+    }
+    for (choice, name, x, wide) in laid {
+        let is_chosen = choice == chosen;
+        let hit = Hit::Tab(choice);
+        let hovered = scene.hover == Some(hit);
+        if hovered && !is_chosen && theme.skin != Skin::Glass {
+            frame.fill_rounded(theme.hover, x, top, wide, CHIP_H, theme.control_radius.min(CHIP_H / 2.0));
+        }
+        let words = if is_chosen || hovered { theme.text } else { theme.text2 };
+        centred(frame, &name, theme.small, words, x, top + (CHIP_H - LINE) / 2.0, wide);
+        hits.push((x, top, wide, CHIP_H, hit));
+    }
+}
+
 /// Where a thing just copied is marked: in the middle of its picture at (x, y), in that much room across; at the end
 /// of its row, its right edge at x, its middle at y.
 #[derive(Clone, Copy)]
@@ -4356,7 +4378,7 @@ pub fn copied() -> Option<(std::time::Instant, Vec<Hit>)> {
     }))
 }
 
-/// Recent files' filter choices: their height and the room round each name; a day's heading over its files.
+/// A page's filter's choices: their height and the room round each name. A day's heading over its files.
 const CHIP_H: f32 = 22.0;
 const CHIP_PAD: f32 = 9.0;
 const DAY_ROW: f32 = 22.0;
@@ -4408,16 +4430,35 @@ pub(crate) fn fitted<'t>(frame: &dyn Canvas, text: &'t str, font: Font, room: f3
     }
 }
 
-/// What was copied lately (see `Block::Copies`) from (`left`, `top`), `width` across, in room `tall` high: a row each
-/// (what it is, its first words, and what and when under them), pressed to be copied again.
+/// What was copied lately (see `Block::Copies`) from (`left`, `top`), `width` across, in room `tall` high: the
+/// filter's choices in a row, and under them a row each of those it takes (what it is, its first words, and what and
+/// when under them), pressed to be copied again.
 #[allow(clippy::too_many_arguments)]
-fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), rows: &[Tile], view: ShelfView, tall: f32, hits: &mut Vec<HitBox>) {
+fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, head, width): (f32, f32, f32), rows: &[Tile], filter: crate::station::shelf::Filter, view: ShelfView, tall: f32, hits: &mut Vec<HitBox>) {
+    use crate::station::shelf::Filter;
     let theme = scene.theme;
     let lang = scene.lang;
+    let choices = Filter::ALL.map(|choice| {
+        let name = match choice {
+            Filter::All => lang.pick("全部", "All"),
+            Filter::Words => lang.pick("文字", "Text"),
+            Filter::Pictures => lang.pick("图片", "Pictures"),
+            Filter::Files => lang.pick("文件", "Files"),
+        };
+        (Tab::Copies(choice), name)
+    });
+    paint_filter(frame, scene, (left, head, width), &choices, Tab::Copies(filter), hits);
+    let top = head + CHIP_H + 6.0;
+    let tall = tall - CHIP_H - 6.0;
     if rows.is_empty() {
         let middle = top + tall / 2.0;
         frame.icon(Icon::Clipboard, Point { x: left + width / 2.0, y: middle - 12.0 }, 22.0, theme.text3);
-        centred(frame, lang.pick("复制的文字、图片和文件会出现在这里", "What you copy shows here"), theme.small, theme.text2, left, middle + 4.0, width);
+        let said = if filter == Filter::All {
+            lang.pick("复制的文字、图片和文件会出现在这里", "What you copy shows here")
+        } else {
+            lang.pick("这一类没有复制的内容", "Nothing of this kind was copied")
+        };
+        centred(frame, said, theme.small, theme.text2, left, middle + 4.0, width);
         return;
     }
     // As cards: each its picture (words, their first lines), what it is and when under it.
@@ -4752,13 +4793,13 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
             let shown = crate::station::run::shown();
             let folder = crate::station::folder::Folder::own();
             let tab = match scene.tab {
-                Tab::Copies if !shown.history => Tab::Shelf,
+                Tab::Copies(_) if !shown.history => Tab::Shelf,
                 Tab::Recent(_) if !crate::station::recent::on() => Tab::Shelf,
                 tab => tab,
             };
             let tiles: Vec<(Tile, Hit)> = match tab {
                 Tab::Shelf => shown.items.iter().rev().filter(|item| !item.copied).map(|item| (Tile::of(item, &folder, lang, now), Hit::Shelf(item.id))).collect(),
-                Tab::Copies => shown.items.iter().rev().filter(|item| item.copied).map(|item| (Tile::of(item, &folder, lang, now), Hit::Copied(item.id))).collect(),
+                Tab::Copies(filter) => copied_lately(&shown.items, filter).map(|item| (Tile::of(item, &folder, lang, now), Hit::Copied(item.id))).collect(),
                 Tab::Recent(filter) => Lately::rows(&crate::station::recent::shown(), filter, lang, now).iter().map(|row| (row.tile(), Hit::Recent(row.entry))).collect(),
             };
             Bench::Station { tiles, tab }
@@ -5028,7 +5069,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             if h >= 150.0 && w >= 110.0 {
                 let name = match tab {
                     Tab::Shelf => scene.lang.pick("中转站", "Station"),
-                    Tab::Copies => scene.lang.pick("最近复制", "Copied"),
+                    Tab::Copies(_) => scene.lang.pick("最近复制", "Copied"),
                     Tab::Recent(_) => scene.lang.pick("最近文件", "Recent"),
                 };
                 let count = tiles.len().to_string();
@@ -5049,7 +5090,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             let grid = Grid::in_room(room, 60.0, true);
             let list = match tab {
                 Tab::Shelf => List::Shelf,
-                Tab::Copies => List::Copies,
+                Tab::Copies(_) => List::Copies,
                 Tab::Recent(_) => List::Recent,
             };
             let pixels = pixels_for(ShelfView::Cards);
@@ -5646,7 +5687,7 @@ otepad.exe", "Notepad"),
                     let (x, y) = (column as f32 * (lane_w + 12.0) + 6.0, row as f32 * (lane_h + 12.0) + 6.0);
                     crate::station::run::pretend(items(), pages[if column == 5 { 1 } else { column.min(2) }]);
                     let tab = match column {
-                        3 => Tab::Copies,
+                        3 => Tab::Copies(Default::default()),
                         4 | 5 => Tab::Recent(Default::default()),
                         _ => Tab::Shelf,
                     };
@@ -6233,8 +6274,9 @@ six".into()));
             assert_eq!(first(&hits, 10.0, 10.0), Some(Hit::Shelf(1)), "{shows:?}");
         }
         let mut hits = Vec::new();
-        paint_copies(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, ShelfView::List, STATION_TALL, &mut hits);
-        assert_eq!(first(&hits, 10.0, 10.0), Some(Hit::Copied(1)));
+        paint_copies(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &many, Default::default(), ShelfView::List, STATION_TALL, &mut hits);
+        let row = hits.iter().find(|hit| hit.4 == Hit::Copied(1)).copied().unwrap();
+        assert_eq!(first(&hits, row.0 + 5.0, row.1 + 5.0), Some(Hit::Copied(1)));
         let rows: Vec<Lately> = (1..=40).map(|file| Lately { entry: crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file }), day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }).collect();
         let mut hits = Vec::new();
         paint_recent(&Nothing, &scene, ink, (0.0, 0.0, 324.0), &rows, Default::default(), ShelfView::List, STATION_TALL, false, &mut hits);
@@ -6273,7 +6315,7 @@ six".into()));
             within(&hits, top, STATION_TALL, &format!("{shows:?}"));
         }
         let mut hits = Vec::new();
-        paint_copies(&Nothing, &scene, ink, (0.0, top, width), &many, ShelfView::List, STATION_TALL, &mut hits);
+        paint_copies(&Nothing, &scene, ink, (0.0, top, width), &many, Default::default(), ShelfView::List, STATION_TALL, &mut hits);
         within(&hits, top, STATION_TALL, "copies");
         let rows: Vec<Lately> = (1..=40).map(|file| Lately { entry: crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file }), day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }).collect();
         let mut hits = Vec::new();
@@ -6300,11 +6342,11 @@ six".into()));
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
             let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Copies, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Copies(Default::default()), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let (mut wide, mut narrow) = (Vec::new(), Vec::new());
-            paint_tabs(&Nothing, &scene, (0.0, 0.0, COLUMN_WIDTH - 2.0 * theme.pad_x), Tab::Copies, 3, true, true, ShelfView::List, &mut wide);
+            paint_tabs(&Nothing, &scene, (0.0, 0.0, COLUMN_WIDTH - 2.0 * theme.pad_x), Tab::Copies(Default::default()), 3, true, true, ShelfView::List, &mut wide);
             // (Measured here as so many DIPs a character, narrower than Chinese is: narrower than the least, for that.)
-            paint_tabs(&Nothing, &scene, (0.0, 0.0, 130.0), Tab::Copies, 3, true, true, ShelfView::List, &mut narrow);
+            paint_tabs(&Nothing, &scene, (0.0, 0.0, 130.0), Tab::Copies(Default::default()), 3, true, true, ShelfView::List, &mut narrow);
             assert_eq!(wide.iter().filter(|hit| matches!(hit.4, Hit::Tab(_))).count(), 3, "{skin:?}");
             assert!(narrow.iter().any(|hit| hit.4 == Hit::StationPages) && !narrow.iter().any(|hit| matches!(hit.4, Hit::Tab(_))), "{skin:?}");
             assert!(narrow.iter().any(|hit| hit.4 == Hit::StationView), "{skin:?}");
@@ -6567,7 +6609,7 @@ six".into()));
     #[test]
     fn the_station_s_menu_button_is_found_first() {
         for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
-            for tab in [Tab::Shelf, Tab::Copies, Tab::Recent(Default::default())] {
+            for tab in [Tab::Shelf, Tab::Copies(Default::default()), Tab::Recent(Default::default())] {
                 let theme = Theme::new(skin, false);
                 let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                 let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
@@ -6788,7 +6830,43 @@ six".into()));
             let chips: Vec<HitBox> = hits.iter().filter(|hit| matches!(hit.4, Hit::Tab(Tab::Recent(_)))).copied().collect();
             assert_eq!(chips.len(), 5, "{skin:?}");
             assert!(chips.iter().all(|chip| chip.0 + chip.2 <= width + 0.01), "{skin:?}: {chips:?}");
+            // And Recently copied's four, in Chinese too, in a lane as narrow as a workbench's gets.
+            for (lang, wide) in [(Lang::En, width), (Lang::Zh, width), (Lang::Zh, LANE_LEAST)] {
+                let scene = Scene { lang, ..scene };
+                let mut hits = Vec::new();
+                paint_copies(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, wide), &[], Default::default(), ShelfView::List, STATION_TALL, &mut hits);
+                let chips: Vec<Tab> = hits.iter().filter_map(|hit| if let Hit::Tab(tab) = hit.4 { Some(tab) } else { None }).collect();
+                assert_eq!(chips, crate::station::shelf::Filter::ALL.map(Tab::Copies), "{skin:?} {}", lang.pick("zh", "en"));
+                assert!(hits.iter().all(|chip| chip.0 + chip.2 <= wide + 0.01), "{skin:?} {}: {hits:?}", lang.pick("zh", "en"));
+            }
         }
+    }
+
+    /// Recently copied with a filter chosen shows only what it takes, the newest first, and its page is chosen again
+    /// with it (a tab or the pages' menu), while another page shown chooses it from the start.
+    #[test]
+    fn recently_copied_shows_what_its_filter_takes() {
+        use crate::station::shelf::{Filter, Item, What};
+        let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0 };
+        let items = [
+            item(1, What::Text { text: "a".into() }, true),
+            item(2, What::Picture { file: "2.png".into() }, true),
+            item(3, What::Link { url: "https://glancepc.com".into() }, true),
+            item(4, What::Text { text: "put by hand".into() }, false),
+            item(5, What::Files { paths: vec![std::path::PathBuf::from(r"C:\a.txt")], kept: Vec::new() }, true),
+        ];
+        let ids = |filter: Filter| copied_lately(&items, filter).map(|item| item.id).collect::<Vec<_>>();
+        assert_eq!(ids(Filter::All), [5, 3, 2, 1]);
+        assert_eq!(ids(Filter::Words), [3, 1]);
+        assert_eq!(ids(Filter::Pictures), [2]);
+        assert_eq!(ids(Filter::Files), [5]);
+        let words = Tab::Copies(Filter::Words);
+        assert_eq!(Tab::Copies(Filter::All).again(words), words);
+        assert_eq!(Tab::Copies(Filter::All).again(Tab::Recent(Default::default())), Tab::Copies(Filter::All));
+        assert_eq!(Tab::Recent(Default::default()).again(words), Tab::Recent(Default::default()));
+        assert_eq!(words.page(), Tab::Copies(Filter::All));
+        // (A filter chosen starts its list from the top: it scrolls for each alone.)
+        assert_ne!(lists_show(words)[List::Copies as usize], lists_show(Tab::Copies(Filter::All))[List::Copies as usize]);
     }
 
     /// Quick launch whole in a column: its rows as many as its things take across the room its skin leaves (the place

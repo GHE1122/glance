@@ -263,11 +263,10 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
         let shown = run::shown();
         let mut pages = vec![(Tab::Shelf, lang.pick("中转站", "Station"), Icon::Inbox)];
         if shown.history {
-            pages.push((Tab::Copies, lang.pick("最近复制", "Copied"), Icon::Clipboard));
+            pages.push((Tab::Copies(Default::default()).again(tab), lang.pick("最近复制", "Copied"), Icon::Clipboard));
         }
         if recent::on() {
-            let filter = if let Tab::Recent(filter) = tab { filter } else { Default::default() };
-            pages.push((Tab::Recent(filter), lang.pick("最近文件", "Recent"), Icon::File));
+            pages.push((Tab::Recent(Default::default()).again(tab), lang.pick("最近文件", "Recent"), Icon::File));
         }
         let items = pages.iter().map(|(page, label, icon)| Item { label, mark: Some(crate::ui::menu::Mark::Icon(*icon)), checked: page.page() == tab.page(), rule_before: false }).collect();
         let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
@@ -280,7 +279,7 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
     // shows (each page its own way); under a rule, what else is done with it; the settings last.
     let (page, view) = match tab {
         Tab::Shelf => (crate::settings::StationPage::Shelf, view),
-        Tab::Copies => (crate::settings::StationPage::Copies, run::shown().copies_view),
+        Tab::Copies(_) => (crate::settings::StationPage::Copies, run::shown().copies_view),
         Tab::Recent(_) => (crate::settings::StationPage::Recent, run::shown().recent_view),
     };
     let mut rows: Vec<(HeadChoice, &'static str, Icon, bool, bool)> = [(ShelfView::Cards, lang.pick("小卡片", "Small cards"), Icon::LayoutGrid), (ShelfView::Large, lang.pick("大卡片", "Large cards"), Icon::Image), (ShelfView::List, lang.pick("列表", "List"), Icon::List)]
@@ -290,7 +289,7 @@ pub fn head_menu(hit: crate::ui::view::Hit, tab: crate::ui::view::Tab, at: windo
     rows.extend(match tab {
         Tab::Shelf => vec![(HeadChoice::Clear, lang.pick("全部清空（保留固定的项目）", "Clear all but the pinned"), Icon::Trash, false, true)],
         Tab::Recent(_) => vec![(HeadChoice::StopRecent, lang.pick("不再列出最近文件", "Stop listing recent files"), Icon::EyeOff, false, true)],
-        Tab::Copies => vec![
+        Tab::Copies(_) => vec![
             (HeadChoice::ClearCopies, lang.pick("清空最近复制（保留固定的项目）", "Clear Recently copied but the pinned"), Icon::Trash, false, true),
             (HeadChoice::StopCopies, lang.pick("不再记录复制的内容", "Stop keeping what is copied"), Icon::Clipboard, false, false),
         ],

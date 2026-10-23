@@ -63,6 +63,32 @@ impl What {
     }
 }
 
+/// Which of what was copied lately a page shows: all; words (text, and links: a link copied is words too); pictures
+/// (what was copied as a picture: a screenshot is one, and cannot be told from others); files (files and folders
+/// copied where they are, pictures among them, and files that came with no path).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum Filter {
+    #[default]
+    All,
+    Words,
+    Pictures,
+    Files,
+}
+
+impl Filter {
+    pub const ALL: [Filter; 4] = [Filter::All, Filter::Words, Filter::Pictures, Filter::Files];
+
+    /// Whether `what` is one it shows.
+    pub fn takes(self, what: &What) -> bool {
+        let kind = match what {
+            What::Text { .. } | What::Link { .. } => Filter::Words,
+            What::Picture { .. } => Filter::Pictures,
+            What::Files { .. } | What::Saved { .. } => Filter::Files,
+        };
+        self == Filter::All || self == kind
+    }
+}
+
 /// How long the station keeps what is not pinned, and how much of its own it keeps at most.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Rules {
@@ -161,6 +187,20 @@ mod tests {
 
     fn picture(name: &str) -> What {
         What::Picture { file: name.into() }
+    }
+
+    #[test]
+    fn what_was_copied_is_sorted_into_words_pictures_and_files() {
+        let link = What::Link { url: "https://glancepc.com".into() };
+        let files = What::Files { paths: vec![PathBuf::from(r"D:\Photos\a.jpg")], kept: Vec::new() };
+        let saved = What::Saved { file: "1.pdf".into(), name: "bill.pdf".into() };
+        let all = [text("hello"), link, picture("1.png"), files, saved];
+        let taken = |filter: Filter| all.iter().enumerate().filter(|(_, what)| filter.takes(what)).map(|(at, _)| at).collect::<Vec<_>>();
+        assert_eq!(taken(Filter::All), [0, 1, 2, 3, 4]);
+        assert_eq!(taken(Filter::Words), [0, 1]);
+        // (A picture file copied in Explorer is a file: it is pasted as one.)
+        assert_eq!(taken(Filter::Pictures), [2]);
+        assert_eq!(taken(Filter::Files), [3, 4]);
     }
 
     #[test]

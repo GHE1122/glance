@@ -766,7 +766,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         pretend_workbench(lang, &folder.join("props"))?;
     }
     let tab = match shot.tab.as_deref() {
-        Some("copies") => crate::ui::view::Tab::Copies,
+        Some("copies") => crate::ui::view::Tab::Copies(Default::default()),
         Some("recent") => crate::ui::view::Tab::Recent(Default::default()),
         _ => crate::ui::view::Tab::Shelf,
     };
