@@ -187,6 +187,8 @@ enum Hit {
     Option,
     Sent,
     Thumb,
+    /// A thread's report closed, or opened again (see `thread`).
+    Turn,
     Yes,
     No,
 }
@@ -556,6 +558,7 @@ impl Dialog {
     fn activate(&mut self, hit: Hit) {
         match hit {
             Hit::Yes | Hit::No if self.conversation.is_some() => self.tell(hit == Hit::Yes),
+            Hit::Turn => self.tell_turn(),
             Hit::Yes => self.answer = Some(true),
             Hit::No => self.answer = Some(false),
             Hit::Add => unsafe {

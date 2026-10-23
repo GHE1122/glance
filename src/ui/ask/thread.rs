@@ -1,8 +1,10 @@
 //! A report's thread in a window of its own, as a conversation. At its top, what the report is and how it stands.
 //! Below, everything said since in a column that scrolls, the newest last, the user's own on the right, the
 //! developer's on the left and each change of its status between them. At its foot, room to add to it (words,
-//! pictures, a fresh copy of the diagnostics). It is kept up beside the window it is opened from, which takes nothing meanwhile:
-//! that window is told as the user sends what they wrote or closes it, and gives it the thread again as it changes.
+//! pictures, a fresh copy of the diagnostics), and the report closed or opened again, as an issue on GitHub is by the
+//! one who opened it. It is kept up beside the window it is opened from, which takes nothing meanwhile: that window is
+//! told as the user sends what they wrote, closes or opens the report again, or closes the window, and gives it the
+//! thread again as it changes.
 
 use super::*;
 
@@ -61,7 +63,8 @@ impl Tone {
 }
 
 /// A report's thread as the window shows it: its title, what is said under it (which report, and when it was sent),
-/// how it stands (in a few words, and what that means for this Glance, if anything), and what was said, in order.
+/// how it stands (in a few words, and what that means for this Glance, if anything), what was said, in order, and
+/// whether the user may close it (else open it again).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Thread {
     pub title: String,
@@ -70,6 +73,7 @@ pub struct Thread {
     pub tone: Tone,
     pub note: String,
     pub items: Vec<Item>,
+    pub closable: bool,
 }
 
 /// One thing said in a thread.
@@ -98,6 +102,9 @@ pub struct Talk<'a> {
     pub option: &'a str,
     /// On the button that sends.
     pub send: &'a str,
+    /// On the button that closes the report, and on the one that opens it again.
+    pub close_report: &'a str,
+    pub reopen: &'a str,
     /// Of closing it (the close button, as it is named).
     pub close: &'a str,
     /// The user, as their own messages are signed.
@@ -132,6 +139,9 @@ pub(super) struct Conversation {
     note: String,
     items: Vec<Shown>,
     you: String,
+    /// Whether the report may be closed (else opened again), and the words on the button that does either.
+    closable: bool,
+    turns: (String, String),
     state: State,
     pub(super) header: f32,
     /// Shown till it is taken down (see `life`).
@@ -211,6 +221,18 @@ impl Dialog {
         }
     }
 
+    /// The window's owner told the user closes the report, or opens it again: as it stands, unless something is being
+    /// sent.
+    pub(super) fn tell_turn(&self) {
+        let Some(conversation) = &self.conversation else { return };
+        if matches!(conversation.state, State::Sending(_)) {
+            return;
+        }
+        unsafe {
+            let _ = PostMessageW(Some(conversation.owner), conversation.told, WPARAM(2), LPARAM(self.hwnd.0 as isize));
+        }
+    }
+
     /// Whether what the user wrote may be sent: there is something to send, and nothing is being sent.
     fn sendable(&self) -> bool {
         self.conversation.as_ref().is_some_and(|conversation| self.sendable_while(&conversation.state))
@@ -222,8 +244,8 @@ impl Dialog {
         !matches!(state, State::Sending(_)) && (!self.typing.string().trim().is_empty() || !self.pictures.is_empty() || option)
     }
 
-    /// What the keyboard can go to in a thread's window, in order: what the user writes, sending it, what was said, and
-    /// closing it.
+    /// What the keyboard can go to in a thread's window, in order: what the user writes, closing the report or opening
+    /// it again, sending it, what was said, and closing the window.
     pub(super) fn thread_stops(&self) -> Vec<Hit> {
         let mut stops = vec![Hit::Words];
         stops.extend((0..self.pictures.len()).map(Hit::Remove));
@@ -233,7 +255,7 @@ impl Dialog {
                 stops.push(Hit::Paste);
             }
         }
-        stops.extend([Hit::Option, Hit::Yes, Hit::Sent, Hit::No]);
+        stops.extend([Hit::Option, Hit::Turn, Hit::Yes, Hit::Sent, Hit::No]);
         stops
     }
 
@@ -401,7 +423,7 @@ impl Dialog {
     }
 
     /// The row of buttons under the box for words: adding a picture (and pasting the clipboard's, where there is
-    /// room), attaching the diagnostics, how the sending goes, and sending.
+    /// room), attaching the diagnostics, how the sending goes, closing the report (or opening it again), and sending.
     fn paint_tools(&mut self, frame: &Frame, c: &Colours, conversation: &Conversation, r: Rect) {
         let send = self.yes.clone();
         let send_wide = (frame.gfx.measure(&send, BODY).ceil() + 56.0).max(96.0);
@@ -409,6 +431,13 @@ impl Dialog {
         // (The conversation is held apart while it is drawn: its state is asked of it as given.)
         let enabled = self.sendable_while(&conversation.state);
         self.send_button(frame, c, send_r, &send, enabled);
+        let (turn, icon) = if conversation.closable { (&conversation.turns.0, Icon::CircleX) } else { (&conversation.turns.1, Icon::CircleDot) };
+        let turn_wide = frame.gfx.measure(turn, BODY).ceil() + 46.0;
+        let turn_r = Rect { x: send_r.x - 8.0 - turn_wide, y: r.y, w: turn_wide, h: r.h };
+        let turnable = !matches!(conversation.state, State::Sending(_));
+        self.tool_while(frame, c, turn_r, icon, turn, Hit::Turn, turnable);
+        // (What is left of the row, before them.)
+        let end = turn_r.x;
         let (said, colour) = match &conversation.state {
             State::Writing => (String::new(), c.text2),
             State::Sending(said) => (said.clone(), c.text2),
@@ -424,7 +453,7 @@ impl Dialog {
             x += wide + 8.0;
             let chip = frame.gfx.measure(&paste, BODY).ceil() + 28.0;
             let option = self.option.as_ref().map_or(0.0, |(words, _)| OPTION_BOX + 10.0 + frame.gfx.measure(words, BODY).ceil() + 16.0);
-            if picture::on_clipboard() && x + chip + 8.0 + option + said_wide <= send_r.x - 12.0 {
+            if picture::on_clipboard() && x + chip + 8.0 + option + said_wide <= end - 12.0 {
                 self.chip_shown = true;
                 self.button(frame, c, Rect { x, y: r.y, w: chip, h: r.h }, &paste, Hit::Paste, false, true);
                 x += chip + 8.0;
@@ -433,27 +462,41 @@ impl Dialog {
         x += 6.0;
         if let Some((words, ticked)) = self.option.clone() {
             let wide = OPTION_BOX + 10.0 + frame.gfx.measure(&words, BODY).ceil();
-            self.paint_option(frame, c, Rect { x, y: r.y + (r.h - OPTION) / 2.0, w: wide.min(send_r.x - 12.0 - x), h: OPTION }, &words, ticked);
+            self.paint_option(frame, c, Rect { x, y: r.y + (r.h - OPTION) / 2.0, w: wide.min(end - 12.0 - x), h: OPTION }, &words, ticked);
             x += wide + 16.0;
         }
         if !said.is_empty() {
             let (ascent, descent) = frame.gfx.baseline(SMALL);
-            let room = (send_r.x - 12.0 - x).max(0.0);
-            frame.text(&said, SMALL, colour, send_r.x - 12.0 - room, r.y + (r.h - ascent - descent) / 2.0, room, Align::End);
+            let room = (end - 12.0 - x).max(0.0);
+            frame.text(&said, SMALL, colour, end - 12.0 - room, r.y + (r.h - ascent - descent) / 2.0, room, Align::End);
         }
     }
 
     /// A button of an icon and words, plain.
     fn tool(&mut self, frame: &Frame, c: &Colours, r: Rect, icon: Icon, words: &str, hit: Hit) {
-        let hover = self.hovered() == Some(hit);
+        self.tool_while(frame, c, r, icon, words, hit, true);
+    }
+
+    /// A button of an icon and words, plain, greyed and not to be pressed unless `enabled`.
+    #[allow(clippy::too_many_arguments)]
+    fn tool_while(&mut self, frame: &Frame, c: &Colours, r: Rect, icon: Icon, words: &str, hit: Hit, enabled: bool) {
+        let hover = enabled && self.hovered() == Some(hit);
         let down = hover && self.pressed == Some(hit);
         frame.fill_rounded(if hover { c.button_hover } else { c.button }, r.x, r.y, r.w, r.h, 6.0);
         frame.stroke_rounded(Fill::Solid(c.button_stroke), r.x, r.y, r.w, r.h, 6.0, 1.0);
-        frame.icon(icon, Point { x: r.x + 20.0, y: r.y + r.h / 2.0 }, 16.0, if hover { c.accent_text } else { c.text2 });
+        let (icon_ink, ink) = match (enabled, hover, down) {
+            (false, ..) => (c.text3, c.text3),
+            (true, true, true) => (c.accent_text, c.text2),
+            (true, true, false) => (c.accent_text, c.text),
+            (true, false, _) => (c.text2, c.text),
+        };
+        frame.icon(icon, Point { x: r.x + 20.0, y: r.y + r.h / 2.0 }, 16.0, icon_ink);
         let (ascent, descent) = frame.gfx.baseline(BODY);
-        frame.text(words, BODY, if down { c.text2 } else { c.text }, r.x + 34.0, r.y + (r.h - ascent - descent) / 2.0, r.w - 40.0, Align::Start);
+        frame.text(words, BODY, ink, r.x + 34.0, r.y + (r.h - ascent - descent) / 2.0, r.w - 40.0, Align::Start);
         self.ring(frame, c, r, 6.0, hit);
-        self.drawn.push((r, hit));
+        if enabled {
+            self.drawn.push((r, hit));
+        }
     }
 
     /// The button that sends, in the accent with its icon (greyed while there is nothing to send, or it is being sent).
@@ -481,7 +524,8 @@ impl Dialog {
 
 /// Opens `thread` in a window over `owner` (`talk` says what it says besides), kept up beside it till it is taken
 /// down (see `close`), `owner` taking nothing meanwhile. `owner` is told `told`, its WPARAM 1 as the user sends what
-/// they wrote (see `said`) and 0 as they close it, its LPARAM the window. The window, if it was made.
+/// they wrote (see `said`), 2 as they close the report or open it again (as `thread` says it may be), and 0 as they
+/// close the window, its LPARAM the window. The window, if it was made.
 pub fn open(owner: HWND, told: u32, thread: Thread, talk: &Talk) -> Option<HWND> {
     let gfx = gfx::current().ok()?;
     let showing = super::super::life::Showing::of(&gfx);
@@ -501,8 +545,9 @@ pub fn open(owner: HWND, told: u32, thread: Thread, talk: &Talk) -> Option<HWND>
     dialog.no = talk.close.into();
     // (From its end: the newest, once it is laid out.)
     dialog.scroll = f32::MAX;
-    let Thread { about, status, tone, note, items, .. } = thread;
-    dialog.conversation = Some(Conversation { owner, told, about, status, tone, note, items: Vec::new(), you: talk.you.into(), state: State::Writing, header: CLOSE + 24.0, _showing: showing });
+    let Thread { about, status, tone, note, items, closable, .. } = thread;
+    let turns = (talk.close_report.into(), talk.reopen.into());
+    dialog.conversation = Some(Conversation { owner, told, about, status, tone, note, items: Vec::new(), you: talk.you.into(), closable, turns, state: State::Writing, header: CLOSE + 24.0, _showing: showing });
     unsafe {
         put_up(owner, dialog, |dialog| {
             let scale = dialog.scale;
@@ -525,6 +570,7 @@ pub fn update(window: HWND, thread: Thread) {
             conversation.tone = thread.tone;
             conversation.note = thread.note;
             conversation.items = shown(thread.items, scale);
+            conversation.closable = thread.closable;
         }
         if at_end {
             dialog.scroll = f32::MAX;
@@ -545,7 +591,8 @@ pub fn said(window: HWND) -> Option<Said> {
     .flatten()
 }
 
-/// What the user wrote in `window` shown as being sent, `doing` said of it meanwhile.
+/// What the user wrote in `window` shown as being sent (or the report being closed or opened again), `doing` said of
+/// it meanwhile: nothing else is sent till it is over (see `sent`, `failed`, `writing`).
 pub fn sending(window: HWND, doing: &str) {
     set_state(window, State::Sending(doing.into()));
 }
@@ -609,9 +656,10 @@ pub fn pictured(gfx: &Rc<Gfx>, thread: Thread, talk: &Talk, scale: f32) -> ((u32
     dialog.yes = talk.send.into();
     dialog.no = talk.close.into();
     dialog.scroll = f32::MAX;
-    let Thread { about, status, tone, note, items, .. } = thread;
+    let Thread { about, status, tone, note, items, closable, .. } = thread;
     let items = shown(items, scale);
-    dialog.conversation = Some(Conversation { owner: HWND::default(), told: 0, about, status, tone, note, items, you: talk.you.into(), state: State::Writing, header: 0.0, _showing: super::super::life::Showing::of(gfx) });
+    let turns = (talk.close_report.into(), talk.reopen.into());
+    dialog.conversation = Some(Conversation { owner: HWND::default(), told: 0, about, status, tone, note, items, you: talk.you.into(), closable, turns, state: State::Writing, header: 0.0, _showing: super::super::life::Showing::of(gfx) });
     let area = (WIDTH, TALL);
     let size = ((area.0 * scale).round() as u32, (area.1 * scale).round() as u32);
     // (Laid out once, to know how far it scrolls, then drawn at its end.)
