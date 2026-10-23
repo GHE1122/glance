@@ -436,8 +436,14 @@ impl Shown {
                                 let all = start..range.start + text[range.clone()].trim_end_matches(['\n', '\r']).len();
                                 let opening = start..text[start..all.end].find('\n').map_or(all.end, |at| start + at);
                                 let last = text[..all.end].rfind('\n').map_or(0, |at| at + 1)..all.end;
+                                // (Its last line closes it only as a fence of the opening's mark, as long as it or
+                                // longer: else it is a line of the code, as the block runs to the end unclosed.)
+                                let opened = &text[opening.clone()];
+                                let opened = &opened[opened.find(['`', '~']).unwrap_or(opened.len())..];
+                                let mark = opened.chars().next();
+                                let run = opened.len() - opened.trim_start_matches(|c| Some(c) == mark).len();
                                 let fence = text[last.clone()].trim();
-                                let closing = (last.start > opening.end && fence.len() >= 3 && (fence.chars().all(|c| c == '`') || fence.chars().all(|c| c == '~'))).then_some(last);
+                                let closing = (last.start > opening.end && run >= 3 && fence.len() >= run && fence.chars().all(|c| Some(c) == mark)).then_some(last);
                                 let between = closing.as_ref().map_or(all.end, |closing| closing.start.saturating_sub(1));
                                 if fenced && between > opening.end {
                                     let mut fences = vec![opening.clone()];
@@ -897,6 +903,15 @@ mod tests {
         assert_eq!((open.codes[0].fences.len(), open.codes[0].fences[0].clone()), (1, 0..3));
         assert_eq!(open.codes[0].span, 0..7);
         assert!(Shown::of("```").codes.is_empty() && Shown::of("```\n").codes.is_empty());
+        // Its last line closes it only as a fence of its opening's mark, as long or longer: else a line of its code,
+        // shown (and not taken away with its fences).
+        for (text, last) in [("```\nhello\n~~~", "~~~"), ("````\nhello\n```", "```")] {
+            let shown = Shown::of(text);
+            assert_eq!(shown.codes[0].fences.len(), 1, "{text}");
+            assert!(!shown.hidden().iter().any(|hidden| *hidden == (text.len() - last.len()..text.len())), "{text}");
+        }
+        assert_eq!(Shown::of("````\nhello\n`````").codes[0].fences.len(), 2);
+        assert_eq!(Shown::of("~~~\nhello\n~~~").codes[0].fences.len(), 2);
     }
 
     /// Quotes' marks as deep as each line's quotes, the space after them the room; one with none after it, or a
