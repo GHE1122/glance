@@ -47,13 +47,30 @@ enum Made {
 const KEPT_MOST: usize = 256;
 
 struct Kept {
-    made: Used<Key, Option<Picture>>,
+    made: Used<Key, Picture>,
     /// Those being made.
     asked: HashSet<Key>,
+    /// Those the shell could not make, made again a while after (see `Failed`).
+    failed: HashMap<Key, Failed>,
     /// What each path was found to be, and when; those being looked at.
     looked: Used<PathBuf, (std::time::Instant, Looked)>,
     looking: HashSet<PathBuf>,
 }
+
+/// A picture the shell could not make (a thumbnail maker busy or failing, the shell slow to answer while the PC is
+/// loaded: none of it says the file has no picture): when it was last tried, how long till it is tried again, and
+/// whether it was asked for since (one no longer drawn is not tried again, but made anew when next asked for).
+struct Failed {
+    at: std::time::Instant,
+    wait: std::time::Duration,
+    asked: bool,
+}
+
+/// How long after a picture first could not be made it is tried again; each time it fails again, twice as long, up to
+/// `TRY_AGAIN_MOST`. (Kept as failed for good, quick launch's pictures, failed once, showed letters till Glance
+/// was started again.)
+const TRY_AGAIN: std::time::Duration = std::time::Duration::from_secs(5);
+const TRY_AGAIN_MOST: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// How long after it was last asked for a picture counts as drawn still: kept past `KEPT_MOST`. (More drawn at once
 /// than the most kept, each let go of as the next was made, then made again: every picture shown came and went, over
@@ -147,7 +164,7 @@ pub fn start(told: impl Fn() + Send + Sync + 'static) {
     if ASKS.set(Mutex::new(sender)).is_err() {
         return;
     }
-    *KEPT.lock().unwrap() = Some(Kept { made: Used::new(KEPT_MOST, DRAWN_STILL), asked: HashSet::new(), looked: Used::new(LOOKED_MOST, LOOK_AGAIN), looking: HashSet::new() });
+    *KEPT.lock().unwrap() = Some(Kept { made: Used::new(KEPT_MOST, DRAWN_STILL), asked: HashSet::new(), failed: HashMap::new(), looked: Used::new(LOOKED_MOST, LOOK_AGAIN), looking: HashSet::new() });
     std::thread::Builder::new().name("glance: station pictures".into()).spawn(move || make(asks)).expect("a thread started");
     let (sender, looks) = std::sync::mpsc::channel();
     let _ = LOOKS.set(Mutex::new(sender));
@@ -222,7 +239,12 @@ fn asked(path: &Path, side: u32, made: Made) -> Option<Picture> {
     let mut kept = KEPT.lock().unwrap();
     let kept = kept.as_mut()?;
     if let Some(made) = kept.made.get(&key) {
-        return made.clone();
+        return Some(made.clone());
+    }
+    // (One that could not be made is tried again in its time, as it is still asked for.)
+    if let Some(failed) = kept.failed.get_mut(&key) {
+        failed.asked = true;
+        return None;
     }
     if kept.asked.insert(key.clone()) {
         if let Some(asks) = ASKS.get() {
@@ -237,25 +259,87 @@ fn make(asks: Receiver<Key>) {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
     }
-    while let Ok(key) = asks.recv() {
-        let number = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            key.hash(&mut hasher);
-            hasher.finish()
+    loop {
+        // (Waiting for the next asked for, or till one that could not be made is to be tried again.)
+        let next = {
+            let kept = KEPT.lock().unwrap();
+            kept.as_ref().and_then(|kept| kept.failed.values().map(|failed| failed.at + failed.wait).min())
         };
-        let made = picture(&key.path, key.side, key.made == Made::Icon).map(|thumb| match key.made {
-            Made::Fill => squared(&middle(&thumb), key.side, number),
-            Made::Fit | Made::Icon => squared(&thumb, key.side, number),
-        });
-        {
-            let mut kept = KEPT.lock().unwrap();
-            let Some(kept) = kept.as_mut() else { continue };
-            kept.asked.remove(&key);
-            kept.made.insert(key, made);
+        let asked = match next {
+            Some(next) => asks.recv_timeout(next.saturating_duration_since(std::time::Instant::now())),
+            None => asks.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+        };
+        match asked {
+            Ok(key) => make_one(key),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let due = {
+                    let mut kept = KEPT.lock().unwrap();
+                    let Some(kept) = kept.as_mut() else { continue };
+                    due(&mut kept.failed, std::time::Instant::now())
+                };
+                due.into_iter().for_each(make_one);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        tell();
     }
+}
+
+/// Those of `failed` due to be tried again by `now`: those asked for since, each kept failed till it is made; those
+/// not asked for since let go of (made anew when next asked for).
+fn due(failed: &mut HashMap<Key, Failed>, now: std::time::Instant) -> Vec<Key> {
+    let mut due = Vec::new();
+    failed.retain(|key, failed| {
+        if failed.at + failed.wait > now {
+            return true;
+        }
+        if failed.asked {
+            due.push(key.clone());
+        }
+        failed.asked
+    });
+    due
+}
+
+/// How `key` stands having failed at `now`, having failed before as `before`: tried again after twice as long as
+/// before (up to `TRY_AGAIN_MOST`), or after `TRY_AGAIN` the first time; asked for since, as it was just tried.
+fn failed_again(before: Option<&Failed>, now: std::time::Instant) -> Failed {
+    let wait = before.map_or(TRY_AGAIN, |before| (before.wait * 2).min(TRY_AGAIN_MOST));
+    Failed { at: now, wait, asked: false }
+}
+
+/// The picture asked for as `key` made, kept, and told; one the shell could not make, kept as failed (see `Failed`),
+/// told too: what drew it draws again, asking for it, which keeps it tried.
+fn make_one(key: Key) {
+    let number = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    };
+    let made = picture(&key.path, key.side, key.made == Made::Icon).map(|thumb| match key.made {
+        Made::Fill => squared(&middle(&thumb), key.side, number),
+        Made::Fit | Made::Icon => squared(&thumb, key.side, number),
+    });
+    {
+        let mut kept = KEPT.lock().unwrap();
+        let Some(kept) = kept.as_mut() else { return };
+        kept.asked.remove(&key);
+        match made {
+            Ok(made) => {
+                kept.failed.remove(&key);
+                kept.made.insert(key, made);
+            }
+            Err(error) => {
+                let before = kept.failed.get(&key);
+                if before.is_none() {
+                    crate::journal::note(format!("station: no picture of {} ({error}), tried again in a while", key.path.display()));
+                }
+                let failed = failed_again(before, std::time::Instant::now());
+                kept.failed.insert(key, failed);
+            }
+        }
+    }
+    tell();
 }
 
 /// `thumb` made no larger than `side` square, its shape kept: each pixel of the smaller the mean of those of the larger
@@ -369,8 +453,8 @@ fn middle(thumb: &Thumb) -> Thumb {
 }
 
 /// The picture of the file at `path`, as large as fits `side` square (its shape kept), as Explorer shows it (`icon`:
-/// its icon alone).
-fn picture(path: &Path, side: u32, icon: bool) -> Option<Thumb> {
+/// its icon alone); else what went wrong.
+fn picture(path: &Path, side: u32, icon: bool) -> Result<Thumb, String> {
     unsafe {
         // (A program the Start menu names by its file's path, "shell:AppsFolder\D:\App\a.exe", which the shell
         // does not read by that name: by the file itself.)
@@ -380,10 +464,10 @@ fn picture(path: &Path, side: u32, icon: bool) -> Option<Thumb> {
             // (Its parts joined as Windows writes paths: the shell does not read one written with '/'.)
             _ => path.components().collect(),
         };
-        let factory: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
+        let factory: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).map_err(|error| format!("the shell found no item: {error}"))?;
         let side = side.max(16) as i32;
         let how = if icon { SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK } else { SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK };
-        let bitmap = factory.GetImage(SIZE { cx: side, cy: side }, how).ok()?;
+        let bitmap = factory.GetImage(SIZE { cx: side, cy: side }, how).map_err(|error| format!("the shell gave no picture: {error}"))?;
         let thumb = pixels_of(bitmap);
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
         thumb
@@ -392,11 +476,11 @@ fn picture(path: &Path, side: u32, icon: bool) -> Option<Thumb> {
 
 /// A bitmap's pixels (32 bits, BGRA), top row first, premultiplied as they are drawn: the shell makes them straight, each
 /// colour whole whatever its alpha (taken as premultiplied, an icon's soft edge came out light, a white rim round it).
-unsafe fn pixels_of(bitmap: HBITMAP) -> Option<Thumb> {
+unsafe fn pixels_of(bitmap: HBITMAP) -> Result<Thumb, String> {
     unsafe {
         let mut described = BITMAP::default();
         if GetObjectW(HGDIOBJ(bitmap.0), std::mem::size_of::<BITMAP>() as i32, Some((&mut described as *mut BITMAP).cast())) == 0 {
-            return None;
+            return Err("the shell's picture could not be described".into());
         }
         let (w, h) = (described.bmWidth, described.bmHeight.abs());
         let mut info = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, ..Default::default() }, ..Default::default() };
@@ -405,7 +489,7 @@ unsafe fn pixels_of(bitmap: HBITMAP) -> Option<Thumb> {
         let lines = GetDIBits(screen, bitmap, 0, h as u32, Some(pixels.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
         windows::Win32::Graphics::Gdi::ReleaseDC(None, screen);
         if lines != h {
-            return None;
+            return Err(format!("{lines} of the shell's picture's {h} rows were read: {}", windows::core::Error::from_thread()));
         }
         // (A picture with no alpha of its own, as an icon of old may be, wholly opaque.)
         if described.bmBitsPixel != 32 || pixels.chunks_exact(4).all(|pixel| pixel[3] == 0) {
@@ -417,13 +501,40 @@ unsafe fn pixels_of(bitmap: HBITMAP) -> Option<Thumb> {
                 *colour = ((u32::from(*colour) * alpha + 127) / 255) as u8;
             }
         }
-        Some(Thumb { pixels, size: (w as u32, h as u32) })
+        Ok(Thumb { pixels, size: (w as u32, h as u32) })
     }
 }
 
 #[cfg(test)]
 mod made {
     use super::*;
+
+    /// A picture the shell could not make is tried again in a while, then twice as long after each time it fails again,
+    /// up to the most: never kept as failed for good (a moment the shell failed once, a letter shown till Glance was
+    /// started again). One no longer asked for is let go of, not tried.
+    #[test]
+    fn a_picture_that_could_not_be_made_is_tried_again() {
+        let key = |name: &str| Key { path: PathBuf::from(name), written: None, side: 64, made: Made::Icon };
+        let start = std::time::Instant::now();
+        let first = failed_again(None, start);
+        assert_eq!(first.wait, TRY_AGAIN);
+        let mut wait = first.wait;
+        for _ in 0..10 {
+            wait = failed_again(Some(&Failed { at: start, wait, asked: true }), start).wait;
+        }
+        assert_eq!(wait, TRY_AGAIN_MOST);
+        assert_eq!(failed_again(Some(&Failed { at: start, wait: TRY_AGAIN, asked: true }), start).wait, TRY_AGAIN * 2);
+
+        let mut failed = HashMap::new();
+        failed.insert(key("shown"), Failed { asked: true, ..failed_again(None, start) });
+        failed.insert(key("gone from view"), failed_again(None, start));
+        failed.insert(key("later"), Failed { at: start, wait: TRY_AGAIN * 4, asked: true });
+        assert!(due(&mut failed, start).is_empty());
+        assert_eq!(failed.len(), 3);
+        assert_eq!(due(&mut failed, start + TRY_AGAIN), vec![key("shown")]);
+        assert!(failed.contains_key(&key("shown")) && failed.contains_key(&key("later")));
+        assert!(!failed.contains_key(&key("gone from view")));
+    }
 
     /// Those kept are let go of as they were last asked for, not as they were made: one asked for all along stays
     /// as many more come and go.
