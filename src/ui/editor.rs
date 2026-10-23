@@ -94,6 +94,16 @@ fn services_maker() -> Option<(PCreateTextServices, GUID)> {
     }
 }
 
+/// The ink the text services fill what is chosen with as they draw it (`ITextServices2::TxDrawD2D`): the system's
+/// highlight colour two fifths over white, solid, its words drawn in their own colours on it (as measured: highlight
+/// 0,120,212 filled 153,201,238, on a note's yellow and on a block of code's box alike). For what Glance draws over
+/// words put away (a note's table), chosen with them.
+pub fn chosen_ink() -> super::canvas::Color {
+    let highlight = unsafe { GetSysColor(windows::Win32::Graphics::Gdi::COLOR_HIGHLIGHT) };
+    let over_white = |channel: u32| (0.4 * (channel & 0xFF) as f32 + 0.6 * 255.0) / 255.0;
+    super::canvas::Color { r: over_white(highlight), g: over_white(highlight >> 8), b: over_white(highlight >> 16), a: 1.0 }
+}
+
 impl Editor {
     /// A box in `hwnd` at `rect`, its words in `face` `pixels` high, of `color`; none where the text services cannot
     /// be had.
@@ -660,6 +670,7 @@ impl ITextHost_Impl for Host_Impl {
         unsafe { *(format as *mut *const PARAFORMAT) = &*self.kept.para_format };
         Ok(())
     }
+    /// (What is chosen they fill from the system's highlight colour: see `chosen_ink`.)
     fn TxGetSysColor(&self, index: SYS_COLOR_INDEX) -> COLORREF {
         unsafe { COLORREF(GetSysColor(index)) }
     }

@@ -356,6 +356,16 @@ fn cell_box(editor: &Editor, laid: &super::gfx::TableLaid, top: i32, row: usize,
     Some(RECT { left: x, top: y, right: x + wide.ceil().max(1.0) as i32, bottom: y + tall.round().max(1.0) as i32 })
 }
 
+/// Whether the cell `row`, `column` of `table` (as dressed, `moved` to where its words are now) is in what is chosen
+/// of them, `chosen` (from, to: UTF-16 units now): what is chosen takes in some of its room, or, its room empty, the
+/// place of it.
+fn cell_chosen(table: &crate::notes::table::Table, moved: &Moved, (from, to): (i32, i32), row: usize, column: usize) -> bool {
+    let Some(cell) = table.rows.get(row).and_then(|cells| cells.get(column)) else { return false };
+    let (Some(start), Some(end)) = (moved.at(cell.room.start), moved.at(cell.room.end)) else { return false };
+    let (from, to) = (from.max(0) as usize, to.max(0) as usize);
+    from < end.max(start + 1) && to > start
+}
+
 /// Words pasted into a table's cell (`text`, the clipboard's): on one line (its line breaks spaces), its pipes written
 /// as they read in a cell (`\|`).
 fn into_cell(text: &str) -> String {
@@ -1752,11 +1762,16 @@ impl Writing {
         // (A cell written in: its words its box's, drawn over where the table leaves them out, where they are now.)
         let open = self.cell_now();
         self.place_cell();
+        // (What is chosen of its words, where no cell is written in: the cells it takes in shown chosen, as its words
+        // are. The table's words are put away under it: the text services showed only a sliver of them chosen.)
+        let (from, to) = self.editor.selection();
+        let chosen_ink = super::editor::chosen_ink();
         for (nth, (table, laid)) in self.laid.iter().enumerate() {
             let Some(line) = moved.at(table.span.start).and_then(|start| line_top(&self.editor, &now, start)) else { continue };
             let (x, y) = in_window(bounds.left as f32, line as f32);
             let written_in = open.as_ref().filter(|(_, table, ..)| *table == nth).map(|(_, _, row, column)| (*row, *column));
-            frame.table(laid, inks, x, y, (top, bottom), written_in);
+            let chosen = |row: usize, column: usize| cell_chosen(table, &moved, (from, to), row, column);
+            frame.table(laid, inks, x, y, (top, bottom), written_in, (open.is_none() && from < to).then_some((chosen_ink, &chosen as &dyn Fn(usize, usize) -> bool)));
         }
         if let Some((inside, ..)) = &open {
             unsafe { frame.dc.SetTransform(&(windows_numerics::Matrix3x2::translation(window.0, window.1) * was)) };
@@ -2175,6 +2190,29 @@ mod pictures {
 
 #[cfg(test)]
 mod tests {
+    /// What is chosen of a note written in takes in a table's cells as it takes in their words: all of them chosen across
+    /// the table, those reached chosen from its middle, none before it; words written before it since it was dressed
+    /// moving them on.
+    #[test]
+    fn a_table_s_cells_are_chosen_with_its_words() {
+        let text = "a\n| x | y |\n| --- | --- |\n| 1 | 2 |\nb";
+        let units = |text: &str| text.encode_utf16().collect::<Vec<u16>>();
+        let table = &crate::notes::table::tables(text)[0];
+        let moved = super::Moved::between(&units(text), &units(text));
+        let chosen = |from: usize, to: usize| -> Vec<(usize, usize)> {
+            (0..2).flat_map(|row| (0..2).map(move |column| (row, column))).filter(|(row, column)| super::cell_chosen(table, &moved, (from as i32, to as i32), *row, *column)).collect()
+        };
+        let at = |words: &str| text.find(words).unwrap();
+        assert_eq!(chosen(0, text.len()), vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
+        assert_eq!(chosen(0, at("x") + 1), vec![(0, 0)]);
+        assert_eq!(chosen(at("2"), text.len()), vec![(1, 1)]);
+        assert_eq!(chosen(0, 1), vec![]);
+        let grown = format!("aaa{}", &text[1..]);
+        let moved = super::Moved::between(&units(text), &units(&grown));
+        assert!(!super::cell_chosen(table, &moved, (0, at("x") as i32 + 1), 0, 0));
+        assert!(super::cell_chosen(table, &moved, (0, at("x") as i32 + 3), 0, 0));
+    }
+
     /// A note's words, in every skin, light and dark: its faint marks (Markdown's) fainter than its words, not as solid
     /// (the box takes colours with no see-through: a faint ink given as one came out as the words' own).
     #[test]

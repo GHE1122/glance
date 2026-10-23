@@ -272,12 +272,16 @@ pub fn hide_to_open(window: HWND) {
 }
 
 /// `window`, hidden by `hide_to_open` and shown, its first frame drawn, poured out of `place` from now on. None where
-/// it could not be (shown at once then: see `reveal`).
+/// it could not be, or `place` is on another screen than the window (see `on_one_screen`): shown at once then (see
+/// `reveal`).
 pub fn opening(gfx: &Gfx, window: HWND, place: RECT) -> Option<Genie> {
     // (Pictured at once: the picture is the window's whole look as soon as it is shown, cloaked; waiting for the
     // compositor's next frame first gave the same picture a tenth of a second and more later. See
     // `settings_window::pictures::how_soon_it_is_pictured`.)
     let (picture, shows) = picture_of(window)?;
+    if !on_one_screen(shows, place) {
+        return None;
+    }
     crate::perf::mark(|| format!("genie pictured {}x{}", picture.size.0, picture.size.1));
     let genie = Genie::start(gfx, picture, shows, place, true);
     crate::perf::mark(|| "genie started".into());
@@ -286,13 +290,25 @@ pub fn opening(gfx: &Gfx, window: HWND, place: RECT) -> Option<Genie> {
 
 /// Where `window`, going, pours into, out of `place` as it came: there where it is still seen (one of Glance's own
 /// windows shows at its middle, a widget whose button it was, or it is the tray's icon), else into Glance's icon in the
-/// tray, where Glance stays (as a window put away goes into the Dock); none where neither is seen.
+/// tray, where Glance stays (as a window put away goes into the Dock); none where neither is seen on the window's screen
+/// (see `on_one_screen`).
 pub fn back_into(window: HWND, place: RECT) -> Option<RECT> {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let mut shows = RECT::default();
+    unsafe { GetWindowRect(window, &mut shows) }.ok()?;
     let icon = crate::tray::icon_place();
-    if icon == Some(place) || glance_shows_at(window, place) {
+    if (icon == Some(place) || glance_shows_at(window, place)) && on_one_screen(shows, place) {
         return Some(place);
     }
-    icon
+    icon.filter(|icon| on_one_screen(shows, *icon))
+}
+
+/// Whether a window showing at `shows` and the place `place` are on one screen (each where most of it is): only so is
+/// the window poured between them. (Between two screens it went through where no screen is, cut off there, pouring
+/// out of sight: into the tray's icon on another screen than the settings', it went off the top of theirs.)
+fn on_one_screen(shows: RECT, place: RECT) -> bool {
+    use windows::Win32::Graphics::Gdi::{MonitorFromRect, MONITOR_DEFAULTTONEAREST};
+    unsafe { MonitorFromRect(&shows, MONITOR_DEFAULTTONEAREST) == MonitorFromRect(&place, MONITOR_DEFAULTTONEAREST) }
 }
 
 /// Whether one of Glance's own windows is what shows at the middle of `place` on the screen, `window` left out: the first
@@ -508,6 +524,30 @@ mod tests {
         // Across the way as the place is.
         let top = Way::between(window, rect(880, 20, 920, 60));
         assert_eq!((top.window_along, top.place_along, top.place_across), ((-900.0, -200.0), (-60.0, -20.0), (880.0, 920.0)));
+    }
+
+    /// A window pours only into a place on its own screen: a place on it is, one on each other screen this PC has is not.
+    #[test]
+    fn it_pours_only_within_one_screen() {
+        use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+        unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, found: windows::Win32::Foundation::LPARAM) -> windows::core::BOOL {
+            let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+                unsafe { &mut *(found.0 as *mut Vec<RECT>) }.push(info.rcMonitor);
+            }
+            true.into()
+        }
+        let mut screens: Vec<RECT> = Vec::new();
+        let _ = unsafe { EnumDisplayMonitors(None, None, Some(each), windows::Win32::Foundation::LPARAM(&mut screens as *mut _ as isize)) };
+        let middle = |screen: &RECT, half: i32| {
+            let (x, y) = ((screen.left + screen.right) / 2, (screen.top + screen.bottom) / 2);
+            rect(x - half, y - half, x + half, y + half)
+        };
+        let window = middle(&screens[0], 300);
+        assert!(super::on_one_screen(window, middle(&screens[0], 10)));
+        for other in &screens[1..] {
+            assert!(!super::on_one_screen(window, middle(other, 10)));
+        }
     }
 
     /// The window bends and slides together from rest: wherever its sides are bent at all it is still on its way (it

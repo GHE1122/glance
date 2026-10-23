@@ -1024,6 +1024,9 @@ impl Drop for Moving<'_, '_> {
     }
 }
 
+/// The ink what is chosen of a table is filled with, and which of its cells (row, column) are chosen (see `Frame::table`).
+pub type ChosenCells<'a> = (Color, &'a dyn Fn(usize, usize) -> bool);
+
 /// A note's table laid out to be drawn (see `Gfx::table_laid`, `Frame::table`): its columns' widths and its rows'
 /// heights, where each begins (and where the last ends), how far its cells' words are in from their sides, and each
 /// cell's words laid out (its column, and how tall they are), all in pixels.
@@ -1947,7 +1950,7 @@ impl<'a> Frame<'a> {
             for line in &laid {
                 let (words, down, tall) = (&line.words, line.down, line.tall);
                 if let Some((_, laid)) = tables.iter().find(|(table, _)| table.span.start == words.start) {
-                    self.table(laid, inks, left, top + down, (y, y + height), None);
+                    self.table(laid, inks, left, top + down, (y, y + height), None, None);
                 }
                 if shown.rules.iter().any(|rule| rule.start == words.start) {
                     self.rule(inks, left, top + down, width, tall * per);
@@ -1989,8 +1992,10 @@ impl<'a> Frame<'a> {
     /// as its column says, in the middle of its row's height. Only its rows within `within` (from, to: DIPs down) are
     /// drawn: those out of it would not show. The same for a note written in and one shown (see `Writing::paint`,
     /// `markdown`): pixel for pixel alike. The words of the cell `written_in` (row, column) are not drawn: they are being
-    /// written in, in a box of their own over it.
-    pub fn table(&self, laid: &TableLaid, inks: Inks, x: f32, y: f32, within: (f32, f32), written_in: Option<(usize, usize)>) {
+    /// written in, in a box of their own over it. The cells `chosen` says are chosen (row, column) are filled in its
+    /// ink within their lines, under their words: what is chosen of a note written in as its words show it chosen.
+    #[allow(clippy::too_many_arguments)]
+    pub fn table(&self, laid: &TableLaid, inks: Inks, x: f32, y: f32, within: (f32, f32), written_in: Option<(usize, usize)>, chosen: Option<ChosenCells>) {
         let per = self.axes().map_or(1.0, |(t, device)| t.M11 * device);
         let (left, top) = self.on_pixel(x, y);
         let (width, height) = (laid.laid.width(), laid.laid.height());
@@ -2001,6 +2006,14 @@ impl<'a> Frame<'a> {
         let last = laid.rows_at[..rows].partition_point(|start| top + start / per < within.1);
         if let Some(head) = laid.laid.rows.first().filter(|_| first == 0) {
             self.fill(Color { a: HEAD_TINT, ..inks.faint }, left, top, width / per, (head + 1.0) / per);
+        }
+        if let Some((ink, chosen)) = chosen {
+            for row in first..last.min(rows) {
+                for column in (0..laid.laid.columns.len()).filter(|column| chosen(row, *column)) {
+                    let (along, down) = (laid.columns_at[column] + 1.0, laid.rows_at[row] + 1.0);
+                    self.fill(ink, left + along / per, top + down / per, (laid.laid.columns[column] - 1.0) / per, (laid.laid.rows[row] - 1.0) / per);
+                }
+            }
         }
         let (from, to) = (laid.rows_at[first], laid.rows_at[last].min(height - 1.0) + 1.0);
         for start in &laid.columns_at {
