@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsWindowVisible, LoadCursorW, HWND_TOP, RegisterClassW, SetCursor, SetLayeredWindowAttributes,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWLP_USERDATA, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
     MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SW_HIDE, SW_SHOWNOACTIVATE,
-    PostMessageW, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    PostMessageW, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -25,6 +25,10 @@ const NO_POINTER: isize = 1;
 /// Posted to the window's thread when the mouse capture it held was taken
 /// from it (or let go).
 pub const CAPTURE_LOST: u32 = WM_APP + 8;
+
+/// Posted to the window's thread when it is asked to close as a window is (Alt+F4 while it has the keys): not
+/// destroyed (each of Glance's windows goes as what owns it lets it go), what owns it told instead.
+pub const CLOSE_ASKED: u32 = WM_APP + 19;
 
 /// The window goes with it: one let go of, however (with what owned it, put away, merged), is never left on the
 /// screen (as where a widget would stick was, the widget put away as it was dragged).
@@ -101,6 +105,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_DPICHANGED => {
             let _ = unsafe { PostMessageW(Some(hwnd), SCREENS_CHANGED, WPARAM(wparam.0 & 0xFFFF), LPARAM(0)) };
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            let _ = unsafe { PostMessageW(Some(hwnd), CLOSE_ASKED, WPARAM(0), LPARAM(0)) };
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
@@ -481,6 +489,17 @@ pub fn desktop_window() -> Option<HWND> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Asked to close as a window is (Alt+F4), it is not destroyed: its thread is told instead.
+    #[test]
+    fn a_window_asked_to_close_is_not_destroyed_but_told() {
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, PeekMessageW, SendMessageW, MSG, PM_REMOVE};
+        let window = Window::new().unwrap();
+        unsafe { SendMessageW(window.hwnd, WM_CLOSE, None, None) };
+        assert!(unsafe { IsWindow(Some(window.hwnd)) }.as_bool());
+        let mut message = MSG::default();
+        assert!(unsafe { PeekMessageW(&mut message, Some(window.hwnd), CLOSE_ASKED, CLOSE_ASKED, PM_REMOVE) }.as_bool());
+    }
 
     /// A window taking the keys takes the focus as it is clicked (its style no longer asks never to), and once it gives
     /// them back never again. Kept on the desktop, it stands above the others meanwhile, under them again after. (Not

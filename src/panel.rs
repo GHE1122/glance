@@ -934,6 +934,8 @@ impl Controller {
                 }
                 // A note written in where it is giving back the keys (Esc, another window in front).
                 crate::ui::keys::LEFT if widgets.owns(msg.hwnd) => widgets.keys_left(msg.hwnd, msg.wParam.0 == 1),
+                // (Alt+F4 on a note written in where it is: as Esc. Other windows of Glance's are not closed so.)
+                crate::ui::window::CLOSE_ASKED if widgets.owns(msg.hwnd) => widgets.keys_left(msg.hwnd, true),
                 KEEP_WRITING => {
                     widgets.keep_as_glance_goes();
                     if let Some(told) = KEPT.lock().unwrap().take() {
