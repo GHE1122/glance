@@ -552,6 +552,9 @@ struct Widget {
     /// whether it is on the button that ends that (the window then takes
     /// the click).
     lingered: Option<Instant>,
+    /// Where its settings' button was when it was last seen to be the place the settings, open, were asked from (see
+    /// `follow_settings`).
+    settings_from: Option<RECT>,
     reached: bool,
     /// The button the pointer is on, said under it.
     tip: Option<Button>,
@@ -2310,6 +2313,7 @@ impl Widget {
             saying: false,
             thumbs: crate::ui::thumb::Dots::new(),
             lingered: None,
+            settings_from: None,
             reached: false,
             tip: None,
             hits: Vec::new(),
@@ -2638,6 +2642,21 @@ impl Widget {
     /// Where its button `button` is on the screen (physical px), while it is offered.
     fn button_on_screen(&self, button: Button) -> Option<RECT> {
         self.offered().iter().any(|(_, offered)| *offered == button).then(|| self.button_rect(button)).flatten()
+    }
+
+    /// The settings, open, asked from its settings' button: told where that is now, as it moves with it (or is gone),
+    /// so they pour back into it there and it shows so there.
+    fn follow_settings(&mut self) {
+        let from = crate::ui::settings_window::asked_from();
+        let button = self.button_rect(Button::Settings);
+        self.settings_from = match from {
+            Some(from) if Some(from) == button => button,
+            Some(from) if Some(from) == self.settings_from => {
+                crate::ui::settings_window::asked_from_moved(from, button);
+                button
+            }
+            _ => None,
+        };
     }
 
     /// Whether the settings, open, were asked from its settings' button, where it is now.
@@ -3173,6 +3192,7 @@ impl Widget {
         // Each part of a frame timed, and a slow one noted.
         let started = Instant::now();
         let mut moving = self.drag.is_some() || self.settle.is_some();
+        self.follow_settings();
         // The knob under the pointer, and the one held (the slider in hand's). (A copy drawn with: the widget is
         // drawn meanwhile.)
         let sliding = match self.drag {
@@ -4016,7 +4036,8 @@ mod tests {
     use super::*;
 
     /// A widget's settings' button shows while the settings asked from it are open, the pointer away from it, lit: they
-    /// pour back into it as they close. Asked from elsewhere, or closed, it shows no more.
+    /// pour back into it as they close, moved with it where the widget is moved meanwhile. Asked from elsewhere, or
+    /// closed, it shows no more.
     #[test]
     fn its_settings_button_shows_while_the_settings_asked_from_it_are_open() {
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
@@ -4029,6 +4050,12 @@ mod tests {
         let closed = settings_shown(&widget);
         crate::ui::settings_window::pretend_asked_from(Some(gear));
         let asked_here = (settings_shown(&widget), widget.button_on_screen(Button::Settings));
+        widget.follow_settings();
+        widget.at.x += 200;
+        widget.at.y -= 50;
+        widget.follow_settings();
+        let moved_gear = widget.button_rect(Button::Settings).unwrap();
+        let moved = (settings_shown(&widget), crate::ui::settings_window::asked_from());
         crate::ui::settings_window::pretend_asked_from(Some(RECT { left: 10, top: 10, right: 40, bottom: 40 }));
         let asked_elsewhere = settings_shown(&widget);
         crate::ui::settings_window::pretend_asked_from(None);
@@ -4038,6 +4065,8 @@ mod tests {
         gfx::let_go();
         assert!(!closed);
         assert_eq!(asked_here, (true, Some(gear)));
+        assert_ne!(moved_gear, gear);
+        assert_eq!(moved, (true, Some(moved_gear)));
         assert!(!asked_elsewhere && !closed_again);
     }
 

@@ -167,9 +167,18 @@ static POURING: AtomicIsize = AtomicIsize::new(0);
 static ASKED_FROM: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
 
 /// The place the settings, open, were asked from (physical px: the button they pour back into as they close), if they
-/// were from one.
+/// were from one. Known before the window is, so what it was asked from shows it was from the window's first frame on.
 pub fn asked_from() -> Option<RECT> {
     *ASKED_FROM.lock().unwrap()
+}
+
+/// The place the settings were asked from, `from`, has moved `to` (a widget moved with its button, or none, its button
+/// gone): they pour back into it there. Another place asked from since is kept.
+pub fn asked_from_moved(from: RECT, to: Option<RECT>) {
+    let mut asked = ASKED_FROM.lock().unwrap();
+    if *asked == Some(from) {
+        *asked = to;
+    }
 }
 
 /// For tests: as if the settings were open, asked from `place` (none: closed).
@@ -430,10 +439,14 @@ fn told(msg: &mut MSG) -> Option<Asked> {
 /// made), with the window asked for again meanwhile, as it went (see `AGAIN`), if it was.
 fn up(asked: Asked) -> Option<Option<Asked>> {
     crate::perf::mark(|| "settings to make".into());
+    // (Before the window is: shown, it tells the widgets, and the one it was asked from shows so at once.)
+    *ASKED_FROM.lock().unwrap() = asked.place;
     let made = gfx::current().ok().and_then(|gfx| make(gfx, Some(asked.place)));
     crate::perf::mark(|| "settings made".into());
+    if made.is_none() {
+        *ASKED_FROM.lock().unwrap() = None;
+    }
     if let Some(hwnd) = made {
-        *ASKED_FROM.lock().unwrap() = asked.place;
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
         // (What plays, looked at only while something on the screen can show it: at once, for the previews.)
         crate::playing::look_now();
@@ -1224,8 +1237,6 @@ const PHONE_ASKED_EVERY: Duration = Duration::from_millis(1500);
 
 struct Ui {
     hwnd: HWND,
-    /// The place it was asked from (physical px: see `show`), poured back into as it closes.
-    place: Option<RECT>,
     /// Pouring out of its place, or into it, while it does (see `genie`): into it, it is hidden, and closed once it is
     /// done.
     genie: Option<super::genie::Genie>,
@@ -1479,7 +1490,6 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>) -> Option<HWND> {
         let pours = super::genie::wanted(place);
         let mut ui = Ui {
             hwnd,
-            place,
             genie: None,
             gfx,
             surface,
@@ -1880,7 +1890,8 @@ impl Ui {
         if self.genie.take().is_some() {
             super::genie::reveal(self.hwnd);
         }
-        let Some(place) = super::genie::wanted(self.place).and_then(|place| super::genie::back_into(self.hwnd, place)) else { return false };
+        // (Where what it was asked from is now: see `asked_from_moved`.)
+        let Some(place) = super::genie::wanted(asked_from()).and_then(|place| super::genie::back_into(self.hwnd, place)) else { return false };
         if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(self.hwnd) }.as_bool() {
             return false;
         }
