@@ -12,8 +12,8 @@ android {
         applicationId = "dev.weiyi.glance.remote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.4.1"
+        versionCode = 17
+        versionName = "0.4.2"
     }
 
     // The key the app is published under is its owner's alone: kept outside
