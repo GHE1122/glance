@@ -70,15 +70,6 @@ pub(super) fn word_inks(theme: &Theme, colour: crate::notes::Colour) -> Inks {
     Inks { words: opaque(text), faint: opaque(faint), accent: opaque(accent) }
 }
 
-/// A plate over a note's page (its format bar, the plate a link is written on), `width` × `height` from (`x`, `y`): the
-/// skin's, as its menus are (see `menu::plate`), of the note's colour as its page is (see `view::note_tint`), that it
-/// be of the note it is over. Its accent the note's (see `view::note_accent`).
-pub(super) fn note_plate(frame: &dyn Canvas, theme: &Theme, colour: crate::notes::Colour, place: (f32, f32, f32, f32)) -> super::menu::Plate {
-    let plate = super::menu::plate(frame, super::menu::Look::of(theme.skin, theme.dark), place);
-    super::view::note_tint(frame, theme, colour, place, plate.radius);
-    plate
-}
-
 /// What a note's page is reckoned to lie over, its inks made opaque over (the box takes colours with no see-through):
 /// the skin's sheet.
 pub(super) fn page_under(theme: &Theme) -> Color {
@@ -1807,7 +1798,7 @@ impl Writing {
             let per = self.pixels.get() / WORDS / scale;
             let (left, top) = in_window(bar.left as f32, bar.top as f32);
             let (right, bottom) = in_window(bar.right as f32, bar.bottom as f32);
-            let plate = note_plate(frame, theme, self.colour, (left, top, right - left, bottom - top));
+            let plate = super::menu::plate(frame, super::menu::Look::of(theme.skin, theme.dark), (left, top, right - left, bottom - top));
             for (nth, (icon, _)) in BAR.iter().enumerate() {
                 let (x, y, side) = (left + (BAR_INSET + nth as f32 * BAR_BUTTON) * per, top + BAR_INSET * per, BAR_BUTTON * per);
                 if self.over.get() == Some(nth) {
@@ -1826,7 +1817,7 @@ impl Writing {
         }
         // A link being written: over all of it, its caret in the field that has the keys.
         if let Some(linking) = linking {
-            linking.paint(frame, theme, self.colour, lang, window, scale, caret_on);
+            linking.paint(frame, theme, lang, window, scale, caret_on);
         }
     }
 }
@@ -2046,11 +2037,10 @@ mod pictures {
         let size = ((w * scale) as u32, (h * scale) as u32);
         let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, size.0 as i32, size.1 as i32, None, None, None, None) }.unwrap();
         for (skin, name) in [(Skin::Glass, "glass"), (Skin::Fluent, "fluent"), (Skin::Paper, "paper")] {
-            for (dark, colour) in [(false, crate::notes::Colour::Blue), (true, crate::notes::Colour::Blue), (false, crate::notes::Colour::Yellow), (true, crate::notes::Colour::Yellow)] {
+            for dark in [false, true] {
                 for lang in [Lang::Zh, Lang::En] {
                     let theme = Theme::new(skin, dark);
-                    let mut writing = Writing::open(hwnd, words_box(0, 0, size.0 as i32, size.1 as i32, scale), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("a.md".into()), &theme, WORDS * scale).unwrap();
-                    writing.colour = colour;
+                    let writing = Writing::open(hwnd, words_box(0, 0, size.0 as i32, size.1 as i32, scale), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("a.md".into()), &theme, WORDS * scale).unwrap();
                     let from = text.find("文档").map(|at| text[..at].encode_utf16().count()).unwrap() as i32;
                     writing.editor.select((from, from + 2));
                     writing.write(Write::Link);
@@ -2059,7 +2049,7 @@ mod pictures {
                         let linking = held.as_ref().unwrap();
                         linking.to.set_text("");
                     }
-                    let dark_name = format!("{}-{}", if dark { "dark" } else { "light" }, format!("{colour:?}").to_lowercase());
+                    let dark_name = if dark { "dark" } else { "light" };
                     let lang_name = if lang == Lang::Zh { "zh" } else { "en" };
                     let drawn = gfx.draw_offscreen(size, scale, |frame| writing.paint(frame, &theme, lang, (0.0, 0.0, w, h), (0.0, 0.0), scale, true)).unwrap();
                     crate::studio::save_png(&out.join(format!("link-{name}-{dark_name}-{lang_name}-empty.png")), size.0, size.1, &drawn).unwrap();
