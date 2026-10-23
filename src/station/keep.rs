@@ -86,7 +86,7 @@ impl Keep {
                 } else {
                     let first = trimmed.lines().next().unwrap_or_default().chars().take(40).collect::<String>();
                     let file = self.kept(text.as_bytes(), "txt", false)?;
-                    Ok((What::Saved { file, name: format!("{first}.txt") }, text.len() as u64))
+                    Ok((What::Saved { file, name: format!("{first}.txt"), words: true }, text.len() as u64))
                 }
             }
             Content::Png(png) => Ok((What::Picture { file: self.kept(&png, "png", false)? }, png.len() as u64)),
@@ -94,7 +94,7 @@ impl Keep {
             // file, not trusted once it is on the station.)
             Content::Saved { name, bytes } => {
                 let extension = std::path::Path::new(&name).extension().and_then(|extension| extension.to_str()).unwrap_or_default().to_string();
-                Ok((What::Saved { file: self.kept(&bytes, &extension, true)?, name }, bytes.len() as u64))
+                Ok((What::Saved { file: self.kept(&bytes, &extension, true)?, name, words: false }, bytes.len() as u64))
             }
             Content::Files(paths) => {
                 if !self.always_copy {
@@ -185,7 +185,8 @@ impl Keep {
                     .collect::<Option<Vec<PathBuf>>>()?,
             ),
             What::Picture { file } => Content::Png(std::fs::read(self.folder.path(file)).ok()?),
-            What::Saved { file, name } => Content::Files(vec![self.folder.named(file, name)?]),
+            What::Saved { file, words: true, .. } => Content::Text(std::fs::read_to_string(self.folder.path(file)).ok()?),
+            What::Saved { file, name, words: false } => Content::Files(vec![self.folder.named(file, name)?]),
         })
     }
 
@@ -221,7 +222,9 @@ mod tests {
         let kinds: Vec<&What> = keep.shelf.items.iter().map(|item| &item.what).collect();
         assert_eq!(kinds[0], &What::Link { url: "https://example.com/a?b=1".into() });
         assert_eq!(kinds[1], &What::Text { text: "hello there".into() });
-        assert!(matches!(kinds[2], What::Saved { name, .. } if name.ends_with(".txt")));
+        assert!(matches!(kinds[2], What::Saved { name, words: true, .. } if name.ends_with(".txt")));
+        // (Given back as the words it was, not as a file of them.)
+        assert_eq!(keep.content_of(&keep.shelf.items[2]), Some(Content::Text("x".repeat(TEXT_MOST + 1))));
         assert!(matches!(kinds[3], What::Picture { .. }));
         assert_eq!(keep.shelf.own_bytes(), (TEXT_MOST + 1 + 3) as u64);
         assert!(keep.shelf.items[3].stays_here);

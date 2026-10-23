@@ -1532,7 +1532,7 @@ impl Beside {
         let (name, picture, words): (String, Option<std::path::PathBuf>, Option<String>) = match &item.what {
             What::Files { paths, .. } => (paths.first().and_then(|path| path.file_name()).map_or_else(String::new, |name| name.to_string_lossy().into_owned()), paths.first().cloned(), (paths.len() > 1).then(|| paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("\n"))),
             What::Picture { file } => (lang.pick("图片", "Picture").into(), Some(folder.path(file)), None),
-            What::Saved { file, name } => (name.clone(), Some(folder.path(file)), None),
+            What::Saved { file, name, .. } => (name.clone(), Some(folder.path(file)), None),
             What::Text { text } => (lang.pick("文字", "Text").into(), None, Some(text.clone())),
             What::Link { url } => (lang.pick("链接", "Link").into(), None, Some(url.clone())),
         };

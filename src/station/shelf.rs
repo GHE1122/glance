@@ -48,8 +48,14 @@ pub enum What {
     /// folder.
     Picture { file: String },
     /// A file that had no path (dragged from a browser or a mail, its contents given): saved in its own folder as it
-    /// came, by its name there and the name it was given.
-    Saved { file: String, name: String },
+    /// came, by its name there and the name it was given. Or text too long to keep on the shelf itself (`words`),
+    /// saved so, named by its first words: words still, given back as words.
+    Saved {
+        file: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        words: bool,
+    },
 }
 
 impl What {
@@ -83,14 +89,14 @@ impl Filter {
         let picture = |path: &std::path::Path| path.extension().is_some_and(|extension| super::recent::is_picture(&extension.to_string_lossy().to_lowercase()));
         match self {
             Filter::All => true,
-            Filter::Words => matches!(what, What::Text { .. } | What::Link { .. }),
+            Filter::Words => matches!(what, What::Text { .. } | What::Link { .. } | What::Saved { words: true, .. }),
             Filter::Pictures => match what {
                 What::Picture { .. } => true,
                 What::Files { paths, .. } => !paths.is_empty() && paths.iter().all(|path| picture(path)),
-                What::Saved { name, .. } => picture(std::path::Path::new(name)),
+                What::Saved { name, words, .. } => !words && picture(std::path::Path::new(name)),
                 What::Text { .. } | What::Link { .. } => false,
             },
-            Filter::Files => matches!(what, What::Files { .. } | What::Saved { .. }),
+            Filter::Files => matches!(what, What::Files { .. } | What::Saved { words: false, .. }),
         }
     }
 }
@@ -199,7 +205,7 @@ mod tests {
     fn what_was_copied_is_sorted_into_words_pictures_and_files() {
         let link = What::Link { url: "https://glancepc.com".into() };
         let files = |paths: &[&str]| What::Files { paths: paths.iter().map(PathBuf::from).collect(), kept: Vec::new() };
-        let saved = |name: &str| What::Saved { file: "1".into(), name: name.into() };
+        let saved = |name: &str| What::Saved { file: "1".into(), name: name.into(), words: false };
         let all = [
             text("hello"),
             link,
@@ -209,10 +215,12 @@ mod tests {
             files(&[r"D:\Photos"]),
             saved("bill.pdf"),
             saved("cat.webp"),
+            What::Saved { file: "2".into(), name: "很长的一段文字.txt".into(), words: true },
         ];
         let taken = |filter: Filter| all.iter().enumerate().filter(|(_, what)| filter.takes(what)).map(|(at, _)| at).collect::<Vec<_>>();
-        assert_eq!(taken(Filter::All), [0, 1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(taken(Filter::Words), [0, 1]);
+        assert_eq!(taken(Filter::All), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        // (Text too long for the shelf, saved as a file, is words.)
+        assert_eq!(taken(Filter::Words), [0, 1, 8]);
         // Picture files are pictures and files both (files with one not a picture, a folder, files alone).
         assert_eq!(taken(Filter::Pictures), [2, 3, 7]);
         assert_eq!(taken(Filter::Files), [3, 4, 5, 6, 7]);

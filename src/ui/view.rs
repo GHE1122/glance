@@ -835,7 +835,7 @@ impl Tile {
             ),
             What::Link { url } => (url.split("://").nth(1).unwrap_or(url).trim_end_matches('/').to_string(), lang.pick("链接", "Link").into(), Face::Link),
             What::Picture { file } => (lang.pick("图片", "Picture").into(), lang.pick("图片", "Picture").into(), Face::Picture { path: folder.path(file), more: 0 }),
-            What::Saved { file, name } => (name.clone(), lang.pick("文件", "File").into(), Face::Picture { path: folder.path(file), more: 0 }),
+            What::Saved { file, name, words } => (name.clone(), if *words { lang.pick("文字", "Text") } else { lang.pick("文件", "File") }.into(), Face::Picture { path: folder.path(file), more: 0 }),
         };
         let about = format!("{kind} · {}", text::since(item.added_ms, now, lang));
         Tile { id: item.id, label, about, face, pinned: item.pinned }
@@ -6199,7 +6199,7 @@ six".into()));
         let long = "Bliss_v2.1.1_(Chocapic13_Shaders_edit).zip";
         let saved = |id: u64, name: &str| crate::station::shelf::Item {
             id,
-            what: crate::station::shelf::What::Saved { file: format!("{id}.zip"), name: name.into() },
+            what: crate::station::shelf::What::Saved { file: format!("{id}.zip"), name: name.into(), words: false },
             added_ms: 0,
             pinned: false,
             copied: false,
