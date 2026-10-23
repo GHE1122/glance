@@ -85,6 +85,9 @@ struct Shot {
     /// than the readings: its lanes are `modules`' then.
     #[serde(default)]
     workbench: bool,
+    /// The station's page shown: "shelf" (if absent), "copies" (Recently copied) or "recent" (Recent files).
+    #[serde(default)]
+    tab: Option<String>,
     /// When the panel slides in; shown from the start if absent.
     slide_in: Option<f32>,
     /// When it slides away again, if it does.
@@ -331,10 +334,14 @@ type Following<'a> = (Option<&'a Track>, Option<(f32, f32)>);
 
 /// A widget torn off the panel: when (the panel goes as it is), and where
 /// it is taken and how large it is made, key by key, eased between them
-/// (its corner from where the panel's corner rests).
+/// (its corner from where the panel's corner rests); or the lane `only`
+/// torn off alone, as a pull on a workbench's lane tears it (its corner
+/// from where that lane is).
 #[derive(Deserialize)]
 struct Torn {
     at: f32,
+    #[serde(default)]
+    only: Option<String>,
     #[serde(flatten)]
     track: Track,
 }
@@ -345,6 +352,9 @@ struct Torn {
 struct Placed {
     at: (f32, f32),
     room: (f32, f32),
+    /// The lanes it shows, in order (the shot's if absent).
+    #[serde(default)]
+    modules: Option<Vec<String>>,
     #[serde(flatten)]
     track: Track,
 }
@@ -642,13 +652,57 @@ pub fn pretend_workbench(lang: Lang, props: &Path) -> Result<(), String> {
     let folder = made(if zh { "项目资料" } else { "Project files" }, None)?;
     let now = crate::station::now_ms();
     let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0 };
+    // What was copied lately, the oldest first as the station keeps it.
+    let copied = |id: u64, what: What, ago_min: u64| Item { copied: true, pinned: false, ..item(id, what, ago_min) };
+    let text = |text: &str| What::Text { text: text.into() };
     crate::station::run::pretend(vec![
-        item(1, What::Files { paths: vec![photo], kept: Vec::new() }, 300),
+        item(1, What::Files { paths: vec![photo.clone()], kept: Vec::new() }, 300),
         item(2, What::Text { text: if zh { "会议改到周四下午三点\n地点：二楼小会议室" } else { "Meeting moved to Thursday, 3 pm\nRoom 2B, second floor" }.into() }, 180),
-        item(3, What::Files { paths: vec![sheet, doc], kept: Vec::new() }, 45),
+        copied(6, text(if zh { "收货地址：上海市徐汇区漕溪北路 88 号 1203 室" } else { "Ship to: 88 Elm Street, Apt 1203, Springfield" }), 160),
+        copied(7, What::Link { url: "https://github.com/lulu-loopp/glance".into() }, 95),
+        item(3, What::Files { paths: vec![sheet.clone(), doc.clone()], kept: Vec::new() }, 45),
+        copied(8, text(if zh { "验证码 482916，5 分钟内有效" } else { "Your code is 482916, valid for 5 minutes" }), 40),
         item(4, What::Link { url: "https://glancepc.com".into() }, 30),
+        copied(9, What::Files { paths: vec![sheet.clone()], kept: Vec::new() }, 20),
         item(5, What::Files { paths: vec![folder], kept: Vec::new() }, 12),
+        copied(10, text(if zh { "SF1428 6093 5521" } else { "1Z 999 AA1 0123 4567 84" }), 6),
+        copied(11, text(if zh { "周四 15:00 二楼小会议室，记得带投影转接头" } else { "Thursday 3 pm, room 2B: bring the HDMI adapter" }), 2),
     ], crate::settings::ShelfView::Cards);
+    // (What was copied, words mostly, read best in a list.)
+    crate::station::run::pretend_pages(crate::settings::ShelfView::List, crate::settings::ShelfView::Cards);
+    // The files come lately, newest first: downloads, screenshots, photos come together, documents saved.
+    let own = |path: &[&str], from: Option<&str>| -> Result<PathBuf, String> {
+        let file = path.iter().fold(props.join(if zh { "此电脑" } else { "This PC" }), |path, name| path.join(name));
+        std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+        match from {
+            Some(from) => std::fs::copy(from, &file).map(|_| ()),
+            None => std::fs::write(&file, b""),
+        }
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+        Ok(file)
+    };
+    use crate::station::recent::{Came, Key, Kind};
+    let came = |file: u128, path: PathBuf, ago_min: u64, bytes: u64, kind: Kind, site: Option<&str>| Came {
+        key: Key { drive: 'D', file },
+        path,
+        came_ms: now - ago_min * 60_000,
+        bytes,
+        kind,
+        downloaded: site.is_some(),
+        site: site.map(String::from),
+    };
+    let (downloads, pictures, shots, documents) = if zh { ("下载", "图片", "屏幕截图", "文档") } else { ("Downloads", "Pictures", "Screenshots", "Documents") };
+    let screen = r"C:\Windows\Web\Screen";
+    crate::station::recent::pretend(vec![
+        came(1, own(&[downloads, if zh { "十月发票.pdf" } else { "Invoice October 2026.pdf" }], None)?, 4, 186_000, Kind::Document, Some("mail.qq.com")),
+        came(2, own(&[pictures, shots, if zh { "屏幕截图 2026-10-22 143015.png" } else { "Screenshot 2026-10-22 143015.png" }], Some(&format!(r"{screen}\img104.jpg")))?, 9, 1_420_000, Kind::Screenshot, None),
+        came(3, own(&[documents, if zh { "工作" } else { "Work" }, &sheet.file_name().unwrap().to_string_lossy()], None)?, 26, 48_000, Kind::Document, None),
+        came(4, own(&[pictures, if zh { "手机" } else { "Phone" }, "IMG_2041.jpg"], Some(&format!(r"{screen}\img101.jpg")))?, 70, 3_900_000, Kind::Picture, None),
+        came(5, own(&[pictures, if zh { "手机" } else { "Phone" }, "IMG_2042.jpg"], Some(&format!(r"{screen}\img102.jpg")))?, 70, 4_100_000, Kind::Picture, None),
+        came(6, own(&[pictures, if zh { "手机" } else { "Phone" }, "IMG_2043.jpg"], Some(&format!(r"{screen}\img103.jpg")))?, 70, 3_700_000, Kind::Picture, None),
+        came(7, own(&[downloads, "GlanceSetup-0.4.2.exe"], None)?, 150, 9_800_000, Kind::Program, Some("glancepc.com")),
+        came(8, own(&[downloads, if zh { "合同扫描件.zip" } else { "Contract scans.zip" }], None)?, 60 * 26, 12_400_000, Kind::Archive, Some("pan.baidu.com")),
+    ]);
     let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into() };
     crate::station::apps::pretend(vec![
         app(r"C:\Windows\explorer.exe", if zh { "文件资源管理器" } else { "File Explorer" }),
@@ -711,6 +765,11 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         known.extend(["station", "notes", "apps"].map(String::from));
         pretend_workbench(lang, &folder.join("props"))?;
     }
+    let tab = match shot.tab.as_deref() {
+        Some("copies") => crate::ui::view::Tab::Copies,
+        Some("recent") => crate::ui::view::Tab::Recent(Default::default()),
+        _ => crate::ui::view::Tab::Shelf,
+    };
     let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     if let Some(shown) = &shot.modules {
         prefs.modules.sort_by_key(|entry| shown.iter().position(|id| *id == entry.id).unwrap_or(usize::MAX));
@@ -771,7 +830,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let measure = Theme::new(skin, false);
     let first = &history[..=backlog as usize];
     let first_seen = Seen::of(first);
-    let probe = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
+    let probe = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, scrolls: crate::ui::view::Scrolls::default(), tab, hover: None, pinned: false, overlay: false, buttons: true, newer: false };
     let (layout, zoom, rest, _) = place(&probe, &measure);
     let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
     let behind = RECT {
@@ -792,6 +851,16 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let mut placed = serde_json::Value::Null;
 
     let mut layers = PanelLayers::default();
+    // Each widget's choices: the shot's, or its own lanes alone (the one torn off, then those placed).
+    let only = |shown: &[String]| {
+        let mut own = prefs.clone();
+        own.modules.sort_by_key(|entry| shown.iter().position(|id| *id == entry.id).unwrap_or(usize::MAX));
+        own.modules.iter_mut().for_each(|entry| entry.on = shown.contains(&entry.id));
+        own
+    };
+    let widget_prefs: Vec<Option<Prefs>> = std::iter::once(shot.torn.as_ref().and_then(|torn| torn.only.as_ref()).map(|id| only(std::slice::from_ref(id))))
+        .chain(shot.widgets.iter().map(|w| w.modules.as_deref().map(only)))
+        .collect();
     // The widgets: the one torn off (once it is), then those placed.
     let mut torn: Option<Filming> = None;
     let mut placed_widgets: Vec<Filming> = shot.widgets.iter().map(|w| Filming::new(Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) }, w.at)).collect();
@@ -817,7 +886,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             seen: &seen,
             pen_ms: now_ms - interval - PEN_LAG_MS,
             scrolls: crate::ui::view::Scrolls::default(),
-            tab: crate::ui::view::Tab::Shelf,
+            tab,
             hover: shot.hover_drive.map(view::Hit::Drive),
             pinned: false,
             overlay: false,
@@ -852,11 +921,18 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         let tracks: Vec<Following> = std::iter::once((shot.torn.as_ref().filter(|torn| t >= torn.at).map(|torn| &torn.track), None))
             .chain(shot.widgets.iter().map(|w| (Some(&w.track), Some(w.room))))
             .collect();
-        if shot.torn.as_ref().is_some_and(|torn| t >= torn.at) && torn.is_none() {
-            torn = Some(Filming::new(Choice { form: Form::Lanes { detail: view::Detail::Full, columns: layout.columns }, scale: zoom, extra: (0.0, 0.0) }, rest));
+        if let Some(torn_off) = shot.torn.as_ref().filter(|torn_off| t >= torn_off.at && torn.is_none()) {
+            // Whole, from where the panel rests; a lane alone, from where it is on it, in one column.
+            let lane = torn_off.only.as_ref().map(|id| boxes[ids.iter().position(|shown| shown == id).expect("the lane torn off is shown")]);
+            let (columns, from) = match lane {
+                Some(lane) => (1, (rest.0 + lane.x * zoom, rest.1 + lane.y * zoom)),
+                None => (layout.columns, rest),
+            };
+            torn = Some(Filming::new(Choice { form: Form::Lanes { detail: view::Detail::Full, columns }, scale: zoom, extra: (0.0, 0.0) }, from));
         }
         for (index, (track, first_room)) in tracks.iter().enumerate() {
             let Some(track) = track else { continue };
+            let fresh = Scene { prefs: widget_prefs[index].as_ref().unwrap_or(&prefs), ..fresh };
             let filming = if index == 0 { torn.as_mut().unwrap() } else { &mut placed_widgets[index - 1] };
             if filming.last.is_none() {
                 if let Some(room) = first_room {
@@ -930,6 +1006,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                 for (index, still, hint) in &showing {
                     let filming = if *index == 0 { torn.as_mut().unwrap() } else { &mut placed_widgets[index - 1] };
                     let at = filming.at;
+                    let fresh = Scene { prefs: widget_prefs[*index].as_ref().unwrap_or(&prefs), ..fresh };
                     filming.draw(frame, &fresh, &theme, desktop, frost, px, at, t, !still);
                     // Where it would stick, over it (as the widget's own
                     // window for it is).
@@ -983,9 +1060,13 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         let panel_at = view::Rect { x: outward * shift * travel, y: 0.0, w: layout.width(), h: layout.height() };
         let where_is = |filming: &Filming| {
             let zoom = filming.last.as_ref().map_or(1.0, |shown| shown.zoom);
+            // (Its bar too, where it has one: what it shows above it is cut out by it.)
+            let bar = filming.last.as_ref().map(|shown| shown.layout.bar()).filter(|bar| bar.h > 0.0).map(|bar| {
+                serde_json::json!({ "x": (filming.at.0 + bar.x * zoom) * px, "y": (filming.at.1 + bar.y * zoom) * px, "w": bar.w * zoom * px, "h": bar.h * zoom * px })
+            });
             serde_json::json!({
                 "x": filming.at.0 * px, "y": filming.at.1 * px, "w": filming.surface.0 * zoom * px, "h": filming.surface.1 * zoom * px,
-                "form": filming.choice.form.key(),
+                "form": filming.choice.form.key(), "bar": bar,
             })
         };
         let widget = showing.iter().find(|(index, ..)| *index == 0).and(torn.as_ref()).map(where_is);

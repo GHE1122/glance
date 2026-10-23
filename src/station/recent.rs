@@ -639,7 +639,7 @@ pub fn nowhere() -> bool {
 }
 static TOLD: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
-#[cfg(test)]
+#[cfg(any(test, feature = "studio"))]
 thread_local! {
     /// What this thread's pictures pretend (see `pretend`): each test's its own, as tests run side by side.
     static PRETENDED: std::cell::RefCell<Option<Arc<Vec<Came>>>> = const { std::cell::RefCell::new(None) };
@@ -647,7 +647,7 @@ thread_local! {
 
 /// The files come lately, newest first (none while the list is off, or not yet read).
 pub fn shown() -> Arc<Vec<Came>> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "studio"))]
     if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
         return pretended;
     }
@@ -655,7 +655,7 @@ pub fn shown() -> Arc<Vec<Came>> {
 }
 
 /// For pictures: as if these had come (its thread not started).
-#[cfg(test)]
+#[cfg(any(test, feature = "studio"))]
 pub fn pretend(files: Vec<Came>) {
     ON.store(true, std::sync::atomic::Ordering::Relaxed);
     PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(files)));

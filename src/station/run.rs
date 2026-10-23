@@ -224,6 +224,18 @@ pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
     PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false })));
 }
 
+/// For pictures: what is pretended (see `pretend`) with Recently copied shown as `copies` and Recent files as `recent`.
+#[cfg(any(test, feature = "studio"))]
+pub fn pretend_pages(copies: crate::settings::ShelfView, recent: crate::settings::ShelfView) {
+    PRETENDED.with(|pretended| {
+        if let Some(shown) = pretended.borrow_mut().as_mut() {
+            let shown = Arc::make_mut(shown);
+            shown.copies_view = copies;
+            shown.recent_view = recent;
+        }
+    });
+}
+
 /// `given` opened as Explorer opens it: each file (a folder in Explorer), or a web address in the browser.
 fn open(given: &Content) {
     let shell = |what: &std::ffi::OsStr| unsafe {
