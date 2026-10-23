@@ -507,10 +507,11 @@ fn answer_cell(hwnd: HWND, (message, wparam, lparam): (u32, WPARAM, LPARAM), ins
                 VK_INSERT if shift && !ctrl && !alt => eaten(paste_in_cell(hwnd, inside)),
                 // (Of the keys held with Ctrl, choosing all, copying, cutting, undoing and doing again are a cell's, and a
                 // link written: the rest write Markdown, a cell's words written as they are.)
-                VK_A | VK_C | VK_X | VK_Z | VK_Y if ctrl => sent(),
+                // (Ctrl with Alt is AltGr, writing a character on many keyboards: not a shortcut.)
+                VK_A | VK_C | VK_X | VK_Z | VK_Y if ctrl && !alt => sent(),
                 // (Ctrl+K: a link written there, as in the note's words.)
-                VK_K if ctrl && !shift => eaten(ask(Asked::Link)),
-                _ if ctrl && (0x30..=0x5A).contains(&key.0) => eaten(done),
+                VK_K if ctrl && !shift && !alt => eaten(ask(Asked::Link)),
+                _ if ctrl && !alt && (0x30..=0x5A).contains(&key.0) => eaten(done),
                 _ => sent(),
             }
         }
@@ -2540,6 +2541,21 @@ mod tests {
         read_outside(&mut writing);
         writing.written();
         assert_eq!(written(&writing), "前\n\n| 丙丁! | 乙 |\n| - | - |\n| x | y |\n\n后");
+        // AltGr (Ctrl with Alt) writes its character in a cell, as on a German keyboard AltGr+Q writes @.
+        let ctrl_alt = |down: bool| unsafe {
+            let mut keys = [0u8; 256];
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardState(&mut keys);
+            for key in [windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL, windows::Win32::UI::Input::KeyboardAndMouse::VK_MENU] {
+                keys[usize::from(key.0)] = if down { 0x80 } else { 0 };
+            }
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetKeyboardState(&keys);
+        };
+        ctrl_alt(true);
+        answer(hwnd, WM_KEYDOWN, WPARAM(usize::from(b'Q')), LPARAM(0));
+        answer(hwnd, WM_CHAR, WPARAM(usize::from(b'@')), LPARAM(0));
+        ctrl_alt(false);
+        writing.written();
+        assert_eq!(written(&writing), "前\n\n| 丙丁!@ | 乙 |\n| - | - |\n| x | y |\n\n后");
         // (Its boxes' text services shut down while their window is there.)
         drop(answer);
         drop(writing);

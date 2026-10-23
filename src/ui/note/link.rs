@@ -246,8 +246,9 @@ impl Linking {
                     VK_INSERT if shift && !ctrl && !alt => (eaten(self.paste(hwnd, &field)), None),
                     // (Of the keys held with Ctrl, choosing all, copying, cutting, undoing and doing again are a field's:
                     // its words are written as they are, dressed in nothing.)
-                    VK_A | VK_C | VK_X | VK_Z | VK_Y if ctrl => (sent(), None),
-                    key if ctrl && (0x30..=0x5A).contains(&key.0) => (eaten(done), None),
+                    // (Ctrl with Alt is AltGr, writing a character on many keyboards: not a shortcut.)
+                    VK_A | VK_C | VK_X | VK_Z | VK_Y if ctrl && !alt => (sent(), None),
+                    key if ctrl && !alt && (0x30..=0x5A).contains(&key.0) => (eaten(done), None),
                     _ => (sent(), None),
                 }
             }
