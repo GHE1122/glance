@@ -1203,6 +1203,14 @@ impl MusicShown {
 /// The room round what plays for its shadow (DIPs).
 const MUSIC_SHADOW: f32 = 24.0;
 
+/// `theme` as a widget of the workbench's lanes is drawn in: no bar under them (its buttons are over it, as every
+/// widget's are; the bar held only how long the PC has been up, which none of them is about).
+pub fn workbench_dressed(mut theme: Theme) -> Theme {
+    theme.bar_gap = 0.0;
+    theme.bar_height = 0.0;
+    theme
+}
+
 impl Content {
     /// What it kept to be drawn again, let go of (its window hidden).
     fn release(&mut self) {
@@ -1277,16 +1285,14 @@ impl Content {
         }
     }
 
-    /// `theme` as it is drawn in: the workbench's with no bar under its lanes (its buttons are over it, as every
-    /// widget's are; the bar held only how long the PC has been up, which none of them is about).
+    /// `theme` as it is drawn in: the workbench's with no bar under its lanes (see `workbench_dressed`).
     ///
     /// A note stuck on the desktop alone: its card the whole of it, with no room round it, the skin's ground (the
     /// desktop frosted, on glass) as round as the card, under it alone (in the skin's sheet, the card read as a note in
     /// a frame; on no ground, glass's card was clear over the desktop, not frosted as on the panel).
     fn dressed(&self, mut theme: Theme) -> Theme {
         if self.workbench() {
-            theme.bar_gap = 0.0;
-            theme.bar_height = 0.0;
+            theme = workbench_dressed(theme);
         }
         if self.bare() {
             (theme.pad_x, theme.pad_top, theme.pad_bottom) = (0.0, 0.0, 0.0);

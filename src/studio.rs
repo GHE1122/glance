@@ -846,6 +846,8 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         _ => theme::is_dark(crate::ui::prefs::ThemePref::Backdrop, Some(tone.0).filter(|_| skin.sees_backdrop())),
     };
     let theme = Theme::new(skin, dark);
+    // A widget torn off the workbench is drawn as the widget's own are (see `widget::workbench_dressed`).
+    let widget_theme = if shot.workbench { crate::widget::workbench_dressed(Theme::new(skin, dark)) } else { Theme::new(skin, dark) };
     let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
     let ids: Vec<&str> = prefs.modules.iter().filter(|entry| entry.on).map(|entry| entry.id.as_str()).collect();
     let mut placed = serde_json::Value::Null;
@@ -916,7 +918,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         // out for where it is taken, how large, and the edge it sticks to;
         // and where each would stick, as it nears an edge.
         // As a widget's are (see `panel::scene_for`): its bar without the panel's buttons.
-        let fresh = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, seen: &seen, buttons: false, ..scene };
+        let fresh = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, seen: &seen, buttons: false, theme: &widget_theme, ..scene };
         let mut showing: Vec<(usize, bool, Option<Shows>)> = Vec::new();
         let tracks: Vec<Following> = std::iter::once((shot.torn.as_ref().filter(|torn| t >= torn.at).map(|torn| &torn.track), None))
             .chain(shot.widgets.iter().map(|w| (Some(&w.track), Some(w.room))))
@@ -936,11 +938,11 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             let filming = if index == 0 { torn.as_mut().unwrap() } else { &mut placed_widgets[index - 1] };
             if filming.last.is_none() {
                 if let Some(room) = first_room {
-                    filming.lay_out(t, &fresh, &theme, &seen, work, Some(*room));
+                    filming.lay_out(t, &fresh, &widget_theme, &seen, work, Some(*room));
                     filming.sized = None;
                 }
             }
-            filming.follow(t, track, &fresh, &theme, &seen, work);
+            filming.follow(t, track, &fresh, &widget_theme, &seen, work);
             let still = keyed(&track.keys, t).0 == keyed(&track.keys, t + 1.0 / script.fps).0;
             let hint = track.hint.as_ref().filter(|hint| t >= hint.from && filming.stuck.is_none()).map(|hint| {
                 let (x, y, w, h) = filming.would_stick(&hint.side, work);
@@ -1007,12 +1009,12 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                     let filming = if *index == 0 { torn.as_mut().unwrap() } else { &mut placed_widgets[index - 1] };
                     let at = filming.at;
                     let fresh = Scene { prefs: widget_prefs[*index].as_ref().unwrap_or(&prefs), ..fresh };
-                    filming.draw(frame, &fresh, &theme, desktop, frost, px, at, t, !still);
+                    filming.draw(frame, &fresh, &widget_theme, desktop, frost, px, at, t, !still);
                     // Where it would stick, over it (as the widget's own
                     // window for it is).
                     if let Some((x, y, w, h, firm, strength)) = hint {
                         frame.place(Matrix3x2::translation(*x, *y));
-                        crate::widget::paint_hint(frame, &theme, (*w, *h), *firm, *strength, None);
+                        crate::widget::paint_hint(frame, &widget_theme, (*w, *h), *firm, *strength, None);
                         frame.origin(0.0, 0.0);
                     }
                 }
