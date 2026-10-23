@@ -274,9 +274,9 @@ pub fn hide_to_open(window: HWND) {
 /// `window`, hidden by `hide_to_open` and shown, its first frame drawn, poured out of `place` from now on. None where
 /// it could not be (shown at once then: see `reveal`).
 pub fn opening(gfx: &Gfx, window: HWND, place: RECT) -> Option<Genie> {
-    // (Its first frame put together by the compositor, cloaked as it is, before it is pictured.)
-    let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
-    crate::perf::mark(|| "genie flushed".into());
+    // (Pictured at once: the picture is the window's whole look as soon as it is shown, cloaked; waiting for the
+    // compositor's next frame first gave the same picture a tenth of a second and more later. See
+    // `settings_window::pictures::how_soon_it_is_pictured`.)
     let (picture, shows) = picture_of(window)?;
     crate::perf::mark(|| format!("genie pictured {}x{}", picture.size.0, picture.size.1));
     let genie = Genie::start(gfx, picture, shows, place, true);

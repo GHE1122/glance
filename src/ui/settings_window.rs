@@ -6364,6 +6364,46 @@ mod pictures {
         }
     }
 
+    /// How soon the window, shown cloaked to pour out, can be pictured as it is: pictured at once, after a frame of the
+    /// compositor and after a while (pictures in target/genie-wait, times said), never seen meanwhile.
+    #[test]
+    #[ignore = "makes a window of this session's (cloaked) and writes pictures to look at"]
+    fn how_soon_it_is_pictured() {
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+        let (_device, hwnd) = pretended();
+        let out = std::path::PathBuf::from(format!("{}/target/genie-wait", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        for round in 0..2 {
+            super::super::genie::hide_to_open(hwnd);
+            let began = Instant::now();
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            let shown = began.elapsed();
+            let mut said = format!("round {round}: shown in {:.1} ms", shown.as_secs_f32() * 1000.0);
+            for (name, wait) in [("at-once", 0u32), ("flushed", 1), ("later", 2)] {
+                match wait {
+                    1 => unsafe {
+                        let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+                    },
+                    2 => std::thread::sleep(Duration::from_millis(400)),
+                    _ => {}
+                }
+                let at = began.elapsed();
+                let (picture, _) = super::super::genie::picture_of(hwnd).unwrap();
+                said += &format!(", {name} at {:.1} ms", at.as_secs_f32() * 1000.0);
+                crate::studio::save_png(&out.join(format!("{round}-{name}.png")), picture.size.0, picture.size.1, &picture.pixels).unwrap();
+            }
+            println!("{said}");
+            unsafe {
+                let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_HIDE);
+            }
+        }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+        }
+    }
+
     /// Glance pictured with made-up readings, the settings window made (not shown), and reports sent from here
     /// pretended (see `reports::pretend`), the first carrying pictures taken of that window: the device, the window.
     fn pretended() -> (gfx::Held, HWND) {
