@@ -64,8 +64,8 @@ impl What {
 }
 
 /// Which of what was copied lately a page shows: all; words (text, and links: a link copied is words too); pictures
-/// (what was copied as a picture: a screenshot is one, and cannot be told from others); files (files and folders
-/// copied where they are, pictures among them, and files that came with no path).
+/// (what was copied as a picture, a screenshot among them, and picture files: files all of them pictures); files
+/// (files and folders copied where they are, picture files too, and files that came with no path).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Filter {
     #[default]
@@ -80,12 +80,18 @@ impl Filter {
 
     /// Whether `what` is one it shows.
     pub fn takes(self, what: &What) -> bool {
-        let kind = match what {
-            What::Text { .. } | What::Link { .. } => Filter::Words,
-            What::Picture { .. } => Filter::Pictures,
-            What::Files { .. } | What::Saved { .. } => Filter::Files,
-        };
-        self == Filter::All || self == kind
+        let picture = |path: &std::path::Path| path.extension().is_some_and(|extension| super::recent::is_picture(&extension.to_string_lossy().to_lowercase()));
+        match self {
+            Filter::All => true,
+            Filter::Words => matches!(what, What::Text { .. } | What::Link { .. }),
+            Filter::Pictures => match what {
+                What::Picture { .. } => true,
+                What::Files { paths, .. } => !paths.is_empty() && paths.iter().all(|path| picture(path)),
+                What::Saved { name, .. } => picture(std::path::Path::new(name)),
+                What::Text { .. } | What::Link { .. } => false,
+            },
+            Filter::Files => matches!(what, What::Files { .. } | What::Saved { .. }),
+        }
     }
 }
 
@@ -192,15 +198,24 @@ mod tests {
     #[test]
     fn what_was_copied_is_sorted_into_words_pictures_and_files() {
         let link = What::Link { url: "https://glancepc.com".into() };
-        let files = What::Files { paths: vec![PathBuf::from(r"D:\Photos\a.jpg")], kept: Vec::new() };
-        let saved = What::Saved { file: "1.pdf".into(), name: "bill.pdf".into() };
-        let all = [text("hello"), link, picture("1.png"), files, saved];
+        let files = |paths: &[&str]| What::Files { paths: paths.iter().map(PathBuf::from).collect(), kept: Vec::new() };
+        let saved = |name: &str| What::Saved { file: "1".into(), name: name.into() };
+        let all = [
+            text("hello"),
+            link,
+            picture("1.png"),
+            files(&[r"D:\Photos\a.JPG", r"D:\Photos\b.png"]),
+            files(&[r"D:\Photos\a.jpg", r"D:\Notes\b.txt"]),
+            files(&[r"D:\Photos"]),
+            saved("bill.pdf"),
+            saved("cat.webp"),
+        ];
         let taken = |filter: Filter| all.iter().enumerate().filter(|(_, what)| filter.takes(what)).map(|(at, _)| at).collect::<Vec<_>>();
-        assert_eq!(taken(Filter::All), [0, 1, 2, 3, 4]);
+        assert_eq!(taken(Filter::All), [0, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(taken(Filter::Words), [0, 1]);
-        // (A picture file copied in Explorer is a file: it is pasted as one.)
-        assert_eq!(taken(Filter::Pictures), [2]);
-        assert_eq!(taken(Filter::Files), [3, 4]);
+        // Picture files are pictures and files both (files with one not a picture, a folder, files alone).
+        assert_eq!(taken(Filter::Pictures), [2, 3, 7]);
+        assert_eq!(taken(Filter::Files), [3, 4, 5, 6, 7]);
     }
 
     #[test]

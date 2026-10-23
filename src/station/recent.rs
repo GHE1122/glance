@@ -291,7 +291,7 @@ pub fn kind_of(path: &Path, places: &Places) -> Option<(Kind, bool)> {
     let anything = downloaded || inside(&places.desktop);
     let kind = match extension.as_str() {
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "rtf" | "txt" | "md" | "csv" | "epub" | "pages" | "key" | "numbers" | "wps" | "et" | "dps" => Kind::Document,
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "heif" | "bmp" | "tif" | "tiff" | "svg" | "psd" | "ai" | "avif" | "dng" | "cr2" | "cr3" | "nef" | "arw" => {
+        picture if is_picture(picture) => {
             let shot = inside(&places.screenshots) || ["屏幕截图", "screenshot", "截图", "snipaste"].iter().any(|start| name.starts_with(start));
             if shot { Kind::Screenshot } else { Kind::Picture }
         }
@@ -303,6 +303,11 @@ pub fn kind_of(path: &Path, places: &Places) -> Option<(Kind, bool)> {
         _ => return None,
     };
     Some((kind, downloaded))
+}
+
+/// Whether a file of this extension (lower case, no dot) is a picture.
+pub fn is_picture(extension: &str) -> bool {
+    ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff", "svg", "psd", "ai", "avif", "dng", "cr2", "cr3", "nef", "arw"].contains(&extension)
 }
 
 /// The site a download came from, as its `Zone.Identifier` says (`text`): the page it was taken from (`ReferrerUrl`),

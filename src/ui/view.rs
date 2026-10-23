@@ -812,15 +812,19 @@ impl Tile {
             What::Files { paths, kept } => {
                 // (A file gone from where it was, by its copy where one is kept. Whether it is gone as last looked at,
                 // on a thread of its own: a drive slow to answer, one on the network gone, never holds the drawing.)
-                let gone = || paths.first().is_some_and(|path| crate::station::thumbs::looked(path) == Some(crate::station::thumbs::Looked::Gone));
-                let first = match kept.first().filter(|name| !name.is_empty() && gone()) {
+                let gone = |path: &std::path::Path| crate::station::thumbs::looked(path) == Some(crate::station::thumbs::Looked::Gone);
+                let first = match kept.first().filter(|name| !name.is_empty() && paths.first().is_some_and(|path| gone(path))) {
                     Some(name) => folder.path(name),
                     None => paths.first().cloned().unwrap_or_default(),
                 };
                 let name = paths.first().and_then(|path| path.file_name()).map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-                let kind = match paths.len() {
-                    1 => lang.pick("文件", "File").to_string(),
-                    n => format!("{n} {}", lang.pick("个文件", "files")),
+                // (All gone, with no copy kept of any: said so, as nothing of them can be given again.)
+                let lost = !paths.is_empty() && paths.iter().enumerate().all(|(at, path)| gone(path) && kept.get(at).is_none_or(|name| name.is_empty()));
+                let kind = match (paths.len(), lost) {
+                    (1, false) => lang.pick("文件", "File").to_string(),
+                    (1, true) => lang.pick("文件已不存在", "File no longer exists").to_string(),
+                    (n, false) => format!("{n} {}", lang.pick("个文件", "files")),
+                    (n, true) => format!("{n} {}", lang.pick("个文件已不存在", "files no longer exist")),
                 };
                 (name, kind, Face::Picture { path: first, more: paths.len().saturating_sub(1) })
             }
@@ -6840,6 +6844,34 @@ six".into()));
                 assert!(hits.iter().all(|chip| chip.0 + chip.2 <= wide + 0.01), "{skin:?} {}: {hits:?}", lang.pick("zh", "en"));
             }
         }
+    }
+
+    /// Files copied that are gone from where they were, with no copy of them kept, are said to be gone; one still
+    /// there, or one whose copy is kept, is a file as before.
+    #[test]
+    fn a_file_copied_and_gone_is_said_to_be() {
+        use crate::station::shelf::{Item, What};
+        crate::station::thumbs::start(|| {});
+        let here = std::env::current_exe().unwrap();
+        let gone = std::env::temp_dir().join("glance-no-such-file.png");
+        let item = |paths: Vec<std::path::PathBuf>, kept: Vec<String>| Item { id: 1, what: What::Files { paths, kept }, added_ms: 0, pinned: false, copied: true, stays_here: false, own_bytes: 0 };
+        let folder = crate::station::folder::Folder::own();
+        let about = |item: &Item| {
+            // (Looked at on a thread of its own: asked till it answers.)
+            for _ in 0..200 {
+                let both = [&here, &gone].iter().all(|path| crate::station::thumbs::looked(path).is_some());
+                if both {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Tile::of(item, &folder, Lang::Zh, 0).about
+        };
+        assert!(about(&item(vec![gone.clone()], Vec::new())).starts_with("文件已不存在 · "));
+        assert!(about(&item(vec![gone.clone(), gone.clone()], Vec::new())).starts_with("2 个文件已不存在 · "));
+        assert!(about(&item(vec![gone.clone(), here.clone()], Vec::new())).starts_with("2 个文件 · "));
+        assert!(about(&item(vec![here.clone()], Vec::new())).starts_with("文件 · "));
+        assert!(about(&item(vec![gone.clone()], vec!["kept.png".into()])).starts_with("文件 · "));
     }
 
     /// Recently copied with a filter chosen shows only what it takes, the newest first, and its page is chosen again
