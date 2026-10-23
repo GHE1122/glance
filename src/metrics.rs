@@ -239,8 +239,8 @@ impl Sampler {
         }
     }
 
-    /// The game to show: of the programs presenting frames, a game on the
-    /// pointer's screen, else a game on another.
+    /// The game to show: of the programs presenting frames, the game in front,
+    /// else a game on the pointer's screen, else a game on another.
     /// A game is one whose window covers its screen, or (asked for by hand,
     /// see `presents::GameMode`) the one in front.
     /// Named by its window's title, its program from the process list, and
@@ -254,7 +254,7 @@ impl Sampler {
         let now = Instant::now();
         let chosen = found
             .iter()
-            .find(|p| front && p.in_front)
+            .find(|p| p.in_front)
             .or_else(|| found.iter().find(|p| p.under_pointer))
             .or_else(|| found.first())
             .cloned();

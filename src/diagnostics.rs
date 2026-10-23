@@ -59,6 +59,7 @@ pub fn report() -> String {
         lines.push("Phone remote:".into());
         lines.extend(remote.lines().map(|line| format!("  {line}")));
     }
+    lines.extend(presenting());
     lines.push("Latest readings:".into());
     match app.controller.history.read().unwrap().back() {
         Some(sample) => lines.extend(readings(sample, info).into_iter().map(|line| format!("  {line}"))),
@@ -117,12 +118,24 @@ pub fn sensor_lines() -> Vec<String> {
 /// Programs known to read a board's chip or light it (and so to take the bus it is read by), by the names their
 /// processes run under: those running now. Only the list of processes is read; none is opened.
 fn sharing_the_bus() -> Vec<String> {
-    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
     const KNOWN: &[&str] = &[
         "armourycrate", "armourycrateservice", "lightingservice", "asuscertservice", "aisuite3", "asus_framework", "hwinfo64", "hwinfo32", "aida64", "librehardwaremonitor",
         "openhardwaremonitor", "fancontrol", "signalrgb", "icue", "msi.centralserver", "msi_center", "mysticlight", "rgbfusion", "gcc", "openrgb", "hwmonitor", "speedfan", "argus monitor",
         "nzxt cam", "corsair.service", "thermaltake", "aura", "auraservice",
     ];
+    let mut found: Vec<String> = Vec::new();
+    for (_, name) in processes() {
+        let bare = name.to_lowercase().trim_end_matches(".exe").to_string();
+        if KNOWN.contains(&bare.as_str()) && !found.contains(&name) {
+            found.push(name);
+        }
+    }
+    found
+}
+
+/// The processes running, each by its id and the name it runs under, from the list of processes: none is opened.
+fn processes() -> Vec<(u32, String)> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
     let mut found = Vec::new();
     unsafe {
         let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return found };
@@ -130,16 +143,42 @@ fn sharing_the_bus() -> Vec<String> {
         let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
         while more {
             let length = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
-            let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
-            let bare = name.to_lowercase().trim_end_matches(".exe").to_string();
-            if KNOWN.contains(&bare.as_str()) && !found.contains(&name) {
-                found.push(name);
-            }
+            found.push((entry.th32ProcessID, String::from_utf16_lossy(&entry.szExeFile[..length])));
             more = Process32NextW(snapshot, &mut entry).is_ok();
         }
         let _ = windows::Win32::Foundation::CloseHandle(snapshot);
     }
     found
+}
+
+/// The programs presenting frames now, as a game is looked for among them (see `presents::presenting`): each by the
+/// name its process runs under (not its window's title, which may say what the user is doing), its frames a second,
+/// and whether its window covers its screen as a game's does and is in front. Then the game taken, as the latest
+/// readings have it. What tells why a game was taken, or not.
+fn presenting() -> Vec<String> {
+    let running = processes();
+    let name = |pid: u32| running.iter().find(|(id, _)| *id == pid).map_or_else(|| format!("process {pid}"), |(_, name)| name.clone());
+    let mut lines = vec![match crate::presents::counting() {
+        true => "Programs presenting frames:".to_string(),
+        false => "Programs presenting frames: not counted".to_string(),
+    }];
+    let yes = |b: bool| if b { "yes" } else { "no" };
+    for program in crate::presents::presenting() {
+        lines.push(format!(
+            "  {}: {:.0} frames a second, covers its screen: {}, in front: {}",
+            name(program.pid),
+            program.stats.fps,
+            yes(program.fills_screen),
+            yes(program.in_front)
+        ));
+    }
+    let game = crate::app().controller.history.read().unwrap().back().and_then(|sample| sample.game.clone());
+    lines.push(match game {
+        Some(game) => format!("  game taken: {} ({}), {}", game.program, if game.by_hand { "by hand" } else { "found" }, game.fps.map_or("frames not counted".into(), |fps| format!("{fps:.0} frames a second"))),
+        None => "  game taken: none".into(),
+    });
+    lines.push(format!("  game mode: {:?}", crate::presents::game_mode()));
+    lines
 }
 
 /// Windows' name, release and build. Windows 11 keeps "Windows 10" in its
