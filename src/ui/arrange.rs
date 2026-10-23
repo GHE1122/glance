@@ -4,7 +4,7 @@
 use super::seen::Seen;
 use super::theme::Theme;
 use super::forms::Small;
-use super::view::{RailSide, RAIL_ROW, RAIL_W};
+use super::view::{rail_length, RailSide, RAIL_ROW, RAIL_W};
 use super::view::{Detail, Layout, Shape, COLUMN_WIDTH};
 use crate::reading::StaticInfo;
 use crate::settings::Edge;
@@ -75,6 +75,9 @@ fn room(theme: &Theme, edge: Edge, work: (f32, f32), gap: f32) -> (f32, f32) {
 
 fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, gap: f32, rail: Option<usize>) -> (Layout, f32) {
     let (room_width, room) = room(theme, edge, work, gap);
+    // A rail down a side as long as all quick launch holds takes, as far as the screen allows (scrolled along past
+    // that): with few lanes beside it, or none, a thing or two showed and the rest were out of sight.
+    let rail_long = rail_length(crate::station::apps::shown().len()).min(room - theme.outer.0 - theme.outer.2);
     // The rail's lane out of the columns, the room it takes out of theirs.
     let side = match edge {
         Edge::Left => RailSide::Start,
@@ -99,7 +102,7 @@ fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f3
         None => Layout::new(heights, room, max_columns, theme),
     };
     let layout = match rail {
-        Some((at, side)) => layout.with_rail(at, side),
+        Some((at, side)) => layout.with_rail(at, side, rail_long),
         None => layout,
     };
     // Zoomed out only if even the most columns are too tall, or one is too wide (the rail's room given back to
@@ -520,6 +523,25 @@ mod tests {
                 assert!(area.y + area.h <= layout.height() + 0.01, "{edge:?} {heights:?}: {area:?} past {}", layout.height());
             }
         }
+    }
+
+    /// Quick launch alone, as a rail down a side: as long as its things take, all of them shown, and on a screen too
+    /// short for them, as long as the screen allows (the rest scrolled to), not zoomed out.
+    #[test]
+    fn a_rail_alone_is_as_long_as_its_things() {
+        let theme = Theme::new(Skin::Fluent, false);
+        let app = |at: usize| crate::station::apps::App { target: format!("C:\\{at}.exe"), name: at.to_string() };
+        crate::station::apps::pretend((0..6).map(app).collect());
+        for edge in [Edge::Left, Edge::Right] {
+            let (layout, zoom) = arrange(&theme, edge, vec![120.0], (1920.0, 1080.0), None, 1.0, Some(0));
+            assert!(layout.lanes()[0].h >= rail_length(6) - 0.01, "{edge:?}: {:?}", layout.lanes()[0]);
+            assert_eq!(zoom, 1.0);
+        }
+        crate::station::apps::pretend((0..60).map(app).collect());
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![120.0], (1920.0, 1080.0), None, 1.0, Some(0));
+        assert!(layout.height() <= 1080.0 && layout.lanes()[0].h > rail_length(6), "{:?} in {}", layout.lanes()[0], layout.height());
+        assert_eq!(zoom, 1.0);
+        crate::station::apps::pretend(Vec::new());
     }
 
     #[test]

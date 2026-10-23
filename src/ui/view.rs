@@ -2896,6 +2896,12 @@ pub const RAIL_ROW: f32 = 56.0;
 /// The least a rail down a side is tall: its foot's buttons, a thing over them, and the room round them (see
 /// `paint_rail`).
 pub(crate) const RAIL_LEAST: f32 = RAIL_FOOT + RAIL_CELL + 16.0;
+
+/// How long a rail down a side is to show all of `things` and the place to add more over its foot, with the room round
+/// them (see `paint_rail`).
+pub(crate) fn rail_length(things: usize) -> f32 {
+    RAIL_FOOT + 16.0 + (things + 1) as f32 * RAIL_CELL
+}
 /// The room a rail's foot takes along it: the room before its two buttons (see `paint_rail`), and them.
 const RAIL_FOOT: f32 = RAIL_FOOT_GAP + 2.0 * BUTTON + BUTTON_GAP;
 const RAIL_FOOT_GAP: f32 = 8.0;
@@ -2987,15 +2993,16 @@ impl Layout {
         self.height() - self.lanes_height + least
     }
 
-    /// The same with the lane at `at` among the lanes (its height left out of the columns') drawn as a rail at `side`.
-    pub fn with_rail(mut self, at: usize, side: RailSide) -> Self {
+    /// The same with the lane at `at` among the lanes (its height left out of the columns') drawn as a rail at `side`,
+    /// down a side `length` long where the columns are shorter.
+    pub fn with_rail(mut self, at: usize, side: RailSide, length: f32) -> Self {
         self.rail = Some((at, side));
         self.bar_gap = 0.0;
         self.bar_height = 0.0;
-        // (A rail down a side as tall as the columns, and no shorter than its foot and a thing over it: with few
-        // lanes, or none, beside it, the columns are drawn as tall.)
+        // (A rail down a side as tall as the columns, and no shorter than it is long nor than its foot and a thing
+        // over it: with few lanes, or none, beside it, the columns are drawn as tall.)
         if side != RailSide::Bottom {
-            self.lanes_height = self.lanes_height.max(RAIL_LEAST);
+            self.lanes_height = self.lanes_height.max(length).max(RAIL_LEAST);
         }
         self
     }
@@ -5407,7 +5414,7 @@ otepad.exe", "Notepad"),
                 ];
                 for (column, side) in sides.iter().enumerate() {
                     let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
-                    let layout = Layout::with_columns(vec![heights[0]], 1, &theme).with_rail(1, *side);
+                    let layout = Layout::with_columns(vec![heights[0]], 1, &theme).with_rail(1, *side, RAIL_LEAST);
                     let (w, h) = (layout.width(), layout.height());
                     let ground = match skin {
                         Skin::Paper => theme.paper,
@@ -5461,7 +5468,7 @@ otepad.exe", "Notepad"),
                     let bench = made(&["time", "station", "notes", "apps"]);
                     let readings = made(&["cpu", "memory"]);
                     let heights = |lanes: &[Lane]| -> Vec<f32> { lanes.iter().map(|lane| lane.height(&theme)).collect() };
-                    let bench_layout = Layout::with_columns(heights(&bench)[..3].to_vec(), 1, &theme).with_rail(3, RailSide::Start);
+                    let bench_layout = Layout::with_columns(heights(&bench)[..3].to_vec(), 1, &theme).with_rail(3, RailSide::Start, RAIL_LEAST);
                     let readings_layout = Layout::with_columns(heights(&readings), 1, &theme);
                     let pixels = gfx.draw_offscreen(((width as f32 * px) as u32, (height as f32 * px) as u32), px, |frame| {
                         if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
@@ -6660,7 +6667,7 @@ six".into()));
         let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: moving, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let lanes: Vec<Lane> = ["time", "apps"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
         let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
-        let layout = Layout::with_columns(vec![heights[0].max(600.0)], 1, &theme).with_rail(1, RailSide::Start);
+        let layout = Layout::with_columns(vec![heights[0].max(600.0)], 1, &theme).with_rail(1, RailSide::Start, RAIL_LEAST);
         let hits = paint(&Nothing, &scene, &lanes, &layout, Pass::Content);
         for at in 0..5u16 {
             let Some(&(x, y, w, h, _)) = hits.iter().find(|hit| hit.4 == Hit::AppSlot(at)) else { panic!("no place {at}: {hits:?}") };
