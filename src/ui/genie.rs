@@ -272,14 +272,13 @@ pub fn hide_to_open(window: HWND) {
 }
 
 /// `window`, hidden by `hide_to_open` and shown, its first frame drawn, poured out of `place` from now on. None where
-/// it could not be, or `place` is on another screen than the window (see `on_one_screen`): shown at once then (see
-/// `reveal`).
+/// it could not be, or `place` is out of its reach (see `reachable`): shown at once then (see `reveal`).
 pub fn opening(gfx: &Gfx, window: HWND, place: RECT) -> Option<Genie> {
     // (Pictured at once: the picture is the window's whole look as soon as it is shown, cloaked; waiting for the
     // compositor's next frame first gave the same picture a tenth of a second and more later. See
     // `settings_window::pictures::how_soon_it_is_pictured`.)
     let (picture, shows) = picture_of(window)?;
-    if !on_one_screen(shows, place) {
+    if !reachable(shows, place) {
         return None;
     }
     crate::perf::mark(|| format!("genie pictured {}x{}", picture.size.0, picture.size.1));
@@ -290,17 +289,26 @@ pub fn opening(gfx: &Gfx, window: HWND, place: RECT) -> Option<Genie> {
 
 /// Where `window`, going, pours into, out of `place` as it came: there where it is still seen (one of Glance's own
 /// windows shows at its middle, a widget whose button it was, or it is the tray's icon), else into Glance's icon in the
-/// tray, where Glance stays (as a window put away goes into the Dock); none where neither is seen on the window's screen
-/// (see `on_one_screen`).
+/// tray, where Glance stays (as a window put away goes into the Dock). None where the one seen is out of reach (see
+/// `reachable`): the place under the window, the window moved over it, or neither seen: it closes without pouring.
 pub fn back_into(window: HWND, place: RECT) -> Option<RECT> {
     use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
     let mut shows = RECT::default();
     unsafe { GetWindowRect(window, &mut shows) }.ok()?;
     let icon = crate::tray::icon_place();
-    if (icon == Some(place) || glance_shows_at(window, place)) && on_one_screen(shows, place) {
-        return Some(place);
+    if icon == Some(place) || glance_shows_at(window, place) {
+        return reachable(shows, place).then_some(place);
     }
-    icon.filter(|icon| on_one_screen(shows, *icon))
+    icon.filter(|icon| reachable(shows, *icon))
+}
+
+/// Whether a window showing at `shows` pours into the place `place` or out of it: on its screen (see `on_one_screen`),
+/// and not under it. (A place under the window has no side of the window to pour through: its mouth, kept at the
+/// window's nearest side, poured into the window's edge above the place, far from it.)
+fn reachable(shows: RECT, place: RECT) -> bool {
+    let (x, y) = ((place.left + place.right) / 2, (place.top + place.bottom) / 2);
+    let under = shows.left <= x && x < shows.right && shows.top <= y && y < shows.bottom;
+    on_one_screen(shows, place) && !under
 }
 
 /// Whether a window showing at `shows` and the place `place` are on one screen (each where most of it is): only so is
@@ -524,6 +532,14 @@ mod tests {
         // Across the way as the place is.
         let top = Way::between(window, rect(880, 20, 920, 60));
         assert_eq!((top.window_along, top.place_along, top.place_across), ((-900.0, -200.0), (-60.0, -20.0), (880.0, 920.0)));
+    }
+
+    /// A window pours into a place outside it, not one under it.
+    #[test]
+    fn it_pours_only_into_a_place_outside_it() {
+        let window = rect(9, -1290, 1941, -159);
+        assert!(!super::reachable(window, rect(1431, -963, 1458, -936)));
+        assert!(super::reachable(window, rect(1960, -963, 1987, -936)));
     }
 
     /// A window pours only into a place on its own screen: a place on it is, one on each other screen this PC has is not.

@@ -201,6 +201,39 @@ fn grown(t: f32) -> f32 {
 }
 
 #[cfg(test)]
+mod placed_tests {
+    use super::placed_clear_of;
+    use windows::Win32::Foundation::RECT;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT { left, top, right, bottom }
+    }
+
+    /// The settings open in the middle of the screen, unless they would cover the button they were asked from: moved
+    /// clear of it the least way that fits (as on the owner's wide screen, a widget's gear under the middle: moved
+    /// left of it), in the middle still where no way fits.
+    #[test]
+    fn the_settings_open_clear_of_their_button() {
+        // A 3440 × 1440 screen at 150%, the window 1932 × 1131 (as measured).
+        let work = rect(-745, -1440, 2695, -48);
+        let size = (1932, 1131);
+        let middle = (-745 + (3440 - 1932) / 2, -1440 + (1392 - 1131) / 2);
+        assert_eq!(placed_clear_of(work, size, None, 18), middle);
+        assert_eq!(placed_clear_of(work, size, Some(rect(2600, -100, 2627, -73)), 18), middle);
+        let gear = rect(1431, -963, 1458, -936);
+        let (x, y) = placed_clear_of(work, size, Some(gear), 18);
+        assert_eq!((x + 1932, y), (1431 - 18, middle.1));
+        assert!(x >= work.left);
+        // Right of it where that is the shorter way.
+        let (x, _) = placed_clear_of(work, size, Some(rect(100, -963, 127, -936)), 18);
+        assert_eq!(x, 127 + 18);
+        // A screen it covers whichever way: in the middle.
+        let small = rect(0, 0, 2000, 1200);
+        assert_eq!(placed_clear_of(small, size, Some(rect(990, 590, 1010, 610)), 18), ((2000 - 1932) / 2, (1200 - 1131) / 2));
+    }
+}
+
+#[cfg(test)]
 mod bounce_tests {
     /// A button the settings land in grows at once (over a tenth larger within the first fifth), dips a little under
     /// its size, and settles back to it by the end, never twice as large nor half as small.
@@ -1685,6 +1718,32 @@ impl Lives for Ui {
 }
 
 /// The window made and drawn, and, `shown` (poured out of the place given, if one is: see `genie`), shown.
+/// How far the window keeps from the button it was asked from where it is moved clear of it (DIPs).
+const CLEAR_OF: f32 = 12.0;
+
+/// Where a window `size` large (physical px) opens in `work`: in its middle; where that would cover the place it was
+/// asked from (`from`: its button, lit while it is open, which it pours out of and back into), moved clear of it, `gap`
+/// from it, on the side it is moved least to, within `work`; in the middle still where it fits on no side of it.
+fn placed_clear_of(work: RECT, (width, height): (i32, i32), from: Option<RECT>, gap: i32) -> (i32, i32) {
+    let middle = (work.left + (work.right - work.left - width) / 2, work.top + (work.bottom - work.top - height) / 2);
+    let Some(from) = from else { return middle };
+    let covers = |(x, y): (i32, i32)| x < from.right && from.left < x + width && y < from.bottom && from.top < y + height;
+    if !covers(middle) {
+        return middle;
+    }
+    let fits = |(x, y): (i32, i32)| x >= work.left && y >= work.top && x + width <= work.right && y + height <= work.bottom;
+    [
+        (from.left - gap - width, middle.1),
+        (from.right + gap, middle.1),
+        (middle.0, from.top - gap - height),
+        (middle.0, from.bottom + gap),
+    ]
+    .into_iter()
+    .filter(|at| fits(*at))
+    .min_by_key(|(x, y)| (x - middle.0).abs() + (y - middle.1).abs())
+    .unwrap_or(middle)
+}
+
 fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>) -> Option<HWND> {
     let (work, scale) = crate::panel::work_area_at_cursor()?;
     let scale = scale as f32;
@@ -1706,13 +1765,14 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>) -> Option<HWND> {
         let (work_w, work_h) = (work.right - work.left, work.bottom - work.top);
         let width = ((SIZE.0 * scale) as i32).min(work_w * 9 / 10);
         let height = ((SIZE.1 * scale) as i32).min(work_h * 9 / 10);
+        let placed = placed_clear_of(work, (width, height), shown.flatten(), (CLEAR_OF * scale).round() as i32);
         let hwnd = CreateWindowExW(
             WS_EX_NOREDIRECTIONBITMAP,
             w!("GlanceSettings"),
             w!("Glance"),
             WS_OVERLAPPEDWINDOW,
-            work.left + (work_w - width) / 2,
-            work.top + (work_h - height) / 2,
+            placed.0,
+            placed.1,
             width,
             height,
             None,
