@@ -26,8 +26,10 @@ use windows::Win32::System::Diagnostics::Etw::{
 };
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetForegroundWindow, GetShellWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
+    EnumWindows, GetCursorPos, GetForegroundWindow, GetShellWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    IsZoomed, GWL_EXSTYLE, GWL_STYLE, WS_CAPTION, WS_EX_TRANSPARENT,
 };
 
 use crate::frames::{FrameStats, Presents};
@@ -278,9 +280,8 @@ pub struct Presenting {
     pub stats: FrameStats,
     /// Its window's title (what the game calls itself).
     pub title: String,
-    /// Whether its window covers its whole screen without being maximized
-    /// (a game, borderless or in exclusive fullscreen: a maximized window on
-    /// a screen with no taskbar covers it too, and is no game).
+    /// Whether its window covers its whole screen as a game's does, borderless or in exclusive fullscreen (see
+    /// `fills`).
     pub fills_screen: bool,
     /// Whether that screen is the one the pointer is on.
     pub under_pointer: bool,
@@ -350,30 +351,52 @@ struct Look {
     /// Cloaked: drawn by none, as a window on another virtual desktop, or one the shell keeps hidden till it is
     /// called up.
     cloaked: bool,
+    /// Taking no input: every click passes through it, or it is disabled. A layer drawn over the screen (another
+    /// program's overlay, its notices) is such a window, and a game's never is.
+    inert: bool,
+    /// Covering its screen as a game's does (see `fills`).
+    fills: bool,
 }
 
 fn look(window: HWND) -> Look {
     let mut cloaked = 0u32;
     let cloaked = unsafe { DwmGetWindowAttribute(window, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, size_of::<u32>() as u32) }.is_ok() && cloaked != 0;
-    Look { visible: unsafe { IsWindowVisible(window) }.as_bool(), minimized: unsafe { IsIconic(window) }.as_bool(), cloaked }
+    let through = unsafe { GetWindowLongW(window, GWL_EXSTYLE) } as u32 & WS_EX_TRANSPARENT.0 != 0;
+    Look {
+        visible: unsafe { IsWindowVisible(window) }.as_bool(),
+        minimized: unsafe { IsIconic(window) }.as_bool(),
+        cloaked,
+        inert: through || !unsafe { IsWindowEnabled(window) }.as_bool(),
+        fills: covers_its_screen(window),
+    }
 }
 
-/// Of the top-level `windows` (topmost first, each with its program), the topmost that shows of each program
-/// `presenting`, topmost first, as `look` tells them. None is Glance's own, nor the shell's (`shell`): what the
-/// shell shows over everything as the virtual desktops are switched covers the screen and is drawn anew all the
-/// while, and is no game, as the desktop and the taskbar are none.
-fn fronts(windows: &[(HWND, u32)], presenting: impl Fn(u32) -> bool, shell: u32, look: impl Fn(HWND) -> Look) -> Vec<(HWND, u32)> {
-    let mut found: Vec<(HWND, u32)> = Vec::new();
-    for &(window, pid) in windows {
-        if !presenting(pid) || ours(pid) || pid == shell || found.iter().any(|(_, seen)| *seen == pid) {
+/// Of the top-level `windows` (topmost first, each with its program), the window of each program `presenting` that
+/// stands for it, as `look` tells them: of those that show and take input, the one in front (`front`), else the
+/// topmost that covers its screen, else the topmost. A program's topmost window may be a small one of its own over
+/// the one it draws in (a splash, a helper), or a layer over the screen that takes no input. In the order their
+/// windows are, topmost first. None is Glance's own, nor the shell's (`shell`): what the shell shows over everything
+/// as the virtual desktops are switched covers the screen and is drawn anew all the while, and is no game, as the
+/// desktop and the taskbar are none.
+fn fronts(windows: &[(HWND, u32)], presenting: impl Fn(u32) -> bool, shell: u32, front: HWND, look: impl Fn(HWND) -> Look) -> Vec<(HWND, u32)> {
+    // Each program's window so far: its place among the windows, the window, its program, whether it covers its screen.
+    let mut found: Vec<(usize, HWND, u32, bool)> = Vec::new();
+    for (place, &(window, pid)) in windows.iter().enumerate() {
+        if !presenting(pid) || ours(pid) || pid == shell {
             continue;
         }
-        let Look { visible, minimized, cloaked } = look(window);
-        if visible && !minimized && !cloaked {
-            found.push((window, pid));
+        let Look { visible, minimized, cloaked, inert, fills } = look(window);
+        if !visible || minimized || cloaked || inert {
+            continue;
+        }
+        match found.iter_mut().find(|(.., seen, _)| *seen == pid) {
+            None => found.push((place, window, pid, fills)),
+            Some(chosen) if chosen.1 != front && (window == front || fills && !chosen.3) => *chosen = (place, window, pid, fills),
+            Some(_) => {}
         }
     }
-    found
+    found.sort_by_key(|(place, ..)| *place);
+    found.into_iter().map(|(_, window, pid, _)| (window, pid)).collect()
 }
 
 /// The games presenting and the game mode, as the sensors' process last told them (where it reads them): what
@@ -431,7 +454,7 @@ pub fn presenting() -> Vec<Presenting> {
     let _ = unsafe { EnumWindows(Some(gather), LPARAM(&mut windows as *mut Vec<HWND> as isize)) };
     let windows: Vec<(HWND, u32)> = windows.into_iter().map(|window| (window, pid_of(window))).collect();
     let mut found: Vec<Presenting> = Vec::new();
-    for (window, pid) in fronts(&windows, |pid| stats.contains_key(&pid), shell(), look) {
+    for (window, pid) in fronts(&windows, |pid| stats.contains_key(&pid), shell(), front, look) {
         let (fills_screen, refresh_hz, monitor) = screen_of(window);
         let mut title = [0u16; 256];
         let length = unsafe { GetWindowTextW(window, &mut title) };
@@ -476,8 +499,33 @@ pub fn in_front() -> Option<Presenting> {
     })
 }
 
-/// Whether `window` covers its monitor, not maximized, the monitor's
-/// refresh rate, and the monitor.
+/// Whether a window `rect` covers its `screen` as a game's does: whole, and not as a maximized window with a title
+/// bar does (on a screen with no taskbar, one covers it too, and is no game). A game's borderless window may be
+/// maximized, with no title bar: it covers the screen as one in exclusive fullscreen does.
+fn fills(rect: RECT, screen: RECT, maximized: bool, captioned: bool) -> bool {
+    let covers = rect.left <= screen.left && rect.top <= screen.top && rect.right >= screen.right && rect.bottom >= screen.bottom;
+    covers && !(maximized && captioned)
+}
+
+/// Whether `window` covers its monitor as a game's does (see `fills`).
+fn covers_its_screen(window: HWND) -> bool {
+    unsafe {
+        let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        !monitor.is_invalid() && GetMonitorInfoW(monitor, &mut info).as_bool() && fills_on(window, info.rcMonitor)
+    }
+}
+
+/// Whether `window` covers `screen` (its monitor's) as a game's does (see `fills`).
+fn fills_on(window: HWND, screen: RECT) -> bool {
+    unsafe {
+        let mut rect = RECT::default();
+        let captioned = GetWindowLongW(window, GWL_STYLE) as u32 & WS_CAPTION.0 == WS_CAPTION.0;
+        GetWindowRect(window, &mut rect).is_ok() && fills(rect, screen, IsZoomed(window).as_bool(), captioned)
+    }
+}
+
+/// Whether `window` covers its monitor as a game's does (see `fills`), the monitor's refresh rate, and the monitor.
 fn screen_of(window: HWND) -> (bool, Option<u32>, Option<(HMONITOR, RECT)>) {
     unsafe {
         let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
@@ -485,11 +533,7 @@ fn screen_of(window: HWND) -> (bool, Option<u32>, Option<(HMONITOR, RECT)>) {
         if monitor.is_invalid() || !GetMonitorInfoW(monitor, &mut info.monitorInfo).as_bool() {
             return (false, None, None);
         }
-        let mut rect = RECT::default();
-        let fills = !IsZoomed(window).as_bool() && GetWindowRect(window, &mut rect).is_ok() && {
-            let screen = info.monitorInfo.rcMonitor;
-            rect.left <= screen.left && rect.top <= screen.top && rect.right >= screen.right && rect.bottom >= screen.bottom
-        };
+        let fills = fills_on(window, info.monitorInfo.rcMonitor);
         let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
         let refresh = EnumDisplaySettingsW(PCWSTR(info.szDevice.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode)
             .as_bool()
@@ -534,9 +578,40 @@ mod tests {
         // Topmost first: the shell's switching preview, the game's window on another desktop, the same game's
         // window shown, a window of a program presenting nothing, a player's window, the shell's desktop.
         let windows = [(window(1), shell), (window(2), game), (window(3), game), (window(4), idle), (window(5), player), (window(6), shell)];
-        let look = |w: HWND| Look { visible: true, minimized: false, cloaked: w == window(2) };
-        let found = fronts(&windows, |pid| pid != idle, shell, look);
+        let look = |w: HWND| Look { visible: true, minimized: false, cloaked: w == window(2), inert: false, fills: false };
+        let found = fronts(&windows, |pid| pid != idle, shell, HWND::default(), look);
         assert_eq!(found, [(window(3), game), (window(5), player)]);
+    }
+
+    /// A game's small window over the one it draws in (a splash, a helper) does not stand for it: the one covering
+    /// its screen does, and the one in front over either. Another program's layer over the screen, taking no input,
+    /// stands for nothing.
+    #[test]
+    fn a_game_is_seen_by_its_window_that_covers_the_screen() {
+        let window = |n: usize| HWND(n as *mut _);
+        let (game, layer, player) = (4_000_011, 4_000_013, 4_000_015);
+        // Topmost first: another program's layer over the screen, the game's helper, the game's window covering the
+        // screen, a player's window, the player's second window, covering its screen.
+        let windows = [(window(1), layer), (window(2), game), (window(3), game), (window(4), player), (window(5), player)];
+        let look = |w: HWND| Look { visible: true, minimized: false, cloaked: false, inert: w == window(1), fills: [window(1), window(3), window(5)].contains(&w) };
+        assert_eq!(fronts(&windows, |_| true, 0, HWND::default(), look), [(window(3), game), (window(5), player)]);
+        // The player's first window in front: it stands for the player, though the other covers its screen.
+        assert_eq!(fronts(&windows, |_| true, 0, window(4), look), [(window(3), game), (window(4), player)]);
+    }
+
+    /// A window covers its screen as a game's does whole, but maximized with a title bar (on a screen with no
+    /// taskbar) it is no game's: a game's borderless window maximized is.
+    #[test]
+    fn a_borderless_window_maximized_covers_its_screen() {
+        let screen = RECT { left: 0, top: 0, right: 2560, bottom: 1440 };
+        let whole = screen;
+        let past = RECT { left: -8, top: -8, right: 2568, bottom: 1448 };
+        let short = RECT { bottom: 1400, ..screen };
+        assert!(fills(whole, screen, false, false));
+        assert!(fills(whole, screen, false, true));
+        assert!(fills(whole, screen, true, false));
+        assert!(!fills(past, screen, true, true));
+        assert!(!fills(short, screen, false, false));
     }
 
     /// For a look at a game in front: run elevated, with the game in front
