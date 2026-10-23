@@ -126,6 +126,9 @@ pub struct Overlay {
     drawn: (Vec<overlay::Reading>, Vec<Option<f32>>, Shape),
     /// How its glass is tinted, as the screen around it last asked.
     glass: Option<Glass>,
+    /// The tint its last look at the screen needed, and when it looked (see `look`).
+    needed: Option<f32>,
+    looked: Instant,
     /// Being dragged by the pointer: to move it, or by its edges, to size it.
     grab: Option<Grab>,
     /// The screen of the game played, kept while it presents no frames
@@ -171,6 +174,8 @@ const EDGE: f32 = 8.0;
 /// tint the glass (DIPs): what is behind it, blurred, is much like what is
 /// around it.
 const AROUND: f32 = 16.0;
+/// How often it looks at what is behind it, the readings or not (see `watch`).
+const LOOK_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// While it is dragged, the pointer is followed this often (ms) by a timer
 /// of this id: never in front, the overlay is told of the pointer only
@@ -284,6 +289,8 @@ impl Overlay {
             size: 1.0,
             drawn: (Vec::new(), Vec::new(), Shape { layout: Layout::Card, rows: 1, width: f32::INFINITY }),
             glass: None,
+            needed: None,
+            looked: Instant::now(),
             grab: None,
             game_screen: None,
             beneath: None,
@@ -428,7 +435,8 @@ impl Overlay {
         let area = RECT { left: (r.left - around).max(s.left), top: (r.top - around).max(s.top), right: (r.right + around).min(s.right), bottom: (r.bottom + around).min(s.bottom) };
         let seen = Capture::take(area);
         let mut behind = seen.map(|capture| capture.luminances(area, r, self.dpi.round().max(1.0) as i32)).unwrap_or_default();
-        self.glass = Some(overlay::glass(&mut behind, self.glass));
+        let (glass, needed) = overlay::glass(&mut behind, self.glass.zip(self.needed));
+        (self.glass, self.needed, self.looked) = (Some(glass), Some(needed), Instant::now());
     }
 
     /// Places its windows: the one that takes the pointer where the glass is, above all but the open panel; its stage
@@ -478,7 +486,7 @@ impl Overlay {
         // but for the open panel.
         self.place();
         let scale = self.scale();
-        let glass = Glass { presence: 1.0 - self.clear, ..self.glass.unwrap_or_else(|| overlay::glass(&mut [], None)) };
+        let glass = Glass { presence: 1.0 - self.clear, ..self.glass.unwrap_or_else(|| overlay::glass(&mut [], None).0) };
         let (width, height, radius) = self.measures();
         self.shape(width, height, radius);
         let (readings, frames, shape) = (&self.drawn.0, &self.drawn.1, self.drawn.2);
@@ -603,6 +611,15 @@ impl Overlay {
     /// stayed a while. Called as often as the pointer is looked at.
     pub fn watch(&mut self) {
         let now = Instant::now();
+        // What is behind looked at often, between the readings: tinted again soon after it changes (a game come up),
+        // drawn again only where the tint changed.
+        if self.shown && self.grab.is_none() && now.duration_since(self.looked) >= LOOK_EVERY {
+            let was = self.glass;
+            self.look();
+            if self.glass != was {
+                self.draw();
+            }
+        }
         // (The glass, the whole row and what lies between them.)
         let reach = {
             let half = ((buttons::SIZE / 2.0 + BAR_PAD) * self.dpi).round() as i32;

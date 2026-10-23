@@ -239,9 +239,6 @@ const LEAST: f32 = 0.3;
 /// How much less tint the other tone has to need to be taken: the glass
 /// does not flip between tones over a picture between the two.
 const SWITCH: f32 = 0.1;
-/// How much the tint may clear from one look at the screen to the next (it
-/// darkens at once, for the words' sake).
-const CLEARING: f32 = 0.1;
 /// The share of what is behind taken as its brightest and its darkest: a
 /// few stray pixels do not decide the tint.
 const EXTREME: f32 = 0.1;
@@ -900,11 +897,12 @@ fn least_tint(tone: Tone, behind: f32) -> f32 {
 
 /// How the glass is tinted over a screen of `behind`'s luminances (0–1,
 /// any order; none: not seen, taken as anything from black to white),
-/// following `before`, how it was: in the tone that needs less tint to keep
-/// its words legible over the brightest of what is behind (dark glass) or
-/// the darkest (light glass), switching only for a clear gain; as little
-/// tint as that, clearing no faster than `CLEARING` a look.
-pub fn glass(behind: &mut [f32], before: Option<Glass>) -> Glass {
+/// following `before`, how it was and the tint the look before needed: in the tone that needs less tint to keep its
+/// words legible over the brightest of what is behind (dark glass) or the darkest (light glass), switching only for a
+/// clear gain; as little tint as that, and as the look before needed too (it darkens at once, for the words' sake,
+/// and clears as soon as two looks in a row see it may: what is behind changed, not a flash that came and went).
+/// With the tint this look needed, for the next.
+pub fn glass(behind: &mut [f32], before: Option<(Glass, f32)>) -> (Glass, f32) {
     let (darkest, brightest) = if behind.is_empty() {
         (0.0, 1.0)
     } else {
@@ -914,7 +912,7 @@ pub fn glass(behind: &mut [f32], before: Option<Glass>) -> Glass {
     };
     let dark = least_tint(Tone::Dark, brightest);
     let light = least_tint(Tone::Light, darkest);
-    let tone = match before.map(|glass| glass.tone) {
+    let tone = match before.map(|(glass, _)| glass.tone) {
         Some(Tone::Dark) if light + SWITCH >= dark => Tone::Dark,
         Some(Tone::Light) if dark + SWITCH >= light => Tone::Light,
         _ if dark <= light => Tone::Dark,
@@ -922,10 +920,10 @@ pub fn glass(behind: &mut [f32], before: Option<Glass>) -> Glass {
     };
     let needed = if tone == Tone::Dark { dark } else { light };
     let opacity = match before {
-        Some(before) if before.tone == tone => needed.max(before.opacity - CLEARING),
+        Some((before, needed_before)) if before.tone == tone => needed.max(needed_before),
         _ => needed,
     };
-    Glass { tone, opacity, presence: 1.0 }
+    (Glass { tone, opacity, presence: 1.0 }, needed)
 }
 
 #[cfg(test)]
@@ -959,20 +957,26 @@ mod tests {
         let dark_scene = || vec![0.02; 100];
         let white_page = || vec![1.0; 100];
         let first = glass(&mut dark_scene(), None);
-        assert_eq!(first.tone, Tone::Dark);
-        let page = glass(&mut white_page(), Some(first));
+        assert_eq!(first.0.tone, Tone::Dark);
+        let page = glass(&mut white_page(), Some(first)).0;
         assert_eq!(page.tone, Tone::Light);
         // A few bright pixels do not decide it.
         let mut specks = dark_scene();
         specks[..5].fill(1.0);
-        assert_eq!(glass(&mut specks, Some(first)), first);
-        // Clearing slowly, darkening at once.
-        let dense = Glass { tone: Tone::Dark, opacity: 0.9, presence: 1.0 };
-        assert!((glass(&mut dark_scene(), Some(dense)).opacity - (0.9 - CLEARING)).abs() < 1e-6);
-        let thin = Glass { tone: Tone::Dark, opacity: LEAST, presence: 1.0 };
-        assert_eq!(glass(&mut vec![0.2; 100], Some(thin)).opacity, least_tint(Tone::Dark, 0.2));
+        assert_eq!(glass(&mut specks, Some(first)).0, first.0);
+        // Darkening at once; clearing once two looks in a row see it may: a flash for one look does not pump it.
+        let (bright, dark) = (least_tint(Tone::Dark, 0.25), least_tint(Tone::Dark, 0.02));
+        assert!(bright > dark);
+        let mut look = glass(&mut dark_scene(), None);
+        let mut tints = Vec::new();
+        for scene in [0.25, 0.02, 0.02, 0.25, 0.25, 0.02, 0.02] {
+            look = glass(&mut vec![scene; 100], Some(look));
+            assert_eq!(look.0.tone, Tone::Dark);
+            tints.push(look.0.opacity);
+        }
+        assert_eq!(tints, vec![bright, bright, dark, bright, bright, bright, dark]);
         // Unseen, the tint is enough for anything.
-        let unseen = glass(&mut [], None);
+        let unseen = glass(&mut [], None).0;
         assert!(unseen.opacity >= least_tint(unseen.tone, if unseen.tone == Tone::Dark { 1.0 } else { 0.0 }));
     }
 

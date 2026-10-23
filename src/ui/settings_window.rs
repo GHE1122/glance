@@ -1438,7 +1438,7 @@ impl Stage {
         match self.measured.glass {
             Some((at, glass)) if at == (ring, hole) => glass,
             _ => {
-                let glass = super::overlay::glass(&mut self.desktop.as_ref().map_or(Vec::new(), |desktop| desktop.luminances(ring, hole, 1)), None);
+                let glass = super::overlay::glass(&mut self.desktop.as_ref().map_or(Vec::new(), |desktop| desktop.luminances(ring, hole, 1)), None).0;
                 self.measured.glass = Some(((ring, hole), glass));
                 glass
             }
@@ -6514,7 +6514,7 @@ mod tests {
         // (Both kept: each frame may ask of several.)
         assert_eq!(stage.measured.tones.iter().map(|(at, _)| *at).collect::<Vec<_>>(), [right, left]);
         let (ring, hole) = (whole, RECT { left: 8, top: 8, right: 56, bottom: 24 });
-        assert_eq!(stage.glass(ring, hole), super::super::overlay::glass(&mut desktop.luminances(ring, hole, 1), None));
+        assert_eq!(stage.glass(ring, hole), super::super::overlay::glass(&mut desktop.luminances(ring, hole, 1), None).0);
         assert_eq!(stage.glass(ring, hole), stage.glass(ring, hole));
         // Not read yet: grey.
         assert_eq!(Stage::new((64.0, 32.0), None, whole, None).tone(left), (0.5, 0.0));
