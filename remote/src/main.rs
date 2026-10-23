@@ -467,14 +467,12 @@ impl Helper {
             ("POST", "/v1/monitor") => {
                 let index = asked.get("index").and_then(Value::as_u64).ok_or((400, "\"index\" is missing".to_string()))? as usize;
                 // On or off, or as bright as asked.
-                let took = match asked.get("brightness").and_then(Value::as_u64) {
+                let done = match asked.get("brightness").and_then(Value::as_u64) {
                     Some(percent) => display::dim(index, percent.min(100) as u8),
                     None => display::turn(index, on()?),
                 };
                 let _ = self.keep_held();
-                if !took {
-                    return Err((500, "the monitor did not take it".into()));
-                }
+                done.map_err(|why| failed(why.into()))?;
             }
             // On or off, in another colour, doing something else: any of
             // them. A colour or an effect alone lights them so.
@@ -880,8 +878,9 @@ fn main() -> std::io::Result<()> {
         Some("restore") => {
             if !config.darkened.is_empty() {
                 journal::note(format!("{} monitors were left dark by a helper that was ended: put on again", config.darkened.len()));
-                display::restore(&config.darkened);
-                Config::change(|config| config.darkened.clear())?;
+                // (Those that did not come on are kept, for the next helper to try again.)
+                let dark = display::restore(&config.darkened);
+                Config::change(|config| config.darkened = dark)?;
             }
             return Ok(());
         }
@@ -962,7 +961,7 @@ fn main() -> std::io::Result<()> {
         Some("dim") => {
             let number = |at: usize| std::env::args().nth(at).and_then(|text| text.parse::<usize>().ok());
             if let (Some(monitor), Some(percent)) = (number(2), number(3)) {
-                say!("{}", if display::dim(monitor, percent.min(100) as u8) { "taken" } else { "not taken" });
+                say!("{}", display::dim(monitor, percent.min(100) as u8).map_or_else(|why| why, |_| "taken"));
             }
             return Ok(());
         }
@@ -993,8 +992,10 @@ fn main() -> std::io::Result<()> {
     // Monitors a helper before this one kept dark and did not put back (it was ended first): put back now.
     if !config.darkened.is_empty() {
         journal::note(format!("{} monitors were left dark by a helper that ended: put on again", config.darkened.len()));
-        display::restore(&config.darkened);
-        Config::change(|config| config.darkened.clear())?;
+        // (Those that did not come on are held as off still: see `display::hold`.)
+        let dark = display::restore(&config.darkened);
+        display::hold(dark.clone());
+        Config::change(|config| config.darkened = dark)?;
     }
     display::watch();
     let listener = TcpListener::bind(("0.0.0.0", config.port)).inspect_err(|error| journal::note(format!("port {} cannot be listened on: {error}", config.port)))?;
