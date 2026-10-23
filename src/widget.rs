@@ -3188,7 +3188,7 @@ impl Widget {
             (true, true) if self.lingered.is_some_and(|since| since.elapsed() >= buttons::LINGER) => all.iter().copied().filter(|(_, button)| *button == Button::Through).collect(),
             (true, true) => Vec::new(),
         };
-        if self.settings_asked_here() && !offered.iter().any(|(_, button)| *button == Button::Settings) {
+        if self.settings_lit().is_some() && !offered.iter().any(|(_, button)| *button == Button::Settings) {
             offered.extend(all.into_iter().filter(|(_, button)| *button == Button::Settings));
         }
         offered
@@ -3220,6 +3220,12 @@ impl Widget {
             }
             _ => None,
         };
+    }
+
+    /// Its settings' button lit, and how large (1 as it is): the settings asked from it open, or just poured back into
+    /// it (it bounces: see `settings_window::bounce`).
+    fn settings_lit(&self) -> Option<f32> {
+        if self.settings_asked_here() { Some(1.0) } else { crate::ui::settings_window::bounce(self.button_rect(Button::Settings)) }
     }
 
     /// Whether the settings, open, were asked from its settings' button, where it is now.
@@ -3744,8 +3750,8 @@ impl Widget {
     /// How far past its surface its buttons' row reaches, above, under, left and right of it (physical px): none but
     /// on the side they are at, and there only while they show (the pointer over it).
     fn reach(&self) -> (i32, i32, i32, i32) {
-        // (Its buttons' room taken where they show: the pointer over it, or the settings asked from it open.)
-        let reach = if self.hover || self.settings_asked_here() { ((BUTTON + 2.0 * BUTTON_INSET) * self.contact.scale * self.zoom) as i32 } else { 0 };
+        // (Its buttons' room taken where they show: the pointer over it, or its settings' button lit.)
+        let reach = if self.hover || self.settings_lit().is_some() { ((BUTTON + 2.0 * BUTTON_INSET) * self.contact.scale * self.zoom) as i32 } else { 0 };
         match self.rack() {
             Rack::Above => (reach, 0, 0, 0),
             Rack::Under => (0, reach, 0, 0),
@@ -3783,6 +3789,8 @@ impl Widget {
         let started = Instant::now();
         let mut moving = self.drag.is_some() || self.settle.is_some();
         self.follow_settings();
+        // (Frames while its settings' button bounces.)
+        moving |= self.settings_lit().is_some_and(|grown| grown != 1.0);
         // The knob under the pointer, and the one held (the slider in hand's). (A copy drawn with: the widget is
         // drawn meanwhile.)
         let sliding = match self.drag {
@@ -4310,7 +4318,7 @@ impl Widget {
         let rough = matches!(self.drag, Some(Drag::Move { moved: true, .. })) || self.fling.is_some();
         let contact_scale = self.contact.scale;
         let offered = self.offered();
-        let asked_here = self.settings_asked_here();
+        let settings_lit = self.settings_lit();
         let frost = if self.content.skinned() { self.frost(now, theme) } else { 0.0 };
         // What plays: as its switches say, the pointer where it is over it (letting clicks through, it is not).
         let shows = (!matches!(self.content, Content::Readings(_))).then(|| Shows::from(&crate::app().settings.lock().unwrap().view));
@@ -4441,10 +4449,11 @@ impl Widget {
             for (centre, button) in offered {
                 // Lit while on: pinned, letting clicks through, the window in front a game.
                 // (Its settings' button, while the settings asked from it are open.)
-                let lit = (button == Button::Pin && pinned) || (button == Button::Through && through) || (button == Button::Game && front_is_game) || (button == Button::Settings && asked_here);
+                let lit = (button == Button::Pin && pinned) || (button == Button::Through && through) || (button == Button::Game && front_is_game) || (button == Button::Settings && settings_lit.is_some());
+                let grown = if button == Button::Settings { settings_lit.unwrap_or(1.0) } else { 1.0 };
                 match button_ground {
-                    Some(ground) => buttons::paint_on(frame, centre, button, lit, ground),
-                    None => buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5)),
+                    Some(ground) => buttons::paint_on(frame, centre, button, lit, ground, grown),
+                    None => buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5), grown),
                 }
             }
             frame.origin(0.0, 0.0);

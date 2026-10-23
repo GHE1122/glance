@@ -182,13 +182,21 @@ impl Way {
 
     /// Where the window's sides are across the way at `along`, bent `bend` of the way into the funnel (0: straight):
     /// the funnel as wide as the window up to its far side, as the place from the place's near side on, and between
-    /// them eased from the one to the other.
+    /// them eased from the one to the other. Past the middle of the place it narrows as the ellipse within the place
+    /// does (Glance's buttons are round): what pours into it ends in a round tip, not cut square.
     fn across_at(&self, along: f32, bend: f32) -> (f32, f32) {
         let (from, to) = (self.window_along.0, self.place_along.0);
         let u = if to > from { ((along - from) / (to - from)).clamp(0.0, 1.0) } else { 1.0 };
         let k = u * u * (3.0 - 2.0 * u);
         let funnel = |window: f32, place: f32| window + (place - window) * k;
-        let (low, high) = (funnel(self.window_across.0, self.place_across.0), funnel(self.window_across.1, self.place_across.1));
+        let (mut low, mut high) = (funnel(self.window_across.0, self.place_across.0), funnel(self.window_across.1, self.place_across.1));
+        let (middle, half_along) = ((self.place_along.0 + self.place_along.1) / 2.0, (self.place_along.1 - self.place_along.0) / 2.0);
+        if along > middle && half_along > 0.0 {
+            let past = ((along - middle) / half_along).min(1.0);
+            let (centre, half_across) = ((self.place_across.0 + self.place_across.1) / 2.0, (self.place_across.1 - self.place_across.0) / 2.0);
+            let half = half_across * (1.0 - past * past).max(0.0).sqrt();
+            (low, high) = (low.max(centre - half), high.min(centre + half));
+        }
         (self.window_across.0 + (low - self.window_across.0) * bend, self.window_across.1 + (high - self.window_across.1) * bend)
     }
 
@@ -374,6 +382,7 @@ pub struct Genie {
     way: Way,
     /// Where its window is on the screen (physical px).
     area: RECT,
+    place: RECT,
     opening: bool,
     began: Instant,
 }
@@ -388,7 +397,7 @@ impl Genie {
         let mut window = Window::new().ok()?;
         window.set_click_through(true);
         let surface = Surface::new(gfx, window.hwnd).ok()?;
-        let mut genie = Genie { window, surface, picture, bitmap: None, way, area, opening, began: Instant::now() };
+        let mut genie = Genie { window, surface, picture, bitmap: None, way, area, place, opening, began: Instant::now() };
         genie.window.place(area);
         if !genie.draw_at(gfx, if opening { 1.0 } else { 0.0 }) {
             return None;
@@ -416,6 +425,11 @@ impl Genie {
     /// Whether it is pouring out of its place (not into it).
     pub fn opening(&self) -> bool {
         self.opening
+    }
+
+    /// The place it pours out of or into (physical px).
+    pub fn place(&self) -> RECT {
+        self.place
     }
 
     fn draw_at(&mut self, gfx: &Gfx, p: f32) -> bool {
@@ -510,6 +524,26 @@ mod tests {
         assert_eq!(phases(0.0), (0.0, 0.0));
         assert!(speed(0.0, |(bend, _)| bend) < 0.05 && speed(0.0, |(_, slide)| slide) < 0.05);
         assert!((speed(1.0 - 1e-3, |(_, slide)| slide) - 1.5).abs() < 0.01);
+    }
+
+    /// What pours into a place ends round in it: as wide as the place to its middle, then as the circle within it, a
+    /// point at its far side; nowhere outside the circle past its middle.
+    #[test]
+    fn it_ends_round_in_its_place() {
+        let way = Way::between(rect(400, 200, 1400, 900), rect(880, 1000, 920, 1040));
+        let width = |along: f32| {
+            let (low, high) = way.across_at(along, 1.0);
+            high - low
+        };
+        assert!((width(1000.0) - 40.0).abs() < 1e-3 && (width(1020.0) - 40.0).abs() < 1e-3);
+        assert!((width(1030.0) - 2.0 * 20.0 * (1.0f32 - 0.25).sqrt()).abs() < 1e-3);
+        assert!(width(1039.5) < 9.0 && width(1040.0).abs() < 1e-3);
+        for step in 0..=40 {
+            let along = 1020.0 + step as f32 / 2.0;
+            let (low, high) = way.across_at(along, 1.0);
+            let (dx, dy) = ((high - 900.0) / 20.0, (along - 1020.0) / 20.0);
+            assert!(dx * dx + dy * dy <= 1.0 + 1e-4 && (low - 900.0).abs() - (high - 900.0) < 1e-3, "{along}: {low}..{high}");
+        }
     }
 
     /// At the start the window is drawn whole where it is, each line of its picture on its own line of the screen.

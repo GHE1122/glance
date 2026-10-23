@@ -3477,7 +3477,7 @@ impl<'a> Panel<'a> {
             _ => None,
         };
         let thumbs_moving = self.thumbs.apps(now, &order, hold) | thumbs_moving;
-        let scene = Scene { thumbs: &self.thumbs, settings_open: self.settings_here(), ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
+        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -3599,7 +3599,7 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel.
-        let moving = thumbs_moving || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turning.is_some();
+        let moving = thumbs_moving || settings_window::bounce(self.settings_from).is_some() || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turning.is_some();
         self.next_frame = if moving {
             now
         } else {
@@ -3663,7 +3663,7 @@ impl<'a> Panel<'a> {
         let within = |(px_x, px_y): (f32, f32), (rx, ry, rw, rh): (f32, f32, f32, f32)| px_x >= rx && px_y >= ry && px_x < rx + rw && px_y < ry + rh;
         let pointer = at.filter(|at| within(*at, (0.0, 0.0, size.0, size.1)));
         let at_buttons = at.filter(|at| pointer.is_some() || rack.is_some_and(|rack| within(*at, rack)));
-        let settings_here = self.settings_here();
+        let settings_lit = self.settings_lit();
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
         let music = &mut self.music;
         let layer = &mut self.music_layer;
@@ -3692,7 +3692,7 @@ impl<'a> Panel<'a> {
             if drew.is_err() {
                 painted = None;
             }
-            if at_buttons.is_some() || settings_here {
+            if at_buttons.is_some() || settings_lit.is_some() {
                 // (The pointer away: over none of them.)
                 let (px_x, px_y) = at_buttons.unwrap_or((f32::NEG_INFINITY, f32::NEG_INFINITY));
                 let ground = music.ground_colour(size);
@@ -3705,8 +3705,10 @@ impl<'a> Panel<'a> {
                 for (index, (button, hit)) in [(crate::ui::buttons::Button::Pin, Hit::Pin), (crate::ui::buttons::Button::Settings, Hit::Settings), (crate::ui::buttons::Button::Full, Hit::Full)].into_iter().enumerate() {
                     let (bx, by) = (right - side - index as f32 * (side + gap), top);
                     let over = px_x >= bx && px_x < bx + side && px_y >= by && px_y < by + side;
-                    let lit = (button == crate::ui::buttons::Button::Pin && pinned) || (button == crate::ui::buttons::Button::Settings && settings_here) || over;
-                    crate::ui::buttons::paint_on(frame, crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 }, button, lit, ground);
+                    let settings = button == crate::ui::buttons::Button::Settings;
+                    let lit = (button == crate::ui::buttons::Button::Pin && pinned) || (settings && settings_lit.is_some()) || over;
+                    let grown = if settings { settings_lit.unwrap_or(1.0) } else { 1.0 };
+                    crate::ui::buttons::paint_on(frame, crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 }, button, lit, ground, grown);
                     buttons.push((bx, by, side, side, hit));
                 }
             }
@@ -3729,7 +3731,7 @@ impl<'a> Panel<'a> {
         self.show_stations();
         self.bar = view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         // (Settling after it was sized, too: see `music_settle`.)
-        let moving = !self.shift.done(now) || !self.opacity.done(now) || painted.busy || self.music_settle.is_some();
+        let moving = !self.shift.done(now) || !self.opacity.done(now) || painted.busy || self.music_settle.is_some() || settings_window::bounce(self.settings_from).is_some();
         self.next_frame = if moving { now } else { now + Duration::from_millis(250) };
     }
 
@@ -3739,11 +3741,19 @@ impl<'a> Panel<'a> {
         from.is_some() && from == self.settings_from
     }
 
+    /// Its settings' button lit, and how large (see `view::Scene::settings_lit`): the settings asked from it open, or
+    /// just poured back into it.
+    fn settings_lit(&self) -> Option<f32> {
+        if self.settings_here() { Some(1.0) } else { settings_window::bounce(self.settings_from) }
+    }
+
     /// The settings asked from its settings' button, open: told where it is now, drawn somewhere else (the panel laid
-    /// out anew), so they pour back into it there. Asked from elsewhere, or closed: no longer its.
+    /// out anew), so they pour back into it there. Asked from elsewhere, or closed and done bouncing: no longer its.
     fn follow_settings(&mut self) {
         if !self.settings_here() {
-            self.settings_from = None;
+            if settings_window::bounce(self.settings_from).is_none() {
+                self.settings_from = None;
+            }
             return;
         }
         let Some(now) = self.on_screen(Hit::Settings) else { return };
@@ -3994,7 +4004,7 @@ fn scene<'s>(
         overlay,
         buttons: true,
         newer: crate::update::available().is_some(),
-        settings_open: false,
+        settings_lit: None,
         music_apart: false,
     }
 }

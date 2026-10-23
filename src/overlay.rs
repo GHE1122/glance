@@ -99,6 +99,8 @@ pub struct Overlay {
     bar: Window,
     bar_surface: Option<(Rc<Gfx>, Surface)>,
     bar_shows: Vec<Button>,
+    /// Its settings' button drawn lit (the settings asked from it open).
+    bar_settings: bool,
     /// Since when the pointer has been over it or its buttons.
     over: Option<Instant>,
     /// Whether a game shows (its button lit), as the last sample had it:
@@ -131,6 +133,8 @@ pub struct Overlay {
     game_screen: Option<[i32; 4]>,
     /// The panel's window while the panel is up: kept above the overlay.
     beneath: Option<HWND>,
+    /// Where its settings' button was as the settings were asked from it, while they are open (see `settings_here`).
+    settings_from: Option<RECT>,
     /// A menu's window while one is up: put back above the overlay each time the overlay is placed (see `under_menu`).
     menu: Option<HWND>,
 }
@@ -259,6 +263,7 @@ impl Overlay {
             showing: None,
             shown: false,
             placed: std::cell::Cell::new(RECT::default()),
+            settings_from: None,
             shaped: (0, 0, 0),
             locked: false,
             clear: 0.0,
@@ -266,6 +271,7 @@ impl Overlay {
             bar,
             bar_surface: None,
             bar_shows: Vec::new(),
+            bar_settings: false,
             over: None,
             game: false,
             bar_at: None,
@@ -569,12 +575,12 @@ impl Overlay {
         let Ok(mut surface) = surface else { return };
         let dark = self.glass.is_none_or(|glass| glass.tone == Tone::Dark);
         let rim = if dark { Color::hex(0xFFFFFF, 0.3) } else { Color::hex(0x000000, 0.3) };
-        let (shows, locked, through, game) = (&self.bar_shows, self.locked, self.through, self.game);
+        let (shows, locked, through, game, settings) = (&self.bar_shows, self.locked, self.through, self.game, self.bar_settings);
         let drawn = surface.draw(&self.gfx, ((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32), self.dpi, |frame| {
             for (place, button) in shows.iter().enumerate() {
-                let lit = (*button == Button::Pin && locked) || (*button == Button::Through && through) || (*button == Button::Game && game);
+                let lit = (*button == Button::Pin && locked) || (*button == Button::Through && through) || (*button == Button::Game && game) || (*button == Button::Settings && settings);
                 let centre = Point { x: BAR_PAD + buttons::SIZE / 2.0 + place as f32 * (buttons::SIZE + buttons::GAP), y: BAR_PAD + buttons::SIZE / 2.0 };
-                buttons::paint(frame, centre, *button, lit, dark, rim);
+                buttons::paint(frame, centre, *button, lit, dark, rim, 1.0);
             }
         });
         self.bar_surface = Some((self.gfx.clone(), surface));
@@ -605,14 +611,28 @@ impl Overlay {
         };
         let inside = self.shown && self.grab.is_none() && cursor().is_some_and(|c| (reach.left..reach.right).contains(&c.x) && (reach.top..reach.bottom).contains(&c.y));
         self.over = if inside { self.over.or(Some(now)) } else { None };
+        // The settings asked from its button, open: told where it is now (the overlay moved meanwhile), so they pour
+        // back into it there, and its buttons shown, it lit. Closed, or asked from elsewhere: no longer its.
+        let gear = self.button_place(Button::Settings);
+        let here = self.settings_here();
+        if here && self.settings_from != Some(gear) {
+            if let Some(from) = self.settings_from {
+                crate::ui::settings_window::asked_from_moved(from, Some(gear));
+            }
+            self.settings_from = Some(gear);
+        } else if !here {
+            self.settings_from = None;
+        }
         let shows = match (self.over, self.through) {
+            (None, _) if here => buttons::ALL.to_vec(),
             (None, _) => Vec::new(),
             (Some(_), false) => buttons::ALL.to_vec(),
             (Some(since), true) if now.duration_since(since) >= buttons::LINGER => vec![Button::Through],
             (Some(_), true) => Vec::new(),
         };
-        if shows != self.bar_shows {
+        if shows != self.bar_shows || here != self.bar_settings {
             self.bar_shows = shows;
+            self.bar_settings = here;
             self.draw_bar();
         }
         if !inside && self.tip.take().is_some() {
@@ -647,13 +667,27 @@ impl Overlay {
         }
     }
 
+    /// Where its button `button` is on the screen (physical px).
+    fn button_place(&self, button: Button) -> RECT {
+        let middle = self.bar_middles()[buttons::ALL.iter().position(|one| *one == button).unwrap()];
+        let half = (buttons::SIZE / 2.0 * self.dpi).round() as i32;
+        RECT { left: middle.x - half, top: middle.y - half, right: middle.x + half, bottom: middle.y + half }
+    }
+
+    /// Whether the settings, open, were asked from its settings' button.
+    fn settings_here(&self) -> bool {
+        let from = crate::ui::settings_window::asked_from();
+        from.is_some() && from == self.settings_from
+    }
+
     /// One of its buttons pressed: what is asked for, where it is another's to do.
     pub fn bar_press(&mut self) -> Option<(Choice, RECT)> {
         let button = self.bar_button_at(cursor()?)?;
         // (Where the button is on the screen.)
-        let middle = self.bar_middles()[buttons::ALL.iter().position(|one| *one == button).unwrap()];
-        let half = (buttons::SIZE / 2.0 * self.dpi).round() as i32;
-        let place = RECT { left: middle.x - half, top: middle.y - half, right: middle.x + half, bottom: middle.y + half };
+        let place = self.button_place(button);
+        if button == Button::Settings {
+            self.settings_from = Some(place);
+        }
         if self.tip.take().is_some() {
             crate::ui::tip::hide();
         }

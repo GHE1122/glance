@@ -68,23 +68,25 @@ impl Button {
 
 /// Draws `button` round `centre` beside a widget whose ground is `ground` (straight RGB): a plate of that colour,
 /// a little lighter, the mark white; lit, inverted.
-pub fn paint_on(frame: &dyn Canvas, centre: Point, button: Button, lit: bool, [r, g, b]: [f32; 3]) {
+pub fn paint_on(frame: &dyn Canvas, centre: Point, button: Button, lit: bool, [r, g, b]: [f32; 3], grown: f32) {
     let lighter = |c: f32| c + (1.0 - c) * 0.12;
     let plate = Color { r: lighter(r), g: lighter(g), b: lighter(b), a: 0.94 };
     let mark = Color::hex(0xFFFFFF, 1.0);
     let (ground, ink) = if lit { (mark, plate.alpha(1.0)) } else { (plate, mark) };
-    frame.fill_circle(ground, centre, SIZE / 2.0);
-    frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, 0.22)), centre.x - SIZE / 2.0, centre.y - SIZE / 2.0, SIZE, SIZE, SIZE / 2.0, 1.0);
-    frame.icon(button.icon(), centre, 13.0, ink);
+    let size = SIZE * grown;
+    frame.fill_circle(ground, centre, size / 2.0);
+    frame.stroke_rounded(Fill::Solid(Color::hex(0xFFFFFF, 0.22)), centre.x - size / 2.0, centre.y - size / 2.0, size, size, size / 2.0, 1.0);
+    frame.icon(button.icon(), centre, 13.0 * grown, ink);
 }
 
 /// Draws `button` round `centre`: a plate of its own over whatever is under
 /// it, light on a light ground and dark on a dark one; lit, inverted.
-pub fn paint(frame: &dyn Canvas, centre: Point, button: Button, lit: bool, dark: bool, rim: Color) {
+pub fn paint(frame: &dyn Canvas, centre: Point, button: Button, lit: bool, dark: bool, rim: Color, grown: f32) {
     let (light, deep) = (Color::hex(0xFFFFFF, 0.94), Color::hex(0x1E1E1E, 0.94));
     let (plate, mark) = if dark { (deep, Color::hex(0xFFFFFF, 1.0)) } else { (light, Color::hex(0x1A1A1A, 1.0)) };
     let (ground, ink) = if lit { (mark, plate) } else { (plate, mark) };
-    frame.fill_circle(ground, centre, SIZE / 2.0);
-    frame.stroke_rounded(Fill::Solid(rim), centre.x - SIZE / 2.0, centre.y - SIZE / 2.0, SIZE, SIZE, SIZE / 2.0, 1.0);
-    frame.icon(button.icon(), centre, 13.0, ink);
+    let size = SIZE * grown;
+    frame.fill_circle(ground, centre, size / 2.0);
+    frame.stroke_rounded(Fill::Solid(rim), centre.x - size / 2.0, centre.y - size / 2.0, size, size, size / 2.0, 1.0);
+    frame.icon(button.icon(), centre, 13.0 * grown, ink);
 }

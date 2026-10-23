@@ -181,6 +181,40 @@ pub fn asked_from_moved(from: RECT, to: Option<RECT>) {
     }
 }
 
+/// The place the settings last poured into as they closed, and when they were in (see `bounce`).
+static LANDED: std::sync::Mutex<Option<(RECT, Instant)>> = std::sync::Mutex::new(None);
+/// How long the button the settings poured into bounces as they land in it.
+pub const BOUNCE: Duration = Duration::from_millis(450);
+
+/// The button at `button` (physical px) as the settings pour into it: how large it is drawn now (1: as it is), while it
+/// bounces (see `BOUNCE`), they having landed in it. Up at once, a little under, settling: a spring let go.
+pub fn bounce(button: Option<RECT>) -> Option<f32> {
+    let (place, at) = (*LANDED.lock().unwrap())?;
+    let t = at.elapsed().as_secs_f32() / BOUNCE.as_secs_f32();
+    (Some(place) == button && t < 1.0).then(|| grown(t))
+}
+
+/// How large a button bouncing is drawn `t` of the way through (0 to 1): from 1, quickly up to about a fifth larger,
+/// a little under, and back to 1.
+fn grown(t: f32) -> f32 {
+    1.0 + 0.3 * (-6.0 * t).exp() * (2.5 * std::f32::consts::PI * t).sin()
+}
+
+#[cfg(test)]
+mod bounce_tests {
+    /// A button the settings land in grows at once (over a tenth larger within the first fifth), dips a little under
+    /// its size, and settles back to it by the end, never twice as large nor half as small.
+    #[test]
+    fn a_button_landed_in_bounces_and_settles() {
+        let at = |t: f32| super::grown(t);
+        assert!((at(0.0) - 1.0).abs() < 1e-6);
+        assert!((0..=20).map(|step| at(step as f32 / 100.0)).fold(0.0f32, f32::max) > 1.1);
+        assert!((40..=80).map(|step| at(step as f32 / 100.0)).fold(2.0f32, f32::min) < 1.0);
+        assert!((at(1.0) - 1.0).abs() < 0.01);
+        assert!((0..=100).map(|step| at(step as f32 / 100.0)).all(|grown| grown > 0.5 && grown < 2.0));
+    }
+}
+
 /// For tests: as if the settings were open, asked from `place` (none: closed).
 #[cfg(test)]
 pub fn pretend_asked_from(place: Option<RECT>) {
@@ -623,13 +657,16 @@ fn tick(now: Instant) -> Option<Duration> {
             super::genie::reveal(ui.hwnd);
             let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
         }
+        let place = genie.place();
         ui.genie = None;
-        Some(Some((opened, ui.hwnd)))
+        Some(Some((opened, ui.hwnd, place)))
     })
     .flatten();
     match poured {
         Some(None) => return Some(Duration::ZERO),
-        Some(Some((false, hwnd))) => {
+        Some(Some((false, hwnd, place))) => {
+            // (Before the window goes, which tells what they poured into: it bounces as it is drawn again.)
+            *LANDED.lock().unwrap() = Some((place, Instant::now()));
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
             }
@@ -1839,7 +1876,9 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>) -> Option<HWND> {
         if !IsWindowVisible(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
+        crate::perf::mark(|| "settings shown, cloaked".into());
         let _ = SetForegroundWindow(hwnd);
+        crate::perf::mark(|| "settings in front".into());
         if let Some(place) = pours {
             match super::genie::opening(&gfx, hwnd, place) {
                 Some(genie) => {
@@ -5886,7 +5925,7 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_open: false };
+        let probe = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
         let lanes = view::lanes(&probe);
         let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&measure)).collect();
         // (Quick launch as its rail, as the panel lays it out.)
@@ -5909,7 +5948,7 @@ impl Ui {
         let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_open: false };
+        let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
         let lanes = view::lanes(&scene);
 
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);
