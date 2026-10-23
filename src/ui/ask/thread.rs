@@ -233,6 +233,12 @@ impl Dialog {
         }
     }
 
+    /// Whether what the user wrote stands as it is, being sent (or the report closed or opened again): what is sent is
+    /// what is taken away once it is, nothing written meanwhile.
+    pub(super) fn written_fixed(&self) -> bool {
+        self.conversation.as_ref().is_some_and(|conversation| matches!(conversation.state, State::Sending(_)))
+    }
+
     /// Whether what the user wrote may be sent: there is something to send, and nothing is being sent.
     fn sendable(&self) -> bool {
         self.conversation.as_ref().is_some_and(|conversation| self.sendable_while(&conversation.state))
@@ -668,4 +674,40 @@ pub fn pictured(gfx: &Rc<Gfx>, thread: Thread, talk: &Talk, scale: f32) -> ((u32
         pixels = gfx.draw_offscreen(size, scale, |frame| dialog.paint(frame, area)).expect("drawn");
     }
     (size, pixels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the user wrote stands while it is sent: what is taken away once it is sent is what was sent, nothing
+    /// written meanwhile.
+    #[test]
+    fn what_is_written_stands_while_it_is_sent() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = Rc::new(Gfx::new().expect("graphics"));
+        let own = OwnText { words: String::new(), hint: String::new(), pictures: String::new(), add: String::new(), ways: String::new(), paste: String::new(), waiting: String::new(), kinds: String::new() };
+        let mut dialog = Dialog::new(gfx.clone(), false, "", "", Some(own));
+        dialog.option = Some((String::new(), false));
+        let state = State::Writing;
+        let turns = (String::new(), String::new());
+        dialog.conversation = Some(Conversation { owner: HWND::default(), told: 0, about: String::new(), status: String::new(), tone: Tone::Open, note: String::new(), items: Vec::new(), you: String::new(), closable: true, turns, state, header: 0.0, _showing: crate::ui::life::Showing::of(&gfx) });
+        dialog.focus = Hit::Words;
+        let write = |dialog: &mut Dialog, text: &str| text.encode_utf16().for_each(|unit| dialog.char(unit));
+        write(&mut dialog, "ab");
+        let set = |dialog: &mut Dialog, state: State| dialog.conversation.as_mut().unwrap().state = state;
+        set(&mut dialog, State::Sending(String::new()));
+        write(&mut dialog, "c");
+        dialog.type_key(VK_BACK, false, false);
+        dialog.type_key(VK_RETURN, false, false);
+        dialog.activate(Hit::Option);
+        assert_eq!((dialog.typing.string(), dialog.option.as_ref().unwrap().1), ("ab".to_string(), false));
+        // The caret still goes where it is sent.
+        dialog.type_key(VK_LEFT, false, false);
+        assert_eq!(dialog.typing.caret, 1);
+        set(&mut dialog, State::Writing);
+        write(&mut dialog, "c");
+        dialog.activate(Hit::Option);
+        assert_eq!((dialog.typing.string(), dialog.option.as_ref().unwrap().1), ("acb".to_string(), true));
+    }
 }

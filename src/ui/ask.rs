@@ -541,6 +541,9 @@ impl Dialog {
     }
 
     fn add(&mut self, more: Vec<Picture>) {
+        if self.written_fixed() {
+            return;
+        }
         self.pictures.extend(more);
         self.pictures.truncate(PICTURES_MOST);
         self.redraw();
@@ -565,6 +568,7 @@ impl Dialog {
                 let _ = PostMessageW(Some(self.hwnd), CHOOSE, WPARAM(0), LPARAM(0));
             },
             Hit::Paste => self.paste_pictures(),
+            Hit::Option | Hit::Remove(_) if self.written_fixed() => {}
             Hit::Option => {
                 if let Some((_, ticked)) = &mut self.option {
                     *ticked = !*ticked;
@@ -685,6 +689,7 @@ impl Dialog {
 
     /// A key pressed while words are written: the caret moved, words taken away, copied or pasted.
     fn type_key(&mut self, key: VIRTUAL_KEY, shift: bool, ctrl: bool) {
+        let fixed = self.written_fixed();
         let typing = &mut self.typing;
         match key {
             VK_LEFT | VK_RIGHT => {
@@ -706,6 +711,7 @@ impl Dialog {
                 let (start, end) = line_of(&self.words_layout(), self.typing.caret);
                 self.typing.go(if key == VK_HOME { start } else { end }, shift);
             }
+            VK_BACK | VK_DELETE | VK_RETURN if fixed => return,
             VK_BACK | VK_DELETE => typing.erase(key == VK_DELETE),
             VK_RETURN => typing.put(&[u16::from(b'\n')]),
             VK_A if ctrl => {
@@ -716,11 +722,12 @@ impl Dialog {
                 let selection = typing.selection();
                 if !selection.is_empty() {
                     copy_text(self.hwnd, &self.typing.text[selection]);
-                    if key == VK_X {
+                    if key == VK_X && !fixed {
                         self.typing.put(&[]);
                     }
                 }
             }
+            VK_V if ctrl && fixed => return,
             VK_V if ctrl => {
                 let pasted = clipboard_text(self.hwnd);
                 self.typing.put(&pasted);
@@ -734,7 +741,7 @@ impl Dialog {
     /// A character typed (or given by the input method), one UTF-16 unit at a time.
     fn char(&mut self, unit: u16) {
         // (Control characters come of keys taken as keys: Enter, Backspace, Ctrl with a letter.)
-        if self.focus != Hit::Words || unit < 0x20 || unit == 0x7F {
+        if self.focus != Hit::Words || unit < 0x20 || unit == 0x7F || self.written_fixed() {
             return;
         }
         self.typing.put(&[unit]);

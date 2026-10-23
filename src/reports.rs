@@ -163,17 +163,19 @@ fn forget_old(kept: &mut Kept, now: u64) -> Vec<Report> {
     old
 }
 
-/// What the site is asked, of the reports kept (the latest first, as many as it answers): each one's id, its secret
-/// and the highest number heard of it. Nothing else. None with no report to ask about.
-fn asking(kept: &Kept) -> Option<String> {
-    let mut latest: Vec<&Report> = kept.reports.iter().collect();
+/// What the site is asked, of the reports kept that `of` takes (the latest first), in as many askings as it takes, each
+/// naming as many as the site answers: each one's id, its secret and the highest number heard of it. Nothing else.
+/// None with no report to ask about.
+fn asking(kept: &Kept, of: impl Fn(&Report) -> bool) -> Vec<String> {
+    let mut latest: Vec<&Report> = kept.reports.iter().filter(|report| of(report)).collect();
     latest.sort_by_key(|report| std::cmp::Reverse(report.active()));
-    let asked: Vec<serde_json::Value> = latest
-        .into_iter()
-        .take(ASKED_MOST)
-        .map(|report| serde_json::json!({ "id": report.id, "secret": report.secret, "after": report.heard }))
-        .collect();
-    (!asked.is_empty()).then(|| serde_json::json!({ "reports": asked }).to_string())
+    latest
+        .chunks(ASKED_MOST)
+        .map(|some| {
+            let asked: Vec<serde_json::Value> = some.iter().map(|report| serde_json::json!({ "id": report.id, "secret": report.secret, "after": report.heard })).collect();
+            serde_json::json!({ "reports": asked }).to_string()
+        })
+        .collect()
 }
 
 /// The site's answer (`body`) taken into `kept`: each message of a report kept, of a kind Glance knows and not heard
@@ -397,24 +399,41 @@ pub fn follow() {
 }
 
 /// What is new in the reports followed, asked of the site and kept: each report with news, and what is newest in it.
+/// Then, all of them heard, those quiet too long forgotten (a reply that came near their end is heard first: asked
+/// of no more, it never would be).
 fn hear() -> Vec<(String, Message)> {
-    let now = now();
-    let (asked, forgotten) = with_changing(|kept| {
-        let forgotten = forget_old(kept, now);
-        let changed = !forgotten.is_empty();
-        ((asking(kept), forgotten), changed)
-    });
-    forgotten.iter().for_each(forget_pictures);
-    let Some(asked) = asked else { return Vec::new() };
-    let Some(answer) = crate::update::post(&format!("{}/api/report/news", crate::update::own_site()), asked.as_bytes()) else {
-        crate::journal::note("reports: no answer from the site");
-        return Vec::new();
-    };
-    with_changing(|kept| {
-        let told = heard(kept, &answer);
-        let changed = !told.is_empty();
-        (told, changed)
-    })
+    let (told, all_heard) = hear_of(|_| true);
+    if all_heard {
+        let now = now();
+        let forgotten = with_changing(|kept| {
+            let forgotten = forget_old(kept, now);
+            let changed = !forgotten.is_empty();
+            (forgotten, changed)
+        });
+        forgotten.iter().for_each(forget_pictures);
+    }
+    told
+}
+
+/// What is new in the reports followed that `of` takes, asked of the site and kept: each report with news, and what is
+/// newest in it; and whether the site answered every asking.
+fn hear_of(of: impl Fn(&Report) -> bool) -> (Vec<(String, Message)>, bool) {
+    let askings = with(false, |kept| asking(kept, of));
+    let mut told = Vec::new();
+    let mut all_heard = true;
+    for asked in askings {
+        let Some(answer) = crate::update::post(&format!("{}/api/report/news", crate::update::own_site()), asked.as_bytes()) else {
+            crate::journal::note("reports: no answer from the site");
+            all_heard = false;
+            continue;
+        };
+        told.extend(with_changing(|kept| {
+            let told = heard(kept, &answer);
+            let changed = !told.is_empty();
+            (told, changed)
+        }));
+    }
+    (told, all_heard)
 }
 
 /// Adds the user's `words` (and `diagnostics`, if they agreed to send them), with their `pictures`, to the report
@@ -461,7 +480,9 @@ pub fn turn(id: &str, close: bool) -> bool {
     let sent = serde_json::json!({ "id": id, "secret": secret, "status": status, "version": env!("CARGO_PKG_VERSION") }).to_string();
     let Some(answer) = crate::update::post(&format!("{}/api/report/status", crate::update::own_site()), sent.as_bytes()) else { return false };
     let Ok(answer) = serde_json::from_slice::<serde_json::Value>(&answer) else { return false };
+    // (Standing so already, set so by the owner meanwhile: what was set heard at once, its thread shown as it is.)
     if answer["same"] == true {
+        let _ = hear_of(|report| report.id == id);
         return true;
     }
     let (Some(n), Some(ts)) = (answer["n"].as_u64(), answer["ts"].as_u64()) else { return false };
@@ -601,7 +622,7 @@ mod tests {
     fn the_asking_names_nothing_but_the_reports_and_their_proof() {
         let mut kept = Kept { reports: vec![report("KQRH9F", 10 * DAY), report("ABCDEF", 20 * DAY)] };
         kept.reports[1].heard = 7;
-        let asked: serde_json::Value = serde_json::from_str(&asking(&kept).unwrap()).unwrap();
+        let asked: serde_json::Value = serde_json::from_str(&asking(&kept, |_| true)[0]).unwrap();
         let fields: Vec<&String> = asked.as_object().unwrap().keys().collect();
         assert_eq!(fields, ["reports"]);
         let reports = asked["reports"].as_array().unwrap();
@@ -613,16 +634,21 @@ mod tests {
             keys.sort();
             assert_eq!(keys, ["after", "id", "secret"]);
         }
-        let text = asking(&kept).unwrap();
+        let text = asking(&kept, |_| true).concat();
         for absent in [env!("CARGO_PKG_VERSION"), "主板", "sent", "words"] {
             assert!(!text.contains(absent), "{absent} in {text}");
         }
         // None kept: nothing asked at all.
-        assert_eq!(asking(&Kept::default()), None);
-        // No more than the site answers.
+        assert!(asking(&Kept::default(), |_| true).is_empty());
+        // No more in one asking than the site answers, and all of them asked of: the latest first.
         let many = Kept { reports: (0..30).map(|at| report(&format!("R{at:05}"), at * DAY)).collect() };
-        let asked: serde_json::Value = serde_json::from_str(&asking(&many).unwrap()).unwrap();
-        assert_eq!(asked["reports"].as_array().unwrap().len(), ASKED_MOST);
+        let askings: Vec<serde_json::Value> = asking(&many, |_| true).iter().map(|text| serde_json::from_str(text).unwrap()).collect();
+        let sizes: Vec<usize> = askings.iter().map(|asked| asked["reports"].as_array().unwrap().len()).collect();
+        assert_eq!(sizes, [ASKED_MOST, 30 - ASKED_MOST]);
+        assert_eq!((askings[0]["reports"][0]["id"].as_str(), askings[1]["reports"][9]["id"].as_str()), (Some("R00029"), Some("R00000")));
+        // One alone, where one is asked of.
+        let one: serde_json::Value = serde_json::from_str(&asking(&many, |report| report.id == "R00003")[0]).unwrap();
+        assert_eq!(one["reports"].as_array().unwrap().len(), 1);
     }
 
     /// A report is followed for 90 days after anything last happened in it, then forgotten.
@@ -650,7 +676,7 @@ mod tests {
         assert_eq!((told[1].0.as_str(), told[1].1.kind), ("ABCDEF", Kind::Fixed));
         assert!(heard(&mut kept, &answer).is_empty());
         assert_eq!(kept.reports[0].thread.len(), 2);
-        let asked: serde_json::Value = serde_json::from_str(&asking(&kept).unwrap()).unwrap();
+        let asked: serde_json::Value = serde_json::from_str(&asking(&kept, |_| true)[0]).unwrap();
         assert!(asked["reports"].as_array().unwrap().iter().any(|one| one["id"] == "KQRH9F" && one["after"] == 4));
         // Unread till read, and the status as last set.
         assert!(kept.reports.iter().all(Report::unread));
