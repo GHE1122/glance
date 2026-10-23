@@ -305,21 +305,71 @@ pub fn back_into(window: HWND, place: RECT) -> Option<RECT> {
     icon.filter(|icon| reachable(shows, *icon)).or_else(|| reachable(shows, place).then_some(place))
 }
 
-/// Whether a window showing at `shows` pours into the place `place` or out of it: on its screen (see `on_one_screen`),
-/// and not under it. (A place under the window has no side of the window to pour through: its mouth, kept at the
-/// window's nearest side, poured into the window's edge above the place, far from it.)
+/// Whether a window showing at `shows` pours into the place `place` or out of it: not under it, and all the way on the
+/// screens (see `shown_whole`), across as many as it goes. (A place under the window has no side of the window to pour
+/// through: its mouth, kept at the window's nearest side, poured into the window's edge above the place, far from it.)
 fn reachable(shows: RECT, place: RECT) -> bool {
     let (x, y) = ((place.left + place.right) / 2, (place.top + place.bottom) / 2);
     let under = shows.left <= x && x < shows.right && shows.top <= y && y < shows.bottom;
-    on_one_screen(shows, place) && !under
+    !under && shown_whole(shows, place, &screens())
 }
 
-/// Whether a window showing at `shows` and the place `place` are on one screen (each where most of it is): only so is
-/// the window poured between them. (Between two screens it went through where no screen is, cut off there, pouring
-/// out of sight: into the tray's icon on another screen than the settings', it went off the top of theirs.)
-fn on_one_screen(shows: RECT, place: RECT) -> bool {
-    use windows::Win32::Graphics::Gdi::{MonitorFromRect, MONITOR_DEFAULTTONEAREST};
-    unsafe { MonitorFromRect(&shows, MONITOR_DEFAULTTONEAREST) == MonitorFromRect(&place, MONITOR_DEFAULTTONEAREST) }
+/// How many frames of its pouring are looked at to tell whether it shows whole (see `shown_whole`): about as many as it
+/// draws on a fast screen (`LASTS` at 144 a second).
+const LOOKED_AT: u32 = 48;
+
+/// How much of what it draws, all through, may be where no screen shows it, and it still shows whole: a sliver past a
+/// screen's edge (the settings a few pixels wider than the screen under them, on their way into its corner), not a
+/// way through where no screen is, which loses far more.
+const UNSEEN_MOST: f32 = 0.01;
+
+/// Whether a window showing at `shows`, pouring into `place` (or out of it), shows whole: all but `UNSEEN_MOST` of every
+/// line of it, all through, where one of `screens` shows it, as it passes from screen to screen where they meet.
+/// (Between two screens with no screen between them, it went through where nothing shows, cut off there.)
+fn shown_whole(shows: RECT, place: RECT, screens: &[RECT]) -> bool {
+    let way = Way::between(shows, place);
+    let size = ((shows.right - shows.left).max(1) as u32, (shows.bottom - shows.top).max(1) as u32);
+    let (mut drawn, mut unseen) = (0.0, 0.0);
+    for frame in 0..=LOOKED_AT {
+        for (at, _) in lines(&way, size, frame as f32 / LOOKED_AT as f32) {
+            let (long, off) = off_screens(at, screens);
+            drawn += long;
+            unseen += off;
+        }
+    }
+    unseen <= drawn * UNSEEN_MOST
+}
+
+/// How long the line `at` (a row or a column, a pixel or so thick) is, and how much of it, along its middle, is where
+/// none of `screens` shows.
+fn off_screens(at: D2D_RECT_F, screens: &[RECT]) -> (f32, f32) {
+    let row = at.right - at.left >= at.bottom - at.top;
+    // (Along it, from and to; across it, its middle.)
+    let (from, to, middle) = if row { (at.left, at.right, (at.top + at.bottom) / 2.0) } else { (at.top, at.bottom, (at.left + at.right) / 2.0) };
+    let long = (to - from).max(0.0);
+    // (Screens do not overlap: what each shows of it, summed.)
+    let shown: f32 = screens
+        .iter()
+        .map(|s| if row { ((s.top as f32, s.bottom as f32), (s.left as f32, s.right as f32)) } else { ((s.left as f32, s.right as f32), (s.top as f32, s.bottom as f32)) })
+        .filter(|((low, high), _)| *low <= middle && middle < *high)
+        .map(|(_, (start, end))| (end.min(to) - start.max(from)).max(0.0))
+        .sum();
+    (long, (long - shown).max(0.0))
+}
+
+/// The screens, where each is (physical px).
+fn screens() -> Vec<RECT> {
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+    unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, found: windows::Win32::Foundation::LPARAM) -> windows::core::BOOL {
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+            unsafe { &mut *(found.0 as *mut Vec<RECT>) }.push(info.rcMonitor);
+        }
+        true.into()
+    }
+    let mut screens = Vec::new();
+    let _ = unsafe { EnumDisplayMonitors(None, None, Some(each), windows::Win32::Foundation::LPARAM(&mut screens as *mut Vec<RECT> as isize)) };
+    screens
 }
 
 /// Whether one of Glance's own windows is what shows at the middle of `place` on the screen, `window` left out: the first
@@ -545,28 +595,18 @@ mod tests {
         assert!(super::reachable(window, rect(1960, -963, 1987, -936)));
     }
 
-    /// A window pours only into a place on its own screen: a place on it is, one on each other screen this PC has is not.
+    /// A window pours across screens where they meet along its way (as the owner's: a wide screen over the main one,
+    /// the tray's icon at the main one's corner), not where its way passes where no screen is (down past the wide
+    /// screen's left, beside the main one, to a tall screen's foot).
     #[test]
-    fn it_pours_only_within_one_screen() {
-        use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
-        unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, found: windows::Win32::Foundation::LPARAM) -> windows::core::BOOL {
-            let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-            if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
-                unsafe { &mut *(found.0 as *mut Vec<RECT>) }.push(info.rcMonitor);
-            }
-            true.into()
-        }
-        let mut screens: Vec<RECT> = Vec::new();
-        let _ = unsafe { EnumDisplayMonitors(None, None, Some(each), windows::Win32::Foundation::LPARAM(&mut screens as *mut _ as isize)) };
-        let middle = |screen: &RECT, half: i32| {
-            let (x, y) = ((screen.left + screen.right) / 2, (screen.top + screen.bottom) / 2);
-            rect(x - half, y - half, x + half, y + half)
-        };
-        let window = middle(&screens[0], 300);
-        assert!(super::on_one_screen(window, middle(&screens[0], 10)));
-        for other in &screens[1..] {
-            assert!(!super::on_one_screen(window, middle(other, 10)));
-        }
+    fn it_pours_across_screens_where_they_meet() {
+        let screens = [rect(-2905, -1459, -745, 2381), rect(-745, -1440, 2695, 0), rect(0, 0, 1920, 1080)];
+        let window = rect(9, -1290, 1941, -159);
+        assert!(super::shown_whole(window, rect(1880, 1040, 1904, 1064), &screens));
+        assert!(super::shown_whole(window, rect(2628, -110, 2671, -66), &screens));
+        assert!(!super::shown_whole(window, rect(-1000, 2000, -970, 2030), &screens));
+        // On one screen alone, a place beyond its edge where no screen is: not.
+        assert!(!super::shown_whole(window, rect(2000, 500, 2030, 530), &screens[1..2]));
     }
 
     /// The window bends and slides together from rest: wherever its sides are bent at all it is still on its way (it
