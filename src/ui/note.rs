@@ -1686,18 +1686,33 @@ impl Writing {
     /// composed): read again, what was chosen kept as far as the words go. (With something waiting, it is kept apart as it
     /// is kept: see `keep`. Deleted outside: left as it is, kept apart likewise.)
     pub fn read_outside(&mut self) {
-        if self.unkept || self.editor.composing() {
+        if !self.readable() {
             return;
         }
         let Some(name) = self.name.clone() else { return };
         let Some((text, stamp)) = crate::notes::folder_at(self.folder.clone()).read(&name) else { return };
+        self.take_outside(&text, stamp);
+    }
+
+    /// Whether it may be read again: not over what is written here and not yet taken in, in its words or in a table's
+    /// cell, nor as the input method composes in either (taken in, it is kept, and that is read again then).
+    fn readable(&self) -> bool {
+        let cell_busy = self.cell.borrow().as_ref().is_some_and(|cell| cell.editor.composing() || cell.editor.changed());
+        !(self.unkept || self.editor.composing() || self.editor.changed() || cell_busy)
+    }
+
+    /// Its file as read (`text`, as `stamp` says it was) taken in, where it changed since it was last read or kept.
+    fn take_outside(&mut self, text: &str, stamp: crate::notes::store::Stamp) {
         if self.stamp.is_some_and(|was| was.same(&stamp)) {
             return;
         }
         // (A link being written there left: what it was for is written anew.)
         link::end(&self.link, link::Ending::Left);
+        // (A cell written in left as it was: its words, as they were, are not the note's now. Opened again on the
+        // words read, where the caret still is in its table: see `written`.)
+        self.close_cell();
         let chosen = self.editor.selection();
-        self.editor.set_text(&text);
+        self.editor.set_text(text);
         self.editor.select(chosen);
         self.stamp = Some(stamp);
         self.written_ms = stamp.written_ms;
@@ -2455,8 +2470,12 @@ mod tests {
         assert_eq!(open(&writing), Some((1, 1)));
         answer(hwnd, WM_LBUTTONUP, WPARAM(0), at((cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2));
         key(&mut writing, VK_END);
+        assert!(!writing.unkept);
         typed(&mut writing, "z|");
         assert_eq!(written(&writing), "前\n\n| 甲 | 乙 |\n| - | - |\n| x | yz\\| |\n\n后");
+        // (Written in a cell alone, the note is to be kept: it was dressed again as the cell's words came into it.)
+        assert!(writing.unkept);
+        writing.unkept = false;
         // Tab past the last cell: a row more, written in at its first.
         key(&mut writing, VK_TAB);
         assert_eq!(open(&writing), Some((2, 0)));
@@ -2474,8 +2493,10 @@ mod tests {
         shift(false);
         assert_eq!(open(&writing), Some((1, 1)));
         assert_eq!(writing.chosen(), (0, 4));
+        writing.unkept = false;
         writing.write(super::Write::Table(crate::notes::table::Change::RowAbove));
         writing.written();
+        assert!(writing.unkept);
         assert_eq!(open(&writing), Some((1, 1)));
         assert_eq!(written(&writing), "前\n\n| 甲 | 乙 |\n|---|---|\n|  |  |\n| x | yz\\| |\n| 新 |  |\n\n后");
         // Down off its last row: on the line after it. Up: back in its last row.
@@ -2495,6 +2516,30 @@ mod tests {
         assert_eq!(writing.editor.selection(), (2, 2));
         key(&mut writing, VK_RIGHT);
         assert_eq!(open(&writing), Some((0, 0)));
+        // Its file written over outside, all here kept: read again, the cell written in shows its words as read, and
+        // what is written in it next goes into them, not into its words as they were.
+        writing.unkept = false;
+        let store = crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" };
+        let read_outside = |writing: &mut super::Writing| {
+            if writing.readable() {
+                let (text, stamp) = store.read("t.md").unwrap();
+                writing.take_outside(&text, stamp);
+            }
+        };
+        std::fs::write(folder.join("t.md"), "前\n\n| 丙 | 乙 |\n| - | - |\n| x | y |\n\n后").unwrap();
+        read_outside(&mut writing);
+        writing.written();
+        assert_eq!(open(&writing), Some((0, 0)));
+        assert_eq!(writing.cell.borrow().as_ref().unwrap().editor.words(), "丙");
+        typed(&mut writing, "丁");
+        assert_eq!(written(&writing), "前\n\n| 丙丁 | 乙 |\n| - | - |\n| x | y |\n\n后");
+        // Not read over what is written in a cell and not yet taken in.
+        std::fs::write(folder.join("t.md"), "前\n\n| 戊 | 乙 |\n| - | - |\n| x | y |\n\n后").unwrap();
+        writing.unkept = false;
+        answer(hwnd, WM_CHAR, WPARAM(usize::from(b'!')), LPARAM(0));
+        read_outside(&mut writing);
+        writing.written();
+        assert_eq!(written(&writing), "前\n\n| 丙丁! | 乙 |\n| - | - |\n| x | y |\n\n后");
         // (Its boxes' text services shut down while their window is there.)
         drop(answer);
         drop(writing);

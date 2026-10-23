@@ -208,6 +208,11 @@ impl Editor {
         self.kept.changed.set(false);
     }
 
+    /// Whether what is written changed since `take_changed` was last asked (not asking it).
+    pub fn changed(&self) -> bool {
+        self.kept.changed.get()
+    }
+
     /// Whether what is written changed since this was last asked.
     pub fn take_changed(&self) -> bool {
         self.kept.changed.replace(false)
@@ -298,6 +303,8 @@ impl Editor {
         // pixels.)
         let pixels = palette.points / 0.75;
         let space = space_width(&palette.face, pixels.round());
+        // (Dressing is no writing: what was written before it, not yet asked about, still was.)
+        let written = self.kept.changed.get();
         unsafe {
             let _ = document.Undo(tomSuspend.0);
             let _ = document.Freeze();
@@ -377,8 +384,7 @@ impl Editor {
             }
             let _ = document.Undo(tomResume.0);
         }
-        // (Dressing is no writing.)
-        self.kept.changed.set(false);
+        self.kept.changed.set(written);
     }
 
     /// All its words set in their lines as `align` says (a table's cell's, as its column is set), kept out of what undo
@@ -392,6 +398,8 @@ impl Editor {
             Align::Centre => 1,
             Align::Right => 2,
         };
+        // (Setting them so is no writing: what was written before, not yet asked about, still was.)
+        let written = self.kept.changed.get();
         unsafe {
             let _ = document.Undo(tomSuspend.0);
             if let Ok(para) = document.Range(0, i32::MAX).and_then(|all| all.GetPara()) {
@@ -399,7 +407,7 @@ impl Editor {
             }
             let _ = document.Undo(tomResume.0);
         }
-        self.kept.changed.set(false);
+        self.kept.changed.set(written);
     }
 
     /// Where the character at `at` (UTF-16 units) is drawn (in the window): from its left and its line's top to where
