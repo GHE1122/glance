@@ -43,14 +43,17 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
             }
         }
         // A file come lately: put on the clipboard as a file (pressed again within a double click's time, opened).
-        Hit::Recent(file) => {
+        // Files come together: put on the clipboard (pressed again, their folder opened, showing them chosen: opened,
+        // a phone's photos would open hundreds of windows).
+        Hit::Recent(entry) => {
             let double = std::time::Duration::from_millis(u64::from(unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }));
-            static LAST_FILE: std::sync::Mutex<Option<(recent::Key, std::time::Instant)>> = std::sync::Mutex::new(None);
+            static LAST_FILE: std::sync::Mutex<Option<(recent::Entry, std::time::Instant)>> = std::sync::Mutex::new(None);
             let mut last = LAST_FILE.lock().unwrap();
-            let again = last.is_some_and(|(was, at)| was == file && at.elapsed() <= double);
-            *last = (!again).then(|| (file, std::time::Instant::now()));
-            if let Some(path) = recent::path_of(file) {
-                run::ask(run::Ask::Files(vec![path], if again { run::FilesAct::Open } else { run::FilesAct::Copy }));
+            let again = last.is_some_and(|(was, at)| was == entry && at.elapsed() <= double);
+            *last = (!again).then(|| (entry, std::time::Instant::now()));
+            if let Some(paths) = recent::paths_of(entry) {
+                let opened = if matches!(entry, recent::Entry::Burst(..)) { run::FilesAct::Show } else { run::FilesAct::Open };
+                run::ask(run::Ask::Files(paths, if again { opened } else { run::FilesAct::Copy }));
             }
         }
         _ => return false,
@@ -113,14 +116,14 @@ pub fn chose(id: u64, choice: Choice) {
 }
 
 /// What a thing pressed on a station's lane and moved far enough (see `run::drag_begins`) drags off: a thing on it, or
-/// copied lately, as the station gives it; a file come lately, where it is (pressed on a window of the thread
-/// numbered `thread`). Whether it was one dragged.
+/// copied lately, as the station gives it, or a file come lately (or files come together), where it is (pressed on a
+/// window of the thread numbered `thread`). Whether it was one dragged.
 pub fn drag_off(hit: crate::ui::view::Hit, thread: u32) -> bool {
     use crate::ui::view::Hit;
     match hit {
         Hit::Shelf(id) | Hit::Copied(id) => run::ask(run::Ask::DragOut(id, thread)),
-        Hit::Recent(file) => match recent::path_of(file) {
-            Some(path) => run::ask(run::Ask::DragFiles(vec![path], thread)),
+        Hit::Recent(entry) => match recent::paths_of(entry) {
+            Some(paths) => run::ask(run::Ask::DragFiles(paths, thread)),
             None => return false,
         },
         _ => return false,
@@ -129,7 +132,8 @@ pub fn drag_off(hit: crate::ui::view::Hit, thread: u32) -> bool {
 }
 
 /// What a file come lately's menu does: opens it, shows it in Explorer, puts it on the station, copies its path, lists
-/// no more of its folder's files.
+/// no more of its folder's files. (Files come together: their folder opened showing them, all put on the station, the
+/// folder's path copied.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RecentChoice {
     Open,
@@ -139,35 +143,53 @@ pub enum RecentChoice {
     Hide,
 }
 
-/// The menu of the file come lately numbered `file` (a right click on it), at `at` on the screen: up, with what its
+/// The menu of `entry` among the files come lately (a right click on it), at `at` on the screen: up, with what its
 /// rows do.
-pub fn recent_menu(file: recent::Key, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<RecentChoice>)> {
+pub fn recent_menu(entry: recent::Entry, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<RecentChoice>)> {
     use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
-    recent::path_of(file)?;
+    recent::paths_of(entry)?;
     let lang = crate::update::language();
-    let rows: [(RecentChoice, &str, Icon, bool); 5] = [
-        (RecentChoice::Open, lang.pick("打开", "Open"), Icon::File, false),
-        (RecentChoice::Show, lang.pick("在资源管理器中显示", "Show in Explorer"), Icon::Panel, false),
-        (RecentChoice::Station, lang.pick("放入中转站", "Put on the station"), Icon::Inbox, false),
-        (RecentChoice::CopyPath, lang.pick("复制路径", "Copy its path"), Icon::Clipboard, false),
-        (RecentChoice::Hide, lang.pick("不再列出这个文件夹", "List this folder no more"), Icon::EyeOff, true),
-    ];
+    let rows: Vec<(RecentChoice, &str, Icon, bool)> = match entry {
+        recent::Entry::File(_) => vec![
+            (RecentChoice::Open, lang.pick("打开", "Open"), Icon::File, false),
+            (RecentChoice::Show, lang.pick("在资源管理器中显示", "Show in Explorer"), Icon::Panel, false),
+            (RecentChoice::Station, lang.pick("放入中转站", "Put on the station"), Icon::Inbox, false),
+            (RecentChoice::CopyPath, lang.pick("复制路径", "Copy its path"), Icon::Clipboard, false),
+            (RecentChoice::Hide, lang.pick("不再列出这个文件夹", "List this folder no more"), Icon::EyeOff, true),
+        ],
+        recent::Entry::Burst(..) => vec![
+            (RecentChoice::Show, lang.pick("打开所在文件夹", "Open their folder"), Icon::Panel, false),
+            (RecentChoice::Station, lang.pick("全部放入中转站", "Put them all on the station"), Icon::Inbox, false),
+            (RecentChoice::CopyPath, lang.pick("复制文件夹路径", "Copy the folder's path"), Icon::Clipboard, false),
+            (RecentChoice::Hide, lang.pick("不再列出这个文件夹", "List this folder no more"), Icon::EyeOff, true),
+        ],
+    };
     let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, mark: Some(crate::ui::menu::Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
     let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect()))
 }
 
-/// `choice` made in the menu of the file come lately numbered `file` (see `recent_menu`): done.
-pub fn recent_chose(file: recent::Key, choice: RecentChoice) {
-    let Some(path) = recent::path_of(file) else { return };
+/// `choice` made in the menu of `entry` among the files come lately (see `recent_menu`): done.
+pub fn recent_chose(entry: recent::Entry, choice: RecentChoice) {
+    let Some(paths) = recent::paths_of(entry) else { return };
+    // (The files come together are in one folder.)
+    let folder = paths.first().and_then(|path| path.parent()).map(std::path::Path::to_path_buf);
     match choice {
-        RecentChoice::Open => run::ask(run::Ask::Files(vec![path], run::FilesAct::Open)),
-        RecentChoice::Show => run::ask(run::Ask::Files(vec![path], run::FilesAct::Show)),
-        RecentChoice::Station => run::ask(run::Ask::Take(clipboard::Content::Files(vec![path]))),
-        RecentChoice::CopyPath => run::ask(run::Ask::CopyText(path.display().to_string())),
+        RecentChoice::Open => run::ask(run::Ask::Files(paths, run::FilesAct::Open)),
+        RecentChoice::Show => run::ask(run::Ask::Files(paths, run::FilesAct::Show)),
+        RecentChoice::Station => run::ask(run::Ask::Take(clipboard::Content::Files(paths))),
+        RecentChoice::CopyPath => {
+            let copied = match entry {
+                recent::Entry::File(_) => paths.first().cloned(),
+                recent::Entry::Burst(..) => folder,
+            };
+            if let Some(copied) = copied {
+                run::ask(run::Ask::CopyText(copied.display().to_string()));
+            }
+        }
         RecentChoice::Hide => {
-            if let Some(folder) = path.parent().map(std::path::Path::to_path_buf) {
+            if let Some(folder) = folder {
                 std::thread::spawn(move || crate::app().change(|settings| if !settings.recent_hidden.contains(&folder) { settings.recent_hidden.push(folder) }));
             }
         }

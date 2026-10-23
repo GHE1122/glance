@@ -311,7 +311,7 @@ thread_local! {
 
 /// What quick launch's adding lists: the Start menu's programs, files used lately, the folders they are in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Kinds {
+pub(crate) enum Kinds {
     Programs,
     Files,
     Folders,
@@ -1925,7 +1925,7 @@ impl Beside {
 
 /// What is chosen on the PC, in Windows' own chooser over `hwnd` (the page), as the kind listed (`kind`) asks:
 /// programs (or shortcuts to them), any files, or folders, several at once; none where it is closed.
-fn choose(hwnd: HWND, kind: Kinds, lang: super::text::Lang) -> Vec<std::path::PathBuf> {
+pub(crate) fn choose(hwnd: HWND, kind: Kinds, lang: super::text::Lang) -> Vec<std::path::PathBuf> {
         use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
         use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
         use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_NODEREFERENCELINKS, FOS_PICKFOLDERS, SIGDN_FILESYSPATH};

@@ -1451,8 +1451,9 @@ enum MenuFor {
     /// The station's head's (see `station::head_menu`).
     /// (And the widget it was opened on: none, the panel.)
     StationHead(Vec<crate::station::HeadChoice>, Option<HWND>),
-    /// A file come lately, by its number, and what each row does (see `station::recent_menu`).
-    Recent(crate::station::recent::Key, Vec<crate::station::RecentChoice>),
+    /// A file come lately (or files come together), as its row names it, and what each row does (see
+    /// `station::recent_menu`).
+    Recent(crate::station::recent::Entry, Vec<crate::station::RecentChoice>),
     /// A thing kept at hand, as its menu was opened on it, and what each row does (see `station::app_menu`).
     App(crate::station::apps::App, Vec<crate::station::AppChoice>),
     /// A note stuck on the desktop, by its name, and what each row does (see `Widgets::note_menu`).

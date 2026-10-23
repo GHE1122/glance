@@ -784,8 +784,27 @@ fn module_fields(id: &str) -> &'static [Field] {
     match id {
         "network" => &[Field::RateUnit],
         "processes" => &[Field::ProcessCount],
-        "station" => &[Field::StationHidden, Field::StationKeep, Field::StationCopy, Field::StationAfterDrag],
+        "station" => &[Field::StationKeep, Field::StationCopy, Field::StationAfterDrag],
         _ => &[],
+    }
+}
+
+/// The drives Recent files' rows offer (see `Row::Drive`), by their letters: `drives`, those it reads now, and those
+/// of `hidden` (left out) that are away, as they were last seen, to be listed again.
+fn drives_offered(drives: &[crate::station::recent::Volume], hidden: &[crate::settings::HiddenDrive]) -> Vec<crate::station::recent::Volume> {
+    let away = hidden.iter().filter(|hidden| !drives.iter().any(|drive| drive.volume == hidden.volume));
+    let mut offered: Vec<crate::station::recent::Volume> = drives.iter().cloned().chain(away.map(|hidden| crate::station::recent::Volume { letter: hidden.letter, volume: hidden.volume.clone(), label: hidden.label.clone() })).collect();
+    offered.sort_by_key(|drive| drive.letter);
+    offered
+}
+
+/// The drive of `volume` listed by Recent files again, where it is among those left out (`hidden`), or else left
+/// out, kept with its label and letter (as `drives`, those read now, have them) to name it while it is away.
+fn turn_drive(hidden: &mut Vec<crate::settings::HiddenDrive>, drives: &[crate::station::recent::Volume], volume: &str) {
+    if hidden.iter().any(|drive| drive.volume == volume) {
+        hidden.retain(|drive| drive.volume != volume);
+    } else if let Some(drive) = drives.iter().find(|drive| drive.volume == volume) {
+        hidden.push(crate::settings::HiddenDrive { volume: drive.volume.clone(), label: drive.label.clone(), letter: drive.letter });
     }
 }
 
@@ -911,8 +930,9 @@ enum Field {
     /// The player music is followed from (see `Ui::sources`).
     MusicSource,
     /// The station's (see `settings::StationSettings`): the folders the files come lately are not listed from (all
-    /// listed again), how long what is not pinned stays, files kept as a copy too, and what is dragged off it taken off.
-    /// (What is copied kept, and the files come lately listed, are its items: see `Ui::items_here`.)
+    /// listed again: under Recent files' group, see `Ui::recent_rows`), how long what is not pinned stays, files kept
+    /// as a copy too, and what is dragged off it taken off. (What is copied kept, and the files come lately listed, are
+    /// its items: see `Ui::items_here`.)
     StationHidden,
     StationKeep,
     StationCopy,
@@ -1056,6 +1076,8 @@ enum Switch {
     HeatAlert,
     /// The phone remote.
     Remote,
+    /// Whether Recent files lists only the files in the folders chosen (see `Settings::recent_only`).
+    RecentOnly,
     /// Whether the remote sets the lights: the program that does, fetched or not.
     RemoteLights,
     /// Whether the remote puts the screens out with their signal kept.
@@ -1113,6 +1135,11 @@ enum Target {
     Tab(Tab),
     /// One of what plays shows (see `Row::Element`).
     Element(&'static str),
+    /// A drive Recent files reads, by its volume (see `Row::Drive`): listed, or left out.
+    Drive(String),
+    /// A folder taken off those Recent files lists only, and Windows' chooser opened, to add more.
+    RecentFolder(std::path::PathBuf),
+    AddRecentFolder,
     /// Opens or closes the fold of the modules few want.
     More,
     /// Asks for a newer release now.
@@ -1166,6 +1193,12 @@ enum Row {
     Tabs,
     /// One of what plays shows, on or off (an item of the lyrics module: see `music::Shows`).
     Element(&'static str),
+    /// A drive Recent files reads, by its volume, or one left out that is away (see `Ui::drives_offered`): its files
+    /// listed or not.
+    Drive(String),
+    /// A folder Recent files lists only (while it does), and the row that adds more.
+    RecentFolder(std::path::PathBuf),
+    AddRecentFolder,
     /// Words of their own, under the rows they are about.
     Note(&'static str),
     /// The fold of the modules few want, and how many it holds.
@@ -1424,6 +1457,15 @@ struct Ui {
     /// The report whose thread is open in its window (see `ask::thread`): its id, the window, and the report as the
     /// window was last given it.
     thread: Option<(String, HWND, crate::reports::Report)>,
+    /// The drives Recent files reads, as last read, their reading (on a thread of its own: a drive asked of may take
+    /// a while to wake), and when it was last asked for (again every two seconds while the workbench's page shows,
+    /// for a drive plugged in or taken out).
+    drives: Vec<crate::station::recent::Volume>,
+    reading_drives: Option<std::thread::JoinHandle<Vec<crate::station::recent::Volume>>>,
+    drives_at: Option<Instant>,
+    /// Windows' chooser of folders up (on a thread of its own, a single-threaded apartment as the shell wants: this
+    /// one is not), with what is chosen in it once it is closed.
+    choosing_folders: Option<std::thread::JoinHandle<Vec<std::path::PathBuf>>>,
     /// Since when the fans in the phone remote's picture have been turning.
     phone_from: Instant,
     phone: PhonePage,
@@ -1629,6 +1671,10 @@ fn make(gfx: Rc<Gfx>, shown: bool) -> Option<HWND> {
             phones: crate::phone::phones(),
             remote_asked: None,
             phones_at: Instant::now(),
+            drives: Vec::new(),
+            reading_drives: None,
+            drives_at: None,
+            choosing_folders: None,
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
             copied_at: None,
@@ -2060,6 +2106,9 @@ impl Ui {
                         rows.extend(self.fields_here(&entry.id).map(|field| Row::ModuleChoice(id.clone(), field)));
                     }
                 }
+                if self.settings.station.recent {
+                    self.recent_rows(&mut rows);
+                }
             }
             (Page::Music, _) => {
                 rows.push(Row::Choice(Field::MusicSource));
@@ -2154,6 +2203,47 @@ impl Ui {
                 }
             }
             Tab::Data => rows.extend([Row::Choice(Field::Interval), Row::Choice(Field::Span), Row::Choice(Field::TempAlert), Row::Switch(Switch::HeatAlert)]),
+        }
+    }
+
+    /// Recent files' rows, while it is on: each drive it reads (listed or left out), whether it lists only the folders
+    /// chosen, and while it does, those folders and the row that adds more, and the folders not listed, while there
+    /// are any.
+    fn recent_rows(&self, rows: &mut Vec<Row>) {
+        rows.push(Row::Group(pick(self.lang, "最近文件", "Recent files")));
+        rows.extend(drives_offered(&self.drives, &self.settings.recent_hidden_drives).into_iter().map(|drive| Row::Drive(drive.volume)));
+        rows.push(Row::Switch(Switch::RecentOnly));
+        if self.settings.recent_only {
+            rows.extend(self.settings.recent_folders.iter().cloned().map(Row::RecentFolder));
+            rows.push(Row::AddRecentFolder);
+        }
+        if !self.settings.recent_hidden.is_empty() {
+            rows.push(Row::Choice(Field::StationHidden));
+        }
+    }
+
+    /// A drive's row (see `Row::Drive`): its name ("Data (D:)", Windows' name for a drive with no label), whether it is
+    /// away, and whether its files are listed.
+    fn drive_row(&self, volume: &str) -> (String, Option<&'static str>, bool) {
+        let drive = drives_offered(&self.drives, &self.settings.recent_hidden_drives).into_iter().find(|drive| drive.volume == volume);
+        let (letter, label) = drive.map_or((' ', String::new()), |drive| (drive.letter, drive.label));
+        let label = if label.is_empty() { pick(self.lang, "本地磁盘", "Local Disk").to_string() } else { label };
+        let away = !self.drives.iter().any(|drive| drive.volume == volume);
+        let listed = !self.settings.recent_hidden_drives.iter().any(|hidden| hidden.volume == volume);
+        (format!("{label} ({letter}:)"), away.then(|| pick(self.lang, "未连接", "Not connected")), listed)
+    }
+
+    /// `chosen` (in Windows' chooser) added to the folders Recent files lists only, those not among them already.
+    fn add_recent_folders(&mut self, chosen: Vec<std::path::PathBuf>) {
+        let mut added = false;
+        for folder in chosen {
+            if !self.settings.recent_folders.contains(&folder) {
+                self.settings.recent_folders.push(folder);
+                added = true;
+            }
+        }
+        if added {
+            self.save();
         }
     }
 
@@ -2463,6 +2553,10 @@ impl Ui {
                 let room = if self.stacked(&options) { width - 2.0 * ROW_SIDE } else { width - 2.0 * ROW_SIDE - self.segmented_width(&options) - 16.0 };
                 (Cow::Borrowed(word), room)
             }
+            Row::Drive(volume) => match self.drive_row(volume).1 {
+                Some(word) => (Cow::Borrowed(word), width - 2.0 * ROW_SIDE - 40.0 - 16.0),
+                None => return 0.0,
+            },
             Row::Element(name) => match self.item_label("lyrics", name).1 {
                 Some(word) => (Cow::Borrowed(word), width - 2.0 * ROW_SIDE - 40.0 - 16.0),
                 None => return 0.0,
@@ -2720,6 +2814,17 @@ impl Ui {
                 if name.is_empty() { p("未命名的手机", "Unnamed phone") } else { name.clone() },
                 p("已配对", "Paired"),
                 vec![(p("取消配对", "Unpair"), Target::Unpair(at.clone()), Button::Plain)],
+            ),
+            // A folder by its name, where it is under it (a drive's top, by itself).
+            Row::RecentFolder(folder) => (
+                folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().into_owned()),
+                folder.display().to_string(),
+                vec![(p("移除", "Remove"), Target::RecentFolder(folder.clone()), Button::Plain)],
+            ),
+            Row::AddRecentFolder => (
+                p("添加文件夹", "Add a folder"),
+                p("所选文件夹的子文件夹一并列出，不列出的文件夹除外", "Their subfolders are listed too, but for folders not listed"),
+                vec![(if self.choosing_folders.is_some() { (p("选择中", "Choosing"), Target::AddRecentFolder, Button::Quiet) } else { (p("选择", "Choose"), Target::AddRecentFolder, Button::Plain) })],
             ),
             Row::Quit => (
                 p("退出 Glance", "Quit Glance"),
@@ -3065,6 +3170,11 @@ impl Ui {
                 )),
                 self.remote_screens,
             ),
+            Switch::RecentOnly => (
+                p("仅列出指定文件夹", "Only these folders"),
+                Some(p("开启后，仅列出下列文件夹及其子文件夹中的文件", "When on, only files in the folders below and their subfolders are listed")),
+                self.settings.recent_only,
+            ),
             Switch::Remote => {
                 let hint = if self.remote_there {
                     p("通过手机关闭屏幕与灯光，调节音量与亮度。仅在本地网络中可用", "Screens, lights, volume and brightness from a phone, over the local network only")
@@ -3108,6 +3218,7 @@ impl Ui {
             Switch::TearOff => settings.tear_off ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
+            Switch::RecentOnly => settings.recent_only ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;
@@ -3472,9 +3583,9 @@ impl Ui {
         }
     }
 
-    /// The settings of module `id` (bare) its card lists: the folders not listed only while there are any.
+    /// The settings of module `id` (bare) its card lists.
     fn fields_here(&self, id: &str) -> impl Iterator<Item = Field> + '_ {
-        module_fields(id).iter().copied().filter(|field| *field != Field::StationHidden || !self.settings.recent_hidden.is_empty())
+        module_fields(id).iter().copied()
     }
 
     /// The station's items (`id` its module, and the workbench's): what is copied kept, and the files come lately
@@ -3847,6 +3958,23 @@ impl Ui {
                 self.prefs.set_item("lyrics", name, !on);
                 self.save();
             }
+            Target::Drive(volume) => {
+                turn_drive(&mut self.settings.recent_hidden_drives, &self.drives, &volume);
+                self.save();
+            }
+            Target::RecentFolder(folder) => {
+                self.settings.recent_folders.retain(|kept| *kept != folder);
+                self.save();
+            }
+            // (One at a time: pressed again while it is up, nothing more.)
+            Target::AddRecentFolder if self.choosing_folders.is_none() => {
+                let (hwnd, lang) = (self.hwnd.0 as isize, self.lang);
+                self.choosing_folders = Some(std::thread::spawn(move || unsafe {
+                    let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+                    super::beside::choose(HWND(hwnd as *mut _), super::beside::Kinds::Folders, lang)
+                }));
+            }
+            Target::AddRecentFolder => {}
             Target::CheckNow => update::check_now(update::Asker::Settings),
             Target::Module(id) => {
                 let (list, bare) = self.list(&id);
@@ -3989,6 +4117,10 @@ impl Ui {
                 Row::More(_) => vec![Target::More],
                 Row::Tabs => TABS.iter().map(|tab| Target::Tab(*tab)).collect(),
                 Row::Element(name) => vec![Target::Element(name)],
+                Row::Drive(volume) => vec![Target::Drive(volume)],
+                Row::RecentFolder(folder) => vec![Target::RecentFolder(folder)],
+                Row::AddRecentFolder if self.choosing_folders.is_some() => vec![],
+                Row::AddRecentFolder => vec![Target::AddRecentFolder],
                 Row::Title | Row::Note(_) => vec![],
             }))
             .chain(editor)
@@ -4126,6 +4258,9 @@ impl Ui {
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
             (Row::MyReports, Target::MyReports) => true,
             (Row::Report(a), Target::Thread(b)) => a == b,
+            (Row::Drive(a), Target::Drive(b)) => a == b,
+            (Row::RecentFolder(a), Target::RecentFolder(b)) => a == b,
+            (Row::AddRecentFolder, Target::AddRecentFolder) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Element(a), Target::Element(b)) => a == b,
@@ -4584,6 +4719,24 @@ impl Ui {
         if self.netease_work.is_some() {
             self.next_frame = now + Duration::from_millis(300);
         }
+        // The drives Recent files reads, read again now and then while they are offered (a drive plugged in or taken
+        // out comes and goes), taken as they are read.
+        if self.reading_drives.as_ref().is_some_and(|reading| reading.is_finished()) {
+            if let Ok(drives) = self.reading_drives.take().unwrap().join() {
+                self.drives = drives;
+            }
+            self.next_frame = now;
+        }
+        if self.page == Page::Workbench && self.settings.station.recent && self.reading_drives.is_none() && self.drives_at.is_none_or(|at| now.duration_since(at) >= Duration::from_secs(2)) {
+            self.reading_drives = Some(std::thread::spawn(crate::station::recent::volumes));
+            self.drives_at = Some(now);
+        }
+        // The folders chosen in Windows' chooser, once it is closed.
+        if self.choosing_folders.as_ref().is_some_and(|choosing| choosing.is_finished()) {
+            let chosen = self.choosing_folders.take().unwrap().join().unwrap_or_default();
+            self.add_recent_folders(chosen);
+            self.next_frame = now;
+        }
         // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered appears, and its code goes.
         // (Read only once the remote has written them since: looked at, not read, every second.)
         if self.page == Page::Phone && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
@@ -4693,6 +4846,16 @@ impl Ui {
                     let target = Target::Element(name);
                     let pressed = self.pressed == Some(target.clone());
                     self.toggle(frame, palette, format!("element:{name}"), on, true, switch_left, y + row_height / 2.0, now, pressed);
+                    self.targets.push((Rect { x: left, y, w: width, h: row_height }, target));
+                }
+                Row::Drive(volume) => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let (name, word, listed) = self.drive_row(&volume);
+                    let switch_left = left + width - ROW_SIDE - 40.0;
+                    field_label(frame, palette, &name, word, label, hint, left + ROW_SIDE, y + row_height / 2.0, switch_left - 16.0 - left - ROW_SIDE);
+                    let target = Target::Drive(volume.clone());
+                    let pressed = self.pressed == Some(target.clone());
+                    self.toggle(frame, palette, format!("drive:{volume}"), listed, true, switch_left, y + row_height / 2.0, now, pressed);
                     self.targets.push((Rect { x: left, y, w: width, h: row_height }, target));
                 }
                 Row::Note(words) => frame.text_wrapped(words, hint, palette.text2, left + 4.0, y + 4.0, width - 8.0),
@@ -4860,7 +5023,7 @@ impl Ui {
 
                     }
                 }
-                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase => {
+                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;
@@ -5948,6 +6111,39 @@ mod pictures {
                 .unwrap();
                 crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
             }
+            // Recent files' group, scrolled to: only some folders (one chosen), a drive left out and away, a folder
+            // not listed (the window's own settings, not kept).
+            with_ui(|ui| {
+                ui.turn_to(Page::Workbench);
+                ui.settings.recent_only = true;
+                ui.settings.recent_folders = vec![std::path::PathBuf::from(r"D:\Photos")];
+                ui.settings.recent_hidden = vec![std::path::PathBuf::from(r"D:\Photos\Private")];
+                ui.settings.recent_hidden_drives = vec![crate::settings::HiddenDrive { volume: r"\\?\Volume{0}\".into(), label: "Phone backup".into(), letter: 'Z' }];
+            });
+            for _ in 0..12 {
+                with_ui(|ui| {
+                    ui.scroll_target = (ui.content_height() - ui.client().1).max(0.0);
+                    ui.draw(Instant::now());
+                });
+                std::thread::sleep(Duration::from_millis(80));
+            }
+            let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+            let size = ((cw * scale).round() as u32, (ch * scale).round() as u32);
+            let pixels = gfx.draw_offscreen(size, scale, |frame| {
+                with_ui(|ui| {
+                    fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                    ui.paint(frame, Instant::now())
+                });
+            })
+            .unwrap();
+            crate::studio::save_png(&out.join(format!("workbench-recent-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
+            with_ui(|ui| {
+                ui.settings.recent_only = false;
+                ui.settings.recent_folders.clear();
+                ui.settings.recent_hidden.clear();
+                ui.settings.recent_hidden_drives.clear();
+                ui.scroll_target = 0.0;
+            });
             // The workbench carried from the library over an edge: of every screen small (the first screen's left),
             // and of one screen large (its right).
             for (large, name) in [(false, "layout-carry"), (true, "layout-carry-one")] {
@@ -6107,6 +6303,27 @@ mod pictures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Recent files' drives: those it reads now and those left out that are away (as last seen), by their letters,
+    /// none twice. One left out by its volume, kept with its label and letter, and listed again (a drive left out
+    /// and away listed again too, one neither read nor left out not made up).
+    #[test]
+    fn offers_and_turns_drives() {
+        use crate::settings::HiddenDrive;
+        use crate::station::recent::Volume;
+        let volume = |letter: char, volume: &str, label: &str| Volume { letter, volume: volume.into(), label: label.into() };
+        let drives = [volume('D', "vol-d", "Data"), volume('C', "vol-c", "")];
+        let mut hidden = vec![HiddenDrive { volume: "vol-e".into(), label: "Backup".into(), letter: 'E' }];
+        let letters = |offered: Vec<Volume>| offered.into_iter().map(|drive| (drive.letter, drive.volume)).collect::<Vec<_>>();
+        assert_eq!(letters(drives_offered(&drives, &hidden)), [('C', "vol-c".to_string()), ('D', "vol-d".into()), ('E', "vol-e".into())]);
+        turn_drive(&mut hidden, &drives, "vol-d");
+        assert_eq!(hidden[1], HiddenDrive { volume: "vol-d".into(), label: "Data".into(), letter: 'D' });
+        assert_eq!(drives_offered(&drives, &hidden).len(), 3);
+        turn_drive(&mut hidden, &drives, "vol-d");
+        turn_drive(&mut hidden, &drives, "vol-e");
+        turn_drive(&mut hidden, &drives, "vol-x");
+        assert!(hidden.is_empty());
+    }
 
     /// What the preview measures of its desktop is what the desktop is where it is asked: kept while it is asked of
     /// the same place, measured again for another.
